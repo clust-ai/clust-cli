@@ -36,8 +36,8 @@ fn print_logo() {
 async fn main() {
     let args = cli::Cli::parse();
 
-    // Subcommand: ui
-    if let Some(cli::Commands::Ui) = args.command {
+    // Subcommand: ui (also triggered by `clust .`)
+    if matches!(args.command, Some(cli::Commands::Ui)) || args.prompt.as_deref() == Some(".") {
         if let Err(e) = ui::run() {
             eprintln!("  {}ui error: {e}{}", theme::ERROR, theme::RESET);
             std::process::exit(1);
