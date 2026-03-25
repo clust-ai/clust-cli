@@ -72,13 +72,30 @@ No terminal takeover. The CLI:
 3. Prints the ID to stdout: `Started agent a3f8c1`
 4. Exits immediately
 
-## Future: `clust ui`
+## `clust ui` Dashboard
 
-A full terminal UI (TUI) built with `ratatui` that will provide:
+A full terminal UI (TUI) built with `ratatui` + `crossterm`.
 
-- Agent list view
-- Live output from selected agent
-- Agent management (stop, attach, detach)
-- Split views for multiple agents
+### Auto-connect
 
-This is not in scope for v0.1 but the choice of `ratatui` + `crossterm` for the status bar ensures we are building on the same foundation.
+On startup, `clust ui` automatically connects to the pool daemon, starting it if not already running. The bottom status bar shows connection status.
+
+### Bottom Status Bar
+
+```
+● connected  q to quit  Q to quit and stop pool          v0.0.1
+```
+
+| Section | Description |
+|---------|-------------|
+| Status dot | Green `●` when connected, dim when disconnected |
+| Status label | `connected` or `disconnected` |
+| Shortcuts | `q to quit` and `Q to quit and stop pool` |
+| Version | Right-aligned, e.g. `v0.0.1` |
+
+### Keyboard Shortcuts
+
+| Shortcut | Action |
+|----------|--------|
+| `q` / `Esc` | Quit the UI (pool keeps running) |
+| `Q` | Quit the UI and stop the pool |

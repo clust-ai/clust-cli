@@ -46,7 +46,7 @@ pub fn run() -> io::Result<()> {
     let mut terminal = Terminal::new(backend)?;
     terminal.clear()?;
 
-    let mut pool_running = block_on_async(async { ipc::try_connect().await.is_ok() });
+    let pool_running = block_on_async(async { ipc::connect_to_pool().await.is_ok() });
 
     let update_notice: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
     let notice_clone = update_notice.clone();
@@ -91,20 +91,13 @@ pub fn run() -> io::Result<()> {
                 if key.kind == KeyEventKind::Press {
                     match key.code {
                         KeyCode::Char('q') | KeyCode::Esc => break,
-                        KeyCode::Char('S') => {
-                            pool_running = block_on_async(async {
-                                if pool_running {
-                                    if let Ok(mut stream) = ipc::try_connect().await {
-                                        let _ = ipc::send_stop(&mut stream).await;
-                                    }
-                                    false
-                                } else {
-                                    ipc::connect_to_pool().await.is_ok()
+                        KeyCode::Char('Q') => {
+                            block_on_async(async {
+                                if let Ok(mut stream) = ipc::try_connect().await {
+                                    let _ = ipc::send_stop(&mut stream).await;
                                 }
                             });
-                            // Clear agents and force re-fetch on next cycle
-                            agents.clear();
-                            last_agent_fetch = Instant::now() - Duration::from_secs(10);
+                            break;
                         }
                         _ => {}
                     }
@@ -301,10 +294,10 @@ fn render_status_bar(
     let bg = Style::default().bg(theme::R_BG_RAISED);
 
     // Build left spans
-    let (dot_color, status_label, toggle_hint) = if pool_running {
-        (theme::R_SUCCESS, "connected", "S to stop")
+    let (dot_color, status_label) = if pool_running {
+        (theme::R_SUCCESS, "connected")
     } else {
-        (theme::R_TEXT_TERTIARY, "disconnected", "S to start")
+        (theme::R_TEXT_TERTIARY, "disconnected")
     };
 
     let mut left_spans = vec![
@@ -320,7 +313,17 @@ fn render_status_bar(
             Style::default().bg(theme::R_BG_RAISED),
         ),
         Span::styled(
-            toggle_hint,
+            "q to quit",
+            Style::default()
+                .fg(theme::R_TEXT_TERTIARY)
+                .bg(theme::R_BG_RAISED),
+        ),
+        Span::styled(
+            "  ",
+            Style::default().bg(theme::R_BG_RAISED),
+        ),
+        Span::styled(
+            "Q to quit and stop pool",
             Style::default()
                 .fg(theme::R_TEXT_TERTIARY)
                 .bg(theme::R_BG_RAISED),
