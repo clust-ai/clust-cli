@@ -45,8 +45,8 @@ async fn main() {
     }
 
     // Subcommand: ls
-    if let Some(cli::Commands::Ls) = args.command {
-        handle_ls().await;
+    if let Some(cli::Commands::Ls { select }) = args.command {
+        handle_ls(select).await;
         return;
     }
 
@@ -269,19 +269,25 @@ async fn handle_attach(id: String) {
     }
 }
 
-/// List all running agents.
-async fn handle_ls() {
-    let mut stream = match ipc::connect_to_pool().await {
+/// List all running agents, or open interactive selector with `--select`.
+async fn handle_ls(select: bool) {
+    if select {
+        handle_select().await;
+        return;
+    }
+
+    // Non-interactive: try_connect (no auto-spawn)
+    let mut stream = match ipc::try_connect().await {
         Ok(s) => s,
-        Err(e) => {
-            eprintln!(
-                "\n  {}✘{} {}failed to connect to pool: {e}{}\n",
+        Err(_) => {
+            println!(
+                "\n  {}✘{} {}pool not running{}\n",
                 theme::ERROR,
                 theme::RESET,
                 theme::TEXT_PRIMARY,
                 theme::RESET,
             );
-            std::process::exit(1);
+            return;
         }
     };
 
@@ -367,6 +373,172 @@ async fn handle_ls() {
         }
         _ => {}
     }
+}
+
+/// Result of the interactive selector.
+enum SelectAction {
+    Cancel,
+    Attach(String),
+    NewAgent,
+}
+
+/// Ensures raw mode and cursor visibility are restored on drop.
+struct RawModeGuard;
+
+impl RawModeGuard {
+    fn new() -> Self {
+        crossterm::terminal::enable_raw_mode().unwrap();
+        let mut stdout = io::stdout();
+        write!(stdout, "\x1b[?25l").unwrap(); // hide cursor
+        stdout.flush().unwrap();
+        RawModeGuard
+    }
+}
+
+impl Drop for RawModeGuard {
+    fn drop(&mut self) {
+        let mut stdout = io::stdout();
+        let _ = write!(stdout, "\x1b[?25h"); // show cursor
+        let _ = stdout.flush();
+        let _ = crossterm::terminal::disable_raw_mode();
+    }
+}
+
+/// Interactive agent selector.
+async fn handle_select() {
+    // Fetch agent list (pool might not be running)
+    let agents = match ipc::try_connect().await {
+        Ok(mut stream) => {
+            if clust_ipc::send_message(&mut stream, &CliMessage::ListAgents)
+                .await
+                .is_err()
+            {
+                vec![]
+            } else {
+                match clust_ipc::recv_message::<PoolMessage>(&mut stream).await {
+                    Ok(PoolMessage::AgentList { agents }) => agents,
+                    _ => vec![],
+                }
+            }
+        }
+        Err(_) => vec![],
+    };
+
+    let action = run_selector(&agents);
+
+    match action {
+        SelectAction::Cancel => {}
+        SelectAction::Attach(id) => handle_attach(id).await,
+        SelectAction::NewAgent => handle_start(None, false).await,
+    }
+}
+
+fn run_selector(agents: &[clust_ipc::AgentInfo]) -> SelectAction {
+    use crossterm::event::{self, Event, KeyCode, KeyEventKind};
+
+    let item_count = 2 + agents.len(); // cancel + agents + new agent
+    let mut selected: usize = 0;
+    let mut stdout = io::stdout();
+
+    // Spacing
+    write!(stdout, "\n").unwrap();
+    stdout.flush().unwrap();
+
+    let _guard = RawModeGuard::new();
+
+    // Initial render
+    render_selector(&mut stdout, agents, selected, item_count);
+
+    loop {
+        if !event::poll(std::time::Duration::from_millis(100)).unwrap_or(false) {
+            continue;
+        }
+        let ev = match event::read() {
+            Ok(ev) => ev,
+            Err(_) => continue,
+        };
+        let Event::Key(key) = ev else { continue };
+        if key.kind != KeyEventKind::Press {
+            continue;
+        }
+
+        match key.code {
+            KeyCode::Up => {
+                if selected > 0 {
+                    selected -= 1;
+                }
+            }
+            KeyCode::Down => {
+                if selected < item_count - 1 {
+                    selected += 1;
+                }
+            }
+            KeyCode::Enter => break,
+            KeyCode::Esc | KeyCode::Char('q') => {
+                selected = 0; // cancel
+                break;
+            }
+            _ => continue,
+        }
+
+        // Move cursor back up and re-render
+        write!(stdout, "\x1b[{}A", item_count).unwrap();
+        render_selector(&mut stdout, agents, selected, item_count);
+    }
+
+    // Erase the selector lines
+    write!(stdout, "\x1b[{}A", item_count).unwrap();
+    for _ in 0..item_count {
+        write!(stdout, "\x1b[2K\n").unwrap();
+    }
+    write!(stdout, "\x1b[{}A", item_count).unwrap();
+    stdout.flush().unwrap();
+
+    // _guard drops here, restoring terminal
+
+    if selected == 0 {
+        SelectAction::Cancel
+    } else if selected <= agents.len() {
+        SelectAction::Attach(agents[selected - 1].id.clone())
+    } else {
+        SelectAction::NewAgent
+    }
+}
+
+fn render_selector(
+    stdout: &mut io::Stdout,
+    agents: &[clust_ipc::AgentInfo],
+    selected: usize,
+    item_count: usize,
+) {
+    for i in 0..item_count {
+        let is_selected = i == selected;
+        let (prefix, label_color) = if is_selected {
+            (
+                format!("  {}▸{} ", theme::ACCENT, theme::RESET),
+                theme::TEXT_PRIMARY,
+            )
+        } else {
+            ("    ".to_string(), theme::TEXT_TERTIARY)
+        };
+
+        let label = if i == 0 {
+            "cancel".to_string()
+        } else if i <= agents.len() {
+            let agent = &agents[i - 1];
+            format!("{}  {}", agent.id, agent.agent_binary)
+        } else {
+            "new agent +".to_string()
+        };
+
+        write!(
+            stdout,
+            "\x1b[2K{}{}{}{}\r\n",
+            prefix, label_color, label, theme::RESET,
+        )
+        .unwrap();
+    }
+    stdout.flush().unwrap();
 }
 
 fn spin(msg: &str) -> tokio::task::JoinHandle<()> {

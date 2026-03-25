@@ -29,7 +29,11 @@ pub struct Cli {
 #[derive(Subcommand)]
 pub enum Commands {
     /// List all running agents in the pool
-    Ls,
+    Ls {
+        /// Interactive selector: navigate with arrow keys, Enter to confirm
+        #[arg(short = 's', long = "select")]
+        select: bool,
+    },
     /// Open the Clust terminal UI
     Ui,
 }
@@ -107,7 +111,19 @@ mod tests {
     #[test]
     fn parse_subcommand_ls() {
         let cli = Cli::try_parse_from(["clust", "ls"]).unwrap();
-        assert!(matches!(cli.command, Some(Commands::Ls)));
+        assert!(matches!(cli.command, Some(Commands::Ls { select: false })));
+    }
+
+    #[test]
+    fn parse_ls_select_short() {
+        let cli = Cli::try_parse_from(["clust", "ls", "-s"]).unwrap();
+        assert!(matches!(cli.command, Some(Commands::Ls { select: true })));
+    }
+
+    #[test]
+    fn parse_ls_select_long() {
+        let cli = Cli::try_parse_from(["clust", "ls", "--select"]).unwrap();
+        assert!(matches!(cli.command, Some(Commands::Ls { select: true })));
     }
 
     #[test]
