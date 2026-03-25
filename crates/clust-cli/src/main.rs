@@ -104,7 +104,7 @@ async fn main() {
     }
 
     // Default: start an agent and attach (or -b for background)
-    handle_start(args.prompt, args.background, args.accept_edits).await;
+    handle_start(args.prompt, args.background, args.accept_edits, args.use_agent).await;
 }
 
 /// Check if a default agent is configured. If not, show the first-run picker.
@@ -181,13 +181,22 @@ async fn check_default_and_prompt() -> Option<Option<String>> {
 }
 
 /// Start a new agent. If background is false, attach to it.
-async fn handle_start(prompt: Option<String>, background: bool, accept_edits: bool) {
-    // Check if a default agent is configured; prompt on first run
-    let agent_override = check_default_and_prompt().await;
-    if agent_override.is_none() {
-        return; // User cancelled first-run picker
-    }
-    let agent_binary = agent_override.unwrap();
+async fn handle_start(
+    prompt: Option<String>,
+    background: bool,
+    accept_edits: bool,
+    use_agent: Option<String>,
+) {
+    // If --use was provided, use that agent directly; otherwise check/prompt for default
+    let agent_binary = if let Some(agent) = use_agent {
+        Some(agent)
+    } else {
+        let agent_override = check_default_and_prompt().await;
+        if agent_override.is_none() {
+            return; // User cancelled first-run picker
+        }
+        agent_override.unwrap()
+    };
 
     let working_dir = std::env::current_dir()
         .map(|p| p.to_string_lossy().into_owned())
@@ -563,7 +572,7 @@ async fn handle_select() {
     match action {
         SelectAction::Cancel => {}
         SelectAction::Attach(id) => handle_attach(id).await,
-        SelectAction::NewAgent => handle_start(None, false, false).await,
+        SelectAction::NewAgent => handle_start(None, false, false, None).await,
     }
 }
 
