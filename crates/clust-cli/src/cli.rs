@@ -31,7 +31,7 @@ pub enum Commands {
     /// List all running agents in the pool
     Ls {
         /// Interactive selector: navigate with arrow keys, Enter to confirm
-        #[arg(short = 's', long = "select")]
+        #[arg(short = 'i', long = "select")]
         select: bool,
     },
     /// Open the Clust terminal UI
@@ -116,7 +116,7 @@ mod tests {
 
     #[test]
     fn parse_ls_select_short() {
-        let cli = Cli::try_parse_from(["clust", "ls", "-s"]).unwrap();
+        let cli = Cli::try_parse_from(["clust", "ls", "-i"]).unwrap();
         assert!(matches!(cli.command, Some(Commands::Ls { select: true })));
     }
 

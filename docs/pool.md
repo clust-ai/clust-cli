@@ -31,14 +31,13 @@ Triggered by `clust -s` / `clust --stop`.
 
 **Shutdown sequence:**
 
-1. Pool receives `StopPool` message
-2. Send SIGTERM to all running agent processes
-3. Wait briefly for graceful exit (e.g., 3s timeout)
-4. SIGKILL any remaining agents
-5. Notify all attached CLI clients that the pool is shutting down
-6. Close all IPC connections
-7. Remove socket file
-8. Exit
+1. Pool receives `StopPool` message over IPC
+2. Pool replies `Ok` to the requesting CLI
+3. Pool removes the socket file (`~/.clust/clust.sock`)
+4. Pool signals the main event loop to exit (all agents terminate with the process)
+
+> **Future work:** Graceful agent termination (SIGTERM with timeout, then SIGKILL) and
+> notification of attached CLI clients before shutdown are planned but not yet implemented.
 
 ### Crash Recovery
 
@@ -97,11 +96,12 @@ struct PoolState {
 struct AgentEntry {
     id: String,               // 6-char hex
     agent_binary: String,     // e.g., "claude"
-    pid: u32,
-    pty_master: PtyMaster,
-    started_at: Instant,
-    working_dir: PathBuf,
-    attached_clients: Vec<ClientConnection>,
+    started_at: String,       // RFC 3339 timestamp
+    working_dir: String,
+    pty_master: Box<dyn MasterPty + Send>,
+    pty_writer: Box<dyn Write + Send>,
+    output_tx: broadcast::Sender<AgentEvent>,
+    attached_count: Arc<AtomicUsize>,
 }
 ```
 
