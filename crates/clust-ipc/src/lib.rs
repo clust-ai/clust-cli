@@ -3,6 +3,7 @@ use std::path::PathBuf;
 
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::unix::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::net::UnixStream;
 
 /// Messages sent from CLI to Pool.
@@ -12,9 +13,13 @@ pub enum CliMessage {
         prompt: Option<String>,
         agent_binary: Option<String>,
         working_dir: String,
+        cols: u16,
+        rows: u16,
     },
     AttachAgent { id: String },
     DetachAgent { id: String },
+    AgentInput { id: String, data: Vec<u8> },
+    ResizeAgent { id: String, cols: u16, rows: u16 },
     ListAgents,
     StopPool,
     SetDefault { agent_binary: String },
@@ -34,7 +39,7 @@ pub struct AgentInfo {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum PoolMessage {
     Ok,
-    AgentStarted { id: String },
+    AgentStarted { id: String, agent_binary: String },
     AgentOutput { id: String, data: Vec<u8> },
     AgentExited { id: String, exit_code: i32 },
     AgentList { agents: Vec<AgentInfo> },
@@ -75,6 +80,35 @@ pub async fn recv_message<T: DeserializeOwned>(stream: &mut UnixStream) -> io::R
         .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
 }
 
+/// Send a length-prefixed MessagePack message over a split write half.
+/// Used for bidirectional streaming sessions where read and write happen concurrently.
+pub async fn send_message_write<T: Serialize>(
+    writer: &mut OwnedWriteHalf,
+    msg: &T,
+) -> io::Result<()> {
+    let payload =
+        rmp_serde::to_vec(msg).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+    let len = payload.len() as u32;
+    writer.write_all(&len.to_be_bytes()).await?;
+    writer.write_all(&payload).await?;
+    writer.flush().await?;
+    Ok(())
+}
+
+/// Receive a length-prefixed MessagePack message from a split read half.
+/// Used for bidirectional streaming sessions where read and write happen concurrently.
+pub async fn recv_message_read<T: DeserializeOwned>(
+    reader: &mut OwnedReadHalf,
+) -> io::Result<T> {
+    let mut len_buf = [0u8; 4];
+    reader.read_exact(&mut len_buf).await?;
+    let len = u32::from_be_bytes(len_buf) as usize;
+    let mut payload = vec![0u8; len];
+    reader.read_exact(&mut payload).await?;
+    rmp_serde::from_slice(&payload)
+        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -105,6 +139,8 @@ mod tests {
             prompt: Some("do something".into()),
             agent_binary: Some("claude".into()),
             working_dir: "/tmp".into(),
+            cols: 120,
+            rows: 40,
         })
         .await;
     }
@@ -115,6 +151,8 @@ mod tests {
             prompt: None,
             agent_binary: None,
             working_dir: "/home/user".into(),
+            cols: 80,
+            rows: 24,
         })
         .await;
     }
@@ -169,6 +207,7 @@ mod tests {
     async fn pool_agent_started() {
         assert_pool_round_trip(PoolMessage::AgentStarted {
             id: "a1b2c3".into(),
+            agent_binary: "claude".into(),
         })
         .await;
     }
@@ -312,6 +351,73 @@ mod tests {
 
         let result: io::Result<CliMessage> = recv_message(&mut b).await;
         assert!(result.is_err());
+    }
+
+    // ── New message variant round-trips ────────────────────────
+
+    #[tokio::test]
+    async fn cli_agent_input() {
+        assert_cli_round_trip(CliMessage::AgentInput {
+            id: "abc123".into(),
+            data: vec![0x68, 0x65, 0x6c, 0x6c, 0x6f],
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn cli_resize_agent() {
+        assert_cli_round_trip(CliMessage::ResizeAgent {
+            id: "abc123".into(),
+            cols: 120,
+            rows: 40,
+        })
+        .await;
+    }
+
+    // ── Split-stream round-trips ─────────────────────────────
+
+    #[tokio::test]
+    async fn split_stream_round_trip() {
+        let (a, b) = UnixStream::pair().unwrap();
+        let (_, mut a_write) = a.into_split();
+        let (mut b_read, _) = b.into_split();
+
+        let msg = PoolMessage::AgentOutput {
+            id: "split".into(),
+            data: vec![1, 2, 3],
+        };
+        send_message_write(&mut a_write, &msg).await.unwrap();
+        let received: PoolMessage = recv_message_read(&mut b_read).await.unwrap();
+        assert_eq!(msg, received);
+    }
+
+    #[tokio::test]
+    async fn split_stream_multiple_messages() {
+        let (a, b) = UnixStream::pair().unwrap();
+        let (_, mut a_write) = a.into_split();
+        let (mut b_read, _) = b.into_split();
+
+        let msgs = vec![
+            CliMessage::AgentInput {
+                id: "x".into(),
+                data: vec![0x41],
+            },
+            CliMessage::ResizeAgent {
+                id: "x".into(),
+                cols: 80,
+                rows: 24,
+            },
+            CliMessage::DetachAgent { id: "x".into() },
+        ];
+
+        for msg in &msgs {
+            send_message_write(&mut a_write, msg).await.unwrap();
+        }
+
+        for expected in &msgs {
+            let received: CliMessage = recv_message_read(&mut b_read).await.unwrap();
+            assert_eq!(expected, &received);
+        }
     }
 
     // ── Path helpers ───────────────────────────────────────────────

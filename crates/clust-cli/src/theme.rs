@@ -30,3 +30,5 @@ pub const R_TEXT_SECONDARY: Color = Color::Rgb(160, 162, 168);
 pub const R_TEXT_TERTIARY: Color = Color::Rgb(108, 110, 116);
 pub const R_SUCCESS: Color = Color::Rgb(91, 184, 114);
 pub const R_WARNING: Color = Color::Rgb(212, 173, 58);
+pub const R_ERROR: Color = Color::Rgb(204, 80, 72);
+pub const R_INFO: Color = Color::Rgb(88, 152, 196);
