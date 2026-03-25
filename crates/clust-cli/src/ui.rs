@@ -472,4 +472,30 @@ mod tests {
         assert_eq!(format_attached(0), "0 terminals");
         assert_eq!(format_attached(3), "3 terminals");
     }
+
+    #[test]
+    fn format_started_today_shows_time_only() {
+        // Build an RFC3339 timestamp for "today" in UTC
+        let now = Utc::now();
+        let ts = now.to_rfc3339();
+        let result = format_started(&ts);
+        // Should be HH:MM format (5 chars)
+        let local = now.with_timezone(&Local);
+        let expected = local.format("%H:%M").to_string();
+        assert_eq!(result, expected);
+    }
+
+    #[test]
+    fn format_started_other_day_shows_date_and_time() {
+        let result = format_started("2025-01-15T10:30:00Z");
+        // Should include month, day, and time
+        assert!(result.contains("Jan"));
+        assert!(result.contains("15"));
+    }
+
+    #[test]
+    fn format_started_invalid_returns_original() {
+        assert_eq!(format_started("not-a-date"), "not-a-date");
+        assert_eq!(format_started(""), "");
+    }
 }

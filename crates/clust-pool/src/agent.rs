@@ -408,6 +408,45 @@ mod tests {
         assert_eq!(result, Ok("opencode".into()));
     }
 
+    // ── stop_agent error path tests ──────────────────────────────────
+
+    #[tokio::test]
+    async fn stop_agent_not_found_returns_error() {
+        let state: SharedPoolState = Arc::new(Mutex::new(PoolState::new()));
+        let result = stop_agent(&state, "nonexistent").await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("not found"));
+    }
+
+    #[tokio::test]
+    async fn stop_agent_no_pid_returns_error() {
+        let state: SharedPoolState = Arc::new(Mutex::new(PoolState::new()));
+        {
+            let mut pool = state.lock().await;
+            pool.agents.insert(
+                "abc123".to_string(),
+                AgentEntry {
+                    id: "abc123".to_string(),
+                    agent_binary: "test".into(),
+                    started_at: "2026-01-01T00:00:00Z".into(),
+                    working_dir: "/tmp".into(),
+                    pid: None,
+                    pty_master: create_dummy_pty_master(),
+                    pty_writer: Box::new(std::io::sink()),
+                    output_tx: broadcast::channel(1).0,
+                    attached_count: Arc::new(AtomicUsize::new(0)),
+                    client_sizes: HashMap::new(),
+                    current_pty_size: (80, 24),
+                    active_client_id: None,
+                    next_client_id: AtomicU64::new(0),
+                },
+            );
+        }
+        let result = stop_agent(&state, "abc123").await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("no PID"));
+    }
+
     /// Helper: create a real PTY master for testing structs that need one.
     fn create_dummy_pty_master() -> Box<dyn MasterPty + Send> {
         let pty_system = portable_pty::native_pty_system();
