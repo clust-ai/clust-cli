@@ -2,6 +2,7 @@ mod cli;
 mod ipc;
 mod pool_launcher;
 mod theme;
+mod ui;
 
 use clap::Parser;
 use std::io::{self, Write};
@@ -29,6 +30,14 @@ fn print_logo() {
 #[tokio::main]
 async fn main() {
     let args = cli::Cli::parse();
+
+    if let Some(cli::Commands::Ui) = args.command {
+        if let Err(e) = ui::run() {
+            eprintln!("  {}ui error: {e}{}", theme::ERROR, theme::RESET);
+            std::process::exit(1);
+        }
+        return;
+    }
 
     if args.stop {
         println!();
