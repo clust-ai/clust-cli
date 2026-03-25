@@ -129,6 +129,10 @@ impl AttachedSession {
                 if let Some(evt) = evt {
                     match evt {
                         Event::Key(key) if key.kind == KeyEventKind::Press => {
+                            // Let the terminal emulator handle Cmd/Super keys (e.g., Cmd+C for copy)
+                            if key.modifiers.contains(KeyModifiers::SUPER) {
+                                continue;
+                            }
                             // Ctrl+Q = detach
                             if key.code == KeyCode::Char('q')
                                 && key.modifiers.contains(KeyModifiers::CONTROL)
@@ -153,6 +157,17 @@ impl AttachedSession {
                                 )
                                 .await;
                             }
+                        }
+                        Event::Paste(text) => {
+                            let data = paste_to_bytes(&text);
+                            let _ = clust_ipc::send_message_write(
+                                &mut writer,
+                                &CliMessage::AgentInput {
+                                    id: agent_id_for_input.clone(),
+                                    data,
+                                },
+                            )
+                            .await;
                         }
                         Event::Resize(cols, rows) => {
                             set_scroll_region(rows.saturating_sub(1).max(1));
@@ -234,6 +249,16 @@ fn draw_status_bar(agent_id: &str, agent_binary: &str, total_rows: u16) {
     // Restore cursor position
     let _ = write!(stdout, "\x1b8");
     let _ = stdout.flush();
+}
+
+/// Convert pasted text into the raw bytes to send to the PTY,
+/// wrapped in bracketed paste markers.
+fn paste_to_bytes(text: &str) -> Vec<u8> {
+    let mut data = Vec::with_capacity(12 + text.len());
+    data.extend_from_slice(b"\x1b[200~");
+    data.extend_from_slice(text.as_bytes());
+    data.extend_from_slice(b"\x1b[201~");
+    data
 }
 
 /// Convert a crossterm KeyEvent into the raw bytes that a PTY application expects.
@@ -420,5 +445,49 @@ mod tests {
     #[test]
     fn unrecognized_key_returns_none() {
         assert_eq!(key_to_bytes(&press(KeyCode::CapsLock)), None);
+    }
+
+    fn super_key(c: char) -> KeyEvent {
+        KeyEvent {
+            code: KeyCode::Char(c),
+            modifiers: KeyModifiers::SUPER,
+            kind: KeyEventKind::Press,
+            state: KeyEventState::NONE,
+        }
+    }
+
+    #[test]
+    fn super_modifier_not_filtered_by_key_to_bytes() {
+        // SUPER filtering happens in the event loop, not in key_to_bytes.
+        assert_eq!(key_to_bytes(&super_key('c')), Some(vec![b'c']));
+        assert_eq!(key_to_bytes(&super_key('v')), Some(vec![b'v']));
+    }
+
+    #[test]
+    fn paste_to_bytes_simple() {
+        assert_eq!(paste_to_bytes("hello"), b"\x1b[200~hello\x1b[201~");
+    }
+
+    #[test]
+    fn paste_to_bytes_empty() {
+        assert_eq!(paste_to_bytes(""), b"\x1b[200~\x1b[201~");
+    }
+
+    #[test]
+    fn paste_to_bytes_with_newlines() {
+        assert_eq!(
+            paste_to_bytes("line1\nline2\n"),
+            b"\x1b[200~line1\nline2\n\x1b[201~"
+        );
+    }
+
+    #[test]
+    fn paste_to_bytes_unicode() {
+        let result = paste_to_bytes("caf\u{00e9}");
+        let mut expected = Vec::new();
+        expected.extend_from_slice(b"\x1b[200~");
+        expected.extend_from_slice("caf\u{00e9}".as_bytes());
+        expected.extend_from_slice(b"\x1b[201~");
+        assert_eq!(result, expected);
     }
 }
