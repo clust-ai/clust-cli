@@ -28,3 +28,4 @@ pub const R_ACCENT_BRIGHT: Color = Color::Rgb(114, 174, 208);
 pub const R_TEXT_PRIMARY: Color = Color::Rgb(220, 221, 224);
 pub const R_TEXT_SECONDARY: Color = Color::Rgb(160, 162, 168);
 pub const R_TEXT_TERTIARY: Color = Color::Rgb(108, 110, 116);
+pub const R_SUCCESS: Color = Color::Rgb(91, 184, 114);
