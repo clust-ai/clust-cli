@@ -1,0 +1,7 @@
+# Override global gitignore for Claude Code project files
+!CLAUDE.md
+!.claude/
+!.claude/**
+
+# Keep local settings ignored (machine-specific)
+.claude/settings.local.json
