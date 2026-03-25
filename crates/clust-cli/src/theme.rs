@@ -23,12 +23,26 @@ pub const RESET: &str = "\x1b[0m";
 // Ratatui colors (same Graphite palette)
 use ratatui::style::Color;
 
-pub const R_ACCENT: Color = Color::Rgb(94, 154, 191);
-pub const R_ACCENT_BRIGHT: Color = Color::Rgb(114, 174, 208);
-pub const R_TEXT_PRIMARY: Color = Color::Rgb(220, 221, 224);
-pub const R_TEXT_SECONDARY: Color = Color::Rgb(160, 162, 168);
-pub const R_TEXT_TERTIARY: Color = Color::Rgb(108, 110, 116);
-pub const R_SUCCESS: Color = Color::Rgb(91, 184, 114);
-pub const R_WARNING: Color = Color::Rgb(212, 173, 58);
-pub const R_ERROR: Color = Color::Rgb(204, 80, 72);
-pub const R_INFO: Color = Color::Rgb(88, 152, 196);
+// Accent
+pub const R_ACCENT: Color = Color::Rgb(94, 154, 191);       // #5e9abf
+pub const R_ACCENT_DIM: Color = Color::Rgb(78, 138, 170);   // #4e8aaa
+pub const R_ACCENT_BRIGHT: Color = Color::Rgb(114, 174, 208); // #72aed0
+pub const R_ACCENT_TEXT: Color = Color::Rgb(126, 184, 216);  // #7eb8d8
+
+// Text
+pub const R_TEXT_PRIMARY: Color = Color::Rgb(220, 221, 224);  // #dcdde0
+pub const R_TEXT_SECONDARY: Color = Color::Rgb(160, 162, 168); // #a0a2a8
+pub const R_TEXT_TERTIARY: Color = Color::Rgb(108, 110, 116); // #6c6e74
+pub const R_TEXT_DISABLED: Color = Color::Rgb(74, 76, 82);   // #4a4c52
+
+// Semantic
+pub const R_SUCCESS: Color = Color::Rgb(91, 184, 114);  // #5bb872
+pub const R_WARNING: Color = Color::Rgb(212, 173, 58);  // #d4ad3a
+pub const R_ERROR: Color = Color::Rgb(204, 80, 72);     // #cc5048
+pub const R_INFO: Color = Color::Rgb(88, 152, 196);     // #5898c4
+
+// Backgrounds
+pub const R_BG_BASE: Color = Color::Rgb(27, 29, 32);    // #1b1d20
+pub const R_BG_SURFACE: Color = Color::Rgb(34, 36, 40); // #222428
+pub const R_BG_RAISED: Color = Color::Rgb(41, 43, 48);  // #292b30
+pub const R_BG_OVERLAY: Color = Color::Rgb(49, 52, 58); // #31343a
