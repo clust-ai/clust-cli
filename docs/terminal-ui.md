@@ -83,7 +83,7 @@ On startup, `clust ui` automatically connects to the pool daemon, starting it if
 ### Bottom Status Bar
 
 ```
-● connected  q to quit  Q to quit and stop pool          v0.0.1
+● connected  q to quit  Q to quit and stop pool          v0.0.2
 ```
 
 | Section | Description |
@@ -91,7 +91,7 @@ On startup, `clust ui` automatically connects to the pool daemon, starting it if
 | Status dot | Green `●` when connected, dim when disconnected |
 | Status label | `connected` or `disconnected` |
 | Shortcuts | `q to quit` and `Q to quit and stop pool` |
-| Version | Right-aligned, e.g. `v0.0.1` |
+| Version | Right-aligned, e.g. `v0.0.2` |
 
 ### Keyboard Shortcuts
 
