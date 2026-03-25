@@ -131,4 +131,11 @@ These shortcuts are active when the CLI is attached to an agent session. They ar
 |----------|--------|
 | `Ctrl+Q` | Detach from agent (agent keeps running in pool) |
 
-Additional shortcuts TBD as features are added.
+## Keyboard Shortcuts (Terminal UI)
+
+These shortcuts are active in the `clust ui` dashboard. They are displayed in the bottom status bar.
+
+| Shortcut | Action |
+|----------|--------|
+| `q` / `Esc` | Quit the UI (pool keeps running) |
+| `Q` | Quit the UI and stop the pool |
