@@ -163,6 +163,32 @@ async fn handle_connection(
 
             let _ = shutdown_proxy.send_event(PoolEvent::Shutdown);
         }
+        CliMessage::StopAgent { id } => {
+            let exists = {
+                let pool = state.lock().await;
+                pool.agents.contains_key(&id)
+            };
+            if exists {
+                clust_ipc::send_message_write(
+                    &mut writer,
+                    &PoolMessage::AgentStopped { id: id.clone() },
+                )
+                .await?;
+                // Spawn so the 3s grace period doesn't block the connection handler
+                let state = state.clone();
+                tokio::spawn(async move {
+                    let _ = agent::stop_agent(&state, &id).await;
+                });
+            } else {
+                clust_ipc::send_message_write(
+                    &mut writer,
+                    &PoolMessage::Error {
+                        message: format!("agent {id} not found"),
+                    },
+                )
+                .await?;
+            }
+        }
         CliMessage::SetDefault { agent_binary } => {
             let result = {
                 let pool = state.lock().await;

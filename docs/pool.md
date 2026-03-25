@@ -27,7 +27,7 @@ The pool starts automatically when any `clust` command is run and no pool is alr
 
 ### Shutdown
 
-Triggered by `clust -s` / `clust --stop`.
+Triggered by `clust --stop-pool`.
 
 **Shutdown sequence:**
 

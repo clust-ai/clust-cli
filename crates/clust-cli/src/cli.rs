@@ -11,9 +11,13 @@ pub struct Cli {
     #[arg(short = 'a', long = "attach")]
     pub attach: Option<String>,
 
-    /// Stop the pool daemon and all running agents
+    /// Stop a specific agent by its 6-char ID
     #[arg(short = 's', long = "stop")]
-    pub stop: bool,
+    pub stop: Option<String>,
+
+    /// Stop the pool daemon and all running agents
+    #[arg(long = "stop-pool")]
+    pub stop_pool: bool,
 
     /// Interactive picker to set the default agent
     #[arg(short = 'd', long = "default")]
@@ -47,7 +51,8 @@ mod tests {
     fn parse_no_args() {
         let cli = Cli::try_parse_from(["clust"]).unwrap();
         assert!(!cli.background);
-        assert!(!cli.stop);
+        assert!(cli.stop.is_none());
+        assert!(!cli.stop_pool);
         assert!(cli.attach.is_none());
         assert!(!cli.default);
         assert!(cli.prompt.is_none());
@@ -56,14 +61,25 @@ mod tests {
 
     #[test]
     fn parse_stop_short() {
-        let cli = Cli::try_parse_from(["clust", "-s"]).unwrap();
-        assert!(cli.stop);
+        let cli = Cli::try_parse_from(["clust", "-s", "abc123"]).unwrap();
+        assert_eq!(cli.stop.as_deref(), Some("abc123"));
     }
 
     #[test]
     fn parse_stop_long() {
-        let cli = Cli::try_parse_from(["clust", "--stop"]).unwrap();
-        assert!(cli.stop);
+        let cli = Cli::try_parse_from(["clust", "--stop", "abc123"]).unwrap();
+        assert_eq!(cli.stop.as_deref(), Some("abc123"));
+    }
+
+    #[test]
+    fn parse_stop_requires_value() {
+        assert!(Cli::try_parse_from(["clust", "-s"]).is_err());
+    }
+
+    #[test]
+    fn parse_stop_pool() {
+        let cli = Cli::try_parse_from(["clust", "--stop-pool"]).unwrap();
+        assert!(cli.stop_pool);
     }
 
     #[test]

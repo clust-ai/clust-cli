@@ -24,6 +24,7 @@ pub enum CliMessage {
     ResizeAgent { id: String, cols: u16, rows: u16 },
     ListAgents,
     StopPool,
+    StopAgent { id: String },
     SetDefault { agent_binary: String },
     GetDefault,
 }
@@ -47,6 +48,7 @@ pub enum PoolMessage {
     AgentExited { id: String, exit_code: i32 },
     AgentList { agents: Vec<AgentInfo> },
     DefaultAgent { agent_binary: Option<String> },
+    AgentStopped { id: String },
     PoolShutdown,
     Error { message: String },
 }
@@ -189,6 +191,14 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn cli_stop_agent() {
+        assert_cli_round_trip(CliMessage::StopAgent {
+            id: "abc123".into(),
+        })
+        .await;
+    }
+
+    #[tokio::test]
     async fn cli_set_default() {
         assert_cli_round_trip(CliMessage::SetDefault {
             agent_binary: "aider".into(),
@@ -282,6 +292,14 @@ mod tests {
     async fn pool_default_agent_none() {
         assert_pool_round_trip(PoolMessage::DefaultAgent {
             agent_binary: None,
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn pool_agent_stopped() {
+        assert_pool_round_trip(PoolMessage::AgentStopped {
+            id: "abc123".into(),
         })
         .await;
     }

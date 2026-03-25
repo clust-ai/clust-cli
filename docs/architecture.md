@@ -93,6 +93,7 @@ CLI -> Pool:
   ResizeAgent { id: String, cols: u16, rows: u16 }
   ListAgents
   StopPool
+  StopAgent { id: String }
   SetDefault { agent_binary: String }
   GetDefault
 
@@ -103,6 +104,7 @@ Pool -> CLI:
   AgentOutput { id: String, data: Vec<u8> }
   AgentExited { id: String, exit_code: i32 }
   AgentList { agents: Vec<AgentInfo> }
+  AgentStopped { id: String }
   DefaultAgent { agent_binary: Option<String> }
   PoolShutdown
   Error { message: String }
