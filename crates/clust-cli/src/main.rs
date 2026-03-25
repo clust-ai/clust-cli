@@ -242,7 +242,7 @@ async fn handle_attach(id: String) {
             });
 
     match response {
-        PoolMessage::AgentStarted { id, agent_binary } => {
+        PoolMessage::AgentAttached { id, agent_binary } => {
             let (reader, writer) = stream.into_split();
             let session = terminal::AttachedSession::new(id, agent_binary, reader, writer);
             if let Err(e) = session.run().await {
@@ -529,30 +529,55 @@ fn render_selector(
 ) {
     for i in 0..item_count {
         let is_selected = i == selected;
-        let (prefix, label_color) = if is_selected {
-            (
-                format!("  {}▸{} ", theme::ACCENT, theme::RESET),
-                theme::TEXT_PRIMARY,
-            )
+        let prefix = if is_selected {
+            format!("  {}▸{} ", theme::ACCENT, theme::RESET)
         } else {
-            ("    ".to_string(), theme::TEXT_TERTIARY)
+            "    ".to_string()
         };
 
-        let label = if i == 0 {
-            "cancel".to_string()
+        let line = if i == 0 {
+            let color = if is_selected {
+                theme::TEXT_PRIMARY
+            } else {
+                theme::TEXT_TERTIARY
+            };
+            format!("{color}cancel{}", theme::RESET)
         } else if i <= agents.len() {
             let agent = &agents[i - 1];
-            format!("{}  {}", agent.id, agent.agent_binary)
+            let started = format_started(&agent.started_at);
+            let (text_color, status_color) = if is_selected {
+                (theme::TEXT_PRIMARY, theme::SUCCESS)
+            } else {
+                (theme::TEXT_TERTIARY, theme::TEXT_TERTIARY)
+            };
+            format!(
+                "{}{:<8}{} {}{:<12}{} {}{:<10}{} {}{:<10}{} {}{}{}",
+                theme::ACCENT,
+                agent.id,
+                theme::RESET,
+                text_color,
+                agent.agent_binary,
+                theme::RESET,
+                status_color,
+                "running",
+                theme::RESET,
+                text_color,
+                agent.attached_clients,
+                theme::RESET,
+                text_color,
+                started,
+                theme::RESET,
+            )
         } else {
-            "new agent +".to_string()
+            let color = if is_selected {
+                theme::TEXT_PRIMARY
+            } else {
+                theme::TEXT_TERTIARY
+            };
+            format!("{color}new agent +{}", theme::RESET)
         };
 
-        write!(
-            stdout,
-            "\x1b[2K{}{}{}{}\r\n",
-            prefix, label_color, label, theme::RESET,
-        )
-        .unwrap();
+        write!(stdout, "\x1b[2K{}{}\r\n", prefix, line).unwrap();
     }
     stdout.flush().unwrap();
 }

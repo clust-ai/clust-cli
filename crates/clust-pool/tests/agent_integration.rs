@@ -55,6 +55,7 @@ async fn spawn_agent_echo_produces_output() {
                     got_exit = true;
                     break;
                 }
+                Ok(clust_pool::agent::AgentEvent::PoolShutdown) => break,
                 Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
                 Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
             }
@@ -122,6 +123,7 @@ async fn spawn_agent_cat_receives_input_and_echoes() {
                 Ok(clust_pool::agent::AgentEvent::Exited(_)) => {
                     return collected;
                 }
+                Ok(clust_pool::agent::AgentEvent::PoolShutdown) => return collected,
                 Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
                 Err(tokio::sync::broadcast::error::RecvError::Closed) => return collected,
             }
@@ -182,6 +184,7 @@ async fn multiple_subscribers_receive_same_output() {
                     collected.extend_from_slice(&data);
                 }
                 Ok(clust_pool::agent::AgentEvent::Exited(_)) => break,
+                Ok(clust_pool::agent::AgentEvent::PoolShutdown) => break,
                 Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
                 Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
             }

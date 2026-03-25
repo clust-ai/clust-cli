@@ -6,6 +6,7 @@ use tao::event_loop::{ControlFlow, EventLoopBuilder};
 use tray_icon::menu::{MenuEvent, MenuId};
 
 use clust_pool::PoolEvent;
+use clust_pool::agent::SharedPoolState;
 
 fn main() {
     let state = Arc::new(Mutex::new(clust_pool::agent::PoolState::new()));
@@ -13,14 +14,29 @@ fn main() {
     let event_loop = EventLoopBuilder::<PoolEvent>::with_user_event().build();
     let proxy = event_loop.create_proxy();
 
+    // Channel for triggering async shutdown from the main thread (tray quit)
+    let (shutdown_tx, mut shutdown_rx) = tokio::sync::mpsc::unbounded_channel::<()>();
+
     // Spawn tokio runtime on a background thread for the IPC server and signal handlers
     let state_clone = state.clone();
     let signal_proxy = proxy.clone();
+    let signal_state = state.clone();
+    let tray_shutdown_state = state.clone();
+    let tray_shutdown_proxy = proxy.clone();
     std::thread::spawn(move || {
         let rt = tokio::runtime::Runtime::new().expect("failed to create tokio runtime");
         rt.block_on(async move {
             // Spawn signal handler for clean shutdown on SIGTERM/SIGINT
-            tokio::spawn(handle_signals(signal_proxy));
+            tokio::spawn(handle_signals(signal_proxy, signal_state));
+
+            // Spawn handler for tray quit → async agent shutdown
+            tokio::spawn(async move {
+                if shutdown_rx.recv().await.is_some() {
+                    clust_pool::agent::shutdown_agents(&tray_shutdown_state).await;
+                    let _ = tokio::fs::remove_file(clust_ipc::socket_path()).await;
+                    let _ = tray_shutdown_proxy.send_event(PoolEvent::Shutdown);
+                }
+            });
 
             clust_pool::ipc::run_ipc_server(proxy, state_clone).await;
         });
@@ -38,7 +54,8 @@ fn main() {
         if let Some(ref qid) = quit_id {
             if let Ok(menu_event) = MenuEvent::receiver().try_recv() {
                 if menu_event.id == *qid {
-                    shutdown(&mut tray_icon_holder, control_flow);
+                    // Trigger async agent shutdown; PoolEvent::Shutdown arrives when done
+                    let _ = shutdown_tx.send(());
                 }
             }
         }
@@ -73,7 +90,10 @@ fn shutdown(
     std::process::exit(0);
 }
 
-async fn handle_signals(proxy: tao::event_loop::EventLoopProxy<PoolEvent>) {
+async fn handle_signals(
+    proxy: tao::event_loop::EventLoopProxy<PoolEvent>,
+    state: SharedPoolState,
+) {
     use tokio::signal::unix::{signal, SignalKind};
 
     let mut sigterm = signal(SignalKind::terminate()).expect("failed to register SIGTERM handler");
@@ -84,6 +104,7 @@ async fn handle_signals(proxy: tao::event_loop::EventLoopProxy<PoolEvent>) {
         _ = sigint.recv() => {}
     }
 
+    clust_pool::agent::shutdown_agents(&state).await;
     let _ = tokio::fs::remove_file(clust_ipc::socket_path()).await;
     let _ = proxy.send_event(PoolEvent::Shutdown);
 }

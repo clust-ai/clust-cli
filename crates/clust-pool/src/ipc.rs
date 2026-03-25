@@ -107,7 +107,7 @@ async fn handle_connection(
                 Some(binary) => {
                     clust_ipc::send_message_write(
                         &mut writer,
-                        &PoolMessage::AgentStarted {
+                        &PoolMessage::AgentAttached {
                             id: id.clone(),
                             agent_binary: binary,
                         },
@@ -146,6 +146,9 @@ async fn handle_connection(
         }
         CliMessage::StopPool => {
             clust_ipc::send_message_write(&mut writer, &PoolMessage::Ok).await?;
+
+            // Terminate all running agents (SIGTERM → 3s → SIGKILL)
+            agent::shutdown_agents(&state).await;
 
             // Clean up socket file before signaling shutdown
             let _ = tokio::fs::remove_file(clust_ipc::socket_path()).await;
@@ -219,6 +222,14 @@ async fn handle_attached_session(
                             id: agent_id_for_output.clone(),
                             exit_code: code,
                         },
+                    )
+                    .await;
+                    break;
+                }
+                Ok(AgentEvent::PoolShutdown) => {
+                    let _ = clust_ipc::send_message_write(
+                        &mut writer,
+                        &PoolMessage::PoolShutdown,
                     )
                     .await;
                     break;

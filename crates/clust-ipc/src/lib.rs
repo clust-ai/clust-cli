@@ -40,9 +40,11 @@ pub struct AgentInfo {
 pub enum PoolMessage {
     Ok,
     AgentStarted { id: String, agent_binary: String },
+    AgentAttached { id: String, agent_binary: String },
     AgentOutput { id: String, data: Vec<u8> },
     AgentExited { id: String, exit_code: i32 },
     AgentList { agents: Vec<AgentInfo> },
+    PoolShutdown,
     Error { message: String },
 }
 
@@ -213,6 +215,15 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn pool_agent_attached() {
+        assert_pool_round_trip(PoolMessage::AgentAttached {
+            id: "a1b2c3".into(),
+            agent_binary: "claude".into(),
+        })
+        .await;
+    }
+
+    #[tokio::test]
     async fn pool_agent_output() {
         assert_pool_round_trip(PoolMessage::AgentOutput {
             id: "a1b2c3".into(),
@@ -254,6 +265,11 @@ mod tests {
     #[tokio::test]
     async fn pool_agent_list_empty() {
         assert_pool_round_trip(PoolMessage::AgentList { agents: vec![] }).await;
+    }
+
+    #[tokio::test]
+    async fn pool_shutdown() {
+        assert_pool_round_trip(PoolMessage::PoolShutdown).await;
     }
 
     #[tokio::test]

@@ -102,6 +102,9 @@ impl AttachedSession {
                     Ok(PoolMessage::AgentExited { exit_code, .. }) => {
                         return SessionEnd::AgentExited(exit_code);
                     }
+                    Ok(PoolMessage::PoolShutdown) => {
+                        return SessionEnd::PoolShutdown;
+                    }
                     Err(_) => {
                         return SessionEnd::ConnectionLost;
                     }
@@ -205,6 +208,7 @@ impl AttachedSession {
 enum SessionEnd {
     Detached,
     AgentExited(i32),
+    PoolShutdown,
     ConnectionLost,
 }
 

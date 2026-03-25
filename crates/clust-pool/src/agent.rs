@@ -30,6 +30,7 @@ pub struct AgentEntry {
     pub agent_binary: String,
     pub started_at: String,
     pub working_dir: String,
+    pub pid: Option<u32>,
     pub pty_master: Box<dyn MasterPty + Send>,
     pub pty_writer: Box<dyn std::io::Write + Send>,
     pub output_tx: broadcast::Sender<AgentEvent>,
@@ -41,6 +42,7 @@ pub struct AgentEntry {
 pub enum AgentEvent {
     Output(Vec<u8>),
     Exited(i32),
+    PoolShutdown,
 }
 
 /// Generate a unique 6-character hex agent ID.
@@ -93,6 +95,8 @@ pub fn spawn_agent(
         .spawn_command(cmd)
         .map_err(|e| format!("spawn failed: {e}"))?;
 
+    let pid = child.process_id();
+
     // Child owns the slave side; drop our handle.
     drop(pair.slave);
 
@@ -119,6 +123,7 @@ pub fn spawn_agent(
         agent_binary: binary,
         started_at,
         working_dir,
+        pid,
         pty_master: pair.master,
         pty_writer: writer,
         output_tx,
@@ -176,6 +181,49 @@ fn spawn_pty_reader(
     });
 }
 
+/// Terminate all running agents during pool shutdown.
+///
+/// 1. Notify all attached CLI clients via broadcast channels
+/// 2. SIGTERM all agent processes
+/// 3. Wait 3 seconds for graceful exit
+/// 4. SIGKILL any remaining agents
+pub async fn shutdown_agents(state: &SharedPoolState) {
+    let pids: Vec<u32>;
+    {
+        let pool = state.lock().await;
+        pids = pool.agents.values().filter_map(|e| e.pid).collect();
+
+        // Notify all attached clients that the pool is shutting down
+        for entry in pool.agents.values() {
+            let _ = entry.output_tx.send(AgentEvent::PoolShutdown);
+        }
+    }
+
+    if pids.is_empty() {
+        return;
+    }
+
+    // Send SIGTERM to all agents
+    for &pid in &pids {
+        unsafe {
+            libc::kill(pid as i32, libc::SIGTERM);
+        }
+    }
+
+    // Wait 3 seconds for graceful exit
+    tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+
+    // SIGKILL any agents still alive
+    for &pid in &pids {
+        // kill(pid, 0) checks if process exists without sending a signal
+        if unsafe { libc::kill(pid as i32, 0) } == 0 {
+            unsafe {
+                libc::kill(pid as i32, libc::SIGKILL);
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -201,6 +249,7 @@ mod tests {
                     agent_binary: "test".into(),
                     started_at: "2026-01-01T00:00:00Z".into(),
                     working_dir: "/tmp".into(),
+                    pid: None,
                     pty_master: create_dummy_pty_master(),
                     pty_writer: Box::new(std::io::sink()),
                     output_tx: broadcast::channel(1).0,
