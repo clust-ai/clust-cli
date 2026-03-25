@@ -72,6 +72,7 @@ async fn handle_connection(
             working_dir,
             cols,
             rows,
+            accept_edits,
         } => {
             let result = {
                 let mut pool = state.lock().await;
@@ -82,6 +83,7 @@ async fn handle_connection(
                     working_dir,
                     cols,
                     rows,
+                    accept_edits,
                     state.clone(),
                 )
             };

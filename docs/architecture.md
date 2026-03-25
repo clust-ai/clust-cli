@@ -86,7 +86,7 @@ Candidate serialization: **MessagePack** via `rmp-serde` (compact, fast, schema-
 
 ```
 CLI -> Pool:
-  StartAgent { prompt: Option<String>, agent_binary: Option<String>, working_dir: String, cols: u16, rows: u16 }
+  StartAgent { prompt: Option<String>, agent_binary: Option<String>, working_dir: String, cols: u16, rows: u16, accept_edits: bool }
   AttachAgent { id: String }
   DetachAgent { id: String }
   AgentInput { id: String, data: Vec<u8> }

@@ -119,6 +119,7 @@ pub fn spawn_agent(
     working_dir: String,
     cols: u16,
     rows: u16,
+    accept_edits: bool,
     shared_state: SharedPoolState,
 ) -> Result<(String, String), String> {
     let binary = agent_binary
@@ -139,6 +140,13 @@ pub fn spawn_agent(
     let mut cmd = CommandBuilder::new(&binary);
     if let Some(ref p) = prompt {
         cmd.arg(p);
+    }
+    if accept_edits {
+        if let Some(args) = clust_ipc::agents::accept_edits_args_for(&binary) {
+            for arg in args {
+                cmd.arg(arg);
+            }
+        }
     }
     cmd.cwd(&working_dir);
 

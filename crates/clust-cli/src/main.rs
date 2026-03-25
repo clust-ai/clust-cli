@@ -102,7 +102,7 @@ async fn main() {
     }
 
     // Default: start an agent and attach (or -b for background)
-    handle_start(args.prompt, args.background).await;
+    handle_start(args.prompt, args.background, args.accept_edits).await;
 }
 
 /// Check if a default agent is configured. If not, show the first-run picker.
@@ -166,7 +166,7 @@ async fn check_default_and_prompt() -> Option<Option<String>> {
 }
 
 /// Start a new agent. If background is false, attach to it.
-async fn handle_start(prompt: Option<String>, background: bool) {
+async fn handle_start(prompt: Option<String>, background: bool, accept_edits: bool) {
     // Check if a default agent is configured; prompt on first run
     let agent_override = check_default_and_prompt().await;
     if agent_override.is_none() {
@@ -222,6 +222,7 @@ async fn handle_start(prompt: Option<String>, background: bool) {
             working_dir,
             cols: term_cols,
             rows: agent_rows,
+            accept_edits,
         },
     )
     .await
@@ -546,7 +547,7 @@ async fn handle_select() {
     match action {
         SelectAction::Cancel => {}
         SelectAction::Attach(id) => handle_attach(id).await,
-        SelectAction::NewAgent => handle_start(None, false).await,
+        SelectAction::NewAgent => handle_start(None, false, false).await,
     }
 }
 
