@@ -53,7 +53,7 @@ Since the pool is ephemeral (no state survives restart):
 
 When the pool receives a `StartAgent` message:
 
-1. Determine agent binary: use `agent_binary` from the message, or fall back to the stored default (from SQLite), or fall back to `claude`
+1. Determine agent binary: use `agent_binary` from the message, or fall back to the stored default (from SQLite). If no default is configured, return an error — the CLI prompts the user to pick a default before calling `StartAgent`.
 2. Generate a 6-character hex ID (from random bytes, check for collision against running agents)
 3. Allocate a PTY pair (master/slave) via `portable-pty`
 4. Spawn the agent process in the slave PTY
@@ -90,7 +90,8 @@ Any attached client can send input. The pool writes it directly to the agent's P
 ```rust
 struct PoolState {
     agents: HashMap<String, AgentEntry>,
-    default_agent: String, // loaded from SQLite on startup
+    default_agent: Option<String>, // loaded from SQLite on startup; None if unset
+    db: Option<rusqlite::Connection>, // open SQLite connection; Some after init_db()
 }
 
 struct AgentEntry {

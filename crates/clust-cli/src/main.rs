@@ -70,6 +70,12 @@ async fn main() {
         return;
     }
 
+    // Flag: --default
+    if args.default {
+        handle_default_picker().await;
+        return;
+    }
+
     // Flag: --attach <ID>
     if let Some(ref id) = args.attach {
         handle_attach(id.clone()).await;
@@ -80,8 +86,75 @@ async fn main() {
     handle_start(args.prompt, args.background).await;
 }
 
+/// Check if a default agent is configured. If not, show the first-run picker.
+///
+/// Returns `Some(Some(binary))` if the user selected a new default,
+/// `Some(None)` if a default already exists (use pool's default),
+/// or `None` if the user cancelled.
+async fn check_default_and_prompt() -> Option<Option<String>> {
+    let mut stream = match ipc::connect_to_pool().await {
+        Ok(s) => s,
+        Err(_) => return Some(None), // Can't reach pool, let handle_start report the error
+    };
+
+    if clust_ipc::send_message(&mut stream, &CliMessage::GetDefault)
+        .await
+        .is_err()
+    {
+        return Some(None);
+    }
+
+    let current = match clust_ipc::recv_message::<PoolMessage>(&mut stream).await {
+        Ok(PoolMessage::DefaultAgent { agent_binary }) => agent_binary,
+        _ => return Some(None), // Unexpected response, proceed with pool's default
+    };
+
+    if current.is_some() {
+        return Some(None); // Default already configured
+    }
+
+    // No default set — first-run prompt
+    print_logo();
+    let result = run_default_selector(None, "pick a default agent to get started");
+
+    match result {
+        DefaultPickerResult::Selected(binary) => {
+            // Persist the choice (new connection)
+            if let Ok(mut s) = ipc::connect_to_pool().await {
+                if clust_ipc::send_message(
+                    &mut s,
+                    &CliMessage::SetDefault {
+                        agent_binary: binary.clone(),
+                    },
+                )
+                .await
+                .is_ok()
+                {
+                    let _ = clust_ipc::recv_message::<PoolMessage>(&mut s).await;
+                }
+            }
+            println!(
+                "  {}✔{} {}default agent set to {binary}{}\n",
+                theme::SUCCESS,
+                theme::RESET,
+                theme::TEXT_PRIMARY,
+                theme::RESET,
+            );
+            Some(Some(binary))
+        }
+        DefaultPickerResult::Cancel => None,
+    }
+}
+
 /// Start a new agent. If background is false, attach to it.
 async fn handle_start(prompt: Option<String>, background: bool) {
+    // Check if a default agent is configured; prompt on first run
+    let agent_override = check_default_and_prompt().await;
+    if agent_override.is_none() {
+        return; // User cancelled first-run picker
+    }
+    let agent_binary = agent_override.unwrap();
+
     let working_dir = std::env::current_dir()
         .map(|p| p.to_string_lossy().into_owned())
         .unwrap_or_else(|_| ".".into());
@@ -126,7 +199,7 @@ async fn handle_start(prompt: Option<String>, background: bool) {
         &mut stream,
         &CliMessage::StartAgent {
             prompt,
-            agent_binary: None,
+            agent_binary,
             working_dir,
             cols: term_cols,
             rows: agent_rows,
@@ -590,6 +663,296 @@ fn render_selector(
         write!(stdout, "\x1b[2K{}{}\r\n", prefix, line).unwrap();
     }
     stdout.flush().unwrap();
+}
+
+// ── Default agent picker ─────────────────────────────────────────────
+
+enum DefaultPickerResult {
+    Cancel,
+    Selected(String),
+}
+
+/// Handle `clust -d`: show interactive picker to set the default agent.
+async fn handle_default_picker() {
+    println!();
+    let spinner = spin("connecting to pool");
+
+    let mut stream = match ipc::connect_to_pool().await {
+        Ok(s) => {
+            stop_spin(spinner, "connected");
+            s
+        }
+        Err(e) => {
+            stop_spin_err(spinner, &format!("failed to connect to pool: {e}"));
+            std::process::exit(1);
+        }
+    };
+
+    // Get current default
+    clust_ipc::send_message(&mut stream, &CliMessage::GetDefault)
+        .await
+        .unwrap_or_else(|e| {
+            eprintln!(
+                "  {}✘{} {}failed to get default: {e}{}",
+                theme::ERROR,
+                theme::RESET,
+                theme::TEXT_PRIMARY,
+                theme::RESET,
+            );
+            std::process::exit(1);
+        });
+
+    let current = match clust_ipc::recv_message::<PoolMessage>(&mut stream).await {
+        Ok(PoolMessage::DefaultAgent { agent_binary }) => agent_binary,
+        _ => None,
+    };
+
+    let result = run_default_selector(current.as_deref(), "set default agent");
+
+    match result {
+        DefaultPickerResult::Cancel => {}
+        DefaultPickerResult::Selected(binary) => {
+            // Persist the choice (new connection since the previous one is consumed)
+            match ipc::connect_to_pool().await {
+                Ok(mut s) => {
+                    if clust_ipc::send_message(
+                        &mut s,
+                        &CliMessage::SetDefault {
+                            agent_binary: binary.clone(),
+                        },
+                    )
+                    .await
+                    .is_ok()
+                    {
+                        let _ = clust_ipc::recv_message::<PoolMessage>(&mut s).await;
+                    }
+                }
+                Err(_) => {}
+            }
+            println!(
+                "  {}✔{} {}default agent set to {binary}{}\n",
+                theme::SUCCESS,
+                theme::RESET,
+                theme::TEXT_PRIMARY,
+                theme::RESET,
+            );
+        }
+    }
+}
+
+/// Interactive default agent selector.
+///
+/// Shows known agents with a checkmark on the current default, plus a "Custom..."
+/// option for entering an arbitrary command.
+fn run_default_selector(current: Option<&str>, header: &str) -> DefaultPickerResult {
+    use crossterm::event::{self, Event, KeyCode, KeyEventKind};
+
+    let known = clust_ipc::agents::KNOWN_AGENTS;
+    // Items: cancel + known agents + custom
+    let item_count = 2 + known.len();
+    let mut selected: usize = 1; // Start on first agent, not cancel
+    let mut stdout = io::stdout();
+
+    // Header
+    write!(
+        stdout,
+        "  {}{}{}\n\n",
+        theme::TEXT_SECONDARY, header, theme::RESET,
+    )
+    .unwrap();
+    stdout.flush().unwrap();
+
+    let _guard = RawModeGuard::new();
+
+    render_default_selector(&mut stdout, known, current, selected, item_count);
+
+    loop {
+        if !event::poll(std::time::Duration::from_millis(100)).unwrap_or(false) {
+            continue;
+        }
+        let ev = match event::read() {
+            Ok(ev) => ev,
+            Err(_) => continue,
+        };
+        let Event::Key(key) = ev else { continue };
+        if key.kind != KeyEventKind::Press {
+            continue;
+        }
+
+        match key.code {
+            KeyCode::Up => {
+                if selected > 0 {
+                    selected -= 1;
+                }
+            }
+            KeyCode::Down => {
+                if selected < item_count - 1 {
+                    selected += 1;
+                }
+            }
+            KeyCode::Enter => break,
+            KeyCode::Esc | KeyCode::Char('q') => {
+                selected = 0; // cancel
+                break;
+            }
+            _ => continue,
+        }
+
+        write!(stdout, "\x1b[{}A", item_count).unwrap();
+        render_default_selector(&mut stdout, known, current, selected, item_count);
+    }
+
+    // Erase the selector lines + header (item_count + 2 for header + blank line)
+    let total_lines = item_count + 2;
+    write!(stdout, "\x1b[{}A", item_count).unwrap();
+    for _ in 0..total_lines {
+        write!(stdout, "\x1b[2K\x1b[1A").unwrap();
+    }
+    write!(stdout, "\x1b[2K").unwrap();
+    stdout.flush().unwrap();
+
+    // _guard drops here, restoring terminal
+
+    if selected == 0 {
+        DefaultPickerResult::Cancel
+    } else if selected <= known.len() {
+        DefaultPickerResult::Selected(known[selected - 1].binary.to_string())
+    } else {
+        // Custom: prompt for input
+        read_custom_agent()
+    }
+}
+
+fn render_default_selector(
+    stdout: &mut io::Stdout,
+    known: &[clust_ipc::agents::KnownAgent],
+    current: Option<&str>,
+    selected: usize,
+    item_count: usize,
+) {
+    for i in 0..item_count {
+        let is_selected = i == selected;
+        let prefix = if is_selected {
+            format!("  {}▸{} ", theme::ACCENT, theme::RESET)
+        } else {
+            "    ".to_string()
+        };
+
+        let line = if i == 0 {
+            // Cancel
+            let color = if is_selected {
+                theme::TEXT_PRIMARY
+            } else {
+                theme::TEXT_TERTIARY
+            };
+            format!("{color}cancel{}", theme::RESET)
+        } else if i <= known.len() {
+            // Known agent
+            let agent = &known[i - 1];
+            let is_current = current == Some(agent.binary);
+            let (name_color, bin_color) = if is_selected {
+                (theme::TEXT_PRIMARY, theme::TEXT_SECONDARY)
+            } else {
+                (theme::TEXT_TERTIARY, theme::TEXT_TERTIARY)
+            };
+            let check = if is_current {
+                format!(" {}✔{}", theme::SUCCESS, theme::RESET)
+            } else {
+                String::new()
+            };
+            format!(
+                "{}{}{} {}({}){}{check}",
+                name_color, agent.display_name, theme::RESET, bin_color, agent.binary, theme::RESET,
+            )
+        } else {
+            // Custom
+            let color = if is_selected {
+                theme::TEXT_PRIMARY
+            } else {
+                theme::TEXT_TERTIARY
+            };
+            // Show checkmark if current default is not a known agent
+            let is_custom_current =
+                current.is_some() && !known.iter().any(|a| Some(a.binary) == current);
+            let check = if is_custom_current {
+                format!(
+                    " {}✔{} {}({}){}",
+                    theme::SUCCESS, theme::RESET,
+                    theme::TEXT_SECONDARY,
+                    current.unwrap(),
+                    theme::RESET,
+                )
+            } else {
+                String::new()
+            };
+            format!("{color}Custom...{}{check}", theme::RESET)
+        };
+
+        write!(stdout, "\x1b[2K{}{}\r\n", prefix, line).unwrap();
+    }
+    stdout.flush().unwrap();
+}
+
+/// Read a custom agent command from the user in raw mode.
+fn read_custom_agent() -> DefaultPickerResult {
+    use crossterm::event::{self, Event, KeyCode, KeyEventKind};
+
+    let mut stdout = io::stdout();
+    let mut buf = String::new();
+
+    let _guard = RawModeGuard::new();
+
+    // Show cursor for text input
+    write!(stdout, "\x1b[?25h").unwrap();
+    write!(
+        stdout,
+        "\r\x1b[2K  {}agent command:{} ",
+        theme::TEXT_SECONDARY, theme::RESET,
+    )
+    .unwrap();
+    stdout.flush().unwrap();
+
+    loop {
+        if !event::poll(std::time::Duration::from_millis(100)).unwrap_or(false) {
+            continue;
+        }
+        let ev = match event::read() {
+            Ok(ev) => ev,
+            Err(_) => continue,
+        };
+        let Event::Key(key) = ev else { continue };
+        if key.kind != KeyEventKind::Press {
+            continue;
+        }
+
+        match key.code {
+            KeyCode::Enter => {
+                if !buf.is_empty() {
+                    // Erase the input line
+                    write!(stdout, "\r\x1b[2K").unwrap();
+                    stdout.flush().unwrap();
+                    return DefaultPickerResult::Selected(buf);
+                }
+            }
+            KeyCode::Esc => {
+                write!(stdout, "\r\x1b[2K").unwrap();
+                stdout.flush().unwrap();
+                return DefaultPickerResult::Cancel;
+            }
+            KeyCode::Backspace => {
+                if buf.pop().is_some() {
+                    write!(stdout, "\x08 \x08").unwrap();
+                    stdout.flush().unwrap();
+                }
+            }
+            KeyCode::Char(c) => {
+                buf.push(c);
+                write!(stdout, "{c}").unwrap();
+                stdout.flush().unwrap();
+            }
+            _ => {}
+        }
+    }
 }
 
 fn spin(msg: &str) -> tokio::task::JoinHandle<()> {

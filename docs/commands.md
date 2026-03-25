@@ -33,7 +33,7 @@ clust [OPTIONS] [PROMPT]
 | `-b` | `--background` | Start agent without attaching. Returns the agent ID. |
 | `-a` | `--attach <ID>` | Attach to an existing agent by its 6-char ID. |
 | `-s` | `--stop` | Stop the pool daemon and all running agents. |
-| `-d` | `--default <AGENT>` | Set the global default agent binary (e.g., `claude`, `aider`). Persisted in SQLite. |
+| `-d` | `--default` | Interactive picker to set the global default agent binary. Persisted in SQLite. |
 | `-h` | `--help` | Show help with all available options. |
 | `-V` | `--version` | Show version. |
 
@@ -88,8 +88,8 @@ clust -a a3f8c1
 # List all running agents
 clust ls
 
-# Set default agent to something other than claude
-clust -d aider
+# Set default agent interactively
+clust -d
 
 # Interactive agent selector
 clust ls -i

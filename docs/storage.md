@@ -34,11 +34,11 @@ CREATE TABLE config (
 
 | Key | Default | Description |
 |-----|---------|-------------|
-| `default_agent` | `claude` | The agent binary to use when none is specified |
+| `default_agent` | *(none)* | The agent binary to use when none is specified. Set via `clust -d` or first-run prompt. |
 
-#### `agent_history`
+#### `agent_history` *(deferred — migration v2)*
 
-Log of past agent sessions. Written when an agent exits. Useful for future features (UI history, analytics).
+Log of past agent sessions. Written when an agent exits. Useful for future features (UI history, analytics). Not created in migration v1; will be added as migration v2.
 
 ```sql
 CREATE TABLE agent_history (

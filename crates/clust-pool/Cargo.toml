@@ -20,6 +20,7 @@ tao = "0.35"
 portable-pty = "0.8"
 rand = "0.8"
 chrono = "0.4"
+rusqlite = { version = "0.31", features = ["bundled"] }
 
 [dev-dependencies]
 tempfile = "3"

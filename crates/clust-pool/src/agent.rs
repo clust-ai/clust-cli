@@ -12,15 +12,31 @@ pub type SharedPoolState = Arc<Mutex<PoolState>>;
 /// Top-level pool state holding all running agents.
 pub struct PoolState {
     pub agents: HashMap<String, AgentEntry>,
-    pub default_agent: String,
+    pub default_agent: Option<String>,
+    pub db: Option<rusqlite::Connection>,
+}
+
+impl Default for PoolState {
+    fn default() -> Self {
+        Self {
+            agents: HashMap::new(),
+            default_agent: None,
+            db: None,
+        }
+    }
 }
 
 impl PoolState {
     pub fn new() -> Self {
-        Self {
-            agents: HashMap::new(),
-            default_agent: "claude".to_string(),
-        }
+        Self::default()
+    }
+
+    /// Initialize the SQLite database and load the default agent from config.
+    pub fn init_db(&mut self) -> Result<(), String> {
+        let conn = crate::db::open_or_create()?;
+        self.default_agent = crate::db::get_default_agent(&conn);
+        self.db = Some(conn);
+        Ok(())
     }
 }
 
@@ -105,7 +121,9 @@ pub fn spawn_agent(
     rows: u16,
     shared_state: SharedPoolState,
 ) -> Result<(String, String), String> {
-    let binary = agent_binary.unwrap_or_else(|| state.default_agent.clone());
+    let binary = agent_binary
+        .or_else(|| state.default_agent.clone())
+        .ok_or_else(|| "no default agent configured".to_string())?;
     let id = generate_agent_id(&state.agents);
 
     let pty_system = portable_pty::native_pty_system();
@@ -308,7 +326,8 @@ mod tests {
     fn pool_state_new_defaults() {
         let state = PoolState::new();
         assert!(state.agents.is_empty());
-        assert_eq!(state.default_agent, "claude");
+        assert_eq!(state.default_agent, None);
+        assert!(state.db.is_none());
     }
 
     /// Helper: create a real PTY master for testing structs that need one.

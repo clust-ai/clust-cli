@@ -28,6 +28,14 @@ async fn run(
     let dir = clust_ipc::clust_dir();
     tokio::fs::create_dir_all(&dir).await?;
 
+    // Initialize SQLite database (creates tables on first run)
+    {
+        let mut pool = state.lock().await;
+        if let Err(e) = pool.init_db() {
+            eprintln!("database init failed: {e}");
+        }
+    }
+
     let sock_path = clust_ipc::socket_path();
 
     // Remove stale socket file if it exists (crash recovery per docs/pool.md)
@@ -155,11 +163,48 @@ async fn handle_connection(
 
             let _ = shutdown_proxy.send_event(PoolEvent::Shutdown);
         }
+        CliMessage::SetDefault { agent_binary } => {
+            let result = {
+                let pool = state.lock().await;
+                if let Some(ref db) = pool.db {
+                    crate::db::set_default_agent(db, &agent_binary)
+                } else {
+                    Err("database not initialized".into())
+                }
+            };
+            match result {
+                Ok(()) => {
+                    let mut pool = state.lock().await;
+                    pool.default_agent = Some(agent_binary);
+                    clust_ipc::send_message_write(&mut writer, &PoolMessage::Ok).await?;
+                }
+                Err(e) => {
+                    clust_ipc::send_message_write(
+                        &mut writer,
+                        &PoolMessage::Error { message: e },
+                    )
+                    .await?;
+                }
+            }
+        }
+        CliMessage::GetDefault => {
+            let default = {
+                let pool = state.lock().await;
+                pool.default_agent.clone()
+            };
+            clust_ipc::send_message_write(
+                &mut writer,
+                &PoolMessage::DefaultAgent {
+                    agent_binary: default,
+                },
+            )
+            .await?;
+        }
         _ => {
             clust_ipc::send_message_write(
                 &mut writer,
                 &PoolMessage::Error {
-                    message: "not yet implemented".into(),
+                    message: "unknown message".into(),
                 },
             )
             .await?;
