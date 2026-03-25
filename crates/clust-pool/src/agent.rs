@@ -108,6 +108,17 @@ pub fn generate_agent_id(existing: &HashMap<String, AgentEntry>) -> String {
     }
 }
 
+/// Resolve which agent binary to use: explicit override takes precedence,
+/// then the pool's configured default, otherwise error.
+pub fn resolve_agent_binary(
+    agent_binary: Option<String>,
+    default_agent: &Option<String>,
+) -> Result<String, String> {
+    agent_binary
+        .or_else(|| default_agent.clone())
+        .ok_or_else(|| "no default agent configured".to_string())
+}
+
 /// Spawn a new agent process inside a PTY.
 ///
 /// Returns the agent ID on success. The agent is added to `state.agents` and
@@ -122,9 +133,7 @@ pub fn spawn_agent(
     accept_edits: bool,
     shared_state: SharedPoolState,
 ) -> Result<(String, String), String> {
-    let binary = agent_binary
-        .or_else(|| state.default_agent.clone())
-        .ok_or_else(|| "no default agent configured".to_string())?;
+    let binary = resolve_agent_binary(agent_binary, &state.default_agent)?;
     let id = generate_agent_id(&state.agents);
 
     let pty_system = portable_pty::native_pty_system();
@@ -370,6 +379,33 @@ mod tests {
         assert!(state.agents.is_empty());
         assert_eq!(state.default_agent, None);
         assert!(state.db.is_none());
+    }
+
+    // ── resolve_agent_binary tests ──────────────────────────────────
+
+    #[test]
+    fn resolve_explicit_binary_overrides_default() {
+        let result = resolve_agent_binary(Some("aider".into()), &Some("claude".into()));
+        assert_eq!(result, Ok("aider".into()));
+    }
+
+    #[test]
+    fn resolve_falls_back_to_default_when_none() {
+        let result = resolve_agent_binary(None, &Some("aider".into()));
+        assert_eq!(result, Ok("aider".into()));
+    }
+
+    #[test]
+    fn resolve_errors_when_both_none() {
+        let result = resolve_agent_binary(None, &None);
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err(), "no default agent configured");
+    }
+
+    #[test]
+    fn resolve_explicit_binary_works_without_default() {
+        let result = resolve_agent_binary(Some("opencode".into()), &None);
+        assert_eq!(result, Ok("opencode".into()));
     }
 
     /// Helper: create a real PTY master for testing structs that need one.
