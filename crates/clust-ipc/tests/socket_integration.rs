@@ -1,7 +1,10 @@
 use tempfile::tempdir;
 use tokio::net::{UnixListener, UnixStream};
 
-use clust_ipc::{recv_message, send_message, AgentInfo, CliMessage, PoolMessage};
+use clust_ipc::{
+    recv_message, recv_message_read, send_message, send_message_write, AgentInfo, CliMessage,
+    PoolMessage,
+};
 
 #[tokio::test]
 async fn request_response_over_real_socket() {
@@ -66,6 +69,130 @@ async fn multiple_clients_sequential() {
         let resp: PoolMessage = recv_message(&mut stream).await.unwrap();
         assert_eq!(resp, PoolMessage::Ok);
     }
+
+    server.await.unwrap();
+}
+
+#[tokio::test]
+async fn bidirectional_streaming_over_split_socket() {
+    let dir = tempdir().unwrap();
+    let sock_path = dir.path().join("test.sock");
+
+    let listener = UnixListener::bind(&sock_path).unwrap();
+
+    // Server: accept connection, split, read/write concurrently
+    let server = tokio::spawn({
+        async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let (mut reader, mut writer) = stream.into_split();
+
+            // Respond to StartAgent with AgentStarted
+            let msg: CliMessage = recv_message_read(&mut reader).await.unwrap();
+            assert!(matches!(msg, CliMessage::StartAgent { .. }));
+            send_message_write(
+                &mut writer,
+                &PoolMessage::AgentStarted {
+                    id: "abc123".into(),
+                    agent_binary: "claude".into(),
+                },
+            )
+            .await
+            .unwrap();
+
+            // Send some output
+            send_message_write(
+                &mut writer,
+                &PoolMessage::AgentOutput {
+                    id: "abc123".into(),
+                    data: b"hello world".to_vec(),
+                },
+            )
+            .await
+            .unwrap();
+
+            // Read input from client
+            let input: CliMessage = recv_message_read(&mut reader).await.unwrap();
+            assert!(matches!(input, CliMessage::AgentInput { .. }));
+
+            // Read resize from client
+            let resize: CliMessage = recv_message_read(&mut reader).await.unwrap();
+            assert!(matches!(resize, CliMessage::ResizeAgent { .. }));
+
+            // Read detach
+            let detach: CliMessage = recv_message_read(&mut reader).await.unwrap();
+            assert!(matches!(detach, CliMessage::DetachAgent { .. }));
+        }
+    });
+
+    // Client: connect, split, send StartAgent, then stream messages
+    let mut stream = UnixStream::connect(&sock_path).await.unwrap();
+    send_message(
+        &mut stream,
+        &CliMessage::StartAgent {
+            prompt: None,
+            agent_binary: None,
+            working_dir: "/tmp".into(),
+            cols: 80,
+            rows: 24,
+        },
+    )
+    .await
+    .unwrap();
+
+    let response: PoolMessage = recv_message(&mut stream).await.unwrap();
+    assert_eq!(
+        response,
+        PoolMessage::AgentStarted {
+            id: "abc123".into(),
+            agent_binary: "claude".into(),
+        }
+    );
+
+    // Split for bidirectional streaming
+    let (mut reader, mut writer) = stream.into_split();
+
+    // Read output from server
+    let output: PoolMessage = recv_message_read(&mut reader).await.unwrap();
+    assert_eq!(
+        output,
+        PoolMessage::AgentOutput {
+            id: "abc123".into(),
+            data: b"hello world".to_vec(),
+        }
+    );
+
+    // Send input
+    send_message_write(
+        &mut writer,
+        &CliMessage::AgentInput {
+            id: "abc123".into(),
+            data: vec![0x41],
+        },
+    )
+    .await
+    .unwrap();
+
+    // Send resize
+    send_message_write(
+        &mut writer,
+        &CliMessage::ResizeAgent {
+            id: "abc123".into(),
+            cols: 120,
+            rows: 40,
+        },
+    )
+    .await
+    .unwrap();
+
+    // Detach
+    send_message_write(
+        &mut writer,
+        &CliMessage::DetachAgent {
+            id: "abc123".into(),
+        },
+    )
+    .await
+    .unwrap();
 
     server.await.unwrap();
 }

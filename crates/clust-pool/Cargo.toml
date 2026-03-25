@@ -3,6 +3,10 @@ name = "clust-pool"
 version = "0.0.1"
 edition = "2021"
 
+[lib]
+name = "clust_pool"
+path = "src/lib.rs"
+
 [[bin]]
 name = "clust-pool"
 path = "src/main.rs"
@@ -12,3 +16,9 @@ clust-ipc = { path = "../clust-ipc" }
 tokio = { version = "1", features = ["rt-multi-thread", "net", "io-util", "macros", "sync", "signal", "fs"] }
 tray-icon = "0.21"
 tao = "0.35"
+portable-pty = "0.8"
+rand = "0.8"
+chrono = "0.4"
+
+[dev-dependencies]
+tempfile = "3"
