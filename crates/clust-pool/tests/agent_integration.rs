@@ -261,6 +261,71 @@ async fn attached_count_tracks_subscribers() {
 }
 
 #[tokio::test]
+async fn stop_agent_terminates_running_process() {
+    let state = new_shared_state();
+    let (id, _) = {
+        let mut pool = state.lock().await;
+        clust_pool::agent::spawn_agent(
+            &mut pool,
+            None,
+            Some("sleep".into()),
+            "/tmp".into(),
+            80,
+            24,
+            false,
+            state.clone(),
+        )
+        .expect("spawn_agent should succeed")
+    };
+
+    // Verify agent exists
+    {
+        let pool = state.lock().await;
+        assert!(pool.agents.contains_key(&id));
+    }
+
+    // Stop the agent
+    let result = clust_pool::agent::stop_agent(&state, &id).await;
+    assert!(result.is_ok(), "stop_agent should succeed");
+
+    // The PTY reader task should clean up the agent from state after process exits
+    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+    let pool = state.lock().await;
+    assert!(
+        !pool.agents.contains_key(&id),
+        "agent should be removed from state after stop"
+    );
+}
+
+#[tokio::test]
+async fn set_and_get_default_agent_via_pool_state() {
+    let mut state = clust_pool::agent::PoolState::new();
+
+    // Fresh state has no default
+    assert_eq!(state.default_agent, None);
+
+    // Initialize with in-memory DB (inline schema to avoid needing private run_migrations)
+    let conn = rusqlite::Connection::open_in_memory().unwrap();
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS schema_version (version INTEGER PRIMARY KEY);
+         CREATE TABLE IF NOT EXISTS config (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+         INSERT INTO schema_version (version) VALUES (1);",
+    )
+    .unwrap();
+    state.db = Some(conn);
+
+    // Set default via DB
+    clust_pool::db::set_default_agent(state.db.as_ref().unwrap(), "claude").unwrap();
+    state.default_agent = clust_pool::db::get_default_agent(state.db.as_ref().unwrap());
+    assert_eq!(state.default_agent, Some("claude".to_string()));
+
+    // Overwrite
+    clust_pool::db::set_default_agent(state.db.as_ref().unwrap(), "aider").unwrap();
+    state.default_agent = clust_pool::db::get_default_agent(state.db.as_ref().unwrap());
+    assert_eq!(state.default_agent, Some("aider".to_string()));
+}
+
+#[tokio::test]
 async fn resize_agent_pty() {
     let state = new_shared_state();
     let (id, _) = {

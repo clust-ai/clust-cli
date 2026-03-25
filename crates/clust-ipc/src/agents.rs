@@ -40,3 +40,36 @@ pub fn accept_edits_args_for(binary: &str) -> Option<&'static [&'static str]> {
         .find(|a| a.binary == binary)
         .and_then(|a| a.accept_edits_args)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn known_agents_contains_expected_entries() {
+        let binaries: Vec<&str> = KNOWN_AGENTS.iter().map(|a| a.binary).collect();
+        assert!(binaries.contains(&"claude"));
+        assert!(binaries.contains(&"opencode"));
+        assert!(binaries.contains(&"aider"));
+        assert!(binaries.contains(&"codex"));
+    }
+
+    #[test]
+    fn accept_edits_args_for_claude_returns_args() {
+        let args = accept_edits_args_for("claude");
+        assert_eq!(args, Some(["--permission-mode", "acceptEdits"].as_slice()));
+    }
+
+    #[test]
+    fn accept_edits_args_for_agent_without_support_returns_none() {
+        assert_eq!(accept_edits_args_for("aider"), None);
+        assert_eq!(accept_edits_args_for("opencode"), None);
+        assert_eq!(accept_edits_args_for("codex"), None);
+    }
+
+    #[test]
+    fn accept_edits_args_for_unknown_agent_returns_none() {
+        assert_eq!(accept_edits_args_for("unknown-binary"), None);
+        assert_eq!(accept_edits_args_for(""), None);
+    }
+}
