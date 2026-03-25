@@ -134,6 +134,7 @@ async fn bidirectional_streaming_over_split_socket() {
             working_dir: "/tmp".into(),
             cols: 80,
             rows: 24,
+            accept_edits: false,
         },
     )
     .await

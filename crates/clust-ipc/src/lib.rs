@@ -17,6 +17,7 @@ pub enum CliMessage {
         working_dir: String,
         cols: u16,
         rows: u16,
+        accept_edits: bool,
     },
     AttachAgent { id: String },
     DetachAgent { id: String },
@@ -148,6 +149,7 @@ mod tests {
             working_dir: "/tmp".into(),
             cols: 120,
             rows: 40,
+            accept_edits: false,
         })
         .await;
     }
@@ -160,6 +162,20 @@ mod tests {
             working_dir: "/home/user".into(),
             cols: 80,
             rows: 24,
+            accept_edits: false,
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn cli_start_agent_accept_edits() {
+        assert_cli_round_trip(CliMessage::StartAgent {
+            prompt: Some("fix tests".into()),
+            agent_binary: Some("claude".into()),
+            working_dir: "/tmp".into(),
+            cols: 120,
+            rows: 40,
+            accept_edits: true,
         })
         .await;
     }

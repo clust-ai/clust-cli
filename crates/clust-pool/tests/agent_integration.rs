@@ -23,6 +23,7 @@ async fn spawn_agent_echo_produces_output() {
             "/tmp".into(),
             80,
             24,
+            false,
             state.clone(),
         )
         .expect("spawn_agent should succeed")
@@ -88,6 +89,7 @@ async fn spawn_agent_cat_receives_input_and_echoes() {
             "/tmp".into(),
             80,
             24,
+            false,
             state.clone(),
         )
         .expect("spawn_agent should succeed")
@@ -161,6 +163,7 @@ async fn multiple_subscribers_receive_same_output() {
             "/tmp".into(),
             80,
             24,
+            false,
             state.clone(),
         )
         .expect("spawn_agent should succeed")
@@ -225,6 +228,7 @@ async fn attached_count_tracks_subscribers() {
             "/tmp".into(),
             80,
             24,
+            false,
             state.clone(),
         )
         .expect("spawn_agent should succeed")
@@ -268,6 +272,7 @@ async fn resize_agent_pty() {
             "/tmp".into(),
             80,
             24,
+            false,
             state.clone(),
         )
         .expect("spawn_agent should succeed")

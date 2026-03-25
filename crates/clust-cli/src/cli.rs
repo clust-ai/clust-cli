@@ -23,6 +23,10 @@ pub struct Cli {
     #[arg(short = 'd', long = "default")]
     pub default: bool,
 
+    /// Auto-accept edits (agent-specific, e.g. --permission-mode acceptEdits for Claude)
+    #[arg(short = 'e', long = "accept-edits")]
+    pub accept_edits: bool,
+
     /// Initial prompt for the agent
     pub prompt: Option<String>,
 
@@ -55,6 +59,7 @@ mod tests {
         assert!(!cli.stop_pool);
         assert!(cli.attach.is_none());
         assert!(!cli.default);
+        assert!(!cli.accept_edits);
         assert!(cli.prompt.is_none());
         assert!(cli.command.is_none());
     }
@@ -159,6 +164,32 @@ mod tests {
     fn parse_dot_as_prompt() {
         let cli = Cli::try_parse_from(["clust", "."]).unwrap();
         assert_eq!(cli.prompt.as_deref(), Some("."));
+    }
+
+    #[test]
+    fn parse_accept_edits_short() {
+        let cli = Cli::try_parse_from(["clust", "-e"]).unwrap();
+        assert!(cli.accept_edits);
+    }
+
+    #[test]
+    fn parse_accept_edits_long() {
+        let cli = Cli::try_parse_from(["clust", "--accept-edits"]).unwrap();
+        assert!(cli.accept_edits);
+    }
+
+    #[test]
+    fn parse_accept_edits_with_prompt() {
+        let cli = Cli::try_parse_from(["clust", "-e", "fix the bug"]).unwrap();
+        assert!(cli.accept_edits);
+        assert_eq!(cli.prompt.as_deref(), Some("fix the bug"));
+    }
+
+    #[test]
+    fn parse_accept_edits_with_background() {
+        let cli = Cli::try_parse_from(["clust", "-e", "-b", "run tests"]).unwrap();
+        assert!(cli.accept_edits);
+        assert!(cli.background);
     }
 
     #[test]

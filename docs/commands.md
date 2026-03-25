@@ -35,6 +35,7 @@ clust [OPTIONS] [PROMPT]
 | `-s` | `--stop <ID>` | Stop a specific agent by its 6-char ID. |
 | | `--stop-pool` | Stop the pool daemon and all running agents. |
 | `-d` | `--default` | Interactive picker to set the global default agent binary. Persisted in SQLite. |
+| `-e` | `--accept-edits` | Auto-accept edits. Agent-specific: for Claude, passes `--permission-mode acceptEdits`. Ignored for agents that don't support it. |
 | `-h` | `--help` | Show help with all available options. |
 | `-V` | `--version` | Show version. |
 
@@ -82,6 +83,12 @@ clust -b
 
 # Start a background agent with a prompt
 clust -b "run the test suite and fix failures"
+
+# Start with accept-edits enabled
+clust -e "refactor the auth module"
+
+# Background agent with accept-edits
+clust -e -b "run the test suite and fix failures"
 
 # Attach to a running agent
 clust -a a3f8c1
