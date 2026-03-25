@@ -140,6 +140,12 @@ mod tests {
     }
 
     #[test]
+    fn parse_dot_as_prompt() {
+        let cli = Cli::try_parse_from(["clust", "."]).unwrap();
+        assert_eq!(cli.prompt.as_deref(), Some("."));
+    }
+
+    #[test]
     fn parse_invalid_flag_errors() {
         assert!(Cli::try_parse_from(["clust", "--nonsense"]).is_err());
     }
