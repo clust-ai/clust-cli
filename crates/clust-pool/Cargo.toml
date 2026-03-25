@@ -13,7 +13,8 @@ path = "src/main.rs"
 
 [dependencies]
 clust-ipc = { path = "../clust-ipc" }
-tokio = { version = "1", features = ["rt-multi-thread", "net", "io-util", "macros", "sync", "signal", "fs"] }
+tokio = { version = "1", features = ["rt-multi-thread", "net", "io-util", "macros", "sync", "signal", "fs", "time"] }
+libc = "0.2"
 tray-icon = "0.21"
 tao = "0.35"
 portable-pty = "0.8"

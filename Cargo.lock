@@ -336,6 +336,7 @@ version = "0.0.1"
 dependencies = [
  "chrono",
  "clust-ipc",
+ "libc",
  "portable-pty",
  "rand",
  "tao",
