@@ -19,3 +19,12 @@ pub const WARNING: &str = "\x1b[38;2;212;173;58m";  // #d4ad3a
 pub const INFO: &str = "\x1b[38;2;88;152;196m";     // #5898c4
 
 pub const RESET: &str = "\x1b[0m";
+
+// Ratatui colors (same Graphite palette)
+use ratatui::style::Color;
+
+pub const R_ACCENT: Color = Color::Rgb(94, 154, 191);
+pub const R_ACCENT_BRIGHT: Color = Color::Rgb(114, 174, 208);
+pub const R_TEXT_PRIMARY: Color = Color::Rgb(220, 221, 224);
+pub const R_TEXT_SECONDARY: Color = Color::Rgb(160, 162, 168);
+pub const R_TEXT_TERTIARY: Color = Color::Rgb(108, 110, 116);
