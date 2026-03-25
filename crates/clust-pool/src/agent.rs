@@ -237,6 +237,40 @@ fn spawn_pty_reader(
     });
 }
 
+/// Terminate a single agent by ID.
+///
+/// Sends SIGTERM, waits 3 seconds, then SIGKILL if still alive.
+/// The existing PTY reader handles cleanup when the process exits.
+pub async fn stop_agent(state: &SharedPoolState, id: &str) -> Result<(), String> {
+    let pid = {
+        let pool = state.lock().await;
+        let entry = pool
+            .agents
+            .get(id)
+            .ok_or_else(|| format!("agent {id} not found"))?;
+        entry
+            .pid
+            .ok_or_else(|| format!("agent {id} has no PID"))?
+    };
+
+    // SIGTERM
+    unsafe {
+        libc::kill(pid as i32, libc::SIGTERM);
+    }
+
+    // Wait 3 seconds for graceful exit
+    tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+
+    // SIGKILL if still alive
+    if unsafe { libc::kill(pid as i32, 0) } == 0 {
+        unsafe {
+            libc::kill(pid as i32, libc::SIGKILL);
+        }
+    }
+
+    Ok(())
+}
+
 /// Terminate all running agents during pool shutdown.
 ///
 /// 1. Notify all attached CLI clients via broadcast channels

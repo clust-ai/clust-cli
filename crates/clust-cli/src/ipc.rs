@@ -59,3 +59,17 @@ pub async fn send_stop(stream: &mut UnixStream) -> io::Result<()> {
 
     Ok(())
 }
+
+/// Send a StopAgent message and return the result.
+pub async fn send_stop_agent(stream: &mut UnixStream, id: &str) -> io::Result<()> {
+    clust_ipc::send_message(stream, &CliMessage::StopAgent { id: id.to_string() }).await?;
+    let response: PoolMessage = clust_ipc::recv_message(stream).await?;
+
+    match response {
+        PoolMessage::AgentStopped { .. } => Ok(()),
+        PoolMessage::Error { message } => {
+            Err(io::Error::new(io::ErrorKind::Other, message))
+        }
+        _ => Ok(()),
+    }
+}

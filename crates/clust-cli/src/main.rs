@@ -51,8 +51,27 @@ async fn main() {
         return;
     }
 
-    // Flag: --stop
-    if args.stop {
+    // Flag: --stop <ID>
+    if let Some(ref id) = args.stop {
+        println!();
+        let spinner = spin(&format!("stopping agent {id}"));
+        match ipc::try_connect().await {
+            Ok(mut stream) => match ipc::send_stop_agent(&mut stream, id).await {
+                Ok(()) => stop_spin(spinner, &format!("agent {id} stopped")),
+                Err(e) => {
+                    stop_spin_err(spinner, &format!("failed to stop agent {id}: {e}"));
+                    std::process::exit(1);
+                }
+            },
+            Err(_) => {
+                stop_spin(spinner, "clust pool is not running");
+            }
+        }
+        return;
+    }
+
+    // Flag: --stop-pool
+    if args.stop_pool {
         println!();
         let spinner = spin("stopping clust pool");
         match ipc::try_connect().await {
