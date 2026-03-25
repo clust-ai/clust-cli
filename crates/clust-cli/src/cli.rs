@@ -33,3 +33,98 @@ pub enum Commands {
     /// Open the Clust terminal UI
     Ui,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::Parser;
+
+    #[test]
+    fn parse_no_args() {
+        let cli = Cli::try_parse_from(["clust"]).unwrap();
+        assert!(!cli.background);
+        assert!(!cli.stop);
+        assert!(cli.attach.is_none());
+        assert!(cli.default.is_none());
+        assert!(cli.prompt.is_none());
+        assert!(cli.command.is_none());
+    }
+
+    #[test]
+    fn parse_stop_short() {
+        let cli = Cli::try_parse_from(["clust", "-s"]).unwrap();
+        assert!(cli.stop);
+    }
+
+    #[test]
+    fn parse_stop_long() {
+        let cli = Cli::try_parse_from(["clust", "--stop"]).unwrap();
+        assert!(cli.stop);
+    }
+
+    #[test]
+    fn parse_background_short() {
+        let cli = Cli::try_parse_from(["clust", "-b"]).unwrap();
+        assert!(cli.background);
+    }
+
+    #[test]
+    fn parse_background_long() {
+        let cli = Cli::try_parse_from(["clust", "--background"]).unwrap();
+        assert!(cli.background);
+    }
+
+    #[test]
+    fn parse_attach_short() {
+        let cli = Cli::try_parse_from(["clust", "-a", "abc123"]).unwrap();
+        assert_eq!(cli.attach.as_deref(), Some("abc123"));
+    }
+
+    #[test]
+    fn parse_attach_long() {
+        let cli = Cli::try_parse_from(["clust", "--attach", "abc123"]).unwrap();
+        assert_eq!(cli.attach.as_deref(), Some("abc123"));
+    }
+
+    #[test]
+    fn parse_default_short() {
+        let cli = Cli::try_parse_from(["clust", "-d", "claude"]).unwrap();
+        assert_eq!(cli.default.as_deref(), Some("claude"));
+    }
+
+    #[test]
+    fn parse_default_long() {
+        let cli = Cli::try_parse_from(["clust", "--default", "aider"]).unwrap();
+        assert_eq!(cli.default.as_deref(), Some("aider"));
+    }
+
+    #[test]
+    fn parse_prompt() {
+        let cli = Cli::try_parse_from(["clust", "do something"]).unwrap();
+        assert_eq!(cli.prompt.as_deref(), Some("do something"));
+    }
+
+    #[test]
+    fn parse_subcommand_ls() {
+        let cli = Cli::try_parse_from(["clust", "ls"]).unwrap();
+        assert!(matches!(cli.command, Some(Commands::Ls)));
+    }
+
+    #[test]
+    fn parse_subcommand_ui() {
+        let cli = Cli::try_parse_from(["clust", "ui"]).unwrap();
+        assert!(matches!(cli.command, Some(Commands::Ui)));
+    }
+
+    #[test]
+    fn parse_background_with_prompt() {
+        let cli = Cli::try_parse_from(["clust", "-b", "run tests"]).unwrap();
+        assert!(cli.background);
+        assert_eq!(cli.prompt.as_deref(), Some("run tests"));
+    }
+
+    #[test]
+    fn parse_invalid_flag_errors() {
+        assert!(Cli::try_parse_from(["clust", "--nonsense"]).is_err());
+    }
+}

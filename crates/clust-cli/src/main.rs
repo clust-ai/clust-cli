@@ -3,6 +3,7 @@ mod ipc;
 mod pool_launcher;
 mod theme;
 mod ui;
+mod version;
 
 use clap::Parser;
 use std::io::{self, Write};
@@ -61,6 +62,11 @@ async fn main() {
 
     // Default: print logo, start pool, exit
     print_logo();
+
+    if let Some(msg) = version::check_brew_update() {
+        println!("  {}{}{}\n", theme::WARNING, msg, theme::RESET);
+    }
+
     let spinner = spin("starting clust pool");
 
     match ipc::connect_to_pool().await {

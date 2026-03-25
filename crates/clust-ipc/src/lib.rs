@@ -6,7 +6,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::UnixStream;
 
 /// Messages sent from CLI to Pool.
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum CliMessage {
     StartAgent {
         prompt: Option<String>,
@@ -22,7 +22,7 @@ pub enum CliMessage {
 }
 
 /// Info about a running agent, returned in AgentList.
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct AgentInfo {
     pub id: String,
     pub agent_binary: String,
@@ -31,7 +31,7 @@ pub struct AgentInfo {
 }
 
 /// Messages sent from Pool to CLI.
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum PoolMessage {
     Ok,
     AgentStarted { id: String },
@@ -73,4 +73,265 @@ pub async fn recv_message<T: DeserializeOwned>(stream: &mut UnixStream) -> io::R
     stream.read_exact(&mut payload).await?;
     rmp_serde::from_slice(&payload)
         .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tokio::io::AsyncWriteExt;
+    use tokio::net::UnixStream;
+
+    // ── Round-trip helpers ──────────────────────────────────────────
+
+    async fn assert_cli_round_trip(msg: CliMessage) {
+        let (mut a, mut b) = UnixStream::pair().unwrap();
+        send_message(&mut a, &msg).await.unwrap();
+        let received: CliMessage = recv_message(&mut b).await.unwrap();
+        assert_eq!(msg, received);
+    }
+
+    async fn assert_pool_round_trip(msg: PoolMessage) {
+        let (mut a, mut b) = UnixStream::pair().unwrap();
+        send_message(&mut a, &msg).await.unwrap();
+        let received: PoolMessage = recv_message(&mut b).await.unwrap();
+        assert_eq!(msg, received);
+    }
+
+    // ── CliMessage round-trips ─────────────────────────────────────
+
+    #[tokio::test]
+    async fn cli_start_agent_all_fields() {
+        assert_cli_round_trip(CliMessage::StartAgent {
+            prompt: Some("do something".into()),
+            agent_binary: Some("claude".into()),
+            working_dir: "/tmp".into(),
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn cli_start_agent_no_optionals() {
+        assert_cli_round_trip(CliMessage::StartAgent {
+            prompt: None,
+            agent_binary: None,
+            working_dir: "/home/user".into(),
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn cli_attach_agent() {
+        assert_cli_round_trip(CliMessage::AttachAgent {
+            id: "abc123".into(),
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn cli_detach_agent() {
+        assert_cli_round_trip(CliMessage::DetachAgent {
+            id: "def456".into(),
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn cli_list_agents() {
+        assert_cli_round_trip(CliMessage::ListAgents).await;
+    }
+
+    #[tokio::test]
+    async fn cli_stop_pool() {
+        assert_cli_round_trip(CliMessage::StopPool).await;
+    }
+
+    #[tokio::test]
+    async fn cli_set_default() {
+        assert_cli_round_trip(CliMessage::SetDefault {
+            agent_binary: "aider".into(),
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn cli_get_default() {
+        assert_cli_round_trip(CliMessage::GetDefault).await;
+    }
+
+    // ── PoolMessage round-trips ────────────────────────────────────
+
+    #[tokio::test]
+    async fn pool_ok() {
+        assert_pool_round_trip(PoolMessage::Ok).await;
+    }
+
+    #[tokio::test]
+    async fn pool_agent_started() {
+        assert_pool_round_trip(PoolMessage::AgentStarted {
+            id: "a1b2c3".into(),
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn pool_agent_output() {
+        assert_pool_round_trip(PoolMessage::AgentOutput {
+            id: "a1b2c3".into(),
+            data: vec![0x00, 0xFF, 0x42],
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn pool_agent_exited() {
+        assert_pool_round_trip(PoolMessage::AgentExited {
+            id: "a1b2c3".into(),
+            exit_code: 42,
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn pool_agent_list_populated() {
+        assert_pool_round_trip(PoolMessage::AgentList {
+            agents: vec![
+                AgentInfo {
+                    id: "aaa111".into(),
+                    agent_binary: "claude".into(),
+                    started_at: "2026-03-25T10:00:00Z".into(),
+                    attached_clients: 2,
+                },
+                AgentInfo {
+                    id: "bbb222".into(),
+                    agent_binary: "aider".into(),
+                    started_at: "2026-03-25T11:00:00Z".into(),
+                    attached_clients: 0,
+                },
+            ],
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn pool_agent_list_empty() {
+        assert_pool_round_trip(PoolMessage::AgentList { agents: vec![] }).await;
+    }
+
+    #[tokio::test]
+    async fn pool_error() {
+        assert_pool_round_trip(PoolMessage::Error {
+            message: "something went wrong".into(),
+        })
+        .await;
+    }
+
+    // ── Framing / edge cases ───────────────────────────────────────
+
+    #[tokio::test]
+    async fn multiple_messages_on_one_stream() {
+        let (mut a, mut b) = UnixStream::pair().unwrap();
+
+        let msgs = vec![
+            CliMessage::ListAgents,
+            CliMessage::StopPool,
+            CliMessage::SetDefault {
+                agent_binary: "claude".into(),
+            },
+        ];
+
+        for msg in &msgs {
+            send_message(&mut a, msg).await.unwrap();
+        }
+
+        for expected in &msgs {
+            let received: CliMessage = recv_message(&mut b).await.unwrap();
+            assert_eq!(expected, &received);
+        }
+    }
+
+    #[tokio::test]
+    async fn large_payload() {
+        let (mut a, mut b) = UnixStream::pair().unwrap();
+        let data = vec![0xAB; 1_000_000]; // 1 MB
+        let msg = PoolMessage::AgentOutput {
+            id: "big".into(),
+            data,
+        };
+        let expected = msg.clone();
+        // Must read concurrently — socket buffer is smaller than 1MB
+        let writer = tokio::spawn(async move { send_message(&mut a, &msg).await.unwrap() });
+        let received: PoolMessage = recv_message(&mut b).await.unwrap();
+        writer.await.unwrap();
+        assert_eq!(expected, received);
+    }
+
+    #[tokio::test]
+    async fn empty_data_payload() {
+        assert_pool_round_trip(PoolMessage::AgentOutput {
+            id: "empty".into(),
+            data: vec![],
+        })
+        .await;
+    }
+
+    // ── Error handling ─────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn recv_on_closed_stream() {
+        let (a, mut b) = UnixStream::pair().unwrap();
+        drop(a); // close the writer
+        let result: io::Result<CliMessage> = recv_message(&mut b).await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn malformed_payload() {
+        let (mut a, mut b) = UnixStream::pair().unwrap();
+
+        // Write a valid length prefix but garbage payload
+        let garbage = b"not valid msgpack";
+        let len = garbage.len() as u32;
+        a.write_all(&len.to_be_bytes()).await.unwrap();
+        a.write_all(garbage).await.unwrap();
+        a.flush().await.unwrap();
+
+        let result: io::Result<CliMessage> = recv_message(&mut b).await;
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err().kind(), io::ErrorKind::InvalidData);
+    }
+
+    #[tokio::test]
+    async fn truncated_payload() {
+        let (mut a, mut b) = UnixStream::pair().unwrap();
+
+        // Claim 100 bytes but only send 10, then drop
+        let len: u32 = 100;
+        a.write_all(&len.to_be_bytes()).await.unwrap();
+        a.write_all(&[0u8; 10]).await.unwrap();
+        drop(a);
+
+        let result: io::Result<CliMessage> = recv_message(&mut b).await;
+        assert!(result.is_err());
+    }
+
+    // ── Path helpers ───────────────────────────────────────────────
+
+    #[test]
+    fn clust_dir_ends_with_dot_clust() {
+        let p = clust_dir();
+        assert!(p.ends_with(".clust"));
+    }
+
+    #[test]
+    fn socket_path_ends_with_clust_sock() {
+        let p = socket_path();
+        assert!(p.ends_with("clust.sock"));
+    }
+
+    #[test]
+    fn socket_path_is_inside_clust_dir() {
+        let dir = clust_dir();
+        let sock = socket_path();
+        assert_eq!(sock.parent().unwrap(), dir);
+    }
 }
