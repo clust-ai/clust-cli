@@ -134,4 +134,24 @@ mod tests {
         set_default_agent(&conn, "aider").unwrap();
         assert_eq!(get_default_agent(&conn), Some("aider".to_string()));
     }
+
+    #[test]
+    fn set_default_persists_across_reads() {
+        let conn = in_memory_db();
+        set_default_agent(&conn, "opencode").unwrap();
+        // Multiple reads should return the same value
+        assert_eq!(get_default_agent(&conn), Some("opencode".to_string()));
+        assert_eq!(get_default_agent(&conn), Some("opencode".to_string()));
+    }
+
+    #[test]
+    fn set_default_overwrites_previous() {
+        let conn = in_memory_db();
+        set_default_agent(&conn, "claude").unwrap();
+        assert_eq!(get_default_agent(&conn), Some("claude".to_string()));
+        set_default_agent(&conn, "aider").unwrap();
+        assert_eq!(get_default_agent(&conn), Some("aider".to_string()));
+        // Old value is gone
+        assert_ne!(get_default_agent(&conn), Some("claude".to_string()));
+    }
 }

@@ -107,8 +107,8 @@ async fn main() {
 
 /// Check if a default agent is configured. If not, show the first-run picker.
 ///
-/// Returns `Some(Some(binary))` if the user selected a new default,
-/// `Some(None)` if a default already exists (use pool's default),
+/// Returns `Some(Some(binary))` if a default exists or the user selected one,
+/// `Some(None)` if the pool is unreachable (let handle_start report the error),
 /// or `None` if the user cancelled.
 async fn check_default_and_prompt() -> Option<Option<String>> {
     let mut stream = match ipc::connect_to_pool().await {
@@ -129,7 +129,7 @@ async fn check_default_and_prompt() -> Option<Option<String>> {
     };
 
     if current.is_some() {
-        return Some(None); // Default already configured
+        return Some(current); // Pass the existing default through
     }
 
     // No default set — first-run prompt
@@ -139,6 +139,7 @@ async fn check_default_and_prompt() -> Option<Option<String>> {
     match result {
         DefaultPickerResult::Selected(binary) => {
             // Persist the choice (new connection)
+            let mut set_ok = false;
             if let Ok(mut s) = ipc::connect_to_pool().await {
                 if clust_ipc::send_message(
                     &mut s,
@@ -149,8 +150,20 @@ async fn check_default_and_prompt() -> Option<Option<String>> {
                 .await
                 .is_ok()
                 {
-                    let _ = clust_ipc::recv_message::<PoolMessage>(&mut s).await;
+                    match clust_ipc::recv_message::<PoolMessage>(&mut s).await {
+                        Ok(PoolMessage::Ok) => set_ok = true,
+                        Ok(PoolMessage::Error { message }) => {
+                            eprintln!(
+                                "  {}✘{} {}failed to set default: {message}{}",
+                                theme::ERROR, theme::RESET, theme::TEXT_PRIMARY, theme::RESET,
+                            );
+                        }
+                        _ => {}
+                    }
                 }
+            }
+            if !set_ok {
+                return None; // Treat as cancelled if we couldn't persist
             }
             println!(
                 "  {}✔{} {}default agent set to {binary}{}\n",
@@ -471,7 +484,7 @@ async fn handle_ls(select: bool) {
     }
 }
 
-/// Format an RFC3339 timestamp into a human-readable string.
+/// Format an attachment count into a human-readable string.
 fn format_attached(count: usize) -> String {
     if count == 1 {
         "1 terminal".to_string()
@@ -480,6 +493,7 @@ fn format_attached(count: usize) -> String {
     }
 }
 
+/// Format an RFC 3339 timestamp into a human-readable relative time string.
 fn format_started(rfc3339: &str) -> String {
     let Ok(dt) = rfc3339.parse::<DateTime<Utc>>() else {
         return rfc3339.to_string();
@@ -733,6 +747,7 @@ async fn handle_default_picker() {
         DefaultPickerResult::Cancel => {}
         DefaultPickerResult::Selected(binary) => {
             // Persist the choice (new connection since the previous one is consumed)
+            let mut set_ok = false;
             match ipc::connect_to_pool().await {
                 Ok(mut s) => {
                     if clust_ipc::send_message(
@@ -744,18 +759,34 @@ async fn handle_default_picker() {
                     .await
                     .is_ok()
                     {
-                        let _ = clust_ipc::recv_message::<PoolMessage>(&mut s).await;
+                        match clust_ipc::recv_message::<PoolMessage>(&mut s).await {
+                            Ok(PoolMessage::Ok) => set_ok = true,
+                            Ok(PoolMessage::Error { message }) => {
+                                eprintln!(
+                                    "  {}✘{} {}failed to set default: {message}{}\n",
+                                    theme::ERROR, theme::RESET, theme::TEXT_PRIMARY, theme::RESET,
+                                );
+                            }
+                            _ => {}
+                        }
                     }
                 }
                 Err(_) => {}
             }
-            println!(
-                "  {}✔{} {}default agent set to {binary}{}\n",
-                theme::SUCCESS,
-                theme::RESET,
-                theme::TEXT_PRIMARY,
-                theme::RESET,
-            );
+            if set_ok {
+                println!(
+                    "  {}✔{} {}default agent set to {binary}{}\n",
+                    theme::SUCCESS,
+                    theme::RESET,
+                    theme::TEXT_PRIMARY,
+                    theme::RESET,
+                );
+            } else {
+                eprintln!(
+                    "  {}✘{} {}failed to set default agent{}\n",
+                    theme::ERROR, theme::RESET, theme::TEXT_PRIMARY, theme::RESET,
+                );
+            }
         }
     }
 }
