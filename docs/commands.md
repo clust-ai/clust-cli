@@ -10,7 +10,7 @@ All flags follow POSIX/GNU conventions:
 - **Flag values**: space-separated (`-a a3f8c1`, `--attach a3f8c1`)
 - **Positional args**: no prefix (`clust "say hi"`)
 
-Short and long forms are always provided together, except for destructive global flags (e.g. `--stop-pool`) which are long-only to prevent accidental use.
+Short and long forms are always provided together.
 
 ---
 
@@ -32,8 +32,7 @@ clust [OPTIONS] [PROMPT]
 |------|------|-------------|
 | `-b` | `--background` | Start agent without attaching. Returns the agent ID. |
 | `-a` | `--attach <ID>` | Attach to an existing agent by its 6-char ID. |
-| `-s` | `--stop <ID>` | Stop a specific agent by its 6-char ID. |
-| | `--stop-pool` | Stop the pool daemon and all running agents. |
+| `-s` | `--stop [ID]` | Without a value: stop the pool daemon and all agents. With a 6-char ID: stop that specific agent. |
 | `-d` | `--default` | Interactive picker to set the global default agent binary. Persisted in SQLite. |
 | `-e` | `--accept-edits` | Auto-accept edits. Agent-specific: for Claude, passes `--permission-mode acceptEdits`. Ignored for agents that don't support it. |
 | `-h` | `--help` | Show help with all available options. |
@@ -106,7 +105,7 @@ clust ls -i
 clust -s a3f8c1
 
 # Stop the pool and all agents
-clust --stop-pool
+clust -s
 
 # Show help
 clust -h

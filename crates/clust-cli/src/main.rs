@@ -51,39 +51,41 @@ async fn main() {
         return;
     }
 
-    // Flag: --stop <ID>
-    if let Some(ref id) = args.stop {
+    // Flag: -s / --stop (no value = stop pool, with value = stop agent)
+    if let Some(ref id_or_empty) = args.stop {
         println!();
-        let spinner = spin(&format!("stopping agent {id}"));
-        match ipc::try_connect().await {
-            Ok(mut stream) => match ipc::send_stop_agent(&mut stream, id).await {
-                Ok(()) => stop_spin(spinner, &format!("agent {id} stopped")),
-                Err(e) => {
-                    stop_spin_err(spinner, &format!("failed to stop agent {id}: {e}"));
-                    std::process::exit(1);
+        if id_or_empty.is_empty() {
+            // No ID → stop the pool
+            let spinner = spin("stopping clust pool");
+            match ipc::try_connect().await {
+                Ok(mut stream) => match ipc::send_stop(&mut stream).await {
+                    Ok(()) => stop_spin(spinner, "clust pool stopped"),
+                    Err(e) => {
+                        stop_spin_err(spinner, &format!("failed to stop clust pool: {e}"));
+                        std::process::exit(1);
+                    }
+                },
+                Err(_) => {
+                    stop_spin(spinner, "clust pool is not running");
                 }
-            },
-            Err(_) => {
-                stop_spin(spinner, "clust pool is not running");
             }
-        }
-        return;
-    }
-
-    // Flag: --stop-pool
-    if args.stop_pool {
-        println!();
-        let spinner = spin("stopping clust pool");
-        match ipc::try_connect().await {
-            Ok(mut stream) => match ipc::send_stop(&mut stream).await {
-                Ok(()) => stop_spin(spinner, "clust pool stopped"),
-                Err(e) => {
-                    stop_spin_err(spinner, &format!("failed to stop clust pool: {e}"));
-                    std::process::exit(1);
+        } else {
+            // ID provided → stop specific agent
+            let spinner = spin(&format!("stopping agent {id_or_empty}"));
+            match ipc::try_connect().await {
+                Ok(mut stream) => match ipc::send_stop_agent(&mut stream, id_or_empty).await {
+                    Ok(()) => stop_spin(spinner, &format!("agent {id_or_empty} stopped")),
+                    Err(e) => {
+                        stop_spin_err(
+                            spinner,
+                            &format!("failed to stop agent {id_or_empty}: {e}"),
+                        );
+                        std::process::exit(1);
+                    }
+                },
+                Err(_) => {
+                    stop_spin(spinner, "clust pool is not running");
                 }
-            },
-            Err(_) => {
-                stop_spin(spinner, "clust pool is not running");
             }
         }
         return;
