@@ -182,14 +182,15 @@ async fn handle_attached_session(
     mut writer: OwnedWriteHalf,
     state: SharedPoolState,
 ) -> io::Result<()> {
-    // Subscribe to agent output broadcast
-    let mut output_rx = {
+    // Subscribe to agent output broadcast and assign a client ID
+    let (mut output_rx, client_id) = {
         let pool = state.lock().await;
         let entry = pool.agents.get(agent_id).ok_or_else(|| {
             io::Error::new(io::ErrorKind::NotFound, "agent not found")
         })?;
         entry.attached_count.fetch_add(1, Ordering::Relaxed);
-        entry.output_tx.subscribe()
+        let cid = entry.next_client_id();
+        (entry.output_tx.subscribe(), cid)
     };
 
     let agent_id_owned = agent_id.to_string();
@@ -263,18 +264,25 @@ async fn handle_attached_session(
                 Ok(CliMessage::AgentInput { data, .. }) => {
                     let mut pool = state_for_input.lock().await;
                     if let Some(entry) = pool.agents.get_mut(&agent_id_for_input) {
+                        // Input-fallback: if this client isn't active and we
+                        // know its size, resize the PTY to match before
+                        // forwarding input (handles terminals without focus
+                        // event support).
+                        if entry.active_client_id != Some(client_id) {
+                            if let Some(&(cols, rows)) = entry.client_sizes.get(&client_id) {
+                                entry.resize_pty_if_needed(cols, rows);
+                            }
+                            entry.active_client_id = Some(client_id);
+                        }
                         let _ = entry.pty_writer.write_all(&data);
                     }
                 }
                 Ok(CliMessage::ResizeAgent { cols, rows, .. }) => {
-                    let pool = state_for_input.lock().await;
-                    if let Some(entry) = pool.agents.get(&agent_id_for_input) {
-                        let _ = entry.pty_master.resize(portable_pty::PtySize {
-                            rows,
-                            cols,
-                            pixel_width: 0,
-                            pixel_height: 0,
-                        });
+                    let mut pool = state_for_input.lock().await;
+                    if let Some(entry) = pool.agents.get_mut(&agent_id_for_input) {
+                        entry.client_sizes.insert(client_id, (cols, rows));
+                        entry.active_client_id = Some(client_id);
+                        entry.resize_pty_if_needed(cols, rows);
                     }
                 }
                 Ok(CliMessage::DetachAgent { .. }) => {
@@ -296,10 +304,14 @@ async fn handle_attached_session(
         _ = input_task => {}
     }
 
-    // Decrement attached count
-    let pool = state_for_cleanup.lock().await;
-    if let Some(entry) = pool.agents.get(&agent_id_for_cleanup) {
+    // Decrement attached count and remove client from size tracking
+    let mut pool = state_for_cleanup.lock().await;
+    if let Some(entry) = pool.agents.get_mut(&agent_id_for_cleanup) {
         entry.attached_count.fetch_sub(1, Ordering::Relaxed);
+        entry.client_sizes.remove(&client_id);
+        if entry.active_client_id == Some(client_id) {
+            entry.active_client_id = None;
+        }
     }
 
     Ok(())

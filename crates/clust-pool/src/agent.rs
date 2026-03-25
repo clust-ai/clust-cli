@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::io::Read;
-use std::sync::atomic::AtomicUsize;
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
 
 use portable_pty::{CommandBuilder, MasterPty, PtySize};
@@ -35,6 +35,40 @@ pub struct AgentEntry {
     pub pty_writer: Box<dyn std::io::Write + Send>,
     pub output_tx: broadcast::Sender<AgentEvent>,
     pub attached_count: Arc<AtomicUsize>,
+    /// Per-client terminal sizes: client_id → (cols, rows).
+    pub client_sizes: HashMap<u64, (u16, u16)>,
+    /// Current PTY dimensions, used to skip redundant resize calls.
+    pub current_pty_size: (u16, u16),
+    /// The client that most recently sent a resize or input event.
+    pub active_client_id: Option<u64>,
+    /// Monotonic counter for assigning unique client IDs.
+    next_client_id: AtomicU64,
+}
+
+impl AgentEntry {
+    /// Allocate a unique client ID for a newly attached session.
+    pub fn next_client_id(&self) -> u64 {
+        self.next_client_id.fetch_add(1, Ordering::Relaxed)
+    }
+
+    /// Resize the PTY only if the requested size differs from the current size.
+    pub fn resize_pty_if_needed(&mut self, cols: u16, rows: u16) -> bool {
+        if self.current_pty_size == (cols, rows) {
+            return false;
+        }
+        let result = self.pty_master.resize(PtySize {
+            rows,
+            cols,
+            pixel_width: 0,
+            pixel_height: 0,
+        });
+        if result.is_ok() {
+            self.current_pty_size = (cols, rows);
+            true
+        } else {
+            false
+        }
+    }
 }
 
 /// Events broadcast from an agent's PTY reader to all attached clients.
@@ -128,6 +162,10 @@ pub fn spawn_agent(
         pty_writer: writer,
         output_tx,
         attached_count: Arc::new(AtomicUsize::new(0)),
+        client_sizes: HashMap::new(),
+        current_pty_size: (cols, rows),
+        active_client_id: None,
+        next_client_id: AtomicU64::new(0),
     };
 
     state.agents.insert(id.clone(), entry);
@@ -254,6 +292,10 @@ mod tests {
                     pty_writer: Box::new(std::io::sink()),
                     output_tx: broadcast::channel(1).0,
                     attached_count: Arc::new(AtomicUsize::new(0)),
+                    client_sizes: HashMap::new(),
+                    current_pty_size: (80, 24),
+                    active_client_id: None,
+                    next_client_id: AtomicU64::new(0),
                 },
             );
         }
