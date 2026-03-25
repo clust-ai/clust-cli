@@ -1,0 +1,14 @@
+[package]
+name = "clust-pool"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "clust-pool"
+path = "src/main.rs"
+
+[dependencies]
+clust-ipc = { path = "../clust-ipc" }
+tokio = { version = "1", features = ["rt-multi-thread", "net", "io-util", "macros", "sync", "signal", "fs"] }
+tray-icon = "0.21"
+tao = "0.35"

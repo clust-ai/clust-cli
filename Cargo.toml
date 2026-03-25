@@ -1,0 +1,7 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/clust-cli",
+    "crates/clust-pool",
+    "crates/clust-ipc",
+]

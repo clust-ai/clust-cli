@@ -1,0 +1,13 @@
+[package]
+name = "clust-cli"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "clust"
+path = "src/main.rs"
+
+[dependencies]
+clust-ipc = { path = "../clust-ipc" }
+clap = { version = "4", features = ["derive"] }
+tokio = { version = "1", features = ["full"] }
