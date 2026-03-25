@@ -63,9 +63,7 @@ async fn main() {
     // Default: print logo, start pool, exit
     print_logo();
 
-    if let Some(msg) = version::check_brew_update() {
-        println!("  {}{}{}\n", theme::WARNING, msg, theme::RESET);
-    }
+    let version_check = tokio::spawn(version::check_brew_update_async());
 
     let spinner = spin("starting clust pool");
 
@@ -77,6 +75,16 @@ async fn main() {
             stop_spin_err(spinner, &format!("failed to start clust pool: {e}"));
             std::process::exit(1);
         }
+    }
+
+    // Wait for version check with 5s timeout
+    if let Ok(Ok(Some(msg))) = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        version_check,
+    )
+    .await
+    {
+        println!("  {}{}{}\n", theme::WARNING, msg, theme::RESET);
     }
 }
 

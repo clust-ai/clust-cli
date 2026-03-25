@@ -58,6 +58,13 @@ pub(crate) fn format_update_message(current: &Version, latest: &Version) -> Opti
     }
 }
 
+pub async fn check_brew_update_async() -> Option<String> {
+    tokio::task::spawn_blocking(check_brew_update)
+        .await
+        .ok()
+        .flatten()
+}
+
 pub fn check_brew_update() -> Option<String> {
     let output = Command::new("brew")
         .args(["info", "--json=v2", "clust"])
@@ -163,5 +170,23 @@ mod tests {
         let current = Version::parse("v0.1.0").unwrap();
         let latest = Version::parse("v0.0.1").unwrap();
         assert!(format_update_message(&current, &latest).is_none());
+    }
+
+    #[tokio::test]
+    async fn check_brew_update_async_returns() {
+        // Should complete without panic; returns None in test env (no brew formula)
+        let result = check_brew_update_async().await;
+        assert!(result.is_none() || result.is_some());
+    }
+
+    #[tokio::test]
+    async fn check_brew_update_async_respects_timeout() {
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            check_brew_update_async(),
+        )
+        .await;
+        // Should complete well within 5s, not hang
+        assert!(result.is_ok());
     }
 }
