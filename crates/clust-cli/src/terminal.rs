@@ -1,7 +1,7 @@
 use std::io::{self, Write};
 
 use crossterm::{
-    event::{self, Event, KeyCode, KeyEventKind, KeyModifiers},
+    event::{self, DisableFocusChange, EnableFocusChange, Event, KeyCode, KeyEventKind, KeyModifiers},
     terminal::{self, disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
     ExecutableCommand,
 };
@@ -40,10 +40,12 @@ impl AttachedSession {
     pub async fn run(self) -> io::Result<()> {
         io::stdout().execute(EnterAlternateScreen)?;
         enable_raw_mode()?;
+        io::stdout().execute(EnableFocusChange)?;
 
         // Install panic hook to restore terminal on crash
         let prev_hook = std::panic::take_hook();
         std::panic::set_hook(Box::new(move |info| {
+            let _ = io::stdout().execute(DisableFocusChange);
             let _ = disable_raw_mode();
             let _ = io::stdout().execute(LeaveAlternateScreen);
             prev_hook(info);
@@ -52,6 +54,7 @@ impl AttachedSession {
         let result = self.run_inner().await;
 
         // Restore terminal
+        let _ = io::stdout().execute(DisableFocusChange);
         disable_raw_mode()?;
         io::stdout().execute(LeaveAlternateScreen)?;
 
@@ -179,6 +182,21 @@ impl AttachedSession {
                                 &agent_binary_for_input,
                                 rows,
                             );
+                            let _ = clust_ipc::send_message_write(
+                                &mut writer,
+                                &CliMessage::ResizeAgent {
+                                    id: agent_id_for_input.clone(),
+                                    cols,
+                                    rows: rows.saturating_sub(1).max(1),
+                                },
+                            )
+                            .await;
+                        }
+                        Event::FocusGained => {
+                            // Re-send our terminal size so the pool resizes the
+                            // PTY to match this client (handles multi-terminal
+                            // attach with different sizes).
+                            let (cols, rows) = terminal::size().unwrap_or((80, 24));
                             let _ = clust_ipc::send_message_write(
                                 &mut writer,
                                 &CliMessage::ResizeAgent {
