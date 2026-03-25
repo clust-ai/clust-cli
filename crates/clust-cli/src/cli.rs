@@ -15,9 +15,9 @@ pub struct Cli {
     #[arg(short = 's', long = "stop")]
     pub stop: bool,
 
-    /// Set the global default agent binary (e.g., claude, aider)
+    /// Interactive picker to set the default agent
     #[arg(short = 'd', long = "default")]
-    pub default: Option<String>,
+    pub default: bool,
 
     /// Initial prompt for the agent
     pub prompt: Option<String>,
@@ -49,7 +49,7 @@ mod tests {
         assert!(!cli.background);
         assert!(!cli.stop);
         assert!(cli.attach.is_none());
-        assert!(cli.default.is_none());
+        assert!(!cli.default);
         assert!(cli.prompt.is_none());
         assert!(cli.command.is_none());
     }
@@ -92,14 +92,14 @@ mod tests {
 
     #[test]
     fn parse_default_short() {
-        let cli = Cli::try_parse_from(["clust", "-d", "claude"]).unwrap();
-        assert_eq!(cli.default.as_deref(), Some("claude"));
+        let cli = Cli::try_parse_from(["clust", "-d"]).unwrap();
+        assert!(cli.default);
     }
 
     #[test]
     fn parse_default_long() {
-        let cli = Cli::try_parse_from(["clust", "--default", "aider"]).unwrap();
-        assert_eq!(cli.default.as_deref(), Some("aider"));
+        let cli = Cli::try_parse_from(["clust", "--default"]).unwrap();
+        assert!(cli.default);
     }
 
     #[test]

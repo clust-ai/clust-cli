@@ -1,3 +1,5 @@
+pub mod agents;
+
 use std::io;
 use std::path::PathBuf;
 
@@ -44,6 +46,7 @@ pub enum PoolMessage {
     AgentOutput { id: String, data: Vec<u8> },
     AgentExited { id: String, exit_code: i32 },
     AgentList { agents: Vec<AgentInfo> },
+    DefaultAgent { agent_binary: Option<String> },
     PoolShutdown,
     Error { message: String },
 }
@@ -265,6 +268,22 @@ mod tests {
     #[tokio::test]
     async fn pool_agent_list_empty() {
         assert_pool_round_trip(PoolMessage::AgentList { agents: vec![] }).await;
+    }
+
+    #[tokio::test]
+    async fn pool_default_agent_some() {
+        assert_pool_round_trip(PoolMessage::DefaultAgent {
+            agent_binary: Some("claude".into()),
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn pool_default_agent_none() {
+        assert_pool_round_trip(PoolMessage::DefaultAgent {
+            agent_binary: None,
+        })
+        .await;
     }
 
     #[tokio::test]
