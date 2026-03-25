@@ -13,10 +13,10 @@ use ratatui::{
     Terminal,
 };
 
-use crate::theme;
+use crate::{ipc, theme};
 
 const LOGO_LINES: &[&str] = &[
-    "██████╗██╗     ██╗   ██╗███████╗████████╗",
+    "██████╗ ██╗     ██╗   ██╗███████╗████████╗",
     "██╔════╝██║     ██║   ██║██╔════╝╚══██╔══╝",
     "██║     ██║     ██║   ██║███████╗   ██║   ",
     "██║     ██║     ██║   ██║╚════██║   ██║   ",
@@ -39,7 +39,10 @@ pub fn run() -> io::Result<()> {
     let mut terminal = Terminal::new(backend)?;
     terminal.clear()?;
 
+    let mut pool_running = block_on_async(async { ipc::try_connect().await.is_ok() });
+
     loop {
+        let pool_status = pool_running;
         terminal.draw(|frame| {
             let area = frame.area();
 
@@ -99,19 +102,36 @@ pub fn run() -> io::Result<()> {
             // Blank line
             lines.push(Line::raw(""));
 
-            // "press q to quit"
+            // Pool status + hints
+            let (status_text, status_color) = if pool_status {
+                ("● pool running", theme::R_SUCCESS)
+            } else {
+                ("○ pool stopped", theme::R_TEXT_TERTIARY)
+            };
             lines.push(Line::from(Span::styled(
-                "press q to quit",
-                Style::default().fg(theme::R_TEXT_SECONDARY),
+                status_text,
+                Style::default().fg(status_color),
+            )).centered());
+
+            let hint = if pool_status { "S stop" } else { "S start" };
+            lines.push(Line::from(Span::styled(
+                format!("{hint} · q quit"),
+                Style::default().fg(theme::R_TEXT_TERTIARY),
             )).centered());
 
             let block_height = lines.len() as u16;
+            let block_width = 48u16;
+
             let [vert_area] = Layout::vertical([Constraint::Length(block_height)])
                 .flex(Flex::Center)
                 .areas(area);
 
-            let paragraph = Paragraph::new(lines).centered();
-            frame.render_widget(paragraph, vert_area);
+            let [horz_area] = Layout::horizontal([Constraint::Length(block_width)])
+                .flex(Flex::Center)
+                .areas(vert_area);
+
+            let paragraph = Paragraph::new(lines);
+            frame.render_widget(paragraph, horz_area);
         })?;
 
         if event::poll(std::time::Duration::from_millis(100))? {
@@ -119,6 +139,18 @@ pub fn run() -> io::Result<()> {
                 if key.kind == KeyEventKind::Press {
                     match key.code {
                         KeyCode::Char('q') | KeyCode::Esc => break,
+                        KeyCode::Char('S') => {
+                            pool_running = block_on_async(async {
+                                if pool_running {
+                                    if let Ok(mut stream) = ipc::try_connect().await {
+                                        let _ = ipc::send_stop(&mut stream).await;
+                                    }
+                                    false
+                                } else {
+                                    ipc::connect_to_pool().await.is_ok()
+                                }
+                            });
+                        }
                         _ => {}
                     }
                 }
@@ -129,6 +161,11 @@ pub fn run() -> io::Result<()> {
     disable_raw_mode()?;
     io::stdout().execute(LeaveAlternateScreen)?;
     Ok(())
+}
+
+/// Run an async future from the synchronous UI loop.
+fn block_on_async<F: std::future::Future>(f: F) -> F::Output {
+    tokio::task::block_in_place(|| tokio::runtime::Handle::current().block_on(f))
 }
 
 /// Wraps inner spans in box-drawing border characters.
