@@ -125,7 +125,7 @@ pub fn run() -> io::Result<()> {
 fn render_left_panel(frame: &mut Frame, area: ratatui::layout::Rect) {
     let block = Block::bordered()
         .title(Line::from(Span::styled(
-            " Repositories ",
+            " Agents ",
             Style::default().fg(theme::R_TEXT_PRIMARY),
         )))
         .border_style(Style::default().fg(theme::R_TEXT_TERTIARY));
@@ -134,7 +134,7 @@ fn render_left_panel(frame: &mut Frame, area: ratatui::layout::Rect) {
     frame.render_widget(block, area);
 
     let text = Paragraph::new(Line::from(Span::styled(
-        "No repositories tracked",
+        "No agents running",
         Style::default().fg(theme::R_TEXT_TERTIARY),
     )))
     .alignment(Alignment::Center);
