@@ -1,4 +1,5 @@
 use std::io;
+use std::sync::{Arc, Mutex};
 
 use crossterm::{
     event::{self, Event, KeyCode, KeyEventKind},
@@ -40,7 +41,14 @@ pub fn run() -> io::Result<()> {
     terminal.clear()?;
 
     let mut pool_running = block_on_async(async { ipc::try_connect().await.is_ok() });
-    let update_notice = version::check_brew_update();
+
+    let update_notice: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
+    let notice_clone = update_notice.clone();
+    std::thread::spawn(move || {
+        if let Some(msg) = version::check_brew_update() {
+            *notice_clone.lock().unwrap() = Some(msg);
+        }
+    });
 
     loop {
         let pool_status = pool_running;
@@ -101,7 +109,7 @@ pub fn run() -> io::Result<()> {
             )));
 
             // Update notice
-            if let Some(ref msg) = update_notice {
+            if let Some(ref msg) = *update_notice.lock().unwrap() {
                 lines.push(Line::from(Span::styled(
                     msg.clone(),
                     Style::default().fg(theme::R_WARNING),
