@@ -23,6 +23,10 @@ pub struct Cli {
     #[arg(short = 'e', long = "accept-edits")]
     pub accept_edits: bool,
 
+    /// Use a specific agent for this session (does not change the default)
+    #[arg(short = 'u', long = "use")]
+    pub use_agent: Option<String>,
+
     /// Initial prompt for the agent
     pub prompt: Option<String>,
 
@@ -186,6 +190,38 @@ mod tests {
         let cli = Cli::try_parse_from(["clust", "-e", "-b", "run tests"]).unwrap();
         assert!(cli.accept_edits);
         assert!(cli.background);
+    }
+
+    #[test]
+    fn parse_use_short() {
+        let cli = Cli::try_parse_from(["clust", "-u", "opencode"]).unwrap();
+        assert_eq!(cli.use_agent.as_deref(), Some("opencode"));
+    }
+
+    #[test]
+    fn parse_use_long() {
+        let cli = Cli::try_parse_from(["clust", "--use", "opencode"]).unwrap();
+        assert_eq!(cli.use_agent.as_deref(), Some("opencode"));
+    }
+
+    #[test]
+    fn parse_use_with_prompt() {
+        let cli = Cli::try_parse_from(["clust", "-u", "opencode", "fix the bug"]).unwrap();
+        assert_eq!(cli.use_agent.as_deref(), Some("opencode"));
+        assert_eq!(cli.prompt.as_deref(), Some("fix the bug"));
+    }
+
+    #[test]
+    fn parse_use_with_background() {
+        let cli = Cli::try_parse_from(["clust", "-u", "opencode", "-b"]).unwrap();
+        assert_eq!(cli.use_agent.as_deref(), Some("opencode"));
+        assert!(cli.background);
+    }
+
+    #[test]
+    fn parse_no_args_use_is_none() {
+        let cli = Cli::try_parse_from(["clust"]).unwrap();
+        assert!(cli.use_agent.is_none());
     }
 
     #[test]
