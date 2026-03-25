@@ -6,5 +6,8 @@
 # Keep local settings ignored (machine-specific)
 .claude/settings.local.json
 
+# Local TODO
+TODO.md
+
 # Rust build artifacts
 target/

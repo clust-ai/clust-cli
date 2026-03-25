@@ -13,7 +13,7 @@ use ratatui::{
     Terminal,
 };
 
-use crate::{ipc, theme};
+use crate::{ipc, theme, version};
 
 const LOGO_LINES: &[&str] = &[
     "██████╗ ██╗     ██╗   ██╗███████╗████████╗",
@@ -40,6 +40,7 @@ pub fn run() -> io::Result<()> {
     terminal.clear()?;
 
     let mut pool_running = block_on_async(async { ipc::try_connect().await.is_ok() });
+    let update_notice = version::check_brew_update();
 
     loop {
         let pool_status = pool_running;
@@ -99,6 +100,14 @@ pub fn run() -> io::Result<()> {
                 Style::default().fg(theme::R_TEXT_TERTIARY),
             )));
 
+            // Update notice
+            if let Some(ref msg) = update_notice {
+                lines.push(Line::from(Span::styled(
+                    msg.clone(),
+                    Style::default().fg(theme::R_WARNING),
+                )).centered());
+            }
+
             // Blank line
             lines.push(Line::raw(""));
 
@@ -116,6 +125,13 @@ pub fn run() -> io::Result<()> {
             let hint = if pool_status { "S stop" } else { "S start" };
             lines.push(Line::from(Span::styled(
                 format!("{hint} · q quit"),
+                Style::default().fg(theme::R_TEXT_TERTIARY),
+            )).centered());
+
+            // Version
+            lines.push(Line::raw(""));
+            lines.push(Line::from(Span::styled(
+                format!("v{}", env!("CARGO_PKG_VERSION")),
                 Style::default().fg(theme::R_TEXT_TERTIARY),
             )).centered());
 
@@ -175,4 +191,37 @@ fn boxed_line<'a>(inner: Vec<Span<'a>>) -> Line<'a> {
     spans.extend(inner);
     spans.push(Span::styled("│", border));
     Line::from(spans)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn boxed_line_wraps_single_span() {
+        let line = boxed_line(vec![Span::raw("hello")]);
+        assert_eq!(line.spans.len(), 3); // │ + hello + │
+        assert_eq!(line.spans[0].content, "│");
+        assert_eq!(line.spans[1].content, "hello");
+        assert_eq!(line.spans[2].content, "│");
+    }
+
+    #[test]
+    fn boxed_line_wraps_multiple_spans() {
+        let line = boxed_line(vec![Span::raw("a"), Span::raw("b"), Span::raw("c")]);
+        assert_eq!(line.spans.len(), 5); // │ + a + b + c + │
+        assert_eq!(line.spans[0].content, "│");
+        assert_eq!(line.spans[1].content, "a");
+        assert_eq!(line.spans[2].content, "b");
+        assert_eq!(line.spans[3].content, "c");
+        assert_eq!(line.spans[4].content, "│");
+    }
+
+    #[test]
+    fn boxed_line_empty_inner() {
+        let line = boxed_line(vec![]);
+        assert_eq!(line.spans.len(), 2); // just │ │
+        assert_eq!(line.spans[0].content, "│");
+        assert_eq!(line.spans[1].content, "│");
+    }
 }
