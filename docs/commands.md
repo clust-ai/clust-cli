@@ -42,8 +42,12 @@ clust [OPTIONS] [PROMPT]
 List all running agents in the pool.
 
 ```
-clust ls
+clust ls [OPTIONS]
 ```
+
+| Flag | Long | Description |
+|------|------|-------------|
+| `-i` | `--select` | Interactive selector: navigate with arrow keys, Enter to attach or start a new agent. |
 
 Output columns:
 
@@ -86,6 +90,9 @@ clust ls
 
 # Set default agent to something other than claude
 clust -d aider
+
+# Interactive agent selector
+clust ls -i
 
 # Stop the pool and all agents
 clust -s

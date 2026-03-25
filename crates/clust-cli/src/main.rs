@@ -330,19 +330,20 @@ async fn handle_ls(select: bool) {
             } else {
                 // Header
                 println!(
-                    "  {}{:<8} {:<12} {:<10} {:<10} {}{}",
+                    "  {}{:<8} {:<12} {:<10} {:<14} {}{}",
                     theme::TEXT_TERTIARY,
                     "ID",
                     "AGENT",
                     "STATUS",
-                    "ATTACHED",
                     "STARTED",
+                    "ATTACHED",
                     theme::RESET,
                 );
                 for agent in &agents {
                     let started = format_started(&agent.started_at);
+                    let attached = format_attached(agent.attached_clients);
                     println!(
-                        "  {}{:<8}{} {}{:<12}{} {}{:<10}{} {}{:<10}{} {}{}{}",
+                        "  {}{:<8}{} {}{:<12}{} {}{:<10}{} {}{:<14}{} {}{}{}",
                         theme::ACCENT,
                         agent.id,
                         theme::RESET,
@@ -353,10 +354,10 @@ async fn handle_ls(select: bool) {
                         "running",
                         theme::RESET,
                         theme::TEXT_SECONDARY,
-                        agent.attached_clients,
+                        started,
                         theme::RESET,
                         theme::TEXT_SECONDARY,
-                        started,
+                        attached,
                         theme::RESET,
                     );
                 }
@@ -378,6 +379,14 @@ async fn handle_ls(select: bool) {
 }
 
 /// Format an RFC3339 timestamp into a human-readable string.
+fn format_attached(count: usize) -> String {
+    if count == 1 {
+        "1 terminal".to_string()
+    } else {
+        format!("{count} terminals")
+    }
+}
+
 fn format_started(rfc3339: &str) -> String {
     let Ok(dt) = rfc3339.parse::<DateTime<Utc>>() else {
         return rfc3339.to_string();
@@ -545,13 +554,14 @@ fn render_selector(
         } else if i <= agents.len() {
             let agent = &agents[i - 1];
             let started = format_started(&agent.started_at);
+            let attached = format_attached(agent.attached_clients);
             let (text_color, status_color) = if is_selected {
                 (theme::TEXT_PRIMARY, theme::SUCCESS)
             } else {
                 (theme::TEXT_TERTIARY, theme::TEXT_TERTIARY)
             };
             format!(
-                "{}{:<8}{} {}{:<12}{} {}{:<10}{} {}{:<10}{} {}{}{}",
+                "{}{:<8}{} {}{:<12}{} {}{:<10}{} {}{:<14}{} {}{}{}",
                 theme::ACCENT,
                 agent.id,
                 theme::RESET,
@@ -562,10 +572,10 @@ fn render_selector(
                 "running",
                 theme::RESET,
                 text_color,
-                agent.attached_clients,
+                started,
                 theme::RESET,
                 text_color,
-                started,
+                attached,
                 theme::RESET,
             )
         } else {

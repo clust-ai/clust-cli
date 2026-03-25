@@ -80,6 +80,8 @@ Messages between CLI and Pool use a length-prefixed binary format:
 
 Candidate serialization: **MessagePack** via `rmp-serde` (compact, fast, schema-friendly). JSON is the fallback if debugging simplicity is preferred during development.
 
+> **Note:** `serde_json` is also used in the CLI crate for parsing output from external tools (e.g., `brew info --json=v2` for update checks). It is not used for IPC.
+
 ### Message Types
 
 ```
@@ -153,3 +155,4 @@ clust "do something"
 | `rmp-serde` | MessagePack serialization |
 | `ratatui` | Terminal UI rendering (bottom bar, future `clust ui`) |
 | `crossterm` | Terminal manipulation (raw mode, input) |
+| `serde_json` | Parse JSON output from external tools (e.g., Homebrew) |
