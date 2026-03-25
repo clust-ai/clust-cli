@@ -104,7 +104,7 @@ Pool -> CLI:
   AgentOutput { id: String, data: Vec<u8> }
   AgentExited { id: String, exit_code: i32 }
   AgentList { agents: Vec<AgentInfo> }
-  AgentStopped { id: String }
+  AgentStopped { id: String }  // Sent when stop is initiated (agent may still be terminating)
   DefaultAgent { agent_binary: Option<String> }
   PoolShutdown
   Error { message: String }

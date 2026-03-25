@@ -34,6 +34,7 @@ clust [OPTIONS] [PROMPT]
 | `-a` | `--attach <ID>` | Attach to an existing agent by its 6-char ID. |
 | `-s` | `--stop [ID]` | Without a value: stop the pool daemon and all agents. With a 6-char ID: stop that specific agent. |
 | `-d` | `--default` | Interactive picker to set the global default agent binary. Persisted in SQLite. |
+| `-u` | `--use <AGENT>` | Use a specific agent binary for this session only (does not change the default). |
 | `-e` | `--accept-edits` | Auto-accept edits. Agent-specific: for Claude, passes `--permission-mode acceptEdits`. Ignored for agents that don't support it. |
 | `-h` | `--help` | Show help with all available options. |
 | `-V` | `--version` | Show version. |
@@ -54,17 +55,19 @@ Output columns:
 
 ```
 ID       AGENT    STATUS    STARTED       ATTACHED
-a3f8c1   claude   running   2 min ago     1 terminal
-b7e2d9   claude   running   15 min ago    0 terminals
+a3f8c1   claude   running   14:32         1 terminal
+b7e2d9   claude   running   14:17         0 terminals
 ```
 
 ### `clust ui`
 
-Open the Clust terminal UI. (Future — not in v0.1)
+Open the Clust terminal UI.
 
 ```
 clust ui
 ```
+
+`clust .` is an alias for `clust ui`.
 
 ---
 
@@ -89,6 +92,9 @@ clust -e "refactor the auth module"
 # Background agent with accept-edits
 clust -e -b "run the test suite and fix failures"
 
+# Use a specific agent for this session only
+clust -u opencode "refactor auth"
+
 # Attach to a running agent
 clust -a a3f8c1
 
@@ -106,6 +112,10 @@ clust -s a3f8c1
 
 # Stop the pool and all agents
 clust -s
+
+# Open terminal UI
+clust ui
+clust .
 
 # Show help
 clust -h
