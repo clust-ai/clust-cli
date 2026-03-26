@@ -263,10 +263,12 @@ async fn handle_connection(
             .await?;
         }
         CliMessage::RegisterRepo { path } => {
+            // Detect git root BEFORE acquiring the lock (avoid holding lock during I/O)
+            let git_root = crate::repo::detect_git_root(&path);
             let result = {
                 let pool_state = state.lock().await;
                 if let Some(ref db) = pool_state.db {
-                    match crate::repo::detect_git_root(&path) {
+                    match git_root {
                         Some(root) => {
                             let root_str = root.to_string_lossy().into_owned();
                             let name = root
@@ -300,31 +302,61 @@ async fn handle_connection(
             }
         }
         CliMessage::ListRepos => {
-            let repos = {
+            // Collect repo list and agent snapshot under lock, then release
+            let (repo_list, agent_snapshots) = {
                 let pool_state = state.lock().await;
-                if let Some(ref db) = pool_state.db {
-                    let repo_list = crate::db::list_repos(db).unwrap_or_default();
-                    let mut valid_repos = Vec::new();
-                    for (path, name) in repo_list {
-                        match crate::repo::get_repo_state(
-                            std::path::Path::new(&path),
-                            &name,
-                            &pool_state.agents,
-                        ) {
-                            Some(info) => valid_repos.push(info),
-                            None => {
-                                // Repo path gone or no longer a git repo — clean up
-                                let _ = crate::db::unregister_repo(db, &path);
-                            }
-                        }
-                    }
-                    valid_repos
+                let list = if let Some(ref db) = pool_state.db {
+                    crate::db::list_repos(db).unwrap_or_default()
                 } else {
                     vec![]
-                }
+                };
+                let snapshots: std::collections::HashMap<
+                    String,
+                    crate::repo::AgentSnapshot,
+                > = pool_state
+                    .agents
+                    .iter()
+                    .map(|(k, v)| {
+                        (
+                            k.clone(),
+                            crate::repo::AgentSnapshot {
+                                repo_path: v.repo_path.clone(),
+                                branch_name: v.branch_name.clone(),
+                            },
+                        )
+                    })
+                    .collect();
+                (list, snapshots)
             };
-            clust_ipc::send_message_write(&mut writer, &PoolMessage::RepoList { repos })
-                .await?;
+            // Do git I/O outside the lock
+            let mut valid_repos = Vec::new();
+            let mut stale_paths = Vec::new();
+            for (path, name) in repo_list {
+                match crate::repo::get_repo_state(
+                    std::path::Path::new(&path),
+                    &name,
+                    &agent_snapshots,
+                ) {
+                    Some(info) => valid_repos.push(info),
+                    None => stale_paths.push(path),
+                }
+            }
+            // Clean up stale repos under lock
+            if !stale_paths.is_empty() {
+                let pool_state = state.lock().await;
+                if let Some(ref db) = pool_state.db {
+                    for path in &stale_paths {
+                        let _ = crate::db::unregister_repo(db, path);
+                    }
+                }
+            }
+            clust_ipc::send_message_write(
+                &mut writer,
+                &PoolMessage::RepoList {
+                    repos: valid_repos,
+                },
+            )
+            .await?;
         }
         _ => {
             clust_ipc::send_message_write(
