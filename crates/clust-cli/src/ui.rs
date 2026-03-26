@@ -15,7 +15,7 @@ use ratatui::{
     Frame, Terminal,
 };
 
-use clust_ipc::{AgentInfo, CliMessage, PoolMessage};
+use clust_ipc::{AgentInfo, CliMessage, PoolMessage, RepoInfo};
 
 use crate::{format::{format_attached, format_started}, ipc, theme, version};
 
@@ -56,13 +56,19 @@ pub fn run() -> io::Result<()> {
     });
 
     let mut agents: Vec<AgentInfo> = Vec::new();
+    let mut repos: Vec<RepoInfo> = Vec::new();
     let mut last_agent_fetch = Instant::now() - Duration::from_secs(10);
+    let mut last_repo_fetch = Instant::now() - Duration::from_secs(10);
 
     loop {
-        // Periodically fetch agent list from pool
+        // Periodically fetch agent list and repo state from pool
         if pool_running && last_agent_fetch.elapsed() >= AGENT_FETCH_INTERVAL {
             agents = fetch_agents();
             last_agent_fetch = Instant::now();
+        }
+        if pool_running && last_repo_fetch.elapsed() >= AGENT_FETCH_INTERVAL {
+            repos = fetch_repos();
+            last_repo_fetch = Instant::now();
         }
 
         let pool_status = pool_running;
@@ -80,7 +86,7 @@ pub fn run() -> io::Result<()> {
                 Layout::horizontal([Constraint::Percentage(40), Constraint::Percentage(60)])
                     .areas(content_area);
 
-            render_left_panel(frame, left_area, &agents);
+            render_left_panel(frame, left_area, &repos);
             render_right_panel(frame, right_area, &agents);
             render_status_bar(frame, status_area, pool_status, &notice);
         })?;
@@ -114,10 +120,10 @@ pub fn run() -> io::Result<()> {
 // Rendering functions
 // ---------------------------------------------------------------------------
 
-fn render_left_panel(frame: &mut Frame, area: ratatui::layout::Rect, agents: &[AgentInfo]) {
+fn render_left_panel(frame: &mut Frame, area: ratatui::layout::Rect, repos: &[RepoInfo]) {
     let block = Block::bordered()
         .title(Line::from(Span::styled(
-            " Pools ",
+            " Repositories ",
             Style::default().fg(theme::R_TEXT_PRIMARY),
         )))
         .border_style(Style::default().fg(theme::R_TEXT_TERTIARY));
@@ -125,9 +131,9 @@ fn render_left_panel(frame: &mut Frame, area: ratatui::layout::Rect, agents: &[A
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
-    if agents.is_empty() {
+    if repos.is_empty() {
         let text = Paragraph::new(Line::from(Span::styled(
-            "No agents running",
+            "No repositories found",
             Style::default().fg(theme::R_TEXT_TERTIARY),
         )))
         .alignment(Alignment::Center);
@@ -138,29 +144,105 @@ fn render_left_panel(frame: &mut Frame, area: ratatui::layout::Rect, agents: &[A
 
         frame.render_widget(text, centered);
     } else {
-        // Collect distinct pool names in sorted order
-        let mut pool_names: Vec<&str> = agents.iter().map(|a| a.pool.as_str()).collect();
-        pool_names.sort();
-        pool_names.dedup();
-
-        let mut lines: Vec<Line> = Vec::new();
-        for name in &pool_names {
-            let count = agents.iter().filter(|a| a.pool == *name).count();
-            lines.push(Line::from(vec![
-                Span::styled(
-                    format!(" {name}"),
-                    Style::default().fg(theme::R_ACCENT),
-                ),
-                Span::styled(
-                    format!("  {count}"),
-                    Style::default().fg(theme::R_TEXT_TERTIARY),
-                ),
-            ]));
-        }
-
+        let lines = build_repo_tree_lines(repos);
         let paragraph = Paragraph::new(lines);
         frame.render_widget(paragraph, inner);
     }
+}
+
+fn build_repo_tree_lines(repos: &[RepoInfo]) -> Vec<Line<'static>> {
+    let mut lines = Vec::new();
+
+    for (repo_idx, repo) in repos.iter().enumerate() {
+        // Repo name header
+        lines.push(Line::from(Span::styled(
+            format!(" {}", repo.name),
+            Style::default().fg(theme::R_ACCENT),
+        )));
+
+        let has_local = !repo.local_branches.is_empty();
+        let has_remote = !repo.remote_branches.is_empty();
+
+        // Local Branches section
+        if has_local {
+            let connector = if has_remote { "├─" } else { "└─" };
+            lines.push(Line::from(Span::styled(
+                format!("   {connector} Local Branches"),
+                Style::default().fg(theme::R_TEXT_SECONDARY),
+            )));
+
+            let continuation = if has_remote { "│" } else { " " };
+            for (i, branch) in repo.local_branches.iter().enumerate() {
+                let is_last = i == repo.local_branches.len() - 1;
+                let branch_connector = if is_last { "└─" } else { "├─" };
+                lines.push(format_branch_line(branch, continuation, branch_connector));
+            }
+        }
+
+        // Remote Branches section
+        if has_remote {
+            lines.push(Line::from(Span::styled(
+                "   └─ Remote Branches".to_string(),
+                Style::default().fg(theme::R_TEXT_SECONDARY),
+            )));
+
+            for (i, branch) in repo.remote_branches.iter().enumerate() {
+                let is_last = i == repo.remote_branches.len() - 1;
+                let branch_connector = if is_last { "└─" } else { "├─" };
+                lines.push(format_branch_line(branch, " ", branch_connector));
+            }
+        }
+
+        // Blank line between repos (not after last)
+        if repo_idx < repos.len() - 1 {
+            lines.push(Line::from(""));
+        }
+    }
+
+    lines
+}
+
+fn format_branch_line(
+    branch: &clust_ipc::BranchInfo,
+    continuation: &str,
+    connector: &str,
+) -> Line<'static> {
+    let mut spans = Vec::new();
+
+    // Tree structure prefix
+    spans.push(Span::styled(
+        format!("   {continuation}  {connector} "),
+        Style::default().fg(theme::R_TEXT_TERTIARY),
+    ));
+
+    // Active agent indicator
+    if branch.active_agent_id.is_some() {
+        spans.push(Span::styled(
+            "● ".to_string(),
+            Style::default().fg(theme::R_SUCCESS),
+        ));
+    }
+
+    // Branch name — head branch is highlighted
+    let name_color = if branch.is_head {
+        theme::R_ACCENT_BRIGHT
+    } else {
+        theme::R_TEXT_PRIMARY
+    };
+    spans.push(Span::styled(
+        branch.name.clone(),
+        Style::default().fg(name_color),
+    ));
+
+    // Worktree indicator
+    if branch.is_worktree {
+        spans.push(Span::styled(
+            " ⎇".to_string(),
+            Style::default().fg(theme::R_TEXT_SECONDARY),
+        ));
+    }
+
+    Line::from(spans)
 }
 
 fn render_right_panel(
@@ -439,6 +521,24 @@ fn fetch_agents() -> Vec<AgentInfo> {
         }
         match clust_ipc::recv_message::<PoolMessage>(&mut stream).await {
             Ok(PoolMessage::AgentList { agents }) => agents,
+            _ => vec![],
+        }
+    })
+}
+
+fn fetch_repos() -> Vec<RepoInfo> {
+    block_on_async(async {
+        let Ok(mut stream) = ipc::try_connect().await else {
+            return vec![];
+        };
+        if clust_ipc::send_message(&mut stream, &CliMessage::ListRepos)
+            .await
+            .is_err()
+        {
+            return vec![];
+        }
+        match clust_ipc::recv_message::<PoolMessage>(&mut stream).await {
+            Ok(PoolMessage::RepoList { repos }) => repos,
             _ => vec![],
         }
     })

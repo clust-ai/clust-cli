@@ -80,10 +80,12 @@ A full terminal UI (TUI) built with `ratatui` + `crossterm`.
 
 The dashboard has two panels:
 
-- **Left panel (40%):** Shows pool names with agent counts. Displays "No agents running" when empty.
+- **Left panel (40%):** Repository tracker. Shows a tree view of registered git repositories with their local and remote branches. Branches with active agents display a green `●` indicator; branches checked out in worktrees display a `⎇` indicator. The current HEAD branch is highlighted. Displays "No repositories found" when no repos are registered.
 - **Right panel (60%):** Shows agent cards grouped by pool name with section headers. Displays the CLUST logo when no agents are running.
 
 Agent cards show: ID, binary name, status, start time, and attached terminal count.
+
+Repositories are registered via `clust -r` or auto-registered when an agent is launched inside a git repo. Branch data is fetched from the local git state every 2 seconds (no network calls or authentication required).
 
 ### Auto-connect
 

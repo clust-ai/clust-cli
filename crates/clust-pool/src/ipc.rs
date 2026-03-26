@@ -75,6 +75,17 @@ async fn handle_connection(
             accept_edits,
             pool,
         } => {
+            // Detect git info BEFORE acquiring the lock (avoid holding lock during I/O)
+            let working_dir_for_register = working_dir.clone();
+            let (repo_path, branch_name, is_worktree) =
+                match crate::repo::detect_git_root(&working_dir) {
+                    Some(root) => {
+                        let rp = root.to_string_lossy().into_owned();
+                        let (bn, iw) = crate::repo::detect_branch_and_worktree(&working_dir);
+                        (Some(rp), bn, iw)
+                    }
+                    None => (None, None, false),
+                };
             let result = {
                 let mut pool_state = state.lock().await;
                 agent::spawn_agent(
@@ -87,10 +98,27 @@ async fn handle_connection(
                     accept_edits,
                     pool,
                     state.clone(),
+                    repo_path,
+                    branch_name,
+                    is_worktree,
                 )
             };
             match result {
                 Ok((id, binary)) => {
+                    // Auto-register repo from working_dir
+                    {
+                        let pool_state = state.lock().await;
+                        if let Some(ref db) = pool_state.db {
+                            if let Some(root) = crate::repo::detect_git_root(&working_dir_for_register) {
+                                let root_str = root.to_string_lossy().into_owned();
+                                let name = root
+                                    .file_name()
+                                    .map(|n| n.to_string_lossy().into_owned())
+                                    .unwrap_or_else(|| root_str.clone());
+                                let _ = crate::db::register_repo(db, &root_str, &name);
+                            }
+                        }
+                    }
                     clust_ipc::send_message_write(
                         &mut writer,
                         &PoolMessage::AgentStarted {
@@ -153,6 +181,7 @@ async fn handle_connection(
                             .attached_count
                             .load(Ordering::Relaxed),
                         pool: e.pool.clone(),
+                        working_dir: e.working_dir.clone(),
                     })
                     .collect()
             };
@@ -232,6 +261,70 @@ async fn handle_connection(
                 },
             )
             .await?;
+        }
+        CliMessage::RegisterRepo { path } => {
+            let result = {
+                let pool_state = state.lock().await;
+                if let Some(ref db) = pool_state.db {
+                    match crate::repo::detect_git_root(&path) {
+                        Some(root) => {
+                            let root_str = root.to_string_lossy().into_owned();
+                            let name = root
+                                .file_name()
+                                .map(|n| n.to_string_lossy().into_owned())
+                                .unwrap_or_else(|| root_str.clone());
+                            crate::db::register_repo(db, &root_str, &name)
+                                .map(|_| (root_str, name))
+                        }
+                        None => Err(format!("{path} is not inside a git repository")),
+                    }
+                } else {
+                    Err("database not initialized".into())
+                }
+            };
+            match result {
+                Ok((path, name)) => {
+                    clust_ipc::send_message_write(
+                        &mut writer,
+                        &PoolMessage::RepoRegistered { path, name },
+                    )
+                    .await?;
+                }
+                Err(e) => {
+                    clust_ipc::send_message_write(
+                        &mut writer,
+                        &PoolMessage::Error { message: e },
+                    )
+                    .await?;
+                }
+            }
+        }
+        CliMessage::ListRepos => {
+            let repos = {
+                let pool_state = state.lock().await;
+                if let Some(ref db) = pool_state.db {
+                    let repo_list = crate::db::list_repos(db).unwrap_or_default();
+                    let mut valid_repos = Vec::new();
+                    for (path, name) in repo_list {
+                        match crate::repo::get_repo_state(
+                            std::path::Path::new(&path),
+                            &name,
+                            &pool_state.agents,
+                        ) {
+                            Some(info) => valid_repos.push(info),
+                            None => {
+                                // Repo path gone or no longer a git repo — clean up
+                                let _ = crate::db::unregister_repo(db, &path);
+                            }
+                        }
+                    }
+                    valid_repos
+                } else {
+                    vec![]
+                }
+            };
+            clust_ipc::send_message_write(&mut writer, &PoolMessage::RepoList { repos })
+                .await?;
         }
         _ => {
             clust_ipc::send_message_write(

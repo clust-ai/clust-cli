@@ -38,6 +38,7 @@ async fn request_response_over_real_socket() {
             started_at: "2026-03-25T10:00:00Z".into(),
             attached_clients: 1,
             pool: clust_ipc::DEFAULT_POOL.into(),
+            working_dir: "/tmp".into(),
         }],
     };
     send_message(&mut server_stream, &response).await.unwrap();

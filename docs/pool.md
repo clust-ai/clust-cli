@@ -131,6 +131,9 @@ struct AgentEntry {
     pty_writer: Box<dyn Write + Send>,
     output_tx: broadcast::Sender<AgentEvent>,
     attached_count: Arc<AtomicUsize>,
+    repo_path: Option<String>,    // git repo root (None if not in a git repo)
+    branch_name: Option<String>,  // current git branch
+    is_worktree: bool,            // whether working_dir is a git worktree
 }
 ```
 
