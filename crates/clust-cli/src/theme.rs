@@ -51,3 +51,5 @@ pub const R_BG_BASE: Color = Color::Rgb(27, 29, 32);    // #1b1d20
 pub const R_BG_SURFACE: Color = Color::Rgb(34, 36, 40); // #222428
 pub const R_BG_RAISED: Color = Color::Rgb(41, 43, 48);  // #292b30
 pub const R_BG_OVERLAY: Color = Color::Rgb(49, 52, 58); // #31343a
+pub const R_BG_HOVER: Color = Color::Rgb(64, 67, 74);   // #40434a
+pub const R_BG_ACTIVE: Color = Color::Rgb(72, 75, 82);  // #484b52
