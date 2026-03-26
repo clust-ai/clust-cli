@@ -7,7 +7,6 @@
 
 use std::time::{Duration, Instant};
 
-use crate::output_filter::OutputFilter;
 
 /// Maximum pending buffer size before safety-flush (8 KB).
 const MAX_PENDING: usize = 8192;
@@ -75,6 +74,12 @@ impl ScrollBreak {
     /// Filter a chunk of raw input bytes. Returns bytes to forward to the agent.
     pub fn filter(&mut self, data: &[u8]) -> Vec<u8> {
         self.filter_at(data, Instant::now())
+    }
+
+    /// Drain any buffered bytes (e.g. an incomplete escape sequence).
+    #[allow(dead_code)]
+    pub fn flush(&mut self) -> Vec<u8> {
+        std::mem::take(&mut self.pending)
     }
 
     /// Filter with an explicit timestamp (for deterministic testing).
@@ -203,16 +208,6 @@ impl ScrollBreak {
                 }
             }
         }
-    }
-}
-
-impl OutputFilter for ScrollBreak {
-    fn filter(&mut self, data: &[u8]) -> Vec<u8> {
-        self.filter_at(data, Instant::now())
-    }
-
-    fn flush(&mut self) -> Vec<u8> {
-        std::mem::take(&mut self.pending)
     }
 }
 

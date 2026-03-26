@@ -584,13 +584,12 @@ async fn handle_ls(select: bool, pool: Option<String>) {
 
 fn print_agent_header() {
     println!(
-        "  {}{:<8} {:<12} {:<10} {:<14} {}{}",
+        "  {}{:<8} {:<12} {:<10} {:<14} ATTACHED{}",
         theme::TEXT_TERTIARY,
         "ID",
         "AGENT",
         "STATUS",
         "STARTED",
-        "ATTACHED",
         theme::RESET,
     );
 }
@@ -699,7 +698,7 @@ fn run_selector(agents: &[clust_ipc::AgentInfo]) -> SelectAction {
     let mut stdout = io::stdout();
 
     // Spacing
-    write!(stdout, "\n").unwrap();
+    writeln!(stdout).unwrap();
     stdout.flush().unwrap();
 
     let _guard = RawModeGuard::new();
@@ -722,9 +721,7 @@ fn run_selector(agents: &[clust_ipc::AgentInfo]) -> SelectAction {
 
         match key.code {
             KeyCode::Up => {
-                if selected > 0 {
-                    selected -= 1;
-                }
+                selected = selected.saturating_sub(1);
             }
             KeyCode::Down => {
                 if selected < item_count - 1 {
@@ -747,7 +744,7 @@ fn run_selector(agents: &[clust_ipc::AgentInfo]) -> SelectAction {
     // Erase the selector lines
     write!(stdout, "\x1b[{}A", item_count).unwrap();
     for _ in 0..item_count {
-        write!(stdout, "\x1b[2K\n").unwrap();
+        writeln!(stdout, "\x1b[2K").unwrap();
     }
     write!(stdout, "\x1b[{}A", item_count).unwrap();
     stdout.flush().unwrap();
@@ -883,30 +880,27 @@ async fn handle_default_picker() {
         DefaultPickerResult::Selected(binary) => {
             // Persist the choice (new connection since the previous one is consumed)
             let mut set_ok = false;
-            match ipc::connect_to_pool().await {
-                Ok(mut s) => {
-                    if clust_ipc::send_message(
-                        &mut s,
-                        &CliMessage::SetDefault {
-                            agent_binary: binary.clone(),
-                        },
-                    )
-                    .await
-                    .is_ok()
-                    {
-                        match clust_ipc::recv_message::<PoolMessage>(&mut s).await {
-                            Ok(PoolMessage::Ok) => set_ok = true,
-                            Ok(PoolMessage::Error { message }) => {
-                                eprintln!(
-                                    "  {}✘{} {}failed to set default: {message}{}\n",
-                                    theme::ERROR, theme::RESET, theme::TEXT_PRIMARY, theme::RESET,
-                                );
-                            }
-                            _ => {}
+            if let Ok(mut s) = ipc::connect_to_pool().await {
+                if clust_ipc::send_message(
+                    &mut s,
+                    &CliMessage::SetDefault {
+                        agent_binary: binary.clone(),
+                    },
+                )
+                .await
+                .is_ok()
+                {
+                    match clust_ipc::recv_message::<PoolMessage>(&mut s).await {
+                        Ok(PoolMessage::Ok) => set_ok = true,
+                        Ok(PoolMessage::Error { message }) => {
+                            eprintln!(
+                                "  {}✘{} {}failed to set default: {message}{}\n",
+                                theme::ERROR, theme::RESET, theme::TEXT_PRIMARY, theme::RESET,
+                            );
                         }
+                        _ => {}
                     }
                 }
-                Err(_) => {}
             }
             if set_ok {
                 println!(
@@ -1102,9 +1096,7 @@ fn run_default_selector(
 
         match key.code {
             KeyCode::Up => {
-                if selected > 0 {
-                    selected -= 1;
-                }
+                selected = selected.saturating_sub(1);
             }
             KeyCode::Down => {
                 if selected < item_count - 1 {

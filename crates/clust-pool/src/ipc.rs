@@ -172,7 +172,7 @@ async fn handle_connection(
                 pool_state
                     .agents
                     .values()
-                    .filter(|e| filter.as_ref().map_or(true, |f| &e.pool == f))
+                    .filter(|e| filter.as_ref().is_none_or(|f| &e.pool == f))
                     .map(|e| clust_ipc::AgentInfo {
                         id: e.id.clone(),
                         agent_binary: e.agent_binary.clone(),

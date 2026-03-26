@@ -49,7 +49,7 @@ CREATE TABLE repos (
 );
 ```
 
-Repos are registered via `clust -r` or auto-registered when an agent is launched inside a git repository. Stale entries (deleted repos) are cleaned up automatically when the TUI polls for repo state.
+Repos are registered via `clust repo -R` or auto-registered when an agent is launched inside a git repository. Stale entries (deleted repos) are cleaned up automatically when the TUI polls for repo state.
 
 #### `agent_history` *(deferred — migration v3)*
 

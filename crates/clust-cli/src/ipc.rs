@@ -90,7 +90,7 @@ pub async fn send_stop_agent(stream: &mut UnixStream, id: &str) -> io::Result<()
     match response {
         PoolMessage::AgentStopped { .. } => Ok(()),
         PoolMessage::Error { message } => {
-            Err(io::Error::new(io::ErrorKind::Other, message))
+            Err(io::Error::other(message))
         }
         _ => Ok(()),
     }
@@ -111,9 +111,9 @@ pub async fn send_unregister_repo(
     match response {
         PoolMessage::RepoUnregistered { name, stopped_agents, .. } => Ok((name, stopped_agents)),
         PoolMessage::Error { message } => {
-            Err(io::Error::new(io::ErrorKind::Other, message))
+            Err(io::Error::other(message))
         }
-        _ => Err(io::Error::new(io::ErrorKind::Other, "unexpected response")),
+        _ => Err(io::Error::other("unexpected response")),
     }
 }
 
@@ -132,8 +132,8 @@ pub async fn send_stop_repo_agents(
     match response {
         PoolMessage::RepoAgentsStopped { stopped_count, .. } => Ok(stopped_count),
         PoolMessage::Error { message } => {
-            Err(io::Error::new(io::ErrorKind::Other, message))
+            Err(io::Error::other(message))
         }
-        _ => Err(io::Error::new(io::ErrorKind::Other, "unexpected response")),
+        _ => Err(io::Error::other("unexpected response")),
     }
 }

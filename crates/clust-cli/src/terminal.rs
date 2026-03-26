@@ -226,6 +226,7 @@ impl AttachedSession {
     }
 }
 
+#[allow(dead_code)]
 enum SessionEnd {
     Detached,
     AgentExited(i32),
