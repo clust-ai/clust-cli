@@ -58,7 +58,7 @@ async fn main() {
 
     // Subcommand: ui (also triggered by `clust .`)
     if matches!(args.command, Some(cli::Commands::Ui)) || args.prompt.as_deref() == Some(".") {
-        if let Err(e) = ui::run() {
+        if let Err(e) = ui::run(&pool_name) {
             eprintln!("  {}ui error: {e}{}", theme::ERROR, theme::RESET);
             std::process::exit(1);
         }
@@ -81,6 +81,14 @@ async fn main() {
             }
         }
         handle_ls(select, pool).await;
+        return;
+    }
+
+    // Subcommand: repo
+    if let Some(cli::Commands::Repo { register }) = args.command {
+        if register {
+            handle_register().await;
+        }
         return;
     }
 
@@ -130,11 +138,6 @@ async fn main() {
         return;
     }
 
-    // Flag: -r / --register
-    if args.register {
-        handle_register().await;
-        return;
-    }
 
     // Flag: --attach <ID>
     if let Some(ref id) = args.attach {
