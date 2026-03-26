@@ -26,6 +26,9 @@ async fn spawn_agent_echo_produces_output() {
             false,
             clust_ipc::DEFAULT_POOL.into(),
             state.clone(),
+            None,
+            None,
+            false,
         )
         .expect("spawn_agent should succeed")
     };
@@ -93,6 +96,9 @@ async fn spawn_agent_cat_receives_input_and_echoes() {
             false,
             clust_ipc::DEFAULT_POOL.into(),
             state.clone(),
+            None,
+            None,
+            false,
         )
         .expect("spawn_agent should succeed")
     };
@@ -168,6 +174,9 @@ async fn multiple_subscribers_receive_same_output() {
             false,
             clust_ipc::DEFAULT_POOL.into(),
             state.clone(),
+            None,
+            None,
+            false,
         )
         .expect("spawn_agent should succeed")
     };
@@ -234,6 +243,9 @@ async fn attached_count_tracks_subscribers() {
             false,
             clust_ipc::DEFAULT_POOL.into(),
             state.clone(),
+            None,
+            None,
+            false,
         )
         .expect("spawn_agent should succeed")
     };
@@ -279,6 +291,9 @@ async fn stop_agent_terminates_running_process() {
             false,
             clust_ipc::DEFAULT_POOL.into(),
             state.clone(),
+            None,
+            None,
+            false,
         )
         .expect("spawn_agent should succeed")
     };
@@ -345,6 +360,9 @@ async fn resize_agent_pty() {
             false,
             clust_ipc::DEFAULT_POOL.into(),
             state.clone(),
+            None,
+            None,
+            false,
         )
         .expect("spawn_agent should succeed")
     };
@@ -366,6 +384,138 @@ async fn resize_agent_pty() {
     {
         let mut pool = state.lock().await;
         if let Some(entry) = pool.agents.get_mut(&id) {
+            use std::io::Write;
+            entry.pty_writer.write_all(&[0x04]).unwrap();
+        }
+    }
+    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+}
+
+#[tokio::test]
+async fn spawn_agent_stores_custom_pool_name() {
+    let state = new_shared_state();
+    let (id, _) = {
+        let mut pool = state.lock().await;
+        clust_pool::agent::spawn_agent(
+            &mut pool,
+            None,
+            Some("cat".into()),
+            "/tmp".into(),
+            80,
+            24,
+            false,
+            "my_feature".into(),
+            state.clone(),
+            None,
+            None,
+            false,
+        )
+        .expect("spawn_agent should succeed")
+    };
+
+    // Verify the pool name is stored on the entry
+    {
+        let pool = state.lock().await;
+        let entry = pool.agents.get(&id).expect("agent should exist");
+        assert_eq!(entry.pool, "my_feature");
+    }
+
+    // Clean up
+    {
+        let mut pool = state.lock().await;
+        if let Some(entry) = pool.agents.get_mut(&id) {
+            use std::io::Write;
+            entry.pty_writer.write_all(&[0x04]).unwrap();
+        }
+    }
+    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+}
+
+#[tokio::test]
+async fn agents_in_different_pools_are_separated() {
+    let state = new_shared_state();
+
+    // Spawn two agents in different pools
+    let (id_a, _) = {
+        let mut pool = state.lock().await;
+        clust_pool::agent::spawn_agent(
+            &mut pool,
+            None,
+            Some("cat".into()),
+            "/tmp".into(),
+            80,
+            24,
+            false,
+            clust_ipc::DEFAULT_POOL.into(),
+            state.clone(),
+            None,
+            None,
+            false,
+        )
+        .expect("spawn default_pool agent")
+    };
+
+    let (id_b, _) = {
+        let mut pool = state.lock().await;
+        clust_pool::agent::spawn_agent(
+            &mut pool,
+            None,
+            Some("cat".into()),
+            "/tmp".into(),
+            80,
+            24,
+            false,
+            "my_feature".into(),
+            state.clone(),
+            None,
+            None,
+            false,
+        )
+        .expect("spawn my_feature agent")
+    };
+
+    // Verify both agents exist with correct pools
+    {
+        let pool = state.lock().await;
+        assert_eq!(pool.agents.len(), 2);
+        assert_eq!(pool.agents.get(&id_a).unwrap().pool, clust_ipc::DEFAULT_POOL);
+        assert_eq!(pool.agents.get(&id_b).unwrap().pool, "my_feature");
+
+        // Simulate ListAgents filter: no filter returns all
+        let all: Vec<_> = pool.agents.values().collect();
+        assert_eq!(all.len(), 2);
+
+        // Filter by default_pool returns only id_a
+        let default_only: Vec<_> = pool
+            .agents
+            .values()
+            .filter(|e| e.pool == clust_ipc::DEFAULT_POOL)
+            .collect();
+        assert_eq!(default_only.len(), 1);
+        assert_eq!(default_only[0].id, id_a);
+
+        // Filter by my_feature returns only id_b
+        let feature_only: Vec<_> = pool
+            .agents
+            .values()
+            .filter(|e| e.pool == "my_feature")
+            .collect();
+        assert_eq!(feature_only.len(), 1);
+        assert_eq!(feature_only[0].id, id_b);
+
+        // Filter by nonexistent pool returns empty
+        let none: Vec<_> = pool
+            .agents
+            .values()
+            .filter(|e| e.pool == "nonexistent")
+            .collect();
+        assert!(none.is_empty());
+    }
+
+    // Clean up both agents
+    for id in [&id_a, &id_b] {
+        let mut pool = state.lock().await;
+        if let Some(entry) = pool.agents.get_mut(id as &str) {
             use std::io::Write;
             entry.pty_writer.write_all(&[0x04]).unwrap();
         }
