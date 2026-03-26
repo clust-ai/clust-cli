@@ -174,8 +174,46 @@ async fn check_default_and_prompt() -> Option<Option<String>> {
     }
 
     // No default set — first-run prompt
+    let installed = installed_agents();
+
+    // If exactly one agent is installed, auto-select it
+    if installed.len() == 1 {
+        let binary = installed[0].binary.to_string();
+        let mut set_ok = false;
+        if let Ok(mut s) = ipc::connect_to_pool().await {
+            if clust_ipc::send_message(
+                &mut s,
+                &CliMessage::SetDefault {
+                    agent_binary: binary.clone(),
+                },
+            )
+            .await
+            .is_ok()
+            {
+                match clust_ipc::recv_message::<PoolMessage>(&mut s).await {
+                    Ok(PoolMessage::Ok) => set_ok = true,
+                    Ok(PoolMessage::Error { message }) => {
+                        eprintln!(
+                            "  {}✘{} {}failed to set default: {message}{}",
+                            theme::ERROR, theme::RESET, theme::TEXT_PRIMARY, theme::RESET,
+                        );
+                    }
+                    _ => {}
+                }
+            }
+        }
+        if !set_ok {
+            return None;
+        }
+        println!(
+            "  {}✔{} {}default agent set to {binary}{}\n",
+            theme::SUCCESS, theme::RESET, theme::TEXT_PRIMARY, theme::RESET,
+        );
+        return Some(Some(binary));
+    }
+
     print_logo();
-    let result = run_default_selector(None, "pick a default agent to get started");
+    let result = run_default_selector(&installed, None, "pick a default agent to get started");
 
     match result {
         DefaultPickerResult::Selected(binary) => {
@@ -778,6 +816,14 @@ enum DefaultPickerResult {
     Selected(String),
 }
 
+/// Return only those known agents whose binary is found in PATH.
+fn installed_agents() -> Vec<&'static clust_ipc::agents::KnownAgent> {
+    clust_ipc::agents::KNOWN_AGENTS
+        .iter()
+        .filter(|a| which::which(a.binary).is_ok())
+        .collect()
+}
+
 /// Handle `clust -d`: show interactive picker to set the default agent.
 async fn handle_default_picker() {
     println!();
@@ -813,7 +859,8 @@ async fn handle_default_picker() {
         _ => None,
     };
 
-    let result = run_default_selector(current.as_deref(), "set default agent");
+    let installed = installed_agents();
+    let result = run_default_selector(&installed, current.as_deref(), "set default agent");
 
     match result {
         DefaultPickerResult::Cancel => {}
@@ -908,12 +955,15 @@ async fn handle_register() {
 ///
 /// Shows known agents with a checkmark on the current default, plus a "Custom..."
 /// option for entering an arbitrary command.
-fn run_default_selector(current: Option<&str>, header: &str) -> DefaultPickerResult {
+fn run_default_selector(
+    installed: &[&clust_ipc::agents::KnownAgent],
+    current: Option<&str>,
+    header: &str,
+) -> DefaultPickerResult {
     use crossterm::event::{self, Event, KeyCode, KeyEventKind};
 
-    let known = clust_ipc::agents::KNOWN_AGENTS;
-    // Items: cancel + known agents + custom
-    let item_count = 2 + known.len();
+    // Items: cancel + installed agents + custom
+    let item_count = 2 + installed.len();
     let mut selected: usize = 1; // Start on first agent, not cancel
     let mut stdout = io::stdout();
 
@@ -928,7 +978,7 @@ fn run_default_selector(current: Option<&str>, header: &str) -> DefaultPickerRes
 
     let _guard = RawModeGuard::new();
 
-    render_default_selector(&mut stdout, known, current, selected, item_count);
+    render_default_selector(&mut stdout, installed, current, selected, item_count);
 
     loop {
         if !event::poll(std::time::Duration::from_millis(100)).unwrap_or(false) {
@@ -963,7 +1013,7 @@ fn run_default_selector(current: Option<&str>, header: &str) -> DefaultPickerRes
         }
 
         write!(stdout, "\x1b[{}A", item_count).unwrap();
-        render_default_selector(&mut stdout, known, current, selected, item_count);
+        render_default_selector(&mut stdout, installed, current, selected, item_count);
     }
 
     // Erase the selector lines + header (item_count + 2 for header + blank line)
@@ -979,8 +1029,8 @@ fn run_default_selector(current: Option<&str>, header: &str) -> DefaultPickerRes
 
     if selected == 0 {
         DefaultPickerResult::Cancel
-    } else if selected <= known.len() {
-        DefaultPickerResult::Selected(known[selected - 1].binary.to_string())
+    } else if selected <= installed.len() {
+        DefaultPickerResult::Selected(installed[selected - 1].binary.to_string())
     } else {
         // Custom: prompt for input
         read_custom_agent()
@@ -989,7 +1039,7 @@ fn run_default_selector(current: Option<&str>, header: &str) -> DefaultPickerRes
 
 fn render_default_selector(
     stdout: &mut io::Stdout,
-    known: &[clust_ipc::agents::KnownAgent],
+    installed: &[&clust_ipc::agents::KnownAgent],
     current: Option<&str>,
     selected: usize,
     item_count: usize,
@@ -1010,9 +1060,9 @@ fn render_default_selector(
                 theme::TEXT_TERTIARY
             };
             format!("{color}cancel{}", theme::RESET)
-        } else if i <= known.len() {
-            // Known agent
-            let agent = &known[i - 1];
+        } else if i <= installed.len() {
+            // Installed agent
+            let agent = installed[i - 1];
             let is_current = current == Some(agent.binary);
             let (name_color, bin_color) = if is_selected {
                 (theme::TEXT_PRIMARY, theme::TEXT_SECONDARY)
@@ -1024,8 +1074,13 @@ fn render_default_selector(
             } else {
                 String::new()
             };
+            let untested_tag = if !agent.tested {
+                format!(" {}UNTESTED{}", theme::WARNING_TEXT, theme::RESET)
+            } else {
+                String::new()
+            };
             format!(
-                "{}{}{} {}({}){}{check}",
+                "{}{}{} {}({}){}{untested_tag}{check}",
                 name_color, agent.display_name, theme::RESET, bin_color, agent.binary, theme::RESET,
             )
         } else {
@@ -1037,7 +1092,7 @@ fn render_default_selector(
             };
             // Show checkmark if current default is not a known agent
             let is_custom_current =
-                current.is_some() && !known.iter().any(|a| Some(a.binary) == current);
+                current.is_some() && !installed.iter().any(|a| Some(a.binary) == current);
             let check = if is_custom_current {
                 format!(
                     " {}✔{} {}({}){}",

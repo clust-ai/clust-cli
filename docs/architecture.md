@@ -163,3 +163,4 @@ clust "do something"
 | `ratatui` | Terminal UI rendering (bottom bar, future `clust ui`) |
 | `crossterm` | Terminal manipulation (raw mode, input) |
 | `serde_json` | Parse JSON output from external tools (e.g., Homebrew) |
+| `which` | Locate agent binaries on PATH (default agent discovery) |
