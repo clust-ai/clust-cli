@@ -329,7 +329,6 @@ dependencies = [
  "crossterm",
  "predicates",
  "ratatui",
- "serde_json",
  "tokio",
  "which",
 ]

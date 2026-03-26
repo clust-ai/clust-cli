@@ -51,23 +51,25 @@ impl fmt::Display for Version {
 pub(crate) fn format_update_message(current: &Version, latest: &Version) -> Option<String> {
     if latest > current {
         Some(format!(
-            "update available: {current} \u{2192} {latest} (brew upgrade clust)"
+            "update available: {current} \u{2192} {latest} (visit github.com/clust-ai/clust-cli)"
         ))
     } else {
         None
     }
 }
 
-pub async fn check_brew_update_async() -> Option<String> {
-    tokio::task::spawn_blocking(check_brew_update)
+const REPO_URL: &str = "https://github.com/clust-ai/clust-cli.git";
+
+pub async fn check_update_async() -> Option<String> {
+    tokio::task::spawn_blocking(check_update)
         .await
         .ok()
         .flatten()
 }
 
-pub fn check_brew_update() -> Option<String> {
-    let output = Command::new("brew")
-        .args(["info", "--json=v2", "clust"])
+pub fn check_update() -> Option<String> {
+    let output = Command::new("git")
+        .args(["ls-remote", "--tags", REPO_URL])
         .output()
         .ok()?;
 
@@ -75,17 +77,24 @@ pub fn check_brew_update() -> Option<String> {
         return None;
     }
 
-    let json: serde_json::Value = serde_json::from_slice(&output.stdout).ok()?;
-    let stable = json
-        .get("formulae")?
-        .get(0)?
-        .get("versions")?
-        .get("stable")?
-        .as_str()?;
-
-    let latest = Version::parse(stable)?;
+    let stdout = String::from_utf8(output.stdout).ok()?;
+    let latest = parse_latest_tag(&stdout)?;
     let current = Version::current();
     format_update_message(&current, &latest)
+}
+
+fn parse_latest_tag(output: &str) -> Option<Version> {
+    output
+        .lines()
+        .filter_map(|line| {
+            let refname = line.split('\t').nth(1)?;
+            let tag = refname.strip_prefix("refs/tags/")?;
+            if tag.ends_with("^{}") {
+                return None;
+            }
+            Version::parse(tag)
+        })
+        .max()
 }
 
 #[cfg(test)]
@@ -172,21 +181,53 @@ mod tests {
         assert!(format_update_message(&current, &latest).is_none());
     }
 
+    #[test]
+    fn parse_latest_tag_basic() {
+        let output = "abc123\trefs/tags/v0.0.1\ndef456\trefs/tags/v0.0.3\nghi789\trefs/tags/v0.0.2\n";
+        let latest = parse_latest_tag(output).unwrap();
+        assert_eq!(latest, Version { major: 0, minor: 0, patch: 3 });
+    }
+
+    #[test]
+    fn parse_latest_tag_with_deref() {
+        let output = "abc123\trefs/tags/v0.0.1\ndef456\trefs/tags/v0.0.1^{}\n";
+        let latest = parse_latest_tag(output).unwrap();
+        assert_eq!(latest, Version { major: 0, minor: 0, patch: 1 });
+    }
+
+    #[test]
+    fn parse_latest_tag_empty() {
+        assert!(parse_latest_tag("").is_none());
+    }
+
+    #[test]
+    fn parse_latest_tag_no_valid_tags() {
+        let output = "abc123\trefs/tags/not-a-version\n";
+        assert!(parse_latest_tag(output).is_none());
+    }
+
+    #[test]
+    fn parse_latest_tag_mixed() {
+        let output = "aaa\trefs/tags/v1.0.0\nbbb\trefs/tags/release-candidate\nccc\trefs/tags/v0.9.0\n";
+        let latest = parse_latest_tag(output).unwrap();
+        assert_eq!(latest, Version { major: 1, minor: 0, patch: 0 });
+    }
+
     #[tokio::test]
-    async fn check_brew_update_async_returns() {
-        // Should complete without panic; returns None in test env (no brew formula)
-        let result = check_brew_update_async().await;
+    async fn check_update_async_returns() {
+        // Should complete without panic; may return None or Some depending on network
+        let result = check_update_async().await;
         assert!(result.is_none() || result.is_some());
     }
 
     #[tokio::test]
-    async fn check_brew_update_async_respects_timeout() {
+    async fn check_update_async_respects_timeout() {
         let result = tokio::time::timeout(
-            std::time::Duration::from_secs(5),
-            check_brew_update_async(),
+            std::time::Duration::from_secs(10),
+            check_update_async(),
         )
         .await;
-        // Should complete well within 5s, not hang
+        // Should complete within timeout, not hang
         assert!(result.is_ok());
     }
 }
