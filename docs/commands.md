@@ -166,3 +166,6 @@ These shortcuts are active in the `clust ui` dashboard. They are displayed in th
 |----------|--------|
 | `q` / `Esc` | Quit the UI (pool keeps running) |
 | `Q` | Quit the UI and stop the pool |
+| `↑` / `↓` | Move selection within current level |
+| `→` | Descend into selected item (repo → category → branch) |
+| `←` | Ascend to parent level |

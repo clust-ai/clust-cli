@@ -9,7 +9,7 @@ use crossterm::{
 };
 use ratatui::{
     layout::{Alignment, Constraint, Flex, Layout},
-    style::Style,
+    style::{Color, Style},
     text::{Line, Span},
     widgets::{Block, Paragraph},
     Frame, Terminal,
@@ -29,6 +29,176 @@ const LOGO_LINES: &[&str] = &[
 ];
 
 const AGENT_FETCH_INTERVAL: Duration = Duration::from_secs(2);
+
+// ---------------------------------------------------------------------------
+// Tree selection state
+// ---------------------------------------------------------------------------
+
+/// Which level of the repo tree the user is navigating.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum TreeLevel {
+    Repo,     // Level 0: selecting between repositories
+    Category, // Level 1: selecting Local/Remote within a repo
+    Branch,   // Level 2: selecting a branch within a category
+}
+
+/// Tracks the user's cursor position within the three-level repo tree.
+struct TreeSelection {
+    level: TreeLevel,
+    repo_idx: usize,
+    category_idx: usize, // 0 = Local, 1 = Remote
+    branch_idx: usize,
+}
+
+impl Default for TreeSelection {
+    fn default() -> Self {
+        Self {
+            level: TreeLevel::Repo,
+            repo_idx: 0,
+            category_idx: 0,
+            branch_idx: 0,
+        }
+    }
+}
+
+impl TreeSelection {
+    /// Returns valid category indices (0=local, 1=remote) for the selected repo.
+    fn visible_categories(&self, repos: &[RepoInfo]) -> Vec<usize> {
+        let Some(repo) = repos.get(self.repo_idx) else {
+            return vec![];
+        };
+        let mut cats = Vec::new();
+        if !repo.local_branches.is_empty() {
+            cats.push(0);
+        }
+        if !repo.remote_branches.is_empty() {
+            cats.push(1);
+        }
+        cats
+    }
+
+    /// Returns the number of branches in the currently selected category.
+    fn branch_count(&self, repos: &[RepoInfo]) -> usize {
+        let Some(repo) = repos.get(self.repo_idx) else {
+            return 0;
+        };
+        match self.category_idx {
+            0 => repo.local_branches.len(),
+            1 => repo.remote_branches.len(),
+            _ => 0,
+        }
+    }
+
+    /// Adjust indices to stay within bounds after data refresh.
+    fn clamp(&mut self, repos: &[RepoInfo]) {
+        if repos.is_empty() {
+            *self = Self::default();
+            return;
+        }
+        self.repo_idx = self.repo_idx.min(repos.len() - 1);
+
+        let cats = self.visible_categories(repos);
+        if cats.is_empty() {
+            self.level = TreeLevel::Repo;
+            return;
+        }
+        if self.level != TreeLevel::Repo && !cats.contains(&self.category_idx) {
+            self.category_idx = cats[0];
+            if self.level == TreeLevel::Branch {
+                self.level = TreeLevel::Category;
+            }
+        }
+
+        let bc = self.branch_count(repos);
+        if bc == 0 && self.level == TreeLevel::Branch {
+            self.level = TreeLevel::Category;
+        } else if bc > 0 {
+            self.branch_idx = self.branch_idx.min(bc - 1);
+        }
+    }
+
+    fn move_up(&mut self, repos: &[RepoInfo]) {
+        if repos.is_empty() {
+            return;
+        }
+        match self.level {
+            TreeLevel::Repo => {
+                self.repo_idx = self.repo_idx.saturating_sub(1);
+            }
+            TreeLevel::Category => {
+                let cats = self.visible_categories(repos);
+                if let Some(pos) = cats.iter().position(|&c| c == self.category_idx) {
+                    if pos > 0 {
+                        self.category_idx = cats[pos - 1];
+                        self.branch_idx = 0;
+                    }
+                }
+            }
+            TreeLevel::Branch => {
+                self.branch_idx = self.branch_idx.saturating_sub(1);
+            }
+        }
+    }
+
+    fn move_down(&mut self, repos: &[RepoInfo]) {
+        if repos.is_empty() {
+            return;
+        }
+        match self.level {
+            TreeLevel::Repo => {
+                self.repo_idx = (self.repo_idx + 1).min(repos.len() - 1);
+            }
+            TreeLevel::Category => {
+                let cats = self.visible_categories(repos);
+                if let Some(pos) = cats.iter().position(|&c| c == self.category_idx) {
+                    if pos + 1 < cats.len() {
+                        self.category_idx = cats[pos + 1];
+                        self.branch_idx = 0;
+                    }
+                }
+            }
+            TreeLevel::Branch => {
+                let bc = self.branch_count(repos);
+                if bc > 0 {
+                    self.branch_idx = (self.branch_idx + 1).min(bc - 1);
+                }
+            }
+        }
+    }
+
+    /// Right arrow: descend one level deeper.
+    fn descend(&mut self, repos: &[RepoInfo]) {
+        if repos.is_empty() {
+            return;
+        }
+        match self.level {
+            TreeLevel::Repo => {
+                let cats = self.visible_categories(repos);
+                if !cats.is_empty() {
+                    self.level = TreeLevel::Category;
+                    self.category_idx = cats[0];
+                    self.branch_idx = 0;
+                }
+            }
+            TreeLevel::Category => {
+                if self.branch_count(repos) > 0 {
+                    self.level = TreeLevel::Branch;
+                    self.branch_idx = 0;
+                }
+            }
+            TreeLevel::Branch => {} // already deepest
+        }
+    }
+
+    /// Left arrow: ascend one level (preserves indices for re-entry).
+    fn ascend(&mut self) {
+        match self.level {
+            TreeLevel::Repo => {}   // already at top
+            TreeLevel::Category => self.level = TreeLevel::Repo,
+            TreeLevel::Branch => self.level = TreeLevel::Category,
+        }
+    }
+}
 
 pub fn run() -> io::Result<()> {
     io::stdout().execute(EnterAlternateScreen)?;
@@ -57,6 +227,7 @@ pub fn run() -> io::Result<()> {
 
     let mut agents: Vec<AgentInfo> = Vec::new();
     let mut repos: Vec<RepoInfo> = Vec::new();
+    let mut selection = TreeSelection::default();
     let mut last_agent_fetch = Instant::now() - Duration::from_secs(10);
     let mut last_repo_fetch = Instant::now() - Duration::from_secs(10);
 
@@ -68,6 +239,7 @@ pub fn run() -> io::Result<()> {
         }
         if pool_running && last_repo_fetch.elapsed() >= AGENT_FETCH_INTERVAL {
             repos = fetch_repos();
+            selection.clamp(&repos);
             last_repo_fetch = Instant::now();
         }
 
@@ -86,7 +258,7 @@ pub fn run() -> io::Result<()> {
                 Layout::horizontal([Constraint::Percentage(40), Constraint::Percentage(60)])
                     .areas(content_area);
 
-            render_left_panel(frame, left_area, &repos);
+            render_left_panel(frame, left_area, &repos, &selection);
             render_right_panel(frame, right_area, &agents);
             render_status_bar(frame, status_area, pool_status, &notice);
         })?;
@@ -104,6 +276,10 @@ pub fn run() -> io::Result<()> {
                             });
                             break;
                         }
+                        KeyCode::Up => selection.move_up(&repos),
+                        KeyCode::Down => selection.move_down(&repos),
+                        KeyCode::Right => selection.descend(&repos),
+                        KeyCode::Left => selection.ascend(),
                         _ => {}
                     }
                 }
@@ -120,7 +296,12 @@ pub fn run() -> io::Result<()> {
 // Rendering functions
 // ---------------------------------------------------------------------------
 
-fn render_left_panel(frame: &mut Frame, area: ratatui::layout::Rect, repos: &[RepoInfo]) {
+fn render_left_panel(
+    frame: &mut Frame,
+    area: ratatui::layout::Rect,
+    repos: &[RepoInfo],
+    selection: &TreeSelection,
+) {
     let block = Block::bordered()
         .title(Line::from(Span::styled(
             " Repositories ",
@@ -144,52 +325,120 @@ fn render_left_panel(frame: &mut Frame, area: ratatui::layout::Rect, repos: &[Re
 
         frame.render_widget(text, centered);
     } else {
-        let lines = build_repo_tree_lines(repos);
+        let lines = build_repo_tree_lines(repos, selection, inner.width);
         let paragraph = Paragraph::new(lines);
         frame.render_widget(paragraph, inner);
     }
 }
 
-fn build_repo_tree_lines(repos: &[RepoInfo]) -> Vec<Line<'static>> {
+fn build_repo_tree_lines(
+    repos: &[RepoInfo],
+    selection: &TreeSelection,
+    width: u16,
+) -> Vec<Line<'static>> {
     let mut lines = Vec::new();
 
     for (repo_idx, repo) in repos.iter().enumerate() {
+        let is_this_repo = repo_idx == selection.repo_idx;
+        let repo_selected = is_this_repo && selection.level == TreeLevel::Repo;
+        let repo_open = is_this_repo && selection.level != TreeLevel::Repo;
+
         // Repo name header
-        lines.push(Line::from(Span::styled(
-            format!(" {}", repo.name),
-            Style::default().fg(theme::R_ACCENT),
-        )));
+        let (indicator, name_color, bg) = if repo_selected {
+            ("▸ ", theme::R_ACCENT_BRIGHT, Some(theme::R_BG_HOVER))
+        } else if repo_open {
+            ("▸ ", theme::R_ACCENT_DIM, None)
+        } else {
+            ("  ", theme::R_ACCENT, None)
+        };
+
+        let text = format!(" {indicator}{}", repo.name);
+        let mut style = Style::default().fg(name_color);
+        if let Some(bg_color) = bg {
+            style = style.bg(bg_color);
+        }
+        lines.push(pad_line(vec![Span::styled(text, style)], width, bg));
 
         let has_local = !repo.local_branches.is_empty();
         let has_remote = !repo.remote_branches.is_empty();
 
         // Local Branches section
         if has_local {
+            let cat_selected =
+                is_this_repo && selection.level == TreeLevel::Category && selection.category_idx == 0;
+            let cat_open =
+                is_this_repo && selection.level == TreeLevel::Branch && selection.category_idx == 0;
+
             let connector = if has_remote { "├─" } else { "└─" };
-            lines.push(Line::from(Span::styled(
-                format!("   {connector} Local Branches"),
-                Style::default().fg(theme::R_TEXT_SECONDARY),
-            )));
+            let (cat_indicator, cat_fg, cat_bg) = if cat_selected {
+                ("▸ ", theme::R_TEXT_PRIMARY, Some(theme::R_BG_HOVER))
+            } else if cat_open {
+                ("▸ ", theme::R_TEXT_TERTIARY, None)
+            } else {
+                ("  ", theme::R_TEXT_SECONDARY, None)
+            };
+
+            let cat_text = format!("   {connector} {cat_indicator}Local Branches");
+            let mut cat_style = Style::default().fg(cat_fg);
+            if let Some(bg_color) = cat_bg {
+                cat_style = cat_style.bg(bg_color);
+            }
+            lines.push(pad_line(vec![Span::styled(cat_text, cat_style)], width, cat_bg));
 
             let continuation = if has_remote { "│" } else { " " };
             for (i, branch) in repo.local_branches.iter().enumerate() {
                 let is_last = i == repo.local_branches.len() - 1;
                 let branch_connector = if is_last { "└─" } else { "├─" };
-                lines.push(format_branch_line(branch, continuation, branch_connector));
+                let branch_selected = is_this_repo
+                    && selection.level == TreeLevel::Branch
+                    && selection.category_idx == 0
+                    && i == selection.branch_idx;
+                lines.push(format_branch_line(
+                    branch,
+                    continuation,
+                    branch_connector,
+                    branch_selected,
+                    width,
+                ));
             }
         }
 
         // Remote Branches section
         if has_remote {
-            lines.push(Line::from(Span::styled(
-                "   └─ Remote Branches".to_string(),
-                Style::default().fg(theme::R_TEXT_SECONDARY),
-            )));
+            let cat_selected =
+                is_this_repo && selection.level == TreeLevel::Category && selection.category_idx == 1;
+            let cat_open =
+                is_this_repo && selection.level == TreeLevel::Branch && selection.category_idx == 1;
+
+            let (cat_indicator, cat_fg, cat_bg) = if cat_selected {
+                ("▸ ", theme::R_TEXT_PRIMARY, Some(theme::R_BG_HOVER))
+            } else if cat_open {
+                ("▸ ", theme::R_TEXT_TERTIARY, None)
+            } else {
+                ("  ", theme::R_TEXT_SECONDARY, None)
+            };
+
+            let cat_text = format!("   └─ {cat_indicator}Remote Branches");
+            let mut cat_style = Style::default().fg(cat_fg);
+            if let Some(bg_color) = cat_bg {
+                cat_style = cat_style.bg(bg_color);
+            }
+            lines.push(pad_line(vec![Span::styled(cat_text, cat_style)], width, cat_bg));
 
             for (i, branch) in repo.remote_branches.iter().enumerate() {
                 let is_last = i == repo.remote_branches.len() - 1;
                 let branch_connector = if is_last { "└─" } else { "├─" };
-                lines.push(format_branch_line(branch, " ", branch_connector));
+                let branch_selected = is_this_repo
+                    && selection.level == TreeLevel::Branch
+                    && selection.category_idx == 1
+                    && i == selection.branch_idx;
+                lines.push(format_branch_line(
+                    branch,
+                    " ",
+                    branch_connector,
+                    branch_selected,
+                    width,
+                ));
             }
         }
 
@@ -206,43 +455,73 @@ fn format_branch_line(
     branch: &clust_ipc::BranchInfo,
     continuation: &str,
     connector: &str,
+    is_selected: bool,
+    width: u16,
 ) -> Line<'static> {
     let mut spans = Vec::new();
+    let bg = if is_selected {
+        Some(theme::R_BG_HOVER)
+    } else {
+        None
+    };
+
+    let indicator = if is_selected { "▸ " } else { "  " };
 
     // Tree structure prefix
+    let mut prefix_style = Style::default().fg(theme::R_TEXT_TERTIARY);
+    if let Some(bg_color) = bg {
+        prefix_style = prefix_style.bg(bg_color);
+    }
     spans.push(Span::styled(
-        format!("   {continuation}  {connector} "),
-        Style::default().fg(theme::R_TEXT_TERTIARY),
+        format!("   {continuation}  {connector} {indicator}"),
+        prefix_style,
     ));
 
     // Active agent indicator
     if branch.active_agent_id.is_some() {
-        spans.push(Span::styled(
-            "● ".to_string(),
-            Style::default().fg(theme::R_SUCCESS),
-        ));
+        let mut dot_style = Style::default().fg(theme::R_SUCCESS);
+        if let Some(bg_color) = bg {
+            dot_style = dot_style.bg(bg_color);
+        }
+        spans.push(Span::styled("● ".to_string(), dot_style));
     }
 
-    // Branch name — head branch is highlighted
-    let name_color = if branch.is_head {
+    let name_color = if is_selected || branch.is_head {
         theme::R_ACCENT_BRIGHT
     } else {
         theme::R_TEXT_PRIMARY
     };
-    spans.push(Span::styled(
-        branch.name.clone(),
-        Style::default().fg(name_color),
-    ));
+    let mut name_style = Style::default().fg(name_color);
+    if let Some(bg_color) = bg {
+        name_style = name_style.bg(bg_color);
+    }
+    spans.push(Span::styled(branch.name.clone(), name_style));
 
     // Worktree indicator
     if branch.is_worktree {
-        spans.push(Span::styled(
-            " ⎇".to_string(),
-            Style::default().fg(theme::R_TEXT_SECONDARY),
-        ));
+        let mut wt_style = Style::default().fg(theme::R_TEXT_SECONDARY);
+        if let Some(bg_color) = bg {
+            wt_style = wt_style.bg(bg_color);
+        }
+        spans.push(Span::styled(" ⎇".to_string(), wt_style));
     }
 
-    Line::from(spans)
+    pad_line(spans, width, bg)
+}
+
+/// Pad a line's spans to fill `width`, applying background color to the padding.
+fn pad_line(spans: Vec<Span<'static>>, width: u16, bg: Option<Color>) -> Line<'static> {
+    let content_width: usize = spans.iter().map(|s| s.content.chars().count()).sum();
+    let remaining = (width as usize).saturating_sub(content_width);
+    let mut all_spans = spans;
+    if remaining > 0 {
+        let mut pad_style = Style::default();
+        if let Some(bg_color) = bg {
+            pad_style = pad_style.bg(bg_color);
+        }
+        all_spans.push(Span::styled(" ".repeat(remaining), pad_style));
+    }
+    Line::from(all_spans)
 }
 
 fn render_right_panel(
@@ -459,6 +738,16 @@ fn render_status_bar(
                 .fg(theme::R_TEXT_TERTIARY)
                 .bg(theme::R_BG_RAISED),
         ),
+        Span::styled(
+            "  ",
+            Style::default().bg(theme::R_BG_RAISED),
+        ),
+        Span::styled(
+            "↑↓←→ navigate",
+            Style::default()
+                .fg(theme::R_TEXT_TERTIARY)
+                .bg(theme::R_BG_RAISED),
+        ),
     ];
 
     if let Some(ref msg) = *update_notice {
@@ -613,7 +902,8 @@ mod tests {
 
     #[test]
     fn tree_empty_repos_produces_no_lines() {
-        let lines = build_repo_tree_lines(&[]);
+        let sel = TreeSelection::default();
+        let lines = build_repo_tree_lines(&[], &sel, 80);
         assert!(lines.is_empty());
     }
 
@@ -627,7 +917,8 @@ mod tests {
             ],
             vec![],
         );
-        let lines = build_repo_tree_lines(&[repo]);
+        let sel = TreeSelection::default();
+        let lines = build_repo_tree_lines(&[repo], &sel, 80);
 
         // Should have: repo name + "Local Branches" header + 2 branch lines
         assert_eq!(lines.len(), 4);
@@ -648,7 +939,8 @@ mod tests {
             vec![make_branch("main", true, None, false)],
             vec![make_branch("origin/main", false, None, false)],
         );
-        let lines = build_repo_tree_lines(&[repo]);
+        let sel = TreeSelection::default();
+        let lines = build_repo_tree_lines(&[repo], &sel, 80);
 
         // repo name + local header + 1 local branch + remote header + 1 remote branch
         assert_eq!(lines.len(), 5);
@@ -670,7 +962,8 @@ mod tests {
             make_repo("alpha", vec![make_branch("main", true, None, false)], vec![]),
             make_repo("beta", vec![make_branch("main", true, None, false)], vec![]),
         ];
-        let lines = build_repo_tree_lines(&repos);
+        let sel = TreeSelection::default();
+        let lines = build_repo_tree_lines(&repos, &sel, 80);
 
         // alpha: name + header + branch = 3
         // blank line = 1
@@ -685,7 +978,7 @@ mod tests {
     #[test]
     fn format_branch_line_shows_agent_indicator() {
         let branch = make_branch("main", false, Some("abc123"), false);
-        let line = format_branch_line(&branch, "│", "├─");
+        let line = format_branch_line(&branch, "│", "├─", false, 80);
         let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
         assert!(text.contains("●"), "should have active agent indicator");
         assert!(text.contains("main"));
@@ -694,7 +987,7 @@ mod tests {
     #[test]
     fn format_branch_line_no_agent_indicator() {
         let branch = make_branch("main", false, None, false);
-        let line = format_branch_line(&branch, "│", "├─");
+        let line = format_branch_line(&branch, "│", "├─", false, 80);
         let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
         assert!(!text.contains("●"), "should not have agent indicator");
     }
@@ -702,7 +995,7 @@ mod tests {
     #[test]
     fn format_branch_line_shows_worktree_indicator() {
         let branch = make_branch("feature", false, None, true);
-        let line = format_branch_line(&branch, " ", "└─");
+        let line = format_branch_line(&branch, " ", "└─", false, 80);
         let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
         assert!(text.contains("⎇"), "should have worktree indicator");
     }
@@ -710,7 +1003,7 @@ mod tests {
     #[test]
     fn format_branch_line_no_worktree_indicator() {
         let branch = make_branch("feature", false, None, false);
-        let line = format_branch_line(&branch, " ", "└─");
+        let line = format_branch_line(&branch, " ", "└─", false, 80);
         let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
         assert!(!text.contains("⎇"), "should not have worktree indicator");
     }
@@ -718,10 +1011,219 @@ mod tests {
     #[test]
     fn format_branch_line_head_and_agent_and_worktree() {
         let branch = make_branch("main", true, Some("abc123"), true);
-        let line = format_branch_line(&branch, "│", "├─");
+        let line = format_branch_line(&branch, "│", "├─", false, 80);
         let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
         assert!(text.contains("●"), "agent indicator");
         assert!(text.contains("main"), "branch name");
         assert!(text.contains("⎇"), "worktree indicator");
+    }
+
+    // ── Tree selection state tests ──────────────────────────────
+
+    fn sample_repos() -> Vec<RepoInfo> {
+        vec![
+            make_repo(
+                "alpha",
+                vec![
+                    make_branch("main", true, None, false),
+                    make_branch("dev", false, None, false),
+                ],
+                vec![make_branch("origin/main", false, None, false)],
+            ),
+            make_repo(
+                "beta",
+                vec![make_branch("main", true, None, false)],
+                vec![],
+            ),
+        ]
+    }
+
+    #[test]
+    fn selection_default_is_repo_level() {
+        let sel = TreeSelection::default();
+        assert_eq!(sel.level, TreeLevel::Repo);
+        assert_eq!(sel.repo_idx, 0);
+    }
+
+    #[test]
+    fn selection_move_down_repos() {
+        let repos = sample_repos();
+        let mut sel = TreeSelection::default();
+        sel.move_down(&repos);
+        assert_eq!(sel.repo_idx, 1);
+        // Cannot go past last
+        sel.move_down(&repos);
+        assert_eq!(sel.repo_idx, 1);
+    }
+
+    #[test]
+    fn selection_move_up_repos() {
+        let repos = sample_repos();
+        let mut sel = TreeSelection::default();
+        // Already at 0, stays at 0
+        sel.move_up(&repos);
+        assert_eq!(sel.repo_idx, 0);
+    }
+
+    #[test]
+    fn selection_descend_to_category() {
+        let repos = sample_repos();
+        let mut sel = TreeSelection::default();
+        sel.descend(&repos);
+        assert_eq!(sel.level, TreeLevel::Category);
+        assert_eq!(sel.category_idx, 0); // first valid = local
+    }
+
+    #[test]
+    fn selection_descend_to_branch() {
+        let repos = sample_repos();
+        let mut sel = TreeSelection::default();
+        sel.descend(&repos); // -> Category
+        sel.descend(&repos); // -> Branch
+        assert_eq!(sel.level, TreeLevel::Branch);
+        assert_eq!(sel.branch_idx, 0);
+    }
+
+    #[test]
+    fn selection_ascend_round_trip() {
+        let repos = sample_repos();
+        let mut sel = TreeSelection::default();
+        sel.descend(&repos); // -> Category
+        sel.descend(&repos); // -> Branch
+        sel.ascend();        // -> Category
+        assert_eq!(sel.level, TreeLevel::Category);
+        sel.ascend();        // -> Repo
+        assert_eq!(sel.level, TreeLevel::Repo);
+        sel.ascend();        // no-op
+        assert_eq!(sel.level, TreeLevel::Repo);
+    }
+
+    #[test]
+    fn selection_category_up_down() {
+        let repos = sample_repos();
+        let mut sel = TreeSelection::default();
+        // alpha has both local (0) and remote (1)
+        sel.descend(&repos); // -> Category, idx 0
+        assert_eq!(sel.category_idx, 0);
+        sel.move_down(&repos);
+        assert_eq!(sel.category_idx, 1);
+        // Can't go past remote
+        sel.move_down(&repos);
+        assert_eq!(sel.category_idx, 1);
+        sel.move_up(&repos);
+        assert_eq!(sel.category_idx, 0);
+    }
+
+    #[test]
+    fn selection_branch_up_down() {
+        let repos = sample_repos();
+        let mut sel = TreeSelection::default();
+        sel.descend(&repos); // -> Category (local)
+        sel.descend(&repos); // -> Branch (0)
+        assert_eq!(sel.branch_idx, 0);
+        sel.move_down(&repos); // alpha has 2 local branches
+        assert_eq!(sel.branch_idx, 1);
+        sel.move_down(&repos); // saturates
+        assert_eq!(sel.branch_idx, 1);
+        sel.move_up(&repos);
+        assert_eq!(sel.branch_idx, 0);
+    }
+
+    #[test]
+    fn selection_descend_noop_on_empty_repos() {
+        let mut sel = TreeSelection::default();
+        sel.descend(&[]);
+        assert_eq!(sel.level, TreeLevel::Repo);
+    }
+
+    #[test]
+    fn selection_descend_skips_empty_category() {
+        // beta has only local branches
+        let repos = sample_repos();
+        let mut sel = TreeSelection { repo_idx: 1, ..TreeSelection::default() };
+        sel.descend(&repos); // -> Category
+        assert_eq!(sel.category_idx, 0); // only local exists
+        // Move down should be no-op (no remote)
+        sel.move_down(&repos);
+        assert_eq!(sel.category_idx, 0);
+    }
+
+    #[test]
+    fn selection_clamp_empty_repos() {
+        let mut sel = TreeSelection {
+            level: TreeLevel::Branch,
+            repo_idx: 5,
+            category_idx: 1,
+            branch_idx: 3,
+        };
+        sel.clamp(&[]);
+        assert_eq!(sel.level, TreeLevel::Repo);
+        assert_eq!(sel.repo_idx, 0);
+    }
+
+    #[test]
+    fn selection_clamp_shrinks_indices() {
+        let repos = sample_repos(); // 2 repos
+        let mut sel = TreeSelection {
+            level: TreeLevel::Repo,
+            repo_idx: 10,
+            category_idx: 0,
+            branch_idx: 0,
+        };
+        sel.clamp(&repos);
+        assert_eq!(sel.repo_idx, 1); // clamped to max valid
+    }
+
+    #[test]
+    fn selection_clamp_invalid_category_resets() {
+        let repos = sample_repos();
+        // beta (idx 1) has no remote branches
+        let mut sel = TreeSelection {
+            level: TreeLevel::Category,
+            repo_idx: 1,
+            category_idx: 1, // remote doesn't exist for beta
+            branch_idx: 0,
+        };
+        sel.clamp(&repos);
+        assert_eq!(sel.category_idx, 0); // falls back to local
+    }
+
+    #[test]
+    fn tree_selected_repo_shows_indicator() {
+        let repos = sample_repos();
+        let sel = TreeSelection::default(); // repo 0 selected
+        let lines = build_repo_tree_lines(&repos, &sel, 80);
+        let first = lines[0].spans.iter().map(|s| s.content.as_ref()).collect::<String>();
+        assert!(first.contains("▸"), "selected repo should have arrow indicator");
+    }
+
+    #[test]
+    fn tree_non_selected_repo_no_indicator() {
+        let repos = sample_repos();
+        let sel = TreeSelection::default(); // repo 0 selected, not repo 1
+        let lines = build_repo_tree_lines(&repos, &sel, 80);
+        // Find the beta repo line (after blank separator)
+        let beta_line = lines.iter().find(|l| {
+            let text: String = l.spans.iter().map(|s| s.content.as_ref()).collect();
+            text.contains("beta")
+        }).expect("should find beta line");
+        let text: String = beta_line.spans.iter().map(|s| s.content.as_ref()).collect();
+        assert!(!text.contains("▸"), "non-selected repo should not have arrow indicator");
+    }
+
+    #[test]
+    fn tree_selected_branch_shows_indicator() {
+        let repos = sample_repos();
+        let mut sel = TreeSelection::default();
+        sel.descend(&repos); // -> Category
+        sel.descend(&repos); // -> Branch 0 (main)
+        let lines = build_repo_tree_lines(&repos, &sel, 80);
+        // Branch line for "main" should have indicator
+        let main_line = lines.iter().find(|l| {
+            let text: String = l.spans.iter().map(|s| s.content.as_ref()).collect();
+            text.contains("main") && !text.contains("origin") && !text.contains("Branches")
+        }).expect("should find main branch line");
+        let text: String = main_line.spans.iter().map(|s| s.content.as_ref()).collect();
+        assert!(text.contains("▸"), "selected branch should have arrow indicator");
     }
 }
