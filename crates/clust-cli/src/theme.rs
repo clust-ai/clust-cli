@@ -19,6 +19,11 @@ pub const WARNING: &str = "\x1b[38;2;212;173;58m";  // #d4ad3a
 pub const INFO: &str = "\x1b[38;2;88;152;196m";     // #5898c4
 
 pub const RESET: &str = "\x1b[0m";
+pub const RESET_FG: &str = "\x1b[39m";
+pub const RESET_BG: &str = "\x1b[49m";
+
+// Backgrounds (ANSI)
+pub const BG_RAISED: &str = "\x1b[48;2;41;43;48m";  // #292b30
 
 // Ratatui colors (same Graphite palette)
 use ratatui::style::Color;
