@@ -59,7 +59,7 @@ pub struct AgentEntry {
     /// The client that most recently sent a resize or input event.
     pub active_client_id: Option<u64>,
     /// Monotonic counter for assigning unique client IDs.
-    next_client_id: AtomicU64,
+    pub(crate) next_client_id: AtomicU64,
     /// Git repository root path (if working_dir is inside a git repo).
     pub repo_path: Option<String>,
     /// Git branch the agent is working on.

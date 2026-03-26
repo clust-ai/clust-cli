@@ -590,4 +590,138 @@ mod tests {
         assert_eq!(line.spans[0].content, "│");
         assert_eq!(line.spans[1].content, "│");
     }
+
+    // ── Repository tree rendering tests ──────────────────────────
+
+    fn make_branch(name: &str, is_head: bool, agent_id: Option<&str>, is_worktree: bool) -> clust_ipc::BranchInfo {
+        clust_ipc::BranchInfo {
+            name: name.to_string(),
+            is_head,
+            active_agent_id: agent_id.map(|s| s.to_string()),
+            is_worktree,
+        }
+    }
+
+    fn make_repo(name: &str, local: Vec<clust_ipc::BranchInfo>, remote: Vec<clust_ipc::BranchInfo>) -> clust_ipc::RepoInfo {
+        clust_ipc::RepoInfo {
+            path: format!("/repos/{name}"),
+            name: name.to_string(),
+            local_branches: local,
+            remote_branches: remote,
+        }
+    }
+
+    #[test]
+    fn tree_empty_repos_produces_no_lines() {
+        let lines = build_repo_tree_lines(&[]);
+        assert!(lines.is_empty());
+    }
+
+    #[test]
+    fn tree_single_repo_with_local_branches() {
+        let repo = make_repo(
+            "myrepo",
+            vec![
+                make_branch("main", true, None, false),
+                make_branch("feature", false, None, false),
+            ],
+            vec![],
+        );
+        let lines = build_repo_tree_lines(&[repo]);
+
+        // Should have: repo name + "Local Branches" header + 2 branch lines
+        assert_eq!(lines.len(), 4);
+
+        // First line is repo name
+        let first = lines[0].spans.iter().map(|s| s.content.as_ref()).collect::<String>();
+        assert!(first.contains("myrepo"));
+
+        // Second line is section header
+        let second = lines[1].spans.iter().map(|s| s.content.as_ref()).collect::<String>();
+        assert!(second.contains("Local Branches"));
+    }
+
+    #[test]
+    fn tree_repo_with_local_and_remote() {
+        let repo = make_repo(
+            "myrepo",
+            vec![make_branch("main", true, None, false)],
+            vec![make_branch("origin/main", false, None, false)],
+        );
+        let lines = build_repo_tree_lines(&[repo]);
+
+        // repo name + local header + 1 local branch + remote header + 1 remote branch
+        assert_eq!(lines.len(), 5);
+
+        let texts: Vec<String> = lines.iter().map(|l| {
+            l.spans.iter().map(|s| s.content.as_ref()).collect::<String>()
+        }).collect();
+
+        assert!(texts[0].contains("myrepo"));
+        assert!(texts[1].contains("Local Branches"));
+        assert!(texts[2].contains("main"));
+        assert!(texts[3].contains("Remote Branches"));
+        assert!(texts[4].contains("origin/main"));
+    }
+
+    #[test]
+    fn tree_multiple_repos_separated_by_blank_line() {
+        let repos = vec![
+            make_repo("alpha", vec![make_branch("main", true, None, false)], vec![]),
+            make_repo("beta", vec![make_branch("main", true, None, false)], vec![]),
+        ];
+        let lines = build_repo_tree_lines(&repos);
+
+        // alpha: name + header + branch = 3
+        // blank line = 1
+        // beta: name + header + branch = 3
+        assert_eq!(lines.len(), 7);
+
+        // Line 3 (index 3) should be the blank separator
+        let blank = lines[3].spans.iter().map(|s| s.content.as_ref()).collect::<String>();
+        assert!(blank.trim().is_empty());
+    }
+
+    #[test]
+    fn format_branch_line_shows_agent_indicator() {
+        let branch = make_branch("main", false, Some("abc123"), false);
+        let line = format_branch_line(&branch, "│", "├─");
+        let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+        assert!(text.contains("●"), "should have active agent indicator");
+        assert!(text.contains("main"));
+    }
+
+    #[test]
+    fn format_branch_line_no_agent_indicator() {
+        let branch = make_branch("main", false, None, false);
+        let line = format_branch_line(&branch, "│", "├─");
+        let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+        assert!(!text.contains("●"), "should not have agent indicator");
+    }
+
+    #[test]
+    fn format_branch_line_shows_worktree_indicator() {
+        let branch = make_branch("feature", false, None, true);
+        let line = format_branch_line(&branch, " ", "└─");
+        let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+        assert!(text.contains("⎇"), "should have worktree indicator");
+    }
+
+    #[test]
+    fn format_branch_line_no_worktree_indicator() {
+        let branch = make_branch("feature", false, None, false);
+        let line = format_branch_line(&branch, " ", "└─");
+        let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+        assert!(!text.contains("⎇"), "should not have worktree indicator");
+    }
+
+    #[test]
+    fn format_branch_line_head_and_agent_and_worktree() {
+        let branch = make_branch("main", true, Some("abc123"), true);
+        let line = format_branch_line(&branch, "│", "├─");
+        let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+        assert!(text.contains("●"), "agent indicator");
+        assert!(text.contains("main"), "branch name");
+        assert!(text.contains("⎇"), "worktree indicator");
+    }
 }
