@@ -1,4 +1,5 @@
 mod cli;
+mod format;
 mod ipc;
 mod output_filter;
 mod pool_launcher;
@@ -7,11 +8,11 @@ mod theme;
 mod ui;
 mod version;
 
-use chrono::{DateTime, Local, Utc};
 use clap::Parser;
 use std::io::{self, Write};
 
 use clust_ipc::{CliMessage, PoolMessage};
+use format::{format_attached, format_started};
 
 const SPINNER: &[char] = &['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
 
@@ -37,6 +38,24 @@ fn print_logo() {
 async fn main() {
     let args = cli::Cli::parse();
 
+    // Validate pool name if provided on top-level flag
+    if let Some(ref p) = args.pool {
+        if let Err(e) = cli::validate_pool_name(p) {
+            eprintln!(
+                "\n  {}✘{} {}invalid pool name: {e}{}\n",
+                theme::ERROR,
+                theme::RESET,
+                theme::TEXT_PRIMARY,
+                theme::RESET,
+            );
+            std::process::exit(1);
+        }
+    }
+    let pool_name = args
+        .pool
+        .clone()
+        .unwrap_or_else(|| clust_ipc::DEFAULT_POOL.into());
+
     // Subcommand: ui (also triggered by `clust .`)
     if matches!(args.command, Some(cli::Commands::Ui)) || args.prompt.as_deref() == Some(".") {
         if let Err(e) = ui::run() {
@@ -47,8 +66,21 @@ async fn main() {
     }
 
     // Subcommand: ls
-    if let Some(cli::Commands::Ls { select }) = args.command {
-        handle_ls(select).await;
+    if let Some(cli::Commands::Ls { select, pool }) = args.command {
+        // Validate pool filter if provided
+        if let Some(ref p) = pool {
+            if let Err(e) = cli::validate_pool_name(p) {
+                eprintln!(
+                    "\n  {}✘{} {}invalid pool name: {e}{}\n",
+                    theme::ERROR,
+                    theme::RESET,
+                    theme::TEXT_PRIMARY,
+                    theme::RESET,
+                );
+                std::process::exit(1);
+            }
+        }
+        handle_ls(select, pool).await;
         return;
     }
 
@@ -105,7 +137,7 @@ async fn main() {
     }
 
     // Default: start an agent and attach (or -b for background)
-    handle_start(args.prompt, args.background, args.accept_edits, args.use_agent).await;
+    handle_start(args.prompt, args.background, args.accept_edits, args.use_agent, pool_name).await;
 }
 
 /// Check if a default agent is configured. If not, show the first-run picker.
@@ -187,6 +219,7 @@ async fn handle_start(
     background: bool,
     accept_edits: bool,
     use_agent: Option<String>,
+    pool: String,
 ) {
     // If --use was provided, use that agent directly; otherwise check/prompt for default
     let agent_binary = if let Some(agent) = use_agent {
@@ -248,6 +281,7 @@ async fn handle_start(
             cols: term_cols,
             rows: agent_rows,
             accept_edits,
+            pool,
         },
     )
     .await
@@ -389,9 +423,9 @@ async fn handle_attach(id: String) {
 }
 
 /// List all running agents, or open interactive selector with `--select`.
-async fn handle_ls(select: bool) {
+async fn handle_ls(select: bool, pool: Option<String>) {
     if select {
-        handle_select().await;
+        handle_select(pool).await;
         return;
     }
 
@@ -410,18 +444,23 @@ async fn handle_ls(select: bool) {
         }
     };
 
-    clust_ipc::send_message(&mut stream, &CliMessage::ListAgents)
-        .await
-        .unwrap_or_else(|e| {
-            eprintln!(
-                "\n  {}✘{} {}failed to send list: {e}{}\n",
-                theme::ERROR,
-                theme::RESET,
-                theme::TEXT_PRIMARY,
-                theme::RESET,
-            );
-            std::process::exit(1);
-        });
+    clust_ipc::send_message(
+        &mut stream,
+        &CliMessage::ListAgents {
+            pool: pool.clone(),
+        },
+    )
+    .await
+    .unwrap_or_else(|e| {
+        eprintln!(
+            "\n  {}✘{} {}failed to send list: {e}{}\n",
+            theme::ERROR,
+            theme::RESET,
+            theme::TEXT_PRIMARY,
+            theme::RESET,
+        );
+        std::process::exit(1);
+    });
 
     let response: PoolMessage =
         clust_ipc::recv_message(&mut stream)
@@ -438,46 +477,33 @@ async fn handle_ls(select: bool) {
             });
 
     match response {
-        PoolMessage::AgentList { agents } => {
+        PoolMessage::AgentList { mut agents } => {
             println!();
             if agents.is_empty() {
                 println!(
                     "  {}no running agents{}",
                     theme::TEXT_SECONDARY, theme::RESET,
                 );
+            } else if pool.is_some() {
+                // Filtered to a single pool — flat display, no header
+                print_agent_table(&agents);
             } else {
-                // Header
-                println!(
-                    "  {}{:<8} {:<12} {:<10} {:<14} {}{}",
-                    theme::TEXT_TERTIARY,
-                    "ID",
-                    "AGENT",
-                    "STATUS",
-                    "STARTED",
-                    "ATTACHED",
-                    theme::RESET,
-                );
+                // All pools — group by pool name
+                agents.sort_by(|a, b| a.pool.cmp(&b.pool).then(a.started_at.cmp(&b.started_at)));
+                let mut current_pool: Option<&str> = None;
                 for agent in &agents {
-                    let started = format_started(&agent.started_at);
-                    let attached = format_attached(agent.attached_clients);
-                    println!(
-                        "  {}{:<8}{} {}{:<12}{} {}{:<10}{} {}{:<14}{} {}{}{}",
-                        theme::ACCENT,
-                        agent.id,
-                        theme::RESET,
-                        theme::TEXT_PRIMARY,
-                        agent.agent_binary,
-                        theme::RESET,
-                        theme::SUCCESS,
-                        "running",
-                        theme::RESET,
-                        theme::TEXT_SECONDARY,
-                        started,
-                        theme::RESET,
-                        theme::TEXT_SECONDARY,
-                        attached,
-                        theme::RESET,
-                    );
+                    if current_pool != Some(&agent.pool) {
+                        if current_pool.is_some() {
+                            println!(); // blank line between pools
+                        }
+                        println!(
+                            "  {}{}{}",
+                            theme::ACCENT, agent.pool, theme::RESET,
+                        );
+                        print_agent_header();
+                        current_pool = Some(&agent.pool);
+                    }
+                    print_agent_row(agent);
                 }
             }
             println!();
@@ -496,26 +522,46 @@ async fn handle_ls(select: bool) {
     }
 }
 
-/// Format an attachment count into a human-readable string.
-fn format_attached(count: usize) -> String {
-    if count == 1 {
-        "1 terminal".to_string()
-    } else {
-        format!("{count} terminals")
-    }
+fn print_agent_header() {
+    println!(
+        "  {}{:<8} {:<12} {:<10} {:<14} {}{}",
+        theme::TEXT_TERTIARY,
+        "ID",
+        "AGENT",
+        "STATUS",
+        "STARTED",
+        "ATTACHED",
+        theme::RESET,
+    );
 }
 
-/// Format an RFC 3339 timestamp into a human-readable relative time string.
-fn format_started(rfc3339: &str) -> String {
-    let Ok(dt) = rfc3339.parse::<DateTime<Utc>>() else {
-        return rfc3339.to_string();
-    };
-    let local = dt.with_timezone(&Local);
-    let now = Local::now();
-    if local.date_naive() == now.date_naive() {
-        local.format("%H:%M").to_string()
-    } else {
-        local.format("%b %d %H:%M").to_string()
+fn print_agent_row(agent: &clust_ipc::AgentInfo) {
+    let started = format_started(&agent.started_at);
+    let attached = format_attached(agent.attached_clients);
+    println!(
+        "  {}{:<8}{} {}{:<12}{} {}{:<10}{} {}{:<14}{} {}{}{}",
+        theme::ACCENT,
+        agent.id,
+        theme::RESET,
+        theme::TEXT_PRIMARY,
+        agent.agent_binary,
+        theme::RESET,
+        theme::SUCCESS,
+        "running",
+        theme::RESET,
+        theme::TEXT_SECONDARY,
+        started,
+        theme::RESET,
+        theme::TEXT_SECONDARY,
+        attached,
+        theme::RESET,
+    );
+}
+
+fn print_agent_table(agents: &[clust_ipc::AgentInfo]) {
+    print_agent_header();
+    for agent in agents {
+        print_agent_row(agent);
     }
 }
 
@@ -549,13 +595,18 @@ impl Drop for RawModeGuard {
 }
 
 /// Interactive agent selector.
-async fn handle_select() {
+async fn handle_select(pool: Option<String>) {
     // Fetch agent list (pool might not be running)
     let agents = match ipc::try_connect().await {
         Ok(mut stream) => {
-            if clust_ipc::send_message(&mut stream, &CliMessage::ListAgents)
-                .await
-                .is_err()
+            if clust_ipc::send_message(
+                &mut stream,
+                &CliMessage::ListAgents {
+                    pool: pool.clone(),
+                },
+            )
+            .await
+            .is_err()
             {
                 vec![]
             } else {
@@ -573,7 +624,10 @@ async fn handle_select() {
     match action {
         SelectAction::Cancel => {}
         SelectAction::Attach(id) => handle_attach(id).await,
-        SelectAction::NewAgent => handle_start(None, false, false, None).await,
+        SelectAction::NewAgent => {
+            let pool_name = pool.unwrap_or_else(|| clust_ipc::DEFAULT_POOL.into());
+            handle_start(None, false, false, None, pool_name).await;
+        }
     }
 }
 

@@ -24,6 +24,7 @@ async fn spawn_agent_echo_produces_output() {
             80,
             24,
             false,
+            clust_ipc::DEFAULT_POOL.into(),
             state.clone(),
         )
         .expect("spawn_agent should succeed")
@@ -90,6 +91,7 @@ async fn spawn_agent_cat_receives_input_and_echoes() {
             80,
             24,
             false,
+            clust_ipc::DEFAULT_POOL.into(),
             state.clone(),
         )
         .expect("spawn_agent should succeed")
@@ -164,6 +166,7 @@ async fn multiple_subscribers_receive_same_output() {
             80,
             24,
             false,
+            clust_ipc::DEFAULT_POOL.into(),
             state.clone(),
         )
         .expect("spawn_agent should succeed")
@@ -229,6 +232,7 @@ async fn attached_count_tracks_subscribers() {
             80,
             24,
             false,
+            clust_ipc::DEFAULT_POOL.into(),
             state.clone(),
         )
         .expect("spawn_agent should succeed")
@@ -273,6 +277,7 @@ async fn stop_agent_terminates_running_process() {
             80,
             24,
             false,
+            clust_ipc::DEFAULT_POOL.into(),
             state.clone(),
         )
         .expect("spawn_agent should succeed")
@@ -338,6 +343,7 @@ async fn resize_agent_pty() {
             80,
             24,
             false,
+            clust_ipc::DEFAULT_POOL.into(),
             state.clone(),
         )
         .expect("spawn_agent should succeed")

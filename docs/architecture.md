@@ -86,12 +86,12 @@ Candidate serialization: **MessagePack** via `rmp-serde` (compact, fast, schema-
 
 ```
 CLI -> Pool:
-  StartAgent { prompt: Option<String>, agent_binary: Option<String>, working_dir: String, cols: u16, rows: u16, accept_edits: bool }
+  StartAgent { prompt: Option<String>, agent_binary: Option<String>, working_dir: String, cols: u16, rows: u16, accept_edits: bool, pool: String }
   AttachAgent { id: String }
   DetachAgent { id: String }
   AgentInput { id: String, data: Vec<u8> }
   ResizeAgent { id: String, cols: u16, rows: u16 }
-  ListAgents
+  ListAgents { pool: Option<String> }
   StopPool
   StopAgent { id: String }
   SetDefault { agent_binary: String }

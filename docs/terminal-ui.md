@@ -76,6 +76,15 @@ No terminal takeover. The CLI:
 
 A full terminal UI (TUI) built with `ratatui` + `crossterm`.
 
+### Layout
+
+The dashboard has two panels:
+
+- **Left panel (40%):** Shows pool names with agent counts. Displays "No agents running" when empty.
+- **Right panel (60%):** Shows agent cards grouped by pool name with section headers. Displays the CLUST logo when no agents are running.
+
+Agent cards show: ID, binary name, status, start time, and attached terminal count.
+
 ### Auto-connect
 
 On startup, `clust ui` automatically connects to the pool daemon, starting it if not already running. The bottom status bar shows connection status.

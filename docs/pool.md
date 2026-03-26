@@ -47,6 +47,33 @@ Since the pool is ephemeral (no state survives restart):
 - On next startup, the pool removes any existing socket file before binding
 - Running agents are lost on pool crash (they were children of the pool process)
 
+## Pools
+
+Pools are logical groupings of agents within the single `clust-pool` process. They are **not** separate daemon instances.
+
+- **Default pool:** `default_pool` — all agents spawn here unless `-p` is specified
+- **Naming convention:** snake_case (`^[a-z][a-z0-9]*(_[a-z0-9]+)*$`) — must start with a lowercase letter, no trailing or consecutive underscores
+- **Lifecycle:** implicit — a pool exists as long as at least one agent references it; empty pools disappear from listings
+- **No creation command:** pools are created on first use when an agent is assigned to one
+
+### Usage
+
+```bash
+# Start agent in default pool
+clust "fix the bug"
+
+# Start agent in a named pool
+clust -p my_feature "fix the bug"
+
+# List all agents grouped by pool
+clust ls
+
+# List only agents in a specific pool
+clust ls -p my_feature
+```
+
+The TUI (`clust ui`) shows pool names in the left sidebar and groups agent cards by pool in the main panel.
+
 ## Agent Management
 
 ### Spawning an Agent
@@ -99,6 +126,7 @@ struct AgentEntry {
     agent_binary: String,     // e.g., "claude"
     started_at: String,       // RFC 3339 timestamp
     working_dir: String,
+    pool: String,             // e.g., "default_pool"
     pty_master: Box<dyn MasterPty + Send>,
     pty_writer: Box<dyn Write + Send>,
     output_tx: broadcast::Sender<AgentEvent>,
