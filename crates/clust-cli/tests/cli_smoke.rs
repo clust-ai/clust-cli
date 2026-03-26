@@ -88,3 +88,23 @@ fn invalid_pool_name_on_ls_exits_nonzero() {
         .failure()
         .stderr(predicate::str::contains("invalid pool name"));
 }
+
+#[test]
+fn repo_help_shows_remove_flag() {
+    Command::cargo_bin("clust")
+        .unwrap()
+        .args(["repo", "--help"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("--remove"));
+}
+
+#[test]
+fn repo_help_shows_stop_flag() {
+    Command::cargo_bin("clust")
+        .unwrap()
+        .args(["repo", "--help"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("--stop"));
+}

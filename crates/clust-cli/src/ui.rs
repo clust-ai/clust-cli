@@ -1,9 +1,10 @@
+use std::collections::HashMap;
 use std::io;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use crossterm::{
-    event::{self, Event, KeyCode, KeyEventKind},
+    event::{self, Event, KeyCode, KeyEventKind, KeyModifiers},
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
     ExecutableCommand,
 };
@@ -42,12 +43,151 @@ enum TreeLevel {
     Branch,   // Level 2: selecting a branch within a category
 }
 
+/// Which panel currently has keyboard focus.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum FocusPanel {
+    Left,
+    Right,
+}
+
+/// Active tab in the top-level tab bar.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum ActiveTab {
+    Repositories,
+    Overview,
+    FocusMode,
+}
+
+impl ActiveTab {
+    fn next(self) -> Self {
+        match self {
+            Self::Repositories => Self::Overview,
+            Self::Overview => Self::FocusMode,
+            Self::FocusMode => Self::Repositories,
+        }
+    }
+
+    fn prev(self) -> Self {
+        match self {
+            Self::Repositories => Self::FocusMode,
+            Self::Overview => Self::Repositories,
+            Self::FocusMode => Self::Overview,
+        }
+    }
+
+    fn label(&self) -> &'static str {
+        match self {
+            Self::Repositories => "Repositories",
+            Self::Overview => "Overview",
+            Self::FocusMode => "Focus",
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Agent selection state (right panel)
+// ---------------------------------------------------------------------------
+
+/// Returns sorted, deduplicated pool names from an agent list.
+fn pool_names(agents: &[AgentInfo]) -> Vec<String> {
+    let mut names: Vec<String> = agents.iter().map(|a| a.pool.clone()).collect();
+    names.sort();
+    names.dedup();
+    names
+}
+
+/// Tracks the user's cursor position within the agent panel (pool + agent).
+struct AgentSelection {
+    pool_idx: usize,
+    agent_idx: usize,
+}
+
+impl Default for AgentSelection {
+    fn default() -> Self {
+        Self {
+            pool_idx: 0,
+            agent_idx: 0,
+        }
+    }
+}
+
+impl AgentSelection {
+    /// Returns the number of agents in the currently selected pool.
+    fn agent_count(&self, agents: &[AgentInfo]) -> usize {
+        let names = pool_names(agents);
+        names
+            .get(self.pool_idx)
+            .map(|pool| agents.iter().filter(|a| &a.pool == pool).count())
+            .unwrap_or(0)
+    }
+
+    /// Adjust indices to stay within bounds after data refresh.
+    fn clamp(&mut self, agents: &[AgentInfo]) {
+        let names = pool_names(agents);
+        if names.is_empty() {
+            self.pool_idx = 0;
+            self.agent_idx = 0;
+            return;
+        }
+        self.pool_idx = self.pool_idx.min(names.len() - 1);
+        let ac = self.agent_count(agents);
+        if ac > 0 {
+            self.agent_idx = self.agent_idx.min(ac - 1);
+        } else {
+            self.agent_idx = 0;
+        }
+    }
+
+    fn move_up(&mut self, agents: &[AgentInfo]) {
+        if pool_names(agents).is_empty() {
+            return;
+        }
+        self.agent_idx = self.agent_idx.saturating_sub(1);
+    }
+
+    fn move_down(&mut self, agents: &[AgentInfo]) {
+        let ac = self.agent_count(agents);
+        if ac > 0 {
+            self.agent_idx = (self.agent_idx + 1).min(ac - 1);
+        }
+    }
+
+    fn prev_pool(&mut self, agents: &[AgentInfo]) {
+        if pool_names(agents).is_empty() {
+            return;
+        }
+        if self.pool_idx > 0 {
+            self.pool_idx -= 1;
+            self.agent_idx = 0;
+        }
+    }
+
+    fn next_pool(&mut self, agents: &[AgentInfo]) {
+        let names = pool_names(agents);
+        if names.is_empty() {
+            return;
+        }
+        if self.pool_idx + 1 < names.len() {
+            self.pool_idx += 1;
+            self.agent_idx = 0;
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Tree selection state (left panel)
+// ---------------------------------------------------------------------------
+
 /// Tracks the user's cursor position within the three-level repo tree.
 struct TreeSelection {
     level: TreeLevel,
     repo_idx: usize,
     category_idx: usize, // 0 = Local, 1 = Remote
     branch_idx: usize,
+    /// Collapsed state per repo index.
+    repo_collapsed: HashMap<usize, bool>,
+    /// Collapsed state per (repo_idx, category_idx).
+    category_collapsed: HashMap<(usize, usize), bool>,
 }
 
 impl Default for TreeSelection {
@@ -57,6 +197,8 @@ impl Default for TreeSelection {
             repo_idx: 0,
             category_idx: 0,
             branch_idx: 0,
+            repo_collapsed: HashMap::new(),
+            category_collapsed: HashMap::new(),
         }
     }
 }
@@ -166,22 +308,32 @@ impl TreeSelection {
         }
     }
 
-    /// Right arrow: descend one level deeper.
+    /// Right arrow: descend one level deeper, or expand if collapsed.
     fn descend(&mut self, repos: &[RepoInfo]) {
         if repos.is_empty() {
             return;
         }
         match self.level {
             TreeLevel::Repo => {
-                let cats = self.visible_categories(repos);
-                if !cats.is_empty() {
-                    self.level = TreeLevel::Category;
-                    self.category_idx = cats[0];
-                    self.branch_idx = 0;
+                if self.is_repo_collapsed(self.repo_idx) {
+                    // Expand, don't descend
+                    self.repo_collapsed.insert(self.repo_idx, false);
+                } else {
+                    let cats = self.visible_categories(repos);
+                    if !cats.is_empty() {
+                        self.level = TreeLevel::Category;
+                        self.category_idx = cats[0];
+                        self.branch_idx = 0;
+                    }
                 }
             }
             TreeLevel::Category => {
-                if self.branch_count(repos) > 0 {
+                if self.is_category_collapsed(self.repo_idx, self.category_idx) {
+                    self.category_collapsed.insert(
+                        (self.repo_idx, self.category_idx),
+                        false,
+                    );
+                } else if self.branch_count(repos) > 0 {
                     self.level = TreeLevel::Branch;
                     self.branch_idx = 0;
                 }
@@ -190,13 +342,51 @@ impl TreeSelection {
         }
     }
 
-    /// Left arrow: ascend one level (preserves indices for re-entry).
+    /// Left arrow: collapse if expanded, or ascend if already collapsed/at top.
     fn ascend(&mut self) {
         match self.level {
-            TreeLevel::Repo => {}   // already at top
-            TreeLevel::Category => self.level = TreeLevel::Repo,
+            TreeLevel::Repo => {
+                // Collapse if expanded
+                if !self.is_repo_collapsed(self.repo_idx) {
+                    self.repo_collapsed.insert(self.repo_idx, true);
+                }
+            }
+            TreeLevel::Category => {
+                if !self.is_category_collapsed(self.repo_idx, self.category_idx) {
+                    self.category_collapsed.insert(
+                        (self.repo_idx, self.category_idx),
+                        true,
+                    );
+                } else {
+                    self.level = TreeLevel::Repo;
+                }
+            }
             TreeLevel::Branch => self.level = TreeLevel::Category,
         }
+    }
+
+    /// Toggle collapse state at the current level.
+    fn toggle_collapse(&mut self) {
+        match self.level {
+            TreeLevel::Repo => {
+                let entry = self.repo_collapsed.entry(self.repo_idx).or_insert(false);
+                *entry = !*entry;
+            }
+            TreeLevel::Category => {
+                let key = (self.repo_idx, self.category_idx);
+                let entry = self.category_collapsed.entry(key).or_insert(false);
+                *entry = !*entry;
+            }
+            TreeLevel::Branch => {} // leaf nodes, no collapse
+        }
+    }
+
+    fn is_repo_collapsed(&self, repo_idx: usize) -> bool {
+        *self.repo_collapsed.get(&repo_idx).unwrap_or(&false)
+    }
+
+    fn is_category_collapsed(&self, repo_idx: usize, cat_idx: usize) -> bool {
+        *self.category_collapsed.get(&(repo_idx, cat_idx)).unwrap_or(&false)
     }
 }
 
@@ -228,6 +418,9 @@ pub fn run(pool_name: &str) -> io::Result<()> {
     let mut agents: Vec<AgentInfo> = Vec::new();
     let mut repos: Vec<RepoInfo> = Vec::new();
     let mut selection = TreeSelection::default();
+    let mut focus = FocusPanel::Left;
+    let mut agent_selection = AgentSelection::default();
+    let mut active_tab = ActiveTab::Repositories;
     let mut last_agent_fetch = Instant::now() - Duration::from_secs(10);
     let mut last_repo_fetch = Instant::now() - Duration::from_secs(10);
 
@@ -238,6 +431,7 @@ pub fn run(pool_name: &str) -> io::Result<()> {
         // Periodically fetch agent list and repo state from pool
         if pool_running && last_agent_fetch.elapsed() >= AGENT_FETCH_INTERVAL {
             agents = fetch_agents();
+            agent_selection.clamp(&agents);
             last_agent_fetch = Instant::now();
         }
         if pool_running && last_repo_fetch.elapsed() >= AGENT_FETCH_INTERVAL {
@@ -248,26 +442,46 @@ pub fn run(pool_name: &str) -> io::Result<()> {
 
         let pool_status = pool_running;
         let notice = update_notice.lock().unwrap().clone();
+        let cur_focus = focus;
+        let cur_tab = active_tab;
 
         terminal.draw(|frame| {
             let area = frame.area();
 
-            // Top-level: content area + status bar
-            let [content_area, status_area] =
-                Layout::vertical([Constraint::Min(0), Constraint::Length(1)]).areas(area);
-
-            // Content: left (40%) + divider (1 col) + right (60%)
-            let [left_area, divider_area, right_area] =
-                Layout::horizontal([
-                    Constraint::Percentage(40),
+            // Top-level: tab bar + content area + status bar
+            let [tab_bar_area, content_area, status_area] =
+                Layout::vertical([
                     Constraint::Length(1),
-                    Constraint::Percentage(60),
+                    Constraint::Min(0),
+                    Constraint::Length(1),
                 ])
-                .areas(content_area);
+                .areas(area);
 
-            render_left_panel(frame, left_area, &repos, &selection);
-            render_divider(frame, divider_area);
-            render_right_panel(frame, right_area, &agents);
+            render_tab_bar(frame, tab_bar_area, cur_tab);
+
+            match cur_tab {
+                ActiveTab::Repositories => {
+                    // Content: left (40%) + divider (1 col) + right (60%)
+                    let [left_area, divider_area, right_area] =
+                        Layout::horizontal([
+                            Constraint::Percentage(40),
+                            Constraint::Length(1),
+                            Constraint::Percentage(60),
+                        ])
+                        .areas(content_area);
+
+                    render_left_panel(frame, left_area, &repos, &selection, cur_focus == FocusPanel::Left);
+                    render_divider(frame, divider_area);
+                    render_right_panel(frame, right_area, &agents, &agent_selection, cur_focus == FocusPanel::Right);
+                }
+                ActiveTab::Overview => {
+                    render_placeholder(frame, content_area, "Overview - coming soon");
+                }
+                ActiveTab::FocusMode => {
+                    render_placeholder(frame, content_area, "Focus mode - coming soon");
+                }
+            }
+
             render_status_bar(frame, status_area, pool_status, &notice, pool_name);
         })?;
 
@@ -290,10 +504,47 @@ pub fn run(pool_name: &str) -> io::Result<()> {
                             pool_stopped = true;
                             break;
                         }
-                        KeyCode::Up => selection.move_up(&repos),
-                        KeyCode::Down => selection.move_down(&repos),
-                        KeyCode::Right => selection.descend(&repos),
-                        KeyCode::Left => selection.ascend(),
+                        // Tab switching (works on all tabs)
+                        KeyCode::Tab => {
+                            active_tab = active_tab.next();
+                        }
+                        KeyCode::BackTab => {
+                            active_tab = active_tab.prev();
+                        }
+                        // Repositories tab navigation
+                        _ if active_tab == ActiveTab::Repositories => match key.code {
+                            // Shift+Arrow: switch panel focus
+                            KeyCode::Left if key.modifiers.contains(KeyModifiers::SHIFT) => {
+                                focus = FocusPanel::Left;
+                            }
+                            KeyCode::Right if key.modifiers.contains(KeyModifiers::SHIFT) => {
+                                focus = FocusPanel::Right;
+                            }
+                            // Toggle collapse (left panel only)
+                            KeyCode::Enter => {
+                                if focus == FocusPanel::Left {
+                                    selection.toggle_collapse();
+                                }
+                            }
+                            // Panel-specific navigation
+                            KeyCode::Up => match focus {
+                                FocusPanel::Left => selection.move_up(&repos),
+                                FocusPanel::Right => agent_selection.move_up(&agents),
+                            },
+                            KeyCode::Down => match focus {
+                                FocusPanel::Left => selection.move_down(&repos),
+                                FocusPanel::Right => agent_selection.move_down(&agents),
+                            },
+                            KeyCode::Right => match focus {
+                                FocusPanel::Left => selection.descend(&repos),
+                                FocusPanel::Right => agent_selection.next_pool(&agents),
+                            },
+                            KeyCode::Left => match focus {
+                                FocusPanel::Left => selection.ascend(),
+                                FocusPanel::Right => agent_selection.prev_pool(&agents),
+                            },
+                            _ => {}
+                        }
                         _ => {}
                     }
                 }
@@ -324,6 +575,64 @@ pub fn run(pool_name: &str) -> io::Result<()> {
 // Rendering functions
 // ---------------------------------------------------------------------------
 
+fn render_tab_bar(frame: &mut Frame, area: Rect, active_tab: ActiveTab) {
+    let tabs = [ActiveTab::Repositories, ActiveTab::Overview, ActiveTab::FocusMode];
+    let mut spans = Vec::new();
+
+    spans.push(Span::styled(" ", Style::default().bg(theme::R_BG_RAISED)));
+
+    for (i, tab) in tabs.iter().enumerate() {
+        if i > 0 {
+            spans.push(Span::styled(
+                " │ ",
+                Style::default().fg(theme::R_TEXT_TERTIARY).bg(theme::R_BG_RAISED),
+            ));
+        }
+
+        let (fg, bg) = if *tab == active_tab {
+            (theme::R_ACCENT_BRIGHT, theme::R_BG_OVERLAY)
+        } else {
+            (theme::R_TEXT_SECONDARY, theme::R_BG_RAISED)
+        };
+
+        spans.push(Span::styled(
+            format!(" {} ", tab.label()),
+            Style::default().fg(fg).bg(bg),
+        ));
+    }
+
+    // Fill remaining width with background
+    let content_width: usize = spans.iter().map(|s| s.content.chars().count()).sum();
+    let remaining = (area.width as usize).saturating_sub(content_width);
+    if remaining > 0 {
+        spans.push(Span::styled(
+            " ".repeat(remaining),
+            Style::default().bg(theme::R_BG_RAISED),
+        ));
+    }
+
+    frame.render_widget(Paragraph::new(Line::from(spans)), area);
+}
+
+fn render_placeholder(frame: &mut Frame, area: Rect, message: &str) {
+    frame.render_widget(
+        Block::default().style(Style::default().bg(theme::R_BG_BASE)),
+        area,
+    );
+
+    let text = Paragraph::new(Line::from(Span::styled(
+        message.to_string(),
+        Style::default().fg(theme::R_TEXT_TERTIARY),
+    )))
+    .alignment(Alignment::Center);
+
+    let [centered] = Layout::vertical([Constraint::Length(1)])
+        .flex(Flex::Center)
+        .areas(area);
+
+    frame.render_widget(text, centered);
+}
+
 fn render_divider(frame: &mut Frame, area: Rect) {
     frame.render_widget(
         Block::default().style(Style::default().bg(theme::R_BG_RAISED)),
@@ -336,6 +645,7 @@ fn render_left_panel(
     area: Rect,
     repos: &[RepoInfo],
     selection: &TreeSelection,
+    focused: bool,
 ) {
     let block = Block::default()
         .style(Style::default().bg(theme::R_BG_SURFACE))
@@ -357,10 +667,15 @@ fn render_left_panel(
 
         frame.render_widget(text, centered);
     } else {
+        let header_color = if focused {
+            theme::R_ACCENT_BRIGHT
+        } else {
+            theme::R_TEXT_PRIMARY
+        };
         let mut lines = vec![
             Line::from(Span::styled(
                 "Repositories",
-                Style::default().fg(theme::R_TEXT_PRIMARY),
+                Style::default().fg(header_color),
             )),
             Line::from(""),
         ];
@@ -381,25 +696,37 @@ fn build_repo_tree_lines(
         let is_this_repo = repo_idx == selection.repo_idx;
         let repo_selected = is_this_repo && selection.level == TreeLevel::Repo;
         let repo_open = is_this_repo && selection.level != TreeLevel::Repo;
+        let repo_collapsed = selection.is_repo_collapsed(repo_idx);
 
-        // Repo name header
-        let (indicator, name_color, bg) = if repo_selected {
-            ("▸ ", theme::R_ACCENT_BRIGHT, Some(theme::R_BG_HOVER))
+        // Repo name header with collapse chevron
+        let chevron = if repo_collapsed { "▸" } else { "▾" };
+        let (name_color, bg) = if repo_selected {
+            (theme::R_ACCENT_BRIGHT, Some(theme::R_BG_HOVER))
         } else if repo_open {
-            ("▸ ", theme::R_ACCENT_DIM, None)
+            (theme::R_ACCENT_DIM, None)
         } else {
-            ("  ", theme::R_ACCENT, None)
+            (theme::R_ACCENT, None)
         };
 
-        let text = format!(" {indicator}{}", repo.name);
+        let text = format!(" {chevron} {}", repo.name);
         let mut style = Style::default().fg(name_color);
         if let Some(bg_color) = bg {
             style = style.bg(bg_color);
         }
         lines.push(pad_line(vec![Span::styled(text, style)], width, bg));
 
+        // Skip children if repo is collapsed
+        if repo_collapsed {
+            if repo_idx < repos.len() - 1 {
+                lines.push(Line::from(""));
+            }
+            continue;
+        }
+
         let has_local = !repo.local_branches.is_empty();
         let has_remote = !repo.remote_branches.is_empty();
+        let local_cat_collapsed = selection.is_category_collapsed(repo_idx, 0);
+        let remote_cat_collapsed = selection.is_category_collapsed(repo_idx, 1);
 
         // Local Branches section
         if has_local {
@@ -409,36 +736,39 @@ fn build_repo_tree_lines(
                 is_this_repo && selection.level == TreeLevel::Branch && selection.category_idx == 0;
 
             let connector = if has_remote { "├─" } else { "└─" };
-            let (cat_indicator, cat_fg, cat_bg) = if cat_selected {
-                ("▸ ", theme::R_TEXT_PRIMARY, Some(theme::R_BG_HOVER))
+            let cat_chevron = if local_cat_collapsed { "▸" } else { "▾" };
+            let (cat_fg, cat_bg) = if cat_selected {
+                (theme::R_TEXT_PRIMARY, Some(theme::R_BG_HOVER))
             } else if cat_open {
-                ("▸ ", theme::R_TEXT_TERTIARY, None)
+                (theme::R_TEXT_TERTIARY, None)
             } else {
-                ("  ", theme::R_TEXT_SECONDARY, None)
+                (theme::R_TEXT_SECONDARY, None)
             };
 
-            let cat_text = format!("   {connector} {cat_indicator}Local Branches");
+            let cat_text = format!("   {connector} {cat_chevron} Local Branches");
             let mut cat_style = Style::default().fg(cat_fg);
             if let Some(bg_color) = cat_bg {
                 cat_style = cat_style.bg(bg_color);
             }
             lines.push(pad_line(vec![Span::styled(cat_text, cat_style)], width, cat_bg));
 
-            let continuation = if has_remote { "│" } else { " " };
-            for (i, branch) in repo.local_branches.iter().enumerate() {
-                let is_last = i == repo.local_branches.len() - 1;
-                let branch_connector = if is_last { "└─" } else { "├─" };
-                let branch_selected = is_this_repo
-                    && selection.level == TreeLevel::Branch
-                    && selection.category_idx == 0
-                    && i == selection.branch_idx;
-                lines.push(format_branch_line(
-                    branch,
-                    continuation,
-                    branch_connector,
-                    branch_selected,
-                    width,
-                ));
+            if !local_cat_collapsed {
+                let continuation = if has_remote { "│" } else { " " };
+                for (i, branch) in repo.local_branches.iter().enumerate() {
+                    let is_last = i == repo.local_branches.len() - 1;
+                    let branch_connector = if is_last { "└─" } else { "├─" };
+                    let branch_selected = is_this_repo
+                        && selection.level == TreeLevel::Branch
+                        && selection.category_idx == 0
+                        && i == selection.branch_idx;
+                    lines.push(format_branch_line(
+                        branch,
+                        continuation,
+                        branch_connector,
+                        branch_selected,
+                        width,
+                    ));
+                }
             }
         }
 
@@ -449,35 +779,38 @@ fn build_repo_tree_lines(
             let cat_open =
                 is_this_repo && selection.level == TreeLevel::Branch && selection.category_idx == 1;
 
-            let (cat_indicator, cat_fg, cat_bg) = if cat_selected {
-                ("▸ ", theme::R_TEXT_PRIMARY, Some(theme::R_BG_HOVER))
+            let cat_chevron = if remote_cat_collapsed { "▸" } else { "▾" };
+            let (cat_fg, cat_bg) = if cat_selected {
+                (theme::R_TEXT_PRIMARY, Some(theme::R_BG_HOVER))
             } else if cat_open {
-                ("▸ ", theme::R_TEXT_TERTIARY, None)
+                (theme::R_TEXT_TERTIARY, None)
             } else {
-                ("  ", theme::R_TEXT_SECONDARY, None)
+                (theme::R_TEXT_SECONDARY, None)
             };
 
-            let cat_text = format!("   └─ {cat_indicator}Remote Branches");
+            let cat_text = format!("   └─ {cat_chevron} Remote Branches");
             let mut cat_style = Style::default().fg(cat_fg);
             if let Some(bg_color) = cat_bg {
                 cat_style = cat_style.bg(bg_color);
             }
             lines.push(pad_line(vec![Span::styled(cat_text, cat_style)], width, cat_bg));
 
-            for (i, branch) in repo.remote_branches.iter().enumerate() {
-                let is_last = i == repo.remote_branches.len() - 1;
-                let branch_connector = if is_last { "└─" } else { "├─" };
-                let branch_selected = is_this_repo
-                    && selection.level == TreeLevel::Branch
-                    && selection.category_idx == 1
-                    && i == selection.branch_idx;
-                lines.push(format_branch_line(
-                    branch,
-                    " ",
-                    branch_connector,
-                    branch_selected,
-                    width,
-                ));
+            if !remote_cat_collapsed {
+                for (i, branch) in repo.remote_branches.iter().enumerate() {
+                    let is_last = i == repo.remote_branches.len() - 1;
+                    let branch_connector = if is_last { "└─" } else { "├─" };
+                    let branch_selected = is_this_repo
+                        && selection.level == TreeLevel::Branch
+                        && selection.category_idx == 1
+                        && i == selection.branch_idx;
+                    lines.push(format_branch_line(
+                        branch,
+                        " ",
+                        branch_connector,
+                        branch_selected,
+                        width,
+                    ));
+                }
             }
         }
 
@@ -567,6 +900,8 @@ fn render_right_panel(
     frame: &mut Frame,
     area: Rect,
     agents: &[AgentInfo],
+    agent_sel: &AgentSelection,
+    focused: bool,
 ) {
     frame.render_widget(
         Block::default().style(Style::default().bg(theme::R_BG_BASE)),
@@ -576,7 +911,7 @@ fn render_right_panel(
     if agents.is_empty() {
         render_logo(frame, area);
     } else {
-        render_agent_list(frame, area, agents);
+        render_agent_list(frame, area, agents, agent_sel, focused);
     }
 }
 
@@ -630,7 +965,13 @@ fn render_logo(frame: &mut Frame, area: Rect) {
     frame.render_widget(paragraph, horz_area);
 }
 
-fn render_agent_list(frame: &mut Frame, area: Rect, agents: &[AgentInfo]) {
+fn render_agent_list(
+    frame: &mut Frame,
+    area: Rect,
+    agents: &[AgentInfo],
+    agent_sel: &AgentSelection,
+    focused: bool,
+) {
     let block = Block::default()
         .padding(Padding::new(1, 1, 0, 0));
 
@@ -641,15 +982,15 @@ fn render_agent_list(frame: &mut Frame, area: Rect, agents: &[AgentInfo]) {
     let mut sorted: Vec<&AgentInfo> = agents.iter().collect();
     sorted.sort_by(|a, b| a.pool.cmp(&b.pool).then(a.started_at.cmp(&b.started_at)));
 
-    let mut pool_names: Vec<&str> = sorted.iter().map(|a| a.pool.as_str()).collect();
-    pool_names.dedup();
+    let mut pnames: Vec<&str> = sorted.iter().map(|a| a.pool.as_str()).collect();
+    pnames.dedup();
 
     // Build layout: header + spacer + pool headers + agent cards
     let mut constraints: Vec<Constraint> = vec![
         Constraint::Length(1), // "Agents" header
         Constraint::Length(1), // spacer
     ];
-    for pool_name in &pool_names {
+    for pool_name in &pnames {
         constraints.push(Constraint::Length(1)); // pool header
         let count = sorted.iter().filter(|a| a.pool == *pool_name).count();
         for _ in 0..count {
@@ -661,14 +1002,19 @@ fn render_agent_list(frame: &mut Frame, area: Rect, agents: &[AgentInfo]) {
     let areas = Layout::vertical(constraints).split(inner);
 
     // Inline header
+    let header_color = if focused {
+        theme::R_ACCENT_BRIGHT
+    } else {
+        theme::R_TEXT_PRIMARY
+    };
     let header = Paragraph::new(Line::from(Span::styled(
         "Agents",
-        Style::default().fg(theme::R_TEXT_PRIMARY),
+        Style::default().fg(header_color),
     )));
     frame.render_widget(header, areas[0]);
 
     let mut area_idx = 2;
-    for pool_name in &pool_names {
+    for (pidx, pool_name) in pnames.iter().enumerate() {
         // Pool header
         let pool_header = Paragraph::new(Line::from(vec![
             Span::styled(
@@ -680,16 +1026,20 @@ fn render_agent_list(frame: &mut Frame, area: Rect, agents: &[AgentInfo]) {
         area_idx += 1;
 
         // Agent cards for this pool
+        let mut aidx = 0;
         for agent in sorted.iter().filter(|a| a.pool == *pool_name) {
-            render_agent_card(frame, areas[area_idx], agent);
+            let is_selected = focused && pidx == agent_sel.pool_idx && aidx == agent_sel.agent_idx;
+            render_agent_card(frame, areas[area_idx], agent, is_selected);
             area_idx += 1;
+            aidx += 1;
         }
     }
 }
 
-fn render_agent_card(frame: &mut Frame, area: Rect, agent: &AgentInfo) {
+fn render_agent_card(frame: &mut Frame, area: Rect, agent: &AgentInfo, is_selected: bool) {
+    let bg = if is_selected { theme::R_BG_HOVER } else { theme::R_BG_SURFACE };
     let block = Block::default()
-        .style(Style::default().bg(theme::R_BG_SURFACE))
+        .style(Style::default().bg(bg))
         .padding(Padding::new(1, 1, 0, 0));
 
     let inner = block.inner(area);
@@ -787,7 +1137,7 @@ fn render_status_bar(
             Style::default().bg(theme::R_BG_RAISED),
         ),
         Span::styled(
-            "↑↓←→ navigate",
+            "↑↓←→ navigate  Shift+←→ panels  Tab switch view",
             Style::default()
                 .fg(theme::R_TEXT_TERTIARY)
                 .bg(theme::R_BG_RAISED),
@@ -1099,9 +1449,13 @@ mod tests {
         sel.descend(&repos); // -> Branch
         sel.ascend();        // -> Category
         assert_eq!(sel.level, TreeLevel::Category);
-        sel.ascend();        // -> Repo
+        sel.ascend();        // collapse category (stays at Category)
+        assert_eq!(sel.level, TreeLevel::Category);
+        assert!(sel.is_category_collapsed(0, 0));
+        sel.ascend();        // now ascend to Repo (category is collapsed)
         assert_eq!(sel.level, TreeLevel::Repo);
-        sel.ascend();        // no-op
+        sel.ascend();        // collapse repo
+        assert!(sel.is_repo_collapsed(0));
         assert_eq!(sel.level, TreeLevel::Repo);
     }
 
@@ -1162,6 +1516,7 @@ mod tests {
             repo_idx: 5,
             category_idx: 1,
             branch_idx: 3,
+            ..TreeSelection::default()
         };
         sel.clamp(&[]);
         assert_eq!(sel.level, TreeLevel::Repo);
@@ -1176,6 +1531,7 @@ mod tests {
             repo_idx: 10,
             category_idx: 0,
             branch_idx: 0,
+            ..TreeSelection::default()
         };
         sel.clamp(&repos);
         assert_eq!(sel.repo_idx, 1); // clamped to max valid
@@ -1190,32 +1546,32 @@ mod tests {
             repo_idx: 1,
             category_idx: 1, // remote doesn't exist for beta
             branch_idx: 0,
+            ..TreeSelection::default()
         };
         sel.clamp(&repos);
         assert_eq!(sel.category_idx, 0); // falls back to local
     }
 
     #[test]
-    fn tree_selected_repo_shows_indicator() {
+    fn tree_selected_repo_shows_expanded_chevron() {
         let repos = sample_repos();
-        let sel = TreeSelection::default(); // repo 0 selected
+        let sel = TreeSelection::default(); // repo 0 selected, expanded by default
         let lines = build_repo_tree_lines(&repos, &sel, 80);
         let first = lines[0].spans.iter().map(|s| s.content.as_ref()).collect::<String>();
-        assert!(first.contains("▸"), "selected repo should have arrow indicator");
+        assert!(first.contains("▾"), "expanded repo should have down chevron");
     }
 
     #[test]
-    fn tree_non_selected_repo_no_indicator() {
+    fn tree_non_selected_repo_shows_expanded_chevron() {
         let repos = sample_repos();
         let sel = TreeSelection::default(); // repo 0 selected, not repo 1
         let lines = build_repo_tree_lines(&repos, &sel, 80);
-        // Find the beta repo line (after blank separator)
         let beta_line = lines.iter().find(|l| {
             let text: String = l.spans.iter().map(|s| s.content.as_ref()).collect();
             text.contains("beta")
         }).expect("should find beta line");
         let text: String = beta_line.spans.iter().map(|s| s.content.as_ref()).collect();
-        assert!(!text.contains("▸"), "non-selected repo should not have arrow indicator");
+        assert!(text.contains("▾"), "non-selected expanded repo should have down chevron");
     }
 
     #[test]
@@ -1232,5 +1588,239 @@ mod tests {
         }).expect("should find main branch line");
         let text: String = main_line.spans.iter().map(|s| s.content.as_ref()).collect();
         assert!(text.contains("▸"), "selected branch should have arrow indicator");
+    }
+
+    // ── Agent selection state tests ──────────────────────────────
+
+    fn make_agent(id: &str, pool: &str) -> AgentInfo {
+        AgentInfo {
+            id: id.to_string(),
+            agent_binary: "claude".to_string(),
+            started_at: "2026-03-26T10:00:00Z".to_string(),
+            attached_clients: 0,
+            pool: pool.to_string(),
+            working_dir: "/tmp".to_string(),
+        }
+    }
+
+    fn sample_agents() -> Vec<AgentInfo> {
+        vec![
+            make_agent("aaa111", "alpha"),
+            make_agent("aaa222", "alpha"),
+            make_agent("bbb111", "beta"),
+        ]
+    }
+
+    #[test]
+    fn agent_selection_default_is_first() {
+        let sel = AgentSelection::default();
+        assert_eq!(sel.pool_idx, 0);
+        assert_eq!(sel.agent_idx, 0);
+    }
+
+    #[test]
+    fn agent_selection_clamp_empty() {
+        let mut sel = AgentSelection { pool_idx: 5, agent_idx: 3 };
+        sel.clamp(&[]);
+        assert_eq!(sel.pool_idx, 0);
+        assert_eq!(sel.agent_idx, 0);
+    }
+
+    #[test]
+    fn agent_selection_clamp_shrinks() {
+        let agents = sample_agents();
+        let mut sel = AgentSelection { pool_idx: 10, agent_idx: 10 };
+        sel.clamp(&agents);
+        assert_eq!(sel.pool_idx, 1); // 2 pools: alpha, beta
+        assert_eq!(sel.agent_idx, 0); // beta has 1 agent
+    }
+
+    #[test]
+    fn agent_selection_move_down_within_pool() {
+        let agents = sample_agents();
+        let mut sel = AgentSelection::default(); // pool 0 (alpha), agent 0
+        sel.move_down(&agents);
+        assert_eq!(sel.agent_idx, 1); // alpha has 2 agents
+        sel.move_down(&agents);
+        assert_eq!(sel.agent_idx, 1); // saturates
+    }
+
+    #[test]
+    fn agent_selection_move_up_within_pool() {
+        let agents = sample_agents();
+        let mut sel = AgentSelection { pool_idx: 0, agent_idx: 1 };
+        sel.move_up(&agents);
+        assert_eq!(sel.agent_idx, 0);
+        sel.move_up(&agents);
+        assert_eq!(sel.agent_idx, 0); // saturates
+    }
+
+    #[test]
+    fn agent_selection_next_pool() {
+        let agents = sample_agents();
+        let mut sel = AgentSelection::default();
+        sel.next_pool(&agents);
+        assert_eq!(sel.pool_idx, 1);
+        assert_eq!(sel.agent_idx, 0); // reset on pool switch
+        sel.next_pool(&agents);
+        assert_eq!(sel.pool_idx, 1); // saturates
+    }
+
+    #[test]
+    fn agent_selection_prev_pool() {
+        let agents = sample_agents();
+        let mut sel = AgentSelection { pool_idx: 1, agent_idx: 0 };
+        sel.prev_pool(&agents);
+        assert_eq!(sel.pool_idx, 0);
+        assert_eq!(sel.agent_idx, 0);
+        sel.prev_pool(&agents);
+        assert_eq!(sel.pool_idx, 0); // saturates
+    }
+
+    #[test]
+    fn agent_selection_next_pool_resets_agent_idx() {
+        let agents = sample_agents();
+        let mut sel = AgentSelection { pool_idx: 0, agent_idx: 1 };
+        sel.next_pool(&agents);
+        assert_eq!(sel.pool_idx, 1);
+        assert_eq!(sel.agent_idx, 0);
+    }
+
+    #[test]
+    fn pool_names_sorted_deduped() {
+        let agents = sample_agents();
+        let names = pool_names(&agents);
+        assert_eq!(names, vec!["alpha", "beta"]);
+    }
+
+    // ── Collapse state tests ──────────────────────────────────────
+
+    #[test]
+    fn toggle_collapse_repo() {
+        let mut sel = TreeSelection::default();
+        assert!(!sel.is_repo_collapsed(0));
+        sel.toggle_collapse(); // at Repo level
+        assert!(sel.is_repo_collapsed(0));
+        sel.toggle_collapse(); // toggle back
+        assert!(!sel.is_repo_collapsed(0));
+    }
+
+    #[test]
+    fn toggle_collapse_category() {
+        let repos = sample_repos();
+        let mut sel = TreeSelection::default();
+        sel.descend(&repos); // -> Category
+        assert!(!sel.is_category_collapsed(0, 0));
+        sel.toggle_collapse();
+        assert!(sel.is_category_collapsed(0, 0));
+        sel.toggle_collapse();
+        assert!(!sel.is_category_collapsed(0, 0));
+    }
+
+    #[test]
+    fn toggle_collapse_branch_noop() {
+        let repos = sample_repos();
+        let mut sel = TreeSelection::default();
+        sel.descend(&repos); // -> Category
+        sel.descend(&repos); // -> Branch
+        sel.toggle_collapse(); // should not panic
+        assert_eq!(sel.level, TreeLevel::Branch);
+    }
+
+    #[test]
+    fn tree_collapsed_repo_hides_branches() {
+        let repo = make_repo(
+            "myrepo",
+            vec![make_branch("main", true, 0, false)],
+            vec![make_branch("origin/main", false, 0, false)],
+        );
+        let mut sel = TreeSelection::default();
+        sel.toggle_collapse(); // collapse repo 0
+
+        let lines = build_repo_tree_lines(&[repo], &sel, 80);
+        // Only the repo header line should remain
+        assert_eq!(lines.len(), 1);
+        let text: String = lines[0].spans.iter().map(|s| s.content.as_ref()).collect();
+        assert!(text.contains("myrepo"));
+        assert!(text.contains("▸"), "collapsed repo should have right chevron");
+    }
+
+    #[test]
+    fn tree_collapsed_category_hides_branches() {
+        let repo = make_repo(
+            "myrepo",
+            vec![
+                make_branch("main", true, 0, false),
+                make_branch("feature", false, 0, false),
+            ],
+            vec![],
+        );
+        let mut sel = TreeSelection::default();
+        sel.descend(&[repo.clone()]); // -> Category
+        sel.toggle_collapse(); // collapse local category
+
+        let lines = build_repo_tree_lines(&[repo], &sel, 80);
+        // repo header + category header (collapsed, no branches)
+        assert_eq!(lines.len(), 2);
+    }
+
+    #[test]
+    fn descend_into_collapsed_expands() {
+        let repos = sample_repos();
+        let mut sel = TreeSelection::default();
+        sel.toggle_collapse(); // collapse repo 0
+        assert!(sel.is_repo_collapsed(0));
+        assert_eq!(sel.level, TreeLevel::Repo);
+
+        sel.descend(&repos); // should expand, NOT descend
+        assert!(!sel.is_repo_collapsed(0));
+        assert_eq!(sel.level, TreeLevel::Repo); // still at repo level
+    }
+
+    #[test]
+    fn ascend_from_expanded_collapses() {
+        let mut sel = TreeSelection::default();
+        assert!(!sel.is_repo_collapsed(0));
+        sel.ascend(); // collapse at repo level
+        assert!(sel.is_repo_collapsed(0));
+        assert_eq!(sel.level, TreeLevel::Repo);
+    }
+
+    // ── Tab navigation tests ──────────────────────────────────────
+
+    #[test]
+    fn active_tab_next_cycles() {
+        let tab = ActiveTab::Repositories;
+        assert_eq!(tab.next(), ActiveTab::Overview);
+        assert_eq!(tab.next().next(), ActiveTab::FocusMode);
+        assert_eq!(tab.next().next().next(), ActiveTab::Repositories);
+    }
+
+    #[test]
+    fn active_tab_prev_cycles() {
+        let tab = ActiveTab::Repositories;
+        assert_eq!(tab.prev(), ActiveTab::FocusMode);
+        assert_eq!(tab.prev().prev(), ActiveTab::Overview);
+        assert_eq!(tab.prev().prev().prev(), ActiveTab::Repositories);
+    }
+
+    #[test]
+    fn active_tab_labels() {
+        assert_eq!(ActiveTab::Repositories.label(), "Repositories");
+        assert_eq!(ActiveTab::Overview.label(), "Overview");
+        assert_eq!(ActiveTab::FocusMode.label(), "Focus");
+    }
+
+    #[test]
+    fn ascend_from_collapsed_category_ascends() {
+        let repos = sample_repos();
+        let mut sel = TreeSelection::default();
+        sel.descend(&repos); // -> Category
+        // Collapse the category first
+        sel.toggle_collapse();
+        assert!(sel.is_category_collapsed(0, 0));
+        // Ascend should go to Repo level since category is already collapsed
+        sel.ascend();
+        assert_eq!(sel.level, TreeLevel::Repo);
     }
 }

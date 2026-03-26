@@ -109,6 +109,8 @@ CLI -> Pool:
   SetDefault { agent_binary: String }
   GetDefault
   RegisterRepo { path: String }
+  UnregisterRepo { path: String }
+  StopRepoAgents { path: String }
   ListRepos
 
 Pool -> CLI:
@@ -123,6 +125,8 @@ Pool -> CLI:
   PoolShutdown
   Error { message: String }
   RepoRegistered { path: String, name: String }
+  RepoUnregistered { path: String, name: String, stopped_agents: usize }
+  RepoAgentsStopped { path: String, stopped_count: usize }
   RepoList { repos: Vec<RepoInfo> }
 ```
 

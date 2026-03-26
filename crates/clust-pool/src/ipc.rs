@@ -358,6 +358,112 @@ async fn handle_connection(
             )
             .await?;
         }
+        CliMessage::UnregisterRepo { path } => {
+            let git_root = crate::repo::detect_git_root(&path);
+            let result = {
+                let pool_state = state.lock().await;
+                if let Some(ref db) = pool_state.db {
+                    match git_root {
+                        Some(root) => {
+                            let root_str = root.to_string_lossy().into_owned();
+                            if !crate::db::is_repo_registered(db, &root_str) {
+                                Err("repository is not registered".into())
+                            } else {
+                                let name = root
+                                    .file_name()
+                                    .map(|n| n.to_string_lossy().into_owned())
+                                    .unwrap_or_else(|| root_str.clone());
+                                // Collect agent IDs matching this repo
+                                let agent_ids: Vec<String> = pool_state
+                                    .agents
+                                    .values()
+                                    .filter(|e| e.repo_path.as_deref() == Some(root_str.as_str()))
+                                    .map(|e| e.id.clone())
+                                    .collect();
+                                let count = agent_ids.len();
+                                crate::db::unregister_repo(db, &root_str)
+                                    .map(|_| (root_str, name, agent_ids, count))
+                            }
+                        }
+                        None => Err(format!("{path} is not inside a git repository")),
+                    }
+                } else {
+                    Err("database not initialized".into())
+                }
+            };
+            match result {
+                Ok((path, name, agent_ids, count)) => {
+                    // Stop agents outside the lock
+                    for id in agent_ids {
+                        let state = state.clone();
+                        tokio::spawn(async move {
+                            let _ = agent::stop_agent(&state, &id).await;
+                        });
+                    }
+                    clust_ipc::send_message_write(
+                        &mut writer,
+                        &PoolMessage::RepoUnregistered {
+                            path,
+                            name,
+                            stopped_agents: count,
+                        },
+                    )
+                    .await?;
+                }
+                Err(e) => {
+                    clust_ipc::send_message_write(
+                        &mut writer,
+                        &PoolMessage::Error { message: e },
+                    )
+                    .await?;
+                }
+            }
+        }
+        CliMessage::StopRepoAgents { path } => {
+            let git_root = crate::repo::detect_git_root(&path);
+            let result = {
+                let pool_state = state.lock().await;
+                match git_root {
+                    Some(root) => {
+                        let root_str = root.to_string_lossy().into_owned();
+                        let agent_ids: Vec<String> = pool_state
+                            .agents
+                            .values()
+                            .filter(|e| e.repo_path.as_deref() == Some(root_str.as_str()))
+                            .map(|e| e.id.clone())
+                            .collect();
+                        let count = agent_ids.len();
+                        Ok((root_str, agent_ids, count))
+                    }
+                    None => Err(format!("{path} is not inside a git repository")),
+                }
+            };
+            match result {
+                Ok((path, agent_ids, count)) => {
+                    for id in agent_ids {
+                        let state = state.clone();
+                        tokio::spawn(async move {
+                            let _ = agent::stop_agent(&state, &id).await;
+                        });
+                    }
+                    clust_ipc::send_message_write(
+                        &mut writer,
+                        &PoolMessage::RepoAgentsStopped {
+                            path,
+                            stopped_count: count,
+                        },
+                    )
+                    .await?;
+                }
+                Err(e) => {
+                    clust_ipc::send_message_write(
+                        &mut writer,
+                        &PoolMessage::Error { message: e },
+                    )
+                    .await?;
+                }
+            }
+        }
         _ => {
             clust_ipc::send_message_write(
                 &mut writer,
