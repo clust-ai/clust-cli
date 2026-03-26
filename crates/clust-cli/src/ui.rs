@@ -232,6 +232,7 @@ pub fn run(pool_name: &str) -> io::Result<()> {
     let mut last_repo_fetch = Instant::now() - Duration::from_secs(10);
 
     let mut pool_stopped = false;
+    let mut pool_count: usize = 1;
 
     loop {
         // Periodically fetch agent list and repo state from pool
@@ -276,6 +277,11 @@ pub fn run(pool_name: &str) -> io::Result<()> {
                     match key.code {
                         KeyCode::Char('q') | KeyCode::Esc => break,
                         KeyCode::Char('Q') => {
+                            let mut names: Vec<&str> =
+                                agents.iter().map(|a| a.pool.as_str()).collect();
+                            names.sort();
+                            names.dedup();
+                            pool_count = names.len().max(1);
                             block_on_async(async {
                                 if let Ok(mut stream) = ipc::try_connect().await {
                                     let _ = ipc::send_stop(&mut stream).await;
@@ -303,7 +309,8 @@ pub fn run(pool_name: &str) -> io::Result<()> {
     io::stdout().execute(LeaveAlternateScreen)?;
 
     if pool_stopped {
-        println!("\n  {}pool stopped{}\n", theme::TEXT_SECONDARY, theme::RESET);
+        let label = if pool_count > 1 { "pools" } else { "pool" };
+        println!("\n  {}{label} stopped{}\n", theme::TEXT_SECONDARY, theme::RESET);
     }
 
     if let Some(ref msg) = *update_notice.lock().unwrap() {

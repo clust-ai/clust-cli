@@ -46,6 +46,28 @@ pub async fn try_connect() -> io::Result<UnixStream> {
     UnixStream::connect(clust_ipc::socket_path()).await
 }
 
+/// Count unique pools by querying the agent list. Returns 1 on failure.
+pub async fn count_pools() -> usize {
+    let Ok(mut stream) = try_connect().await else {
+        return 1;
+    };
+    if clust_ipc::send_message(&mut stream, &CliMessage::ListAgents { pool: None })
+        .await
+        .is_err()
+    {
+        return 1;
+    }
+    match clust_ipc::recv_message::<PoolMessage>(&mut stream).await {
+        Ok(PoolMessage::AgentList { agents }) => {
+            let mut names: Vec<&str> = agents.iter().map(|a| a.pool.as_str()).collect();
+            names.sort();
+            names.dedup();
+            names.len().max(1)
+        }
+        _ => 1,
+    }
+}
+
 /// Send a StopPool message and print the result.
 pub async fn send_stop(stream: &mut UnixStream) -> io::Result<()> {
     clust_ipc::send_message(stream, &CliMessage::StopPool).await?;
