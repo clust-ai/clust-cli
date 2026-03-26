@@ -5,6 +5,37 @@ use clust_ipc::{BranchInfo, RepoInfo};
 
 use crate::agent::AgentEntry;
 
+/// Trait for accessing agent matching fields without requiring the full AgentEntry.
+/// This allows repo queries to use a lightweight snapshot taken outside the pool lock.
+pub trait AgentMatcher {
+    fn repo_path(&self) -> Option<&str>;
+    fn branch_name(&self) -> Option<&str>;
+}
+
+impl AgentMatcher for AgentEntry {
+    fn repo_path(&self) -> Option<&str> {
+        self.repo_path.as_deref()
+    }
+    fn branch_name(&self) -> Option<&str> {
+        self.branch_name.as_deref()
+    }
+}
+
+/// Lightweight snapshot of agent fields needed for repo state queries.
+pub(crate) struct AgentSnapshot {
+    pub repo_path: Option<String>,
+    pub branch_name: Option<String>,
+}
+
+impl AgentMatcher for AgentSnapshot {
+    fn repo_path(&self) -> Option<&str> {
+        self.repo_path.as_deref()
+    }
+    fn branch_name(&self) -> Option<&str> {
+        self.branch_name.as_deref()
+    }
+}
+
 /// Walk upward from a working directory to find the git repository root.
 /// Handles both regular repos and worktrees.
 pub fn detect_git_root(working_dir: &str) -> Option<PathBuf> {
@@ -39,10 +70,10 @@ pub fn detect_branch_and_worktree(working_dir: &str) -> (Option<String>, bool) {
 
 /// Compute the current state of a repository: branches, worktrees, active agents.
 /// Returns None if the repo cannot be opened (e.g. path deleted).
-pub fn get_repo_state(
+pub fn get_repo_state<A: AgentMatcher>(
     path: &Path,
     name: &str,
-    agents: &HashMap<String, AgentEntry>,
+    agents: &HashMap<String, A>,
 ) -> Option<RepoInfo> {
     let repo = git2::Repository::open(path).ok()?;
 
@@ -59,10 +90,10 @@ pub fn get_repo_state(
     })
 }
 
-fn list_branches(
+fn list_branches<A: AgentMatcher>(
     repo: &git2::Repository,
     branch_type: git2::BranchType,
-    agents: &HashMap<String, AgentEntry>,
+    agents: &HashMap<String, A>,
     worktree_branches: &[String],
 ) -> Vec<BranchInfo> {
     let Ok(branches) = repo.branches(Some(branch_type)) else {
@@ -85,8 +116,8 @@ fn list_branches(
                 agents
                     .values()
                     .filter(|a| {
-                        a.repo_path.as_deref() == Some(rp.as_str())
-                            && a.branch_name.as_deref() == Some(&name)
+                        a.repo_path() == Some(rp.as_str())
+                            && a.branch_name() == Some(&name)
                     })
                     .count()
             });
@@ -252,7 +283,7 @@ mod tests {
         let head = repo.head().unwrap().peel_to_commit().unwrap();
         repo.branch("feature-branch", &head, false).unwrap();
 
-        let agents = HashMap::new();
+        let agents: HashMap<String, AgentEntry> = HashMap::new();
         let state = get_repo_state(dir.path(), "test-repo", &agents);
         assert!(state.is_some());
         let info = state.unwrap();
@@ -265,7 +296,7 @@ mod tests {
 
     #[test]
     fn get_repo_state_returns_none_for_missing_path() {
-        let agents = HashMap::new();
+        let agents: HashMap<String, AgentEntry> = HashMap::new();
         assert!(get_repo_state(Path::new("/nonexistent/path"), "gone", &agents).is_none());
     }
 
@@ -279,7 +310,7 @@ mod tests {
             .unwrap()
             .to_string();
 
-        let agents = HashMap::new();
+        let agents: HashMap<String, AgentEntry> = HashMap::new();
         let state = get_repo_state(dir.path(), "test-repo", &agents).unwrap();
         let branch = state
             .local_branches
@@ -407,7 +438,7 @@ mod tests {
             return; // skip if git worktree not available
         }
 
-        let agents = HashMap::new();
+        let agents: HashMap<String, AgentEntry> = HashMap::new();
         let state = get_repo_state(dir.path(), "test-repo", &agents).unwrap();
 
         // The worktree branch should be marked is_worktree: true
@@ -475,7 +506,7 @@ mod tests {
     #[test]
     fn get_repo_state_empty_remote_branches() {
         let (dir, _repo) = create_test_repo();
-        let agents = HashMap::new();
+        let agents: HashMap<String, AgentEntry> = HashMap::new();
         let state = get_repo_state(dir.path(), "test-repo", &agents).unwrap();
         assert!(
             state.remote_branches.is_empty(),
