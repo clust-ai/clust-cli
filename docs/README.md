@@ -8,6 +8,7 @@ Clust is a CLI tool for managing AI agents (Claude Code, etc.) with session mult
 |-------|------|-------------|
 | `clust-cli` | Binary | The CLI users interact with. Installed as `clust`. |
 | `clust-pool` | Binary | Background daemon. Manages agent lifecycles, PTYs, and IPC. Installed alongside `clust-cli`. |
+| `clust-ipc` | Library | Shared IPC types (message enums, framing, socket path helpers). Used by both binaries. |
 
 ## Documentation
 
