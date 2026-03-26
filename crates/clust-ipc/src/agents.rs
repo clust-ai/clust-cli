@@ -6,29 +6,35 @@ pub struct KnownAgent {
     /// CLI args to append when accept-edits mode is requested.
     /// `None` means this agent does not support the feature.
     pub accept_edits_args: Option<&'static [&'static str]>,
+    /// Whether this agent has been tested with clust.
+    pub tested: bool,
 }
 
 /// Built-in agent registry.
 pub const KNOWN_AGENTS: &[KnownAgent] = &[
     KnownAgent {
         binary: "claude",
-        display_name: "Claude",
+        display_name: "Claude Code",
         accept_edits_args: Some(&["--permission-mode", "acceptEdits"]),
+        tested: true,
     },
     KnownAgent {
         binary: "opencode",
-        display_name: "OpenCode",
+        display_name: "Open Code",
         accept_edits_args: None,
+        tested: true,
     },
     KnownAgent {
         binary: "aider",
         display_name: "Aider",
         accept_edits_args: None,
+        tested: false,
     },
     KnownAgent {
         binary: "codex",
         display_name: "Codex",
         accept_edits_args: None,
+        tested: false,
     },
 ];
 
@@ -71,5 +77,17 @@ mod tests {
     fn accept_edits_args_for_unknown_agent_returns_none() {
         assert_eq!(accept_edits_args_for("unknown-binary"), None);
         assert_eq!(accept_edits_args_for(""), None);
+    }
+
+    #[test]
+    fn tested_agents_are_correct() {
+        let tested: Vec<&str> = KNOWN_AGENTS
+            .iter()
+            .filter(|a| a.tested)
+            .map(|a| a.binary)
+            .collect();
+        assert!(tested.contains(&"claude"));
+        assert!(tested.contains(&"opencode"));
+        assert_eq!(tested.len(), 2);
     }
 }

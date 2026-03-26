@@ -15,7 +15,8 @@ pub const TEXT_TERTIARY: &str = "\x1b[38;2;108;110;116m";  // #6c6e74
 // Semantic
 pub const SUCCESS: &str = "\x1b[38;2;91;184;114m";  // #5bb872
 pub const ERROR: &str = "\x1b[38;2;204;80;72m";     // #cc5048
-pub const WARNING: &str = "\x1b[38;2;212;173;58m";  // #d4ad3a
+pub const WARNING: &str = "\x1b[38;2;212;173;58m";       // #d4ad3a
+pub const WARNING_TEXT: &str = "\x1b[38;2;232;196;88m";  // #e8c458
 pub const INFO: &str = "\x1b[38;2;88;152;196m";     // #5898c4
 
 pub const RESET: &str = "\x1b[0m";
