@@ -200,7 +200,7 @@ impl TreeSelection {
     }
 }
 
-pub fn run() -> io::Result<()> {
+pub fn run(pool_name: &str) -> io::Result<()> {
     io::stdout().execute(EnterAlternateScreen)?;
     enable_raw_mode()?;
 
@@ -220,7 +220,7 @@ pub fn run() -> io::Result<()> {
     let update_notice: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
     let notice_clone = update_notice.clone();
     std::thread::spawn(move || {
-        if let Some(msg) = version::check_brew_update() {
+        if let Some(msg) = version::check_update() {
             *notice_clone.lock().unwrap() = Some(msg);
         }
     });
@@ -230,6 +230,8 @@ pub fn run() -> io::Result<()> {
     let mut selection = TreeSelection::default();
     let mut last_agent_fetch = Instant::now() - Duration::from_secs(10);
     let mut last_repo_fetch = Instant::now() - Duration::from_secs(10);
+
+    let mut pool_stopped = false;
 
     loop {
         // Periodically fetch agent list and repo state from pool
@@ -265,12 +267,12 @@ pub fn run() -> io::Result<()> {
             render_left_panel(frame, left_area, &repos, &selection);
             render_divider(frame, divider_area);
             render_right_panel(frame, right_area, &agents);
-            render_status_bar(frame, status_area, pool_status, &notice);
+            render_status_bar(frame, status_area, pool_status, &notice, pool_name);
         })?;
 
         if event::poll(Duration::from_millis(100))? {
-            if let Event::Key(key) = event::read()? {
-                if key.kind == KeyEventKind::Press {
+            match event::read()? {
+                Event::Key(key) if key.kind == KeyEventKind::Press => {
                     match key.code {
                         KeyCode::Char('q') | KeyCode::Esc => break,
                         KeyCode::Char('Q') => {
@@ -279,6 +281,7 @@ pub fn run() -> io::Result<()> {
                                     let _ = ipc::send_stop(&mut stream).await;
                                 }
                             });
+                            pool_stopped = true;
                             break;
                         }
                         KeyCode::Up => selection.move_up(&repos),
@@ -288,12 +291,25 @@ pub fn run() -> io::Result<()> {
                         _ => {}
                     }
                 }
+                Event::Resize(_, _) => {
+                    // Continue to redraw immediately with new terminal size
+                }
+                _ => {}
             }
         }
     }
 
     disable_raw_mode()?;
     io::stdout().execute(LeaveAlternateScreen)?;
+
+    if pool_stopped {
+        println!("\n  {}pool stopped{}\n", theme::TEXT_SECONDARY, theme::RESET);
+    }
+
+    if let Some(ref msg) = *update_notice.lock().unwrap() {
+        println!("  {}{msg}{}\n", theme::WARNING, theme::RESET);
+    }
+
     Ok(())
 }
 
@@ -709,6 +725,7 @@ fn render_status_bar(
     area: Rect,
     pool_running: bool,
     update_notice: &Option<String>,
+    pool_name: &str,
 ) {
     let bg = Style::default().bg(theme::R_BG_RAISED);
 
@@ -727,6 +744,17 @@ fn render_status_bar(
                 .fg(theme::R_TEXT_SECONDARY)
                 .bg(theme::R_BG_RAISED),
         ),
+    ];
+
+    if pool_name != clust_ipc::DEFAULT_POOL {
+        left_spans.push(Span::styled("  ", Style::default().bg(theme::R_BG_RAISED)));
+        left_spans.push(Span::styled(
+            pool_name.to_string(),
+            Style::default().fg(theme::R_ACCENT).bg(theme::R_BG_RAISED),
+        ));
+    }
+
+    left_spans.extend([
         Span::styled(
             "  ",
             Style::default().bg(theme::R_BG_RAISED),
@@ -757,7 +785,7 @@ fn render_status_bar(
                 .fg(theme::R_TEXT_TERTIARY)
                 .bg(theme::R_BG_RAISED),
         ),
-    ];
+    ]);
 
     if let Some(ref msg) = *update_notice {
         left_spans.push(Span::styled(

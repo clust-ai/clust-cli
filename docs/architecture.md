@@ -49,7 +49,7 @@
 - Handle attach/detach lifecycle
 - TUI dashboard (`clust ui`) with repo tree and agent cards via `ratatui`
 - Default agent picker with known agent detection
-- Homebrew update check
+- Version update check (via Git)
 
 The CLI is a thin client. It does NOT manage agent processes directly.
 
@@ -93,8 +93,6 @@ Messages between CLI and Pool use a length-prefixed binary format:
 ```
 
 Serialization uses **MessagePack** via `rmp-serde` (compact, fast, schema-friendly).
-
-> **Note:** `serde_json` is also used in the CLI crate for parsing output from external tools (e.g., `brew info --json=v2` for update checks). It is not used for IPC.
 
 ### Message Types
 
@@ -182,5 +180,4 @@ clust "do something"
 | `tao` | Native event loop (macOS tray icon support) |
 | `tray-icon` | System tray icon and menu |
 | `git2` | Git repository/branch/worktree detection |
-| `serde_json` | Parse JSON output from external tools (e.g., Homebrew) |
 | `which` | Locate agent binaries on PATH (default agent discovery) |

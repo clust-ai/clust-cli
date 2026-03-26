@@ -27,10 +27,6 @@ pub struct Cli {
     #[arg(short = 'u', long = "use")]
     pub use_agent: Option<String>,
 
-    /// Register the current directory's git repository for tracking
-    #[arg(short = 'r', long = "register")]
-    pub register: bool,
-
     /// Assign the agent to a named pool (snake_case; default: default_pool)
     #[arg(short = 'p', long = "pool")]
     pub pool: Option<String>,
@@ -56,6 +52,12 @@ pub enum Commands {
     },
     /// Open the Clust terminal UI
     Ui,
+    /// Repository management
+    Repo {
+        /// Register the current directory's git repository for tracking
+        #[arg(short = 'r', long = "register")]
+        register: bool,
+    },
 }
 
 /// Validate a pool name follows snake_case: starts with a lowercase ASCII letter,
@@ -283,24 +285,27 @@ mod tests {
         assert!(cli.use_agent.is_none());
     }
 
-    // ── Register flag tests ──────────────────────────────────────────
+    // ── Repo subcommand tests ───────────────────────────────────────
 
     #[test]
-    fn parse_register_short() {
-        let cli = Cli::try_parse_from(["clust", "-r"]).unwrap();
-        assert!(cli.register);
+    fn parse_repo_register_short() {
+        let cli = Cli::try_parse_from(["clust", "repo", "-r"]).unwrap();
+        assert!(matches!(cli.command, Some(Commands::Repo { register: true })));
     }
 
     #[test]
-    fn parse_register_long() {
-        let cli = Cli::try_parse_from(["clust", "--register"]).unwrap();
-        assert!(cli.register);
+    fn parse_repo_register_long() {
+        let cli = Cli::try_parse_from(["clust", "repo", "--register"]).unwrap();
+        assert!(matches!(cli.command, Some(Commands::Repo { register: true })));
     }
 
     #[test]
-    fn parse_no_args_register_is_false() {
-        let cli = Cli::try_parse_from(["clust"]).unwrap();
-        assert!(!cli.register);
+    fn parse_repo_no_flags() {
+        let cli = Cli::try_parse_from(["clust", "repo"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(Commands::Repo { register: false })
+        ));
     }
 
     #[test]
