@@ -27,6 +27,10 @@ pub struct Cli {
     #[arg(short = 'u', long = "use")]
     pub use_agent: Option<String>,
 
+    /// Register the current directory's git repository for tracking
+    #[arg(short = 'r', long = "register")]
+    pub register: bool,
+
     /// Assign the agent to a named pool (snake_case; default: default_pool)
     #[arg(short = 'p', long = "pool")]
     pub pool: Option<String>,
@@ -279,6 +283,26 @@ mod tests {
         assert!(cli.use_agent.is_none());
     }
 
+    // ── Register flag tests ──────────────────────────────────────────
+
+    #[test]
+    fn parse_register_short() {
+        let cli = Cli::try_parse_from(["clust", "-r"]).unwrap();
+        assert!(cli.register);
+    }
+
+    #[test]
+    fn parse_register_long() {
+        let cli = Cli::try_parse_from(["clust", "--register"]).unwrap();
+        assert!(cli.register);
+    }
+
+    #[test]
+    fn parse_no_args_register_is_false() {
+        let cli = Cli::try_parse_from(["clust"]).unwrap();
+        assert!(!cli.register);
+    }
+
     #[test]
     fn parse_invalid_flag_errors() {
         assert!(Cli::try_parse_from(["clust", "--nonsense"]).is_err());
@@ -356,6 +380,11 @@ mod tests {
         assert!(validate_pool_name("a").is_ok());
         assert!(validate_pool_name("pool123").is_ok());
         assert!(validate_pool_name("my_pool_2").is_ok());
+    }
+
+    #[test]
+    fn default_pool_constant_passes_validation() {
+        assert!(validate_pool_name(clust_ipc::DEFAULT_POOL).is_ok());
     }
 
     #[test]
