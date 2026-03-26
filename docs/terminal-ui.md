@@ -112,5 +112,9 @@ On startup, `clust ui` automatically connects to the pool daemon, starting it if
 | `q` / `Esc` | Quit the UI (pool keeps running) |
 | `Q` | Quit the UI and stop the pool |
 | `↑` / `↓` | Move selection within current level |
-| `→` | Descend into selected item (repo → category → branch) |
-| `←` | Ascend to parent level |
+| `→` | Descend into selected item, or expand if collapsed |
+| `←` | Collapse current item, or ascend to parent level |
+| `Enter` | Toggle collapse/expand on repos and categories |
+| `Shift+←` / `Shift+→` | Switch focus between left and right panels |
+| `Tab` | Switch to next tab |
+| `Shift+Tab` | Switch to previous tab |

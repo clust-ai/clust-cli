@@ -55,8 +55,16 @@ pub enum Commands {
     /// Repository management
     Repo {
         /// Register the current directory's git repository for tracking
-        #[arg(short = 'r', long = "register")]
+        #[arg(short = 'R', long = "register")]
         register: bool,
+
+        /// Remove a repository from clust tracking (stops all agents first)
+        #[arg(short = 'r', long = "remove")]
+        remove: bool,
+
+        /// Stop all agents running on the current repository
+        #[arg(short = 's', long = "stop")]
+        stop: bool,
     },
 }
 
@@ -289,23 +297,93 @@ mod tests {
 
     #[test]
     fn parse_repo_register_short() {
-        let cli = Cli::try_parse_from(["clust", "repo", "-r"]).unwrap();
-        assert!(matches!(cli.command, Some(Commands::Repo { register: true })));
+        let cli = Cli::try_parse_from(["clust", "repo", "-R"]).unwrap();
+        match cli.command {
+            Some(Commands::Repo { register, remove, stop }) => {
+                assert!(register);
+                assert!(!remove);
+                assert!(!stop);
+            }
+            _ => panic!("expected Repo command"),
+        }
     }
 
     #[test]
     fn parse_repo_register_long() {
         let cli = Cli::try_parse_from(["clust", "repo", "--register"]).unwrap();
-        assert!(matches!(cli.command, Some(Commands::Repo { register: true })));
+        match cli.command {
+            Some(Commands::Repo { register, remove, stop }) => {
+                assert!(register);
+                assert!(!remove);
+                assert!(!stop);
+            }
+            _ => panic!("expected Repo command"),
+        }
+    }
+
+    #[test]
+    fn parse_repo_remove_short() {
+        let cli = Cli::try_parse_from(["clust", "repo", "-r"]).unwrap();
+        match cli.command {
+            Some(Commands::Repo { register, remove, stop }) => {
+                assert!(!register);
+                assert!(remove);
+                assert!(!stop);
+            }
+            _ => panic!("expected Repo command"),
+        }
+    }
+
+    #[test]
+    fn parse_repo_remove_long() {
+        let cli = Cli::try_parse_from(["clust", "repo", "--remove"]).unwrap();
+        match cli.command {
+            Some(Commands::Repo { register, remove, stop }) => {
+                assert!(!register);
+                assert!(remove);
+                assert!(!stop);
+            }
+            _ => panic!("expected Repo command"),
+        }
+    }
+
+    #[test]
+    fn parse_repo_stop_short() {
+        let cli = Cli::try_parse_from(["clust", "repo", "-s"]).unwrap();
+        match cli.command {
+            Some(Commands::Repo { register, remove, stop }) => {
+                assert!(!register);
+                assert!(!remove);
+                assert!(stop);
+            }
+            _ => panic!("expected Repo command"),
+        }
+    }
+
+    #[test]
+    fn parse_repo_stop_long() {
+        let cli = Cli::try_parse_from(["clust", "repo", "--stop"]).unwrap();
+        match cli.command {
+            Some(Commands::Repo { register, remove, stop }) => {
+                assert!(!register);
+                assert!(!remove);
+                assert!(stop);
+            }
+            _ => panic!("expected Repo command"),
+        }
     }
 
     #[test]
     fn parse_repo_no_flags() {
         let cli = Cli::try_parse_from(["clust", "repo"]).unwrap();
-        assert!(matches!(
-            cli.command,
-            Some(Commands::Repo { register: false })
-        ));
+        match cli.command {
+            Some(Commands::Repo { register, remove, stop }) => {
+                assert!(!register);
+                assert!(!remove);
+                assert!(!stop);
+            }
+            _ => panic!("expected Repo command"),
+        }
     }
 
     #[test]

@@ -33,6 +33,8 @@ pub enum CliMessage {
     SetDefault { agent_binary: String },
     GetDefault,
     RegisterRepo { path: String },
+    UnregisterRepo { path: String },
+    StopRepoAgents { path: String },
     ListRepos,
 }
 
@@ -79,6 +81,8 @@ pub enum PoolMessage {
     PoolShutdown,
     Error { message: String },
     RepoRegistered { path: String, name: String },
+    RepoUnregistered { path: String, name: String, stopped_agents: usize },
+    RepoAgentsStopped { path: String, stopped_count: usize },
     RepoList { repos: Vec<RepoInfo> },
 }
 
@@ -557,6 +561,22 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn cli_unregister_repo() {
+        assert_cli_round_trip(CliMessage::UnregisterRepo {
+            path: "/home/user/project".into(),
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn cli_stop_repo_agents() {
+        assert_cli_round_trip(CliMessage::StopRepoAgents {
+            path: "/home/user/project".into(),
+        })
+        .await;
+    }
+
+    #[tokio::test]
     async fn cli_list_repos() {
         assert_cli_round_trip(CliMessage::ListRepos).await;
     }
@@ -566,6 +586,44 @@ mod tests {
         assert_pool_round_trip(PoolMessage::RepoRegistered {
             path: "/home/user/project".into(),
             name: "project".into(),
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn pool_repo_unregistered() {
+        assert_pool_round_trip(PoolMessage::RepoUnregistered {
+            path: "/home/user/project".into(),
+            name: "project".into(),
+            stopped_agents: 2,
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn pool_repo_unregistered_no_agents() {
+        assert_pool_round_trip(PoolMessage::RepoUnregistered {
+            path: "/home/user/project".into(),
+            name: "project".into(),
+            stopped_agents: 0,
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn pool_repo_agents_stopped() {
+        assert_pool_round_trip(PoolMessage::RepoAgentsStopped {
+            path: "/home/user/project".into(),
+            stopped_count: 3,
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn pool_repo_agents_stopped_zero() {
+        assert_pool_round_trip(PoolMessage::RepoAgentsStopped {
+            path: "/home/user/project".into(),
+            stopped_count: 0,
         })
         .await;
     }

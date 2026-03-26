@@ -93,7 +93,9 @@ clust repo [OPTIONS]
 
 | Flag | Long | Description |
 |------|------|-------------|
-| `-r` | `--register` | Register the current directory's git repository for tracking in the TUI. |
+| `-R` | `--register` | Register the current directory's git repository for tracking in the TUI. |
+| `-r` | `--remove` | Remove a repository from clust tracking. Stops all agents first. Prompts for confirmation. |
+| `-s` | `--stop` | Stop all agents running on the current repository (keeps repo tracked). |
 
 ---
 
@@ -149,7 +151,16 @@ clust -s a3f8c1
 clust -s
 
 # Register the current repo for TUI tracking
+clust repo -R
+clust repo --register
+
+# Remove a repo from tracking (stops agents, prompts for confirmation)
+clust repo --remove
 clust repo -r
+
+# Stop all agents in the current repo (keeps repo tracked)
+clust repo --stop
+clust repo -s
 
 # Open terminal UI
 clust ui
@@ -178,5 +189,9 @@ These shortcuts are active in the `clust ui` dashboard. They are displayed in th
 | `q` / `Esc` | Quit the UI (pool keeps running) |
 | `Q` | Quit the UI and stop the pool |
 | `↑` / `↓` | Move selection within current level |
-| `→` | Descend into selected item (repo → category → branch) |
-| `←` | Ascend to parent level |
+| `→` | Descend into selected item, or expand if collapsed |
+| `←` | Collapse current item, or ascend to parent level |
+| `Enter` | Toggle collapse/expand on repos and categories |
+| `Shift+←` / `Shift+→` | Switch focus between left and right panels |
+| `Tab` | Switch to next tab |
+| `Shift+Tab` | Switch to previous tab |

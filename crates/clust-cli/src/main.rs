@@ -85,9 +85,13 @@ async fn main() {
     }
 
     // Subcommand: repo
-    if let Some(cli::Commands::Repo { register }) = args.command {
+    if let Some(cli::Commands::Repo { register, remove, stop }) = args.command {
         if register {
             handle_register().await;
+        } else if remove {
+            handle_repo_remove().await;
+        } else if stop {
+            handle_repo_stop().await;
         }
         return;
     }
@@ -146,7 +150,6 @@ async fn main() {
         handle_default_picker().await;
         return;
     }
-
 
     // Flag: --attach <ID>
     if let Some(ref id) = args.attach {
@@ -957,6 +960,97 @@ async fn handle_register() {
         }
         _ => {
             stop_spin_err(spinner, "unexpected response from pool");
+            std::process::exit(1);
+        }
+    }
+    println!();
+}
+
+async fn handle_repo_remove() {
+    println!();
+    let working_dir = std::env::current_dir()
+        .map(|p| p.to_string_lossy().into_owned())
+        .unwrap_or_else(|_| ".".into());
+
+    // Yellow warning
+    println!(
+        "  {}⚠ this will stop all agents working in this repo and remove it from clust{}",
+        theme::WARNING, theme::RESET
+    );
+    println!();
+
+    // Confirmation prompt
+    eprint!(
+        "  {}are you sure? [y/N]{} ",
+        theme::TEXT_PRIMARY, theme::RESET
+    );
+    let mut input = String::new();
+    if std::io::stdin().read_line(&mut input).is_err() || !matches!(input.trim(), "y" | "Y") {
+        println!(
+            "\n  {}cancelled{}",
+            theme::TEXT_SECONDARY, theme::RESET
+        );
+        println!();
+        return;
+    }
+    println!();
+
+    let spinner = spin("removing repository");
+    let mut stream = match ipc::connect_to_pool().await {
+        Ok(s) => s,
+        Err(e) => {
+            stop_spin_err(spinner, &format!("failed to connect to pool: {e}"));
+            std::process::exit(1);
+        }
+    };
+
+    match ipc::send_unregister_repo(&mut stream, &working_dir).await {
+        Ok((name, stopped)) => {
+            if stopped > 0 {
+                stop_spin(
+                    spinner,
+                    &format!("repository '{name}' removed ({stopped} agent{} stopped)", if stopped == 1 { "" } else { "s" }),
+                );
+            } else {
+                stop_spin(spinner, &format!("repository '{name}' removed"));
+            }
+        }
+        Err(e) => {
+            stop_spin_err(spinner, &format!("{e}"));
+            std::process::exit(1);
+        }
+    }
+    println!();
+}
+
+async fn handle_repo_stop() {
+    println!();
+    let working_dir = std::env::current_dir()
+        .map(|p| p.to_string_lossy().into_owned())
+        .unwrap_or_else(|_| ".".into());
+
+    let spinner = spin("stopping repo agents");
+    let mut stream = match ipc::connect_to_pool().await {
+        Ok(s) => s,
+        Err(e) => {
+            stop_spin_err(spinner, &format!("failed to connect to pool: {e}"));
+            std::process::exit(1);
+        }
+    };
+
+    match ipc::send_stop_repo_agents(&mut stream, &working_dir).await {
+        Ok(count) => {
+            if count > 0 {
+                stop_spin(
+                    spinner,
+                    &format!("{count} agent{} stopped", if count == 1 { "" } else { "s" }),
+                );
+            } else {
+                stop_spin(spinner, "no agents running in this repo");
+            }
+        }
+        Err(e) => {
+            stop_spin_err(spinner, &format!("{e}"));
             std::process::exit(1);
         }
     }

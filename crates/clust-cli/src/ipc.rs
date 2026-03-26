@@ -95,3 +95,45 @@ pub async fn send_stop_agent(stream: &mut UnixStream, id: &str) -> io::Result<()
         _ => Ok(()),
     }
 }
+
+/// Send an UnregisterRepo message and return (name, stopped_agents) on success.
+pub async fn send_unregister_repo(
+    stream: &mut UnixStream,
+    path: &str,
+) -> io::Result<(String, usize)> {
+    clust_ipc::send_message(
+        stream,
+        &CliMessage::UnregisterRepo { path: path.to_string() },
+    )
+    .await?;
+    let response: PoolMessage = clust_ipc::recv_message(stream).await?;
+
+    match response {
+        PoolMessage::RepoUnregistered { name, stopped_agents, .. } => Ok((name, stopped_agents)),
+        PoolMessage::Error { message } => {
+            Err(io::Error::new(io::ErrorKind::Other, message))
+        }
+        _ => Err(io::Error::new(io::ErrorKind::Other, "unexpected response")),
+    }
+}
+
+/// Send a StopRepoAgents message and return the stopped count on success.
+pub async fn send_stop_repo_agents(
+    stream: &mut UnixStream,
+    path: &str,
+) -> io::Result<usize> {
+    clust_ipc::send_message(
+        stream,
+        &CliMessage::StopRepoAgents { path: path.to_string() },
+    )
+    .await?;
+    let response: PoolMessage = clust_ipc::recv_message(stream).await?;
+
+    match response {
+        PoolMessage::RepoAgentsStopped { stopped_count, .. } => Ok(stopped_count),
+        PoolMessage::Error { message } => {
+            Err(io::Error::new(io::ErrorKind::Other, message))
+        }
+        _ => Err(io::Error::new(io::ErrorKind::Other, "unexpected response")),
+    }
+}
