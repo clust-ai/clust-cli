@@ -98,9 +98,18 @@ async fn main() {
         if id_or_empty.is_empty() {
             // No ID → stop the pool
             let spinner = spin("stopping clust pool");
+            // Count unique pools for pluralization
+            let pool_count = ipc::count_pools().await;
             match ipc::try_connect().await {
                 Ok(mut stream) => match ipc::send_stop(&mut stream).await {
-                    Ok(()) => stop_spin(spinner, "clust pool stopped"),
+                    Ok(()) => {
+                        let label = if pool_count > 1 {
+                            "clust pools stopped"
+                        } else {
+                            "clust pool stopped"
+                        };
+                        stop_spin(spinner, label);
+                    }
                     Err(e) => {
                         stop_spin_err(spinner, &format!("failed to stop clust pool: {e}"));
                         std::process::exit(1);
