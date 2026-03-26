@@ -80,21 +80,21 @@ fn list_branches(
             let is_head = branch.is_head();
             let is_worktree = worktree_branches.contains(&name);
 
-            // Find agent whose repo_path and branch_name match this branch
-            let active_agent_id = repo_path.as_ref().and_then(|rp| {
+            // Count agents whose repo_path and branch_name match this branch
+            let active_agent_count = repo_path.as_ref().map_or(0, |rp| {
                 agents
                     .values()
-                    .find(|a| {
+                    .filter(|a| {
                         a.repo_path.as_deref() == Some(rp.as_str())
                             && a.branch_name.as_deref() == Some(&name)
                     })
-                    .map(|a| a.id.clone())
+                    .count()
             });
 
             Some(BranchInfo {
                 name,
                 is_head,
-                active_agent_id,
+                active_agent_count,
                 is_worktree,
             })
         })
@@ -286,7 +286,7 @@ mod tests {
             .iter()
             .find(|b| b.name == head_branch)
             .unwrap();
-        assert!(branch.active_agent_id.is_none());
+        assert_eq!(branch.active_agent_count, 0);
     }
 
     #[test]
@@ -336,8 +336,7 @@ mod tests {
             .find(|b| b.name == head_branch)
             .unwrap();
         assert_eq!(
-            branch.active_agent_id.as_deref(),
-            Some("abc123"),
+            branch.active_agent_count, 1,
             "agent should be matched to its branch"
         );
     }
@@ -361,8 +360,8 @@ mod tests {
             .iter()
             .find(|b| b.name == head_branch)
             .unwrap();
-        assert!(
-            branch.active_agent_id.is_none(),
+        assert_eq!(
+            branch.active_agent_count, 0,
             "agent on different branch should not match"
         );
     }
@@ -385,8 +384,8 @@ mod tests {
             .iter()
             .find(|b| b.name == head_branch)
             .unwrap();
-        assert!(
-            branch.active_agent_id.is_none(),
+        assert_eq!(
+            branch.active_agent_count, 0,
             "agent in different repo should not match"
         );
     }
