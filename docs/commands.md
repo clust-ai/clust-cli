@@ -37,7 +37,6 @@ clust [OPTIONS] [PROMPT]
 | `-u` | `--use <AGENT>` | Use a specific agent binary for this session only (does not change the default). |
 | `-e` | `--accept-edits` | Auto-accept edits. Agent-specific: for Claude, passes `--permission-mode acceptEdits`. Ignored for agents that don't support it. |
 | `-p` | `--pool <NAME>` | Assign the agent to a named pool (snake_case; default: `default_pool`). Pools are logical groupings within the single pool process. |
-| `-r` | `--register` | Register the current directory's git repository for tracking in the TUI. Does not launch an agent. |
 | `-h` | `--help` | Show help with all available options. |
 | `-V` | `--version` | Show version. |
 
@@ -83,6 +82,18 @@ clust ui
 ```
 
 `clust .` is an alias for `clust ui`.
+
+### `clust repo`
+
+Repository management.
+
+```
+clust repo [OPTIONS]
+```
+
+| Flag | Long | Description |
+|------|------|-------------|
+| `-r` | `--register` | Register the current directory's git repository for tracking in the TUI. |
 
 ---
 
@@ -138,7 +149,7 @@ clust -s a3f8c1
 clust -s
 
 # Register the current repo for TUI tracking
-clust -r
+clust repo -r
 
 # Open terminal UI
 clust ui
