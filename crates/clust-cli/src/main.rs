@@ -3,6 +3,7 @@ mod format;
 mod ipc;
 mod output_filter;
 mod pool_launcher;
+mod scroll_break;
 mod terminal;
 mod theme;
 mod ui;

@@ -10,10 +10,14 @@ use tokio::net::unix::{OwnedReadHalf, OwnedWriteHalf};
 use clust_ipc::{CliMessage, PoolMessage};
 
 use crate::output_filter::{EscapeSequenceAssembler, FilterChain};
+use crate::scroll_break::{ScrollBreak, ScrollMode};
 use crate::theme;
 
 /// Ctrl+Q raw byte (DC1/XON) — used as the detach key.
 const CTRL_Q: u8 = 0x11;
+
+/// Maximum scroll events forwarded per second in the attached session.
+const SCROLL_MAX_PER_SEC: u32 = 5;
 
 /// An active terminal session attached to an agent in the pool.
 pub struct AttachedSession {
@@ -126,8 +130,9 @@ impl AttachedSession {
         });
 
         // Task 2: Read raw stdin bytes and forward to pool.
-        // Raw byte forwarding is lossless — mouse events, terminal protocols,
-        // alt+key combinations all pass through automatically.
+        // Input bytes pass through the scroll break filter (rate-limiting mouse
+        // scroll events) before forwarding. All other bytes — keyboard input,
+        // terminal protocols, alt+key — pass through unchanged.
         let agent_id_for_input = agent_id.clone();
         let agent_binary_for_input = agent_binary.clone();
         let input_task = tokio::spawn(async move {
@@ -140,6 +145,9 @@ impl AttachedSession {
             };
 
             let mut buf = [0u8; 4096];
+            let mut scroll_break = ScrollBreak::new(ScrollMode::RateLimited {
+                max_per_sec: SCROLL_MAX_PER_SEC,
+            });
 
             loop {
                 tokio::select! {
@@ -153,13 +161,16 @@ impl AttachedSession {
                                 if let Some(pos) = data.iter().position(|&b| b == CTRL_Q) {
                                     // Forward any bytes before Ctrl+Q
                                     if pos > 0 {
-                                        let _ = clust_ipc::send_message_write(
-                                            &mut writer,
-                                            &CliMessage::AgentInput {
-                                                id: agent_id_for_input.clone(),
-                                                data: data[..pos].to_vec(),
-                                            },
-                                        ).await;
+                                        let filtered = scroll_break.filter(&data[..pos]);
+                                        if !filtered.is_empty() {
+                                            let _ = clust_ipc::send_message_write(
+                                                &mut writer,
+                                                &CliMessage::AgentInput {
+                                                    id: agent_id_for_input.clone(),
+                                                    data: filtered,
+                                                },
+                                            ).await;
+                                        }
                                     }
                                     let _ = clust_ipc::send_message_write(
                                         &mut writer,
@@ -170,14 +181,17 @@ impl AttachedSession {
                                     return SessionEnd::Detached;
                                 }
 
-                                // Forward all bytes to the agent PTY
-                                let _ = clust_ipc::send_message_write(
-                                    &mut writer,
-                                    &CliMessage::AgentInput {
-                                        id: agent_id_for_input.clone(),
-                                        data: data.to_vec(),
-                                    },
-                                ).await;
+                                // Filter scroll events, then forward
+                                let filtered = scroll_break.filter(data);
+                                if !filtered.is_empty() {
+                                    let _ = clust_ipc::send_message_write(
+                                        &mut writer,
+                                        &CliMessage::AgentInput {
+                                            id: agent_id_for_input.clone(),
+                                            data: filtered,
+                                        },
+                                    ).await;
+                                }
                             }
                         }
                     }
