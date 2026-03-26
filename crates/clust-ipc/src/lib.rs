@@ -32,6 +32,8 @@ pub enum CliMessage {
     StopAgent { id: String },
     SetDefault { agent_binary: String },
     GetDefault,
+    RegisterRepo { path: String },
+    ListRepos,
 }
 
 /// Info about a running agent, returned in AgentList.
@@ -42,6 +44,25 @@ pub struct AgentInfo {
     pub started_at: String,
     pub attached_clients: usize,
     pub pool: String,
+    pub working_dir: String,
+}
+
+/// Info about a registered repository, returned in RepoList.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RepoInfo {
+    pub path: String,
+    pub name: String,
+    pub local_branches: Vec<BranchInfo>,
+    pub remote_branches: Vec<BranchInfo>,
+}
+
+/// Info about a single branch within a repository.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct BranchInfo {
+    pub name: String,
+    pub is_head: bool,
+    pub active_agent_id: Option<String>,
+    pub is_worktree: bool,
 }
 
 /// Messages sent from Pool to CLI.
@@ -57,6 +78,8 @@ pub enum PoolMessage {
     AgentStopped { id: String },
     PoolShutdown,
     Error { message: String },
+    RepoRegistered { path: String, name: String },
+    RepoList { repos: Vec<RepoInfo> },
 }
 
 /// Returns the clust data directory: `~/.clust/`.
@@ -310,6 +333,7 @@ mod tests {
                     started_at: "2026-03-25T10:00:00Z".into(),
                     attached_clients: 2,
                     pool: DEFAULT_POOL.into(),
+                    working_dir: "/tmp/project".into(),
                 },
                 AgentInfo {
                     id: "bbb222".into(),
@@ -317,6 +341,7 @@ mod tests {
                     started_at: "2026-03-25T11:00:00Z".into(),
                     attached_clients: 0,
                     pool: "my_feature".into(),
+                    working_dir: "/home/user/code".into(),
                 },
             ],
         })
@@ -519,6 +544,66 @@ mod tests {
             let received: CliMessage = recv_message_read(&mut b_read).await.unwrap();
             assert_eq!(expected, &received);
         }
+    }
+
+    // ── Repo message round-trips ────────────────────────────────
+
+    #[tokio::test]
+    async fn cli_register_repo() {
+        assert_cli_round_trip(CliMessage::RegisterRepo {
+            path: "/home/user/project".into(),
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn cli_list_repos() {
+        assert_cli_round_trip(CliMessage::ListRepos).await;
+    }
+
+    #[tokio::test]
+    async fn pool_repo_registered() {
+        assert_pool_round_trip(PoolMessage::RepoRegistered {
+            path: "/home/user/project".into(),
+            name: "project".into(),
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn pool_repo_list_populated() {
+        assert_pool_round_trip(PoolMessage::RepoList {
+            repos: vec![RepoInfo {
+                path: "/home/user/project".into(),
+                name: "project".into(),
+                local_branches: vec![
+                    BranchInfo {
+                        name: "main".into(),
+                        is_head: true,
+                        active_agent_id: Some("abc123".into()),
+                        is_worktree: false,
+                    },
+                    BranchInfo {
+                        name: "feature/foo".into(),
+                        is_head: false,
+                        active_agent_id: None,
+                        is_worktree: true,
+                    },
+                ],
+                remote_branches: vec![BranchInfo {
+                    name: "origin/main".into(),
+                    is_head: false,
+                    active_agent_id: None,
+                    is_worktree: false,
+                }],
+            }],
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn pool_repo_list_empty() {
+        assert_pool_round_trip(PoolMessage::RepoList { repos: vec![] }).await;
     }
 
     // ── Path helpers ───────────────────────────────────────────────

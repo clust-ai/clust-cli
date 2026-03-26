@@ -41,6 +41,9 @@ fn run_migrations(conn: &Connection) -> Result<(), String> {
     if current_version < 1 {
         migrate_v1(conn)?;
     }
+    if current_version < 2 {
+        migrate_v2(conn)?;
+    }
 
     Ok(())
 }
@@ -55,6 +58,60 @@ fn migrate_v1(conn: &Connection) -> Result<(), String> {
         INSERT INTO schema_version (version) VALUES (1);",
     )
     .map_err(|e| format!("migration v1 failed: {e}"))
+}
+
+/// Migration v2: create the repos table.
+fn migrate_v2(conn: &Connection) -> Result<(), String> {
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS repos (
+            path           TEXT PRIMARY KEY,
+            name           TEXT NOT NULL,
+            registered_at  TEXT NOT NULL
+        );
+        INSERT INTO schema_version (version) VALUES (2);",
+    )
+    .map_err(|e| format!("migration v2 failed: {e}"))
+}
+
+/// Register a repository path. Silently ignores duplicates.
+pub fn register_repo(conn: &Connection, path: &str, name: &str) -> Result<(), String> {
+    let now = chrono::Utc::now().to_rfc3339();
+    conn.execute(
+        "INSERT OR IGNORE INTO repos (path, name, registered_at) VALUES (?1, ?2, ?3)",
+        rusqlite::params![path, name, now],
+    )
+    .map_err(|e| format!("failed to register repo: {e}"))?;
+    Ok(())
+}
+
+/// List all registered repositories, ordered by name.
+pub fn list_repos(conn: &Connection) -> Result<Vec<(String, String)>, String> {
+    let mut stmt = conn
+        .prepare("SELECT path, name FROM repos ORDER BY name")
+        .map_err(|e| format!("failed to prepare repo query: {e}"))?;
+    let rows = stmt
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+        .map_err(|e| format!("failed to query repos: {e}"))?;
+    rows.collect::<Result<Vec<_>, _>>()
+        .map_err(|e| format!("failed to collect repos: {e}"))
+}
+
+/// Check if a repository path is already registered.
+pub fn is_repo_registered(conn: &Connection, path: &str) -> bool {
+    conn.query_row(
+        "SELECT COUNT(*) FROM repos WHERE path = ?1",
+        [path],
+        |row| row.get::<_, i64>(0),
+    )
+    .map(|c| c > 0)
+    .unwrap_or(false)
+}
+
+/// Remove a repository registration.
+pub fn unregister_repo(conn: &Connection, path: &str) -> Result<(), String> {
+    conn.execute("DELETE FROM repos WHERE path = ?1", [path])
+        .map_err(|e| format!("failed to unregister repo: {e}"))?;
+    Ok(())
 }
 
 /// Read the default agent from the config table. Returns `None` if not set.
@@ -153,5 +210,72 @@ mod tests {
         assert_eq!(get_default_agent(&conn), Some("aider".to_string()));
         // Old value is gone
         assert_ne!(get_default_agent(&conn), Some("claude".to_string()));
+    }
+
+    // ── Repo CRUD tests ──────────────────────────────────────────
+
+    #[test]
+    fn creates_repos_table() {
+        let conn = in_memory_db();
+        let count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM repos", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(count, 0);
+    }
+
+    #[test]
+    fn register_and_list_repo() {
+        let conn = in_memory_db();
+        register_repo(&conn, "/home/user/project", "project").unwrap();
+        let repos = list_repos(&conn).unwrap();
+        assert_eq!(repos.len(), 1);
+        assert_eq!(repos[0].0, "/home/user/project");
+        assert_eq!(repos[0].1, "project");
+    }
+
+    #[test]
+    fn register_duplicate_is_noop() {
+        let conn = in_memory_db();
+        register_repo(&conn, "/tmp/repo", "repo").unwrap();
+        register_repo(&conn, "/tmp/repo", "repo").unwrap();
+        let repos = list_repos(&conn).unwrap();
+        assert_eq!(repos.len(), 1);
+    }
+
+    #[test]
+    fn is_repo_registered_true_false() {
+        let conn = in_memory_db();
+        assert!(!is_repo_registered(&conn, "/tmp/repo"));
+        register_repo(&conn, "/tmp/repo", "repo").unwrap();
+        assert!(is_repo_registered(&conn, "/tmp/repo"));
+    }
+
+    #[test]
+    fn unregister_repo_removes_entry() {
+        let conn = in_memory_db();
+        register_repo(&conn, "/tmp/repo", "repo").unwrap();
+        assert!(is_repo_registered(&conn, "/tmp/repo"));
+        unregister_repo(&conn, "/tmp/repo").unwrap();
+        assert!(!is_repo_registered(&conn, "/tmp/repo"));
+        assert!(list_repos(&conn).unwrap().is_empty());
+    }
+
+    #[test]
+    fn list_repos_ordered_by_name() {
+        let conn = in_memory_db();
+        register_repo(&conn, "/z/zebra", "zebra").unwrap();
+        register_repo(&conn, "/a/alpha", "alpha").unwrap();
+        register_repo(&conn, "/m/mid", "mid").unwrap();
+        let repos = list_repos(&conn).unwrap();
+        let names: Vec<&str> = repos.iter().map(|(_, n)| n.as_str()).collect();
+        assert_eq!(names, vec!["alpha", "mid", "zebra"]);
+    }
+
+    #[test]
+    fn migration_v2_is_idempotent() {
+        let conn = in_memory_db();
+        run_migrations(&conn).unwrap();
+        register_repo(&conn, "/tmp/repo", "repo").unwrap();
+        assert_eq!(list_repos(&conn).unwrap().len(), 1);
     }
 }

@@ -36,9 +36,23 @@ CREATE TABLE config (
 |-----|---------|-------------|
 | `default_agent` | *(none)* | The agent binary to use when none is specified. Set via `clust -d` or first-run prompt. |
 
-#### `agent_history` *(deferred — migration v2)*
+#### `repos` *(migration v2)*
 
-Log of past agent sessions. Written when an agent exits. Useful for future features (UI history, analytics). Not created in migration v1; will be added as migration v2.
+Registered git repositories tracked in the TUI. Branch/worktree data is ephemeral (fetched from git on each poll), only the registration is persisted.
+
+```sql
+CREATE TABLE repos (
+    path           TEXT PRIMARY KEY,  -- absolute path to repo root
+    name           TEXT NOT NULL,     -- directory name
+    registered_at  TEXT NOT NULL      -- ISO 8601
+);
+```
+
+Repos are registered via `clust -r` or auto-registered when an agent is launched inside a git repository. Stale entries (deleted repos) are cleaned up automatically when the TUI polls for repo state.
+
+#### `agent_history` *(deferred — migration v3)*
+
+Log of past agent sessions. Written when an agent exits. Useful for future features (UI history, analytics). Not yet created; will be added as migration v3.
 
 ```sql
 CREATE TABLE agent_history (
@@ -69,6 +83,8 @@ On startup, the pool checks `schema_version` and applies any pending migrations 
 | Data | Location | Lifetime |
 |------|----------|----------|
 | Default agent binary | SQLite `config` table | Persistent (survives restarts) |
+| Registered repositories | SQLite `repos` table | Persistent (auto-cleaned if path deleted) |
 | Agent session history | SQLite `agent_history` table | Persistent |
 | Running agent state | Pool in-memory | Ephemeral (dies with pool) |
+| Repository branch/worktree data | Fetched from git on demand | Ephemeral (never persisted) |
 | IPC socket | `~/.clust/clust.sock` | Runtime only |

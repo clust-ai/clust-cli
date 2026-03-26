@@ -60,6 +60,12 @@ pub struct AgentEntry {
     pub active_client_id: Option<u64>,
     /// Monotonic counter for assigning unique client IDs.
     next_client_id: AtomicU64,
+    /// Git repository root path (if working_dir is inside a git repo).
+    pub repo_path: Option<String>,
+    /// Git branch the agent is working on.
+    pub branch_name: Option<String>,
+    /// Whether the agent's working_dir is a git worktree checkout.
+    pub is_worktree: bool,
 }
 
 impl AgentEntry {
@@ -124,6 +130,10 @@ pub fn resolve_agent_binary(
 ///
 /// Returns the agent ID on success. The agent is added to `state.agents` and
 /// a background task is started to read PTY output and broadcast it.
+///
+/// Git info (`repo_path`, `branch_name`, `is_worktree`) should be pre-computed
+/// by the caller BEFORE acquiring the state lock, to avoid holding the lock
+/// during potentially slow git operations.
 pub fn spawn_agent(
     state: &mut PoolState,
     prompt: Option<String>,
@@ -134,6 +144,9 @@ pub fn spawn_agent(
     accept_edits: bool,
     pool: String,
     shared_state: SharedPoolState,
+    repo_path: Option<String>,
+    branch_name: Option<String>,
+    is_worktree: bool,
 ) -> Result<(String, String), String> {
     let binary = resolve_agent_binary(agent_binary, &state.default_agent)?;
     let id = generate_agent_id(&state.agents);
@@ -204,6 +217,9 @@ pub fn spawn_agent(
         current_pty_size: (cols, rows),
         active_client_id: None,
         next_client_id: AtomicU64::new(0),
+        repo_path,
+        branch_name,
+        is_worktree,
     };
 
     state.agents.insert(id.clone(), entry);
@@ -369,6 +385,9 @@ mod tests {
                     current_pty_size: (80, 24),
                     active_client_id: None,
                     next_client_id: AtomicU64::new(0),
+                    repo_path: None,
+                    branch_name: None,
+                    is_worktree: false,
                 },
             );
         }
@@ -444,6 +463,9 @@ mod tests {
                     current_pty_size: (80, 24),
                     active_client_id: None,
                     next_client_id: AtomicU64::new(0),
+                    repo_path: None,
+                    branch_name: None,
+                    is_worktree: false,
                 },
             );
         }

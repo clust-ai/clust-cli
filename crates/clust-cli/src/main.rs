@@ -130,6 +130,12 @@ async fn main() {
         return;
     }
 
+    // Flag: -r / --register
+    if args.register {
+        handle_register().await;
+        return;
+    }
+
     // Flag: --attach <ID>
     if let Some(ref id) = args.attach {
         handle_attach(id.clone()).await;
@@ -855,6 +861,47 @@ async fn handle_default_picker() {
             }
         }
     }
+}
+
+async fn handle_register() {
+    println!();
+    let working_dir = std::env::current_dir()
+        .map(|p| p.to_string_lossy().into_owned())
+        .unwrap_or_else(|_| ".".into());
+
+    let spinner = spin("registering repository");
+    let mut stream = match ipc::connect_to_pool().await {
+        Ok(s) => s,
+        Err(e) => {
+            stop_spin_err(spinner, &format!("failed to connect to pool: {e}"));
+            std::process::exit(1);
+        }
+    };
+
+    if let Err(e) = clust_ipc::send_message(
+        &mut stream,
+        &CliMessage::RegisterRepo { path: working_dir },
+    )
+    .await
+    {
+        stop_spin_err(spinner, &format!("failed to send register: {e}"));
+        std::process::exit(1);
+    }
+
+    match clust_ipc::recv_message::<PoolMessage>(&mut stream).await {
+        Ok(PoolMessage::RepoRegistered { name, .. }) => {
+            stop_spin(spinner, &format!("repository '{name}' registered"));
+        }
+        Ok(PoolMessage::Error { message }) => {
+            stop_spin_err(spinner, &message);
+            std::process::exit(1);
+        }
+        _ => {
+            stop_spin_err(spinner, "unexpected response from pool");
+            std::process::exit(1);
+        }
+    }
+    println!();
 }
 
 /// Interactive default agent selector.
