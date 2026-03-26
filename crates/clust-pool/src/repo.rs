@@ -144,15 +144,13 @@ fn collect_worktree_branches(repo: &git2::Repository) -> Vec<String> {
     }
 
     if let Ok(worktree_names) = repo.worktrees() {
-        for wt_name in worktree_names.iter() {
-            if let Some(name) = wt_name {
-                // Open the worktree's repo to read its HEAD
-                if let Ok(wt) = repo.find_worktree(name) {
-                    if let Ok(wt_repo) = git2::Repository::open_from_worktree(&wt) {
-                        if let Ok(head) = wt_repo.head() {
-                            if let Some(branch_name) = head.shorthand() {
-                                branches.push(branch_name.to_string());
-                            }
+        for name in worktree_names.iter().flatten() {
+            // Open the worktree's repo to read its HEAD
+            if let Ok(wt) = repo.find_worktree(name) {
+                if let Ok(wt_repo) = git2::Repository::open_from_worktree(&wt) {
+                    if let Ok(head) = wt_repo.head() {
+                        if let Some(branch_name) = head.shorthand() {
+                            branches.push(branch_name.to_string());
                         }
                     }
                 }

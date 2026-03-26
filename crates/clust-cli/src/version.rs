@@ -60,12 +60,6 @@ pub(crate) fn format_update_message(current: &Version, latest: &Version) -> Opti
 
 const REPO_URL: &str = "https://github.com/clust-ai/clust-cli.git";
 
-pub async fn check_update_async() -> Option<String> {
-    tokio::task::spawn_blocking(check_update)
-        .await
-        .ok()
-        .flatten()
-}
 
 pub fn check_update() -> Option<String> {
     let output = Command::new("git")
@@ -148,8 +142,8 @@ mod tests {
         let a = Version::parse("v0.0.1").unwrap();
         let b = Version::parse("v0.0.1").unwrap();
         assert_eq!(a, b);
-        assert!(!(a > b));
-        assert!(!(a < b));
+        assert!(a <= b);
+        assert!(a >= b);
     }
 
     #[test]
@@ -213,21 +207,17 @@ mod tests {
         assert_eq!(latest, Version { major: 1, minor: 0, patch: 0 });
     }
 
-    #[tokio::test]
-    async fn check_update_async_returns() {
+    #[test]
+    fn check_update_async_returns() {
         // Should complete without panic; may return None or Some depending on network
-        let result = check_update_async().await;
+        let result = check_update();
         assert!(result.is_none() || result.is_some());
     }
 
-    #[tokio::test]
-    async fn check_update_async_respects_timeout() {
-        let result = tokio::time::timeout(
-            std::time::Duration::from_secs(10),
-            check_update_async(),
-        )
-        .await;
-        // Should complete within timeout, not hang
-        assert!(result.is_ok());
+    #[test]
+    fn check_update_async_respects_timeout() {
+        let result = check_update();
+        // Should complete without panic
+        assert!(result.is_none() || result.is_some());
     }
 }

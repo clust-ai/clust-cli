@@ -10,20 +10,11 @@ use tokio::sync::{broadcast, Mutex};
 pub type SharedPoolState = Arc<Mutex<PoolState>>;
 
 /// Top-level pool state holding all running agents.
+#[derive(Default)]
 pub struct PoolState {
     pub agents: HashMap<String, AgentEntry>,
     pub default_agent: Option<String>,
     pub db: Option<rusqlite::Connection>,
-}
-
-impl Default for PoolState {
-    fn default() -> Self {
-        Self {
-            agents: HashMap::new(),
-            default_agent: None,
-            db: None,
-        }
-    }
 }
 
 impl PoolState {

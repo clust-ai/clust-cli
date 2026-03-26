@@ -97,18 +97,10 @@ fn pool_names(agents: &[AgentInfo]) -> Vec<String> {
 }
 
 /// Tracks the user's cursor position within the agent panel (pool + agent).
+#[derive(Default)]
 struct AgentSelection {
     pool_idx: usize,
     agent_idx: usize,
-}
-
-impl Default for AgentSelection {
-    fn default() -> Self {
-        Self {
-            pool_idx: 0,
-            agent_idx: 0,
-        }
-    }
 }
 
 impl AgentSelection {
@@ -1026,12 +1018,10 @@ fn render_agent_list(
         area_idx += 1;
 
         // Agent cards for this pool
-        let mut aidx = 0;
-        for agent in sorted.iter().filter(|a| a.pool == *pool_name) {
+        for (aidx, agent) in sorted.iter().filter(|a| a.pool == *pool_name).enumerate() {
             let is_selected = focused && pidx == agent_sel.pool_idx && aidx == agent_sel.agent_idx;
             render_agent_card(frame, areas[area_idx], agent, is_selected);
             area_idx += 1;
-            aidx += 1;
         }
     }
 }
@@ -1756,7 +1746,7 @@ mod tests {
             vec![],
         );
         let mut sel = TreeSelection::default();
-        sel.descend(&[repo.clone()]); // -> Category
+        sel.descend(std::slice::from_ref(&repo)); // -> Category
         sel.toggle_collapse(); // collapse local category
 
         let lines = build_repo_tree_lines(&[repo], &sel, 80);

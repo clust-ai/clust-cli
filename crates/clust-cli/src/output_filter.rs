@@ -2,7 +2,6 @@
 ///
 /// All PTY output must pass through a `FilterChain` before reaching stdout.
 /// New filters implement the `OutputFilter` trait and are added to the chain.
-
 /// A filter that processes terminal output bytes.
 pub trait OutputFilter: Send {
     /// Process a chunk of output data. Returns bytes safe to write to the terminal.

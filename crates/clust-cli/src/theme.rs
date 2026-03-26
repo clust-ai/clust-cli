@@ -2,7 +2,6 @@
 /// ANSI true-color (24-bit) escape helpers for the Graphite theme.
 ///
 /// See docs/theme.md for the full palette.
-
 // Accent
 pub const ACCENT: &str = "\x1b[38;2;94;154;191m";      // #5e9abf
 pub const ACCENT_BRIGHT: &str = "\x1b[38;2;114;174;208m"; // #72aed0
