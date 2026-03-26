@@ -1,6 +1,6 @@
 # Clust
 
-Agent manager CLI built in Rust. Two crates: `clust-cli` (CLI binary) and `clust-pool` (background daemon).
+Agent manager CLI built in Rust. Three crates: `clust-cli` (CLI binary), `clust-pool` (background daemon), and `clust-ipc` (shared IPC library).
 
 ## Quick Reference
 
@@ -12,7 +12,7 @@ Agent manager CLI built in Rust. Two crates: `clust-cli` (CLI binary) and `clust
 
 ```bash
 cargo build
-cargo run --bin clust-cli
+cargo run --bin clust
 cargo run --bin clust-pool
 cargo test
 ```

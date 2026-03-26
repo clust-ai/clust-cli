@@ -78,9 +78,10 @@ A full terminal UI (TUI) built with `ratatui` + `crossterm`.
 
 ### Layout
 
-The dashboard has two panels:
+The dashboard has two panels separated by a vertical divider:
 
-- **Left panel (40%):** Repository tracker. Shows a tree view of registered git repositories with their local and remote branches. Branches with active agents display a green `●` indicator; branches checked out in worktrees display a `⎇` indicator. The current HEAD branch is highlighted. Displays "No repositories found" when no repos are registered.
+- **Left panel (40%):** Repository tracker. Shows a tree view of registered git repositories with their local and remote branches. Branches with active agents display a green `●` indicator; branches checked out in worktrees display a `⎇` indicator. The current HEAD branch is highlighted. Displays "No repositories found" when no repos are registered. Uses background colors for visual separation (no borders).
+- **Vertical divider (1 col):** A single-column divider between the two panels.
 - **Right panel (60%):** Shows agent cards grouped by pool name with section headers. Displays the CLUST logo when no agents are running.
 
 Agent cards show: ID, binary name, status, start time, and attached terminal count.
@@ -94,7 +95,7 @@ On startup, `clust ui` automatically connects to the pool daemon, starting it if
 ### Bottom Status Bar
 
 ```
-● connected  q to quit  Q to quit and stop pool  ↑↓←→ navigate          v0.0.2
+● connected  q to quit  Q to quit and stop pool  ↑↓←→ navigate          v0.0.3
 ```
 
 | Section | Description |
@@ -102,7 +103,7 @@ On startup, `clust ui` automatically connects to the pool daemon, starting it if
 | Status dot | Green `●` when connected, dim when disconnected |
 | Status label | `connected` or `disconnected` |
 | Shortcuts | `q to quit`, `Q to quit and stop pool`, `↑↓←→ navigate` |
-| Version | Right-aligned, e.g. `v0.0.2` |
+| Version | Right-aligned, e.g. `v0.0.3` |
 
 ### Keyboard Shortcuts
 

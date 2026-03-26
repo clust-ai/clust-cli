@@ -33,11 +33,10 @@ Triggered by `clust -s` / `clust --stop` (no argument).
 
 1. Pool receives `StopPool` message over IPC
 2. Pool replies `Ok` to the requesting CLI
-3. Pool removes the socket file (`~/.clust/clust.sock`)
-4. Pool signals the main event loop to exit (all agents terminate with the process)
-
-> **Future work:** Graceful agent termination (SIGTERM with timeout, then SIGKILL) and
-> notification of attached CLI clients before shutdown are planned but not yet implemented.
+3. Pool notifies all attached CLI clients via broadcast channels (`PoolShutdown` event)
+4. Pool sends SIGTERM to all agent processes, waits 3 seconds, then SIGKILL any survivors
+5. Pool removes the socket file (`~/.clust/clust.sock`)
+6. Pool signals the tao event loop to exit
 
 ### Crash Recovery
 
@@ -117,23 +116,28 @@ Any attached client can send input. The pool writes it directly to the agent's P
 ```rust
 struct PoolState {
     agents: HashMap<String, AgentEntry>,
-    default_agent: Option<String>, // loaded from SQLite on startup; None if unset
-    db: Option<rusqlite::Connection>, // open SQLite connection; Some after init_db()
+    default_agent: Option<String>,         // loaded from SQLite on startup; None if unset
+    db: Option<rusqlite::Connection>,      // open SQLite connection; Some after init_db()
 }
 
 struct AgentEntry {
-    id: String,               // 6-char hex
-    agent_binary: String,     // e.g., "claude"
-    started_at: String,       // RFC 3339 timestamp
+    id: String,                            // 6-char hex
+    agent_binary: String,                  // e.g., "claude"
+    started_at: String,                    // RFC 3339 timestamp
     working_dir: String,
-    pool: String,             // e.g., "default_pool"
+    pool: String,                          // e.g., "default_pool"
+    pid: Option<u32>,                      // OS process ID (for SIGTERM/SIGKILL)
     pty_master: Box<dyn MasterPty + Send>,
     pty_writer: Box<dyn Write + Send>,
     output_tx: broadcast::Sender<AgentEvent>,
     attached_count: Arc<AtomicUsize>,
-    repo_path: Option<String>,    // git repo root (None if not in a git repo)
-    branch_name: Option<String>,  // current git branch
-    is_worktree: bool,            // whether working_dir is a git worktree
+    client_sizes: HashMap<u64, (u16, u16)>,// per-client terminal sizes
+    current_pty_size: (u16, u16),          // current PTY dimensions (skip redundant resizes)
+    active_client_id: Option<u64>,         // most recently active client
+    next_client_id: AtomicU64,             // monotonic counter for client IDs
+    repo_path: Option<String>,             // git repo root (None if not in a git repo)
+    branch_name: Option<String>,           // current git branch
+    is_worktree: bool,                     // whether working_dir is a git worktree
 }
 ```
 

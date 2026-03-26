@@ -5,8 +5,8 @@ use std::process::{Command, Stdio};
 pub fn spawn_pool() -> io::Result<()> {
     // Resolve clust-pool binary path relative to the current executable.
     // During development (cargo build/run), both binaries are in the same
-    // target/{debug,release}/ directory. After `cargo install`, both are
-    // in ~/.cargo/bin/.
+    // target/{debug,release}/ directory. When installed, both are co-located
+    // in the same directory (e.g. ~/.clust/bin/).
     let current_exe = std::env::current_exe()?;
     let bin_dir = current_exe
         .parent()

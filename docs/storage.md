@@ -4,6 +4,7 @@
 
 ```
 ~/.clust/
+├── bin/            # Installed binaries (clust, clust-pool)
 ├── clust.db        # SQLite database (config, defaults)
 ├── clust.sock      # Unix domain socket (IPC, runtime only)
 └── logs/           # Optional: daemon logs (future)
@@ -84,7 +85,7 @@ On startup, the pool checks `schema_version` and applies any pending migrations 
 |------|----------|----------|
 | Default agent binary | SQLite `config` table | Persistent (survives restarts) |
 | Registered repositories | SQLite `repos` table | Persistent (auto-cleaned if path deleted) |
-| Agent session history | SQLite `agent_history` table | Persistent |
+| Agent session history | SQLite `agent_history` table | Persistent *(not yet implemented)* |
 | Running agent state | Pool in-memory | Ephemeral (dies with pool) |
 | Repository branch/worktree data | Fetched from git on demand | Ephemeral (never persisted) |
 | IPC socket | `~/.clust/clust.sock` | Runtime only |
