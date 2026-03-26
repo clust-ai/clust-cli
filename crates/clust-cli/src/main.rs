@@ -1,5 +1,6 @@
 mod cli;
 mod ipc;
+mod output_filter;
 mod pool_launcher;
 mod terminal;
 mod theme;

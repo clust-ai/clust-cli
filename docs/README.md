@@ -16,6 +16,7 @@ Clust is a CLI tool for managing AI agents (Claude Code, etc.) with session mult
 - [Pool](./pool.md) — Daemon lifecycle, agent management, PTY handling
 - [Storage](./storage.md) — SQLite schema, config, file layout (`~/.clust/`)
 - [Terminal UI](./terminal-ui.md) — Rendering, bottom bar, attach/detach behavior
+- [Terminal Multiplexing](./terminal-multiplexing.md) — I/O forwarding, filter chain, input conventions
 
 ## Design Principles
 
