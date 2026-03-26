@@ -278,4 +278,50 @@ mod tests {
         register_repo(&conn, "/tmp/repo", "repo").unwrap();
         assert_eq!(list_repos(&conn).unwrap().len(), 1);
     }
+
+    #[test]
+    fn unregister_nonexistent_is_noop() {
+        let conn = in_memory_db();
+        // Should not error when path doesn't exist
+        unregister_repo(&conn, "/does/not/exist").unwrap();
+        assert!(list_repos(&conn).unwrap().is_empty());
+    }
+
+    #[test]
+    fn migrate_v2_only_when_v1_already_applied() {
+        // Simulate a database that already has v1 applied but not v2
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS schema_version (
+                version INTEGER PRIMARY KEY
+            );",
+        )
+        .unwrap();
+        // Apply only v1
+        migrate_v1(&conn).unwrap();
+
+        // Verify v1 is applied but repos table doesn't exist yet
+        let version: i64 = conn
+            .query_row("SELECT MAX(version) FROM schema_version", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(version, 1);
+        assert!(conn
+            .query_row("SELECT COUNT(*) FROM repos", [], |row| row.get::<_, i64>(0))
+            .is_err());
+
+        // Now run all migrations — should apply v2 only
+        run_migrations(&conn).unwrap();
+
+        // repos table should now exist
+        let count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM repos", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(count, 0);
+
+        // v1 data should still be intact
+        set_default_agent(&conn, "claude").unwrap();
+        assert_eq!(get_default_agent(&conn), Some("claude".to_string()));
+    }
 }
