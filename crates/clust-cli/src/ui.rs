@@ -2,7 +2,6 @@ use std::io;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use chrono::{DateTime, Local, Utc};
 use crossterm::{
     event::{self, Event, KeyCode, KeyEventKind},
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
@@ -18,7 +17,7 @@ use ratatui::{
 
 use clust_ipc::{AgentInfo, CliMessage, PoolMessage};
 
-use crate::{ipc, theme, version};
+use crate::{format::{format_attached, format_started}, ipc, theme, version};
 
 const LOGO_LINES: &[&str] = &[
     "██████╗ ██╗     ██╗   ██╗███████╗████████╗",
@@ -81,7 +80,7 @@ pub fn run() -> io::Result<()> {
                 Layout::horizontal([Constraint::Percentage(40), Constraint::Percentage(60)])
                     .areas(content_area);
 
-            render_left_panel(frame, left_area);
+            render_left_panel(frame, left_area, &agents);
             render_right_panel(frame, right_area, &agents);
             render_status_bar(frame, status_area, pool_status, &notice);
         })?;
@@ -115,10 +114,10 @@ pub fn run() -> io::Result<()> {
 // Rendering functions
 // ---------------------------------------------------------------------------
 
-fn render_left_panel(frame: &mut Frame, area: ratatui::layout::Rect) {
+fn render_left_panel(frame: &mut Frame, area: ratatui::layout::Rect, agents: &[AgentInfo]) {
     let block = Block::bordered()
         .title(Line::from(Span::styled(
-            " Agents ",
+            " Pools ",
             Style::default().fg(theme::R_TEXT_PRIMARY),
         )))
         .border_style(Style::default().fg(theme::R_TEXT_TERTIARY));
@@ -126,18 +125,42 @@ fn render_left_panel(frame: &mut Frame, area: ratatui::layout::Rect) {
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
-    let text = Paragraph::new(Line::from(Span::styled(
-        "No agents running",
-        Style::default().fg(theme::R_TEXT_TERTIARY),
-    )))
-    .alignment(Alignment::Center);
+    if agents.is_empty() {
+        let text = Paragraph::new(Line::from(Span::styled(
+            "No agents running",
+            Style::default().fg(theme::R_TEXT_TERTIARY),
+        )))
+        .alignment(Alignment::Center);
 
-    // Center vertically
-    let [centered] = Layout::vertical([Constraint::Length(1)])
-        .flex(Flex::Center)
-        .areas(inner);
+        let [centered] = Layout::vertical([Constraint::Length(1)])
+            .flex(Flex::Center)
+            .areas(inner);
 
-    frame.render_widget(text, centered);
+        frame.render_widget(text, centered);
+    } else {
+        // Collect distinct pool names in sorted order
+        let mut pool_names: Vec<&str> = agents.iter().map(|a| a.pool.as_str()).collect();
+        pool_names.sort();
+        pool_names.dedup();
+
+        let mut lines: Vec<Line> = Vec::new();
+        for name in &pool_names {
+            let count = agents.iter().filter(|a| a.pool == *name).count();
+            lines.push(Line::from(vec![
+                Span::styled(
+                    format!(" {name}"),
+                    Style::default().fg(theme::R_ACCENT),
+                ),
+                Span::styled(
+                    format!("  {count}"),
+                    Style::default().fg(theme::R_TEXT_TERTIARY),
+                ),
+            ]));
+        }
+
+        let paragraph = Paragraph::new(lines);
+        frame.render_widget(paragraph, inner);
+    }
 }
 
 fn render_right_panel(
@@ -231,17 +254,43 @@ fn render_agent_list(frame: &mut Frame, area: ratatui::layout::Rect, agents: &[A
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
-    // Each agent card is 4 rows tall
-    let mut constraints: Vec<Constraint> = agents
-        .iter()
-        .map(|_| Constraint::Length(4))
-        .collect();
+    // Group agents by pool (sorted)
+    let mut sorted: Vec<&AgentInfo> = agents.iter().collect();
+    sorted.sort_by(|a, b| a.pool.cmp(&b.pool).then(a.started_at.cmp(&b.started_at)));
+
+    let mut pool_names: Vec<&str> = sorted.iter().map(|a| a.pool.as_str()).collect();
+    pool_names.dedup();
+
+    // Build layout: for each pool, 1 row header + 4 rows per agent card
+    let mut constraints: Vec<Constraint> = Vec::new();
+    for pool_name in &pool_names {
+        constraints.push(Constraint::Length(1)); // pool header
+        let count = sorted.iter().filter(|a| a.pool == *pool_name).count();
+        for _ in 0..count {
+            constraints.push(Constraint::Length(4)); // agent card
+        }
+    }
     constraints.push(Constraint::Min(0)); // absorb remaining space
 
-    let card_areas = Layout::vertical(constraints).split(inner);
+    let areas = Layout::vertical(constraints).split(inner);
 
-    for (i, agent) in agents.iter().enumerate() {
-        render_agent_card(frame, card_areas[i], agent);
+    let mut area_idx = 0;
+    for pool_name in &pool_names {
+        // Pool header
+        let header = Paragraph::new(Line::from(vec![
+            Span::styled(
+                format!(" {pool_name}"),
+                Style::default().fg(theme::R_ACCENT),
+            ),
+        ]));
+        frame.render_widget(header, areas[area_idx]);
+        area_idx += 1;
+
+        // Agent cards for this pool
+        for agent in sorted.iter().filter(|a| a.pool == *pool_name) {
+            render_agent_card(frame, areas[area_idx], agent);
+            area_idx += 1;
+        }
     }
 }
 
@@ -382,7 +431,7 @@ fn fetch_agents() -> Vec<AgentInfo> {
         let Ok(mut stream) = ipc::try_connect().await else {
             return vec![];
         };
-        if clust_ipc::send_message(&mut stream, &CliMessage::ListAgents)
+        if clust_ipc::send_message(&mut stream, &CliMessage::ListAgents { pool: None })
             .await
             .is_err()
         {
@@ -408,29 +457,6 @@ fn boxed_line<'a>(inner: Vec<Span<'a>>) -> Line<'a> {
     spans.extend(inner);
     spans.push(Span::styled("│", border));
     Line::from(spans)
-}
-
-/// Format an RFC 3339 timestamp into a short human-readable string.
-fn format_started(rfc3339: &str) -> String {
-    let Ok(dt) = rfc3339.parse::<DateTime<Utc>>() else {
-        return rfc3339.to_string();
-    };
-    let local = dt.with_timezone(&Local);
-    let now = Local::now();
-    if local.date_naive() == now.date_naive() {
-        local.format("%H:%M").to_string()
-    } else {
-        local.format("%b %d %H:%M").to_string()
-    }
-}
-
-/// Format an attached client count.
-fn format_attached(count: usize) -> String {
-    if count == 1 {
-        "1 terminal".to_string()
-    } else {
-        format!("{count} terminals")
-    }
 }
 
 #[cfg(test)]
@@ -463,42 +489,5 @@ mod tests {
         assert_eq!(line.spans.len(), 2); // just │ │
         assert_eq!(line.spans[0].content, "│");
         assert_eq!(line.spans[1].content, "│");
-    }
-
-    #[test]
-    fn format_attached_singular() {
-        assert_eq!(format_attached(1), "1 terminal");
-    }
-
-    #[test]
-    fn format_attached_plural() {
-        assert_eq!(format_attached(0), "0 terminals");
-        assert_eq!(format_attached(3), "3 terminals");
-    }
-
-    #[test]
-    fn format_started_today_shows_time_only() {
-        // Build an RFC3339 timestamp for "today" in UTC
-        let now = Utc::now();
-        let ts = now.to_rfc3339();
-        let result = format_started(&ts);
-        // Should be HH:MM format (5 chars)
-        let local = now.with_timezone(&Local);
-        let expected = local.format("%H:%M").to_string();
-        assert_eq!(result, expected);
-    }
-
-    #[test]
-    fn format_started_other_day_shows_date_and_time() {
-        let result = format_started("2025-01-15T10:30:00Z");
-        // Should include month, day, and time
-        assert!(result.contains("Jan"));
-        assert!(result.contains("15"));
-    }
-
-    #[test]
-    fn format_started_invalid_returns_original() {
-        assert_eq!(format_started("not-a-date"), "not-a-date");
-        assert_eq!(format_started(""), "");
     }
 }

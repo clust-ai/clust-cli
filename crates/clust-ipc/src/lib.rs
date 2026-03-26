@@ -8,6 +8,9 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::unix::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::net::UnixStream;
 
+/// Default pool name for agents not assigned to a specific pool.
+pub const DEFAULT_POOL: &str = "default_pool";
+
 /// Messages sent from CLI to Pool.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum CliMessage {
@@ -18,12 +21,13 @@ pub enum CliMessage {
         cols: u16,
         rows: u16,
         accept_edits: bool,
+        pool: String,
     },
     AttachAgent { id: String },
     DetachAgent { id: String },
     AgentInput { id: String, data: Vec<u8> },
     ResizeAgent { id: String, cols: u16, rows: u16 },
-    ListAgents,
+    ListAgents { pool: Option<String> },
     StopPool,
     StopAgent { id: String },
     SetDefault { agent_binary: String },
@@ -37,6 +41,7 @@ pub struct AgentInfo {
     pub agent_binary: String,
     pub started_at: String,
     pub attached_clients: usize,
+    pub pool: String,
 }
 
 /// Messages sent from Pool to CLI.
@@ -150,6 +155,7 @@ mod tests {
             cols: 120,
             rows: 40,
             accept_edits: false,
+            pool: DEFAULT_POOL.into(),
         })
         .await;
     }
@@ -163,6 +169,7 @@ mod tests {
             cols: 80,
             rows: 24,
             accept_edits: false,
+            pool: DEFAULT_POOL.into(),
         })
         .await;
     }
@@ -176,6 +183,21 @@ mod tests {
             cols: 120,
             rows: 40,
             accept_edits: true,
+            pool: DEFAULT_POOL.into(),
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn cli_start_agent_custom_pool() {
+        assert_cli_round_trip(CliMessage::StartAgent {
+            prompt: None,
+            agent_binary: Some("claude".into()),
+            working_dir: "/tmp".into(),
+            cols: 80,
+            rows: 24,
+            accept_edits: false,
+            pool: "my_feature".into(),
         })
         .await;
     }
@@ -197,8 +219,16 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn cli_list_agents() {
-        assert_cli_round_trip(CliMessage::ListAgents).await;
+    async fn cli_list_agents_no_filter() {
+        assert_cli_round_trip(CliMessage::ListAgents { pool: None }).await;
+    }
+
+    #[tokio::test]
+    async fn cli_list_agents_with_pool_filter() {
+        assert_cli_round_trip(CliMessage::ListAgents {
+            pool: Some("my_feature".into()),
+        })
+        .await;
     }
 
     #[tokio::test]
@@ -279,12 +309,14 @@ mod tests {
                     agent_binary: "claude".into(),
                     started_at: "2026-03-25T10:00:00Z".into(),
                     attached_clients: 2,
+                    pool: DEFAULT_POOL.into(),
                 },
                 AgentInfo {
                     id: "bbb222".into(),
                     agent_binary: "aider".into(),
                     started_at: "2026-03-25T11:00:00Z".into(),
                     attached_clients: 0,
+                    pool: "my_feature".into(),
                 },
             ],
         })
@@ -340,7 +372,7 @@ mod tests {
         let (mut a, mut b) = UnixStream::pair().unwrap();
 
         let msgs = vec![
-            CliMessage::ListAgents,
+            CliMessage::ListAgents { pool: None },
             CliMessage::StopPool,
             CliMessage::SetDefault {
                 agent_binary: "claude".into(),

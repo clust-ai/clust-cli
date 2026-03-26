@@ -36,6 +36,7 @@ clust [OPTIONS] [PROMPT]
 | `-d` | `--default` | Interactive picker to set the global default agent binary. Persisted in SQLite. |
 | `-u` | `--use <AGENT>` | Use a specific agent binary for this session only (does not change the default). |
 | `-e` | `--accept-edits` | Auto-accept edits. Agent-specific: for Claude, passes `--permission-mode acceptEdits`. Ignored for agents that don't support it. |
+| `-p` | `--pool <NAME>` | Assign the agent to a named pool (snake_case; default: `default_pool`). Pools are logical groupings within the single pool process. |
 | `-h` | `--help` | Show help with all available options. |
 | `-V` | `--version` | Show version. |
 
@@ -50,13 +51,26 @@ clust ls [OPTIONS]
 | Flag | Long | Description |
 |------|------|-------------|
 | `-i` | `--select` | Interactive selector: navigate with arrow keys, Enter to attach or start a new agent. |
+| `-p` | `--pool <NAME>` | Filter agents by pool name. Without this flag, agents are grouped by pool. |
 
-Output columns:
+Output (no filter — grouped by pool):
 
 ```
-ID       AGENT    STATUS    STARTED       ATTACHED
-a3f8c1   claude   running   14:32         1 terminal
-b7e2d9   claude   running   14:17         0 terminals
+  default_pool
+  ID       AGENT        STATUS     STARTED        ATTACHED
+  a3f8c1   claude       running    14:32          1 terminal
+  b7e2d9   claude       running    14:17          0 terminals
+
+  my_feature
+  ID       AGENT        STATUS     STARTED        ATTACHED
+  c4d5e6   aider        running    15:01          1 terminal
+```
+
+Output (with `-p` filter — flat list):
+
+```
+  ID       AGENT        STATUS     STARTED        ATTACHED
+  c4d5e6   aider        running    15:01          1 terminal
 ```
 
 ### `clust ui`
@@ -91,6 +105,15 @@ clust -e "refactor the auth module"
 
 # Background agent with accept-edits
 clust -e -b "run the test suite and fix failures"
+
+# Start an agent in a named pool
+clust -p my_feature "refactor auth"
+
+# List agents grouped by pool
+clust ls
+
+# List only agents in a specific pool
+clust ls -p my_feature
 
 # Use a specific agent for this session only
 clust -u opencode "refactor auth"

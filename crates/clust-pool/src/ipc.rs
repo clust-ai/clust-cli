@@ -73,17 +73,19 @@ async fn handle_connection(
             cols,
             rows,
             accept_edits,
+            pool,
         } => {
             let result = {
-                let mut pool = state.lock().await;
+                let mut pool_state = state.lock().await;
                 agent::spawn_agent(
-                    &mut pool,
+                    &mut pool_state,
                     prompt,
                     agent_binary,
                     working_dir,
                     cols,
                     rows,
                     accept_edits,
+                    pool,
                     state.clone(),
                 )
             };
@@ -136,11 +138,13 @@ async fn handle_connection(
                 }
             }
         }
-        CliMessage::ListAgents => {
+        CliMessage::ListAgents { pool: filter } => {
             let agents = {
-                let pool = state.lock().await;
-                pool.agents
+                let pool_state = state.lock().await;
+                pool_state
+                    .agents
                     .values()
+                    .filter(|e| filter.as_ref().map_or(true, |f| &e.pool == f))
                     .map(|e| clust_ipc::AgentInfo {
                         id: e.id.clone(),
                         agent_binary: e.agent_binary.clone(),
@@ -148,6 +152,7 @@ async fn handle_connection(
                         attached_clients: e
                             .attached_count
                             .load(Ordering::Relaxed),
+                        pool: e.pool.clone(),
                     })
                     .collect()
             };
