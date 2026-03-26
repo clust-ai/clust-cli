@@ -8,10 +8,10 @@ use crossterm::{
     ExecutableCommand,
 };
 use ratatui::{
-    layout::{Alignment, Constraint, Flex, Layout},
+    layout::{Alignment, Constraint, Flex, Layout, Rect},
     style::{Color, Style},
     text::{Line, Span},
-    widgets::{Block, Paragraph},
+    widgets::{Block, Padding, Paragraph},
     Frame, Terminal,
 };
 
@@ -253,12 +253,17 @@ pub fn run() -> io::Result<()> {
             let [content_area, status_area] =
                 Layout::vertical([Constraint::Min(0), Constraint::Length(1)]).areas(area);
 
-            // Content: left (40%) + right (60%)
-            let [left_area, right_area] =
-                Layout::horizontal([Constraint::Percentage(40), Constraint::Percentage(60)])
-                    .areas(content_area);
+            // Content: left (40%) + divider (1 col) + right (60%)
+            let [left_area, divider_area, right_area] =
+                Layout::horizontal([
+                    Constraint::Percentage(40),
+                    Constraint::Length(1),
+                    Constraint::Percentage(60),
+                ])
+                .areas(content_area);
 
             render_left_panel(frame, left_area, &repos, &selection);
+            render_divider(frame, divider_area);
             render_right_panel(frame, right_area, &agents);
             render_status_bar(frame, status_area, pool_status, &notice);
         })?;
@@ -296,18 +301,22 @@ pub fn run() -> io::Result<()> {
 // Rendering functions
 // ---------------------------------------------------------------------------
 
+fn render_divider(frame: &mut Frame, area: Rect) {
+    frame.render_widget(
+        Block::default().style(Style::default().bg(theme::R_BG_RAISED)),
+        area,
+    );
+}
+
 fn render_left_panel(
     frame: &mut Frame,
-    area: ratatui::layout::Rect,
+    area: Rect,
     repos: &[RepoInfo],
     selection: &TreeSelection,
 ) {
-    let block = Block::bordered()
-        .title(Line::from(Span::styled(
-            " Repositories ",
-            Style::default().fg(theme::R_TEXT_PRIMARY),
-        )))
-        .border_style(Style::default().fg(theme::R_TEXT_TERTIARY));
+    let block = Block::default()
+        .style(Style::default().bg(theme::R_BG_SURFACE))
+        .padding(Padding::new(1, 1, 0, 0));
 
     let inner = block.inner(area);
     frame.render_widget(block, area);
@@ -325,7 +334,14 @@ fn render_left_panel(
 
         frame.render_widget(text, centered);
     } else {
-        let lines = build_repo_tree_lines(repos, selection, inner.width);
+        let mut lines = vec![
+            Line::from(Span::styled(
+                "Repositories",
+                Style::default().fg(theme::R_TEXT_PRIMARY),
+            )),
+            Line::from(""),
+        ];
+        lines.extend(build_repo_tree_lines(repos, selection, inner.width));
         let paragraph = Paragraph::new(lines);
         frame.render_widget(paragraph, inner);
     }
@@ -478,12 +494,12 @@ fn format_branch_line(
     ));
 
     // Active agent indicator
-    if branch.active_agent_id.is_some() {
+    if branch.active_agent_count > 0 {
         let mut dot_style = Style::default().fg(theme::R_SUCCESS);
         if let Some(bg_color) = bg {
             dot_style = dot_style.bg(bg_color);
         }
-        spans.push(Span::styled("● ".to_string(), dot_style));
+        spans.push(Span::styled(format!("● {} ", branch.active_agent_count), dot_style));
     }
 
     let name_color = if is_selected || branch.is_head {
@@ -526,9 +542,14 @@ fn pad_line(spans: Vec<Span<'static>>, width: u16, bg: Option<Color>) -> Line<'s
 
 fn render_right_panel(
     frame: &mut Frame,
-    area: ratatui::layout::Rect,
+    area: Rect,
     agents: &[AgentInfo],
 ) {
+    frame.render_widget(
+        Block::default().style(Style::default().bg(theme::R_BG_BASE)),
+        area,
+    );
+
     if agents.is_empty() {
         render_logo(frame, area);
     } else {
@@ -536,19 +557,10 @@ fn render_right_panel(
     }
 }
 
-fn render_logo(frame: &mut Frame, area: ratatui::layout::Rect) {
+fn render_logo(frame: &mut Frame, area: Rect) {
     let mut lines: Vec<Line> = Vec::new();
 
-    // Top border
-    lines.push(Line::from(Span::styled(
-        "┌──────────────────────────────────────────────┐",
-        Style::default().fg(theme::R_TEXT_TERTIARY),
-    )));
-
-    // Empty line inside box
-    lines.push(boxed_line(vec![Span::raw(
-        "                                              ",
-    )]));
+    lines.push(Line::from(""));
 
     // Logo lines with accent colors
     for (i, text) in LOGO_LINES.iter().enumerate() {
@@ -558,19 +570,16 @@ fn render_logo(frame: &mut Frame, area: ratatui::layout::Rect) {
             theme::R_ACCENT
         };
         let padded = format!("  {:<44}", text);
-        lines.push(boxed_line(vec![Span::styled(
+        lines.push(Line::from(Span::styled(
             padded,
             Style::default().fg(color),
-        )]));
+        )));
     }
 
-    // Empty line
-    lines.push(boxed_line(vec![Span::raw(
-        "                                              ",
-    )]));
+    lines.push(Line::from(""));
 
     // Gradient bar
-    lines.push(boxed_line(vec![
+    lines.push(Line::from(vec![
         Span::raw("  "),
         Span::styled("░░", Style::default().fg(theme::R_TEXT_TERTIARY)),
         Span::styled("▒▒", Style::default().fg(theme::R_TEXT_SECONDARY)),
@@ -583,14 +592,8 @@ fn render_logo(frame: &mut Frame, area: ratatui::layout::Rect) {
         Span::raw("  "),
     ]));
 
-    // Bottom border
-    lines.push(Line::from(Span::styled(
-        "└──────────────────────────────────────────────┘",
-        Style::default().fg(theme::R_TEXT_TERTIARY),
-    )));
-
     let block_height = lines.len() as u16;
-    let block_width = 48u16;
+    let block_width = 46u16;
 
     let [vert_area] = Layout::vertical([Constraint::Length(block_height)])
         .flex(Flex::Center)
@@ -604,13 +607,9 @@ fn render_logo(frame: &mut Frame, area: ratatui::layout::Rect) {
     frame.render_widget(paragraph, horz_area);
 }
 
-fn render_agent_list(frame: &mut Frame, area: ratatui::layout::Rect, agents: &[AgentInfo]) {
-    let block = Block::bordered()
-        .title(Line::from(Span::styled(
-            " Agents ",
-            Style::default().fg(theme::R_TEXT_PRIMARY),
-        )))
-        .border_style(Style::default().fg(theme::R_TEXT_TERTIARY));
+fn render_agent_list(frame: &mut Frame, area: Rect, agents: &[AgentInfo]) {
+    let block = Block::default()
+        .padding(Padding::new(1, 1, 0, 0));
 
     let inner = block.inner(area);
     frame.render_widget(block, area);
@@ -622,8 +621,11 @@ fn render_agent_list(frame: &mut Frame, area: ratatui::layout::Rect, agents: &[A
     let mut pool_names: Vec<&str> = sorted.iter().map(|a| a.pool.as_str()).collect();
     pool_names.dedup();
 
-    // Build layout: for each pool, 1 row header + 4 rows per agent card
-    let mut constraints: Vec<Constraint> = Vec::new();
+    // Build layout: header + spacer + pool headers + agent cards
+    let mut constraints: Vec<Constraint> = vec![
+        Constraint::Length(1), // "Agents" header
+        Constraint::Length(1), // spacer
+    ];
     for pool_name in &pool_names {
         constraints.push(Constraint::Length(1)); // pool header
         let count = sorted.iter().filter(|a| a.pool == *pool_name).count();
@@ -635,16 +637,23 @@ fn render_agent_list(frame: &mut Frame, area: ratatui::layout::Rect, agents: &[A
 
     let areas = Layout::vertical(constraints).split(inner);
 
-    let mut area_idx = 0;
+    // Inline header
+    let header = Paragraph::new(Line::from(Span::styled(
+        "Agents",
+        Style::default().fg(theme::R_TEXT_PRIMARY),
+    )));
+    frame.render_widget(header, areas[0]);
+
+    let mut area_idx = 2;
     for pool_name in &pool_names {
         // Pool header
-        let header = Paragraph::new(Line::from(vec![
+        let pool_header = Paragraph::new(Line::from(vec![
             Span::styled(
                 format!(" {pool_name}"),
                 Style::default().fg(theme::R_ACCENT),
             ),
         ]));
-        frame.render_widget(header, areas[area_idx]);
+        frame.render_widget(pool_header, areas[area_idx]);
         area_idx += 1;
 
         // Agent cards for this pool
@@ -655,14 +664,10 @@ fn render_agent_list(frame: &mut Frame, area: ratatui::layout::Rect, agents: &[A
     }
 }
 
-fn render_agent_card(frame: &mut Frame, area: ratatui::layout::Rect, agent: &AgentInfo) {
-    let block = Block::bordered()
-        .title(Line::from(vec![
-            Span::raw(" "),
-            Span::styled(&agent.id, Style::default().fg(theme::R_ACCENT)),
-            Span::raw(" "),
-        ]))
-        .border_style(Style::default().fg(theme::R_TEXT_TERTIARY));
+fn render_agent_card(frame: &mut Frame, area: Rect, agent: &AgentInfo) {
+    let block = Block::default()
+        .style(Style::default().bg(theme::R_BG_SURFACE))
+        .padding(Padding::new(1, 1, 0, 0));
 
     let inner = block.inner(area);
     frame.render_widget(block, area);
@@ -671,9 +676,13 @@ fn render_agent_card(frame: &mut Frame, area: ratatui::layout::Rect, agent: &Age
     let attached = format_attached(agent.attached_clients);
 
     let lines = vec![
+        Line::from(Span::styled(
+            &agent.id,
+            Style::default().fg(theme::R_ACCENT),
+        )),
         Line::from(vec![
             Span::styled(
-                format!(" {}", &agent.agent_binary),
+                agent.agent_binary.clone(),
                 Style::default().fg(theme::R_TEXT_PRIMARY),
             ),
             Span::raw("  "),
@@ -681,7 +690,7 @@ fn render_agent_card(frame: &mut Frame, area: ratatui::layout::Rect, agent: &Age
         ]),
         Line::from(vec![
             Span::styled(
-                format!(" started {started}"),
+                format!("started {started}"),
                 Style::default().fg(theme::R_TEXT_SECONDARY),
             ),
             Span::raw("    "),
@@ -697,7 +706,7 @@ fn render_agent_card(frame: &mut Frame, area: ratatui::layout::Rect, agent: &Age
 
 fn render_status_bar(
     frame: &mut Frame,
-    area: ratatui::layout::Rect,
+    area: Rect,
     pool_running: bool,
     update_notice: &Option<String>,
 ) {
@@ -839,54 +848,17 @@ fn block_on_async<F: std::future::Future>(f: F) -> F::Output {
     tokio::task::block_in_place(|| tokio::runtime::Handle::current().block_on(f))
 }
 
-/// Wraps inner spans in box-drawing border characters.
-fn boxed_line<'a>(inner: Vec<Span<'a>>) -> Line<'a> {
-    let border = Style::default().fg(theme::R_TEXT_TERTIARY);
-    let mut spans = vec![Span::styled("│", border)];
-    spans.extend(inner);
-    spans.push(Span::styled("│", border));
-    Line::from(spans)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    #[test]
-    fn boxed_line_wraps_single_span() {
-        let line = boxed_line(vec![Span::raw("hello")]);
-        assert_eq!(line.spans.len(), 3); // │ + hello + │
-        assert_eq!(line.spans[0].content, "│");
-        assert_eq!(line.spans[1].content, "hello");
-        assert_eq!(line.spans[2].content, "│");
-    }
-
-    #[test]
-    fn boxed_line_wraps_multiple_spans() {
-        let line = boxed_line(vec![Span::raw("a"), Span::raw("b"), Span::raw("c")]);
-        assert_eq!(line.spans.len(), 5); // │ + a + b + c + │
-        assert_eq!(line.spans[0].content, "│");
-        assert_eq!(line.spans[1].content, "a");
-        assert_eq!(line.spans[2].content, "b");
-        assert_eq!(line.spans[3].content, "c");
-        assert_eq!(line.spans[4].content, "│");
-    }
-
-    #[test]
-    fn boxed_line_empty_inner() {
-        let line = boxed_line(vec![]);
-        assert_eq!(line.spans.len(), 2); // just │ │
-        assert_eq!(line.spans[0].content, "│");
-        assert_eq!(line.spans[1].content, "│");
-    }
-
     // ── Repository tree rendering tests ──────────────────────────
 
-    fn make_branch(name: &str, is_head: bool, agent_id: Option<&str>, is_worktree: bool) -> clust_ipc::BranchInfo {
+    fn make_branch(name: &str, is_head: bool, agent_count: usize, is_worktree: bool) -> clust_ipc::BranchInfo {
         clust_ipc::BranchInfo {
             name: name.to_string(),
             is_head,
-            active_agent_id: agent_id.map(|s| s.to_string()),
+            active_agent_count: agent_count,
             is_worktree,
         }
     }
@@ -912,8 +884,8 @@ mod tests {
         let repo = make_repo(
             "myrepo",
             vec![
-                make_branch("main", true, None, false),
-                make_branch("feature", false, None, false),
+                make_branch("main", true, 0, false),
+                make_branch("feature", false, 0, false),
             ],
             vec![],
         );
@@ -936,8 +908,8 @@ mod tests {
     fn tree_repo_with_local_and_remote() {
         let repo = make_repo(
             "myrepo",
-            vec![make_branch("main", true, None, false)],
-            vec![make_branch("origin/main", false, None, false)],
+            vec![make_branch("main", true, 0, false)],
+            vec![make_branch("origin/main", false, 0, false)],
         );
         let sel = TreeSelection::default();
         let lines = build_repo_tree_lines(&[repo], &sel, 80);
@@ -959,8 +931,8 @@ mod tests {
     #[test]
     fn tree_multiple_repos_separated_by_blank_line() {
         let repos = vec![
-            make_repo("alpha", vec![make_branch("main", true, None, false)], vec![]),
-            make_repo("beta", vec![make_branch("main", true, None, false)], vec![]),
+            make_repo("alpha", vec![make_branch("main", true, 0, false)], vec![]),
+            make_repo("beta", vec![make_branch("main", true, 0, false)], vec![]),
         ];
         let sel = TreeSelection::default();
         let lines = build_repo_tree_lines(&repos, &sel, 80);
@@ -977,7 +949,7 @@ mod tests {
 
     #[test]
     fn format_branch_line_shows_agent_indicator() {
-        let branch = make_branch("main", false, Some("abc123"), false);
+        let branch = make_branch("main", false, 1, false);
         let line = format_branch_line(&branch, "│", "├─", false, 80);
         let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
         assert!(text.contains("●"), "should have active agent indicator");
@@ -986,7 +958,7 @@ mod tests {
 
     #[test]
     fn format_branch_line_no_agent_indicator() {
-        let branch = make_branch("main", false, None, false);
+        let branch = make_branch("main", false, 0, false);
         let line = format_branch_line(&branch, "│", "├─", false, 80);
         let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
         assert!(!text.contains("●"), "should not have agent indicator");
@@ -994,7 +966,7 @@ mod tests {
 
     #[test]
     fn format_branch_line_shows_worktree_indicator() {
-        let branch = make_branch("feature", false, None, true);
+        let branch = make_branch("feature", false, 0, true);
         let line = format_branch_line(&branch, " ", "└─", false, 80);
         let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
         assert!(text.contains("⎇"), "should have worktree indicator");
@@ -1002,7 +974,7 @@ mod tests {
 
     #[test]
     fn format_branch_line_no_worktree_indicator() {
-        let branch = make_branch("feature", false, None, false);
+        let branch = make_branch("feature", false, 0, false);
         let line = format_branch_line(&branch, " ", "└─", false, 80);
         let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
         assert!(!text.contains("⎇"), "should not have worktree indicator");
@@ -1010,7 +982,7 @@ mod tests {
 
     #[test]
     fn format_branch_line_head_and_agent_and_worktree() {
-        let branch = make_branch("main", true, Some("abc123"), true);
+        let branch = make_branch("main", true, 1, true);
         let line = format_branch_line(&branch, "│", "├─", false, 80);
         let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
         assert!(text.contains("●"), "agent indicator");
@@ -1025,14 +997,14 @@ mod tests {
             make_repo(
                 "alpha",
                 vec![
-                    make_branch("main", true, None, false),
-                    make_branch("dev", false, None, false),
+                    make_branch("main", true, 0, false),
+                    make_branch("dev", false, 0, false),
                 ],
-                vec![make_branch("origin/main", false, None, false)],
+                vec![make_branch("origin/main", false, 0, false)],
             ),
             make_repo(
                 "beta",
-                vec![make_branch("main", true, None, false)],
+                vec![make_branch("main", true, 0, false)],
                 vec![],
             ),
         ]

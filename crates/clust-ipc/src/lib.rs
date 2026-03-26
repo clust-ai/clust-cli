@@ -61,7 +61,7 @@ pub struct RepoInfo {
 pub struct BranchInfo {
     pub name: String,
     pub is_head: bool,
-    pub active_agent_id: Option<String>,
+    pub active_agent_count: usize,
     pub is_worktree: bool,
 }
 
@@ -580,20 +580,20 @@ mod tests {
                     BranchInfo {
                         name: "main".into(),
                         is_head: true,
-                        active_agent_id: Some("abc123".into()),
+                        active_agent_count: 1,
                         is_worktree: false,
                     },
                     BranchInfo {
                         name: "feature/foo".into(),
                         is_head: false,
-                        active_agent_id: None,
+                        active_agent_count: 0,
                         is_worktree: true,
                     },
                 ],
                 remote_branches: vec![BranchInfo {
                     name: "origin/main".into(),
                     is_head: false,
-                    active_agent_id: None,
+                    active_agent_count: 0,
                     is_worktree: false,
                 }],
             }],
