@@ -100,6 +100,11 @@ pub fn socket_path() -> PathBuf {
     clust_dir().join("clust.sock")
 }
 
+/// Returns the pool log path: `~/.clust/pool.log`.
+pub fn log_path() -> PathBuf {
+    clust_dir().join("pool.log")
+}
+
 /// Send a length-prefixed MessagePack message over a Unix stream.
 pub async fn send_message<T: Serialize>(stream: &mut UnixStream, msg: &T) -> io::Result<()> {
     let payload = rmp_serde::to_vec(msg)
@@ -689,5 +694,18 @@ mod tests {
         let dir = clust_dir();
         let sock = socket_path();
         assert_eq!(sock.parent().unwrap(), dir);
+    }
+
+    #[test]
+    fn log_path_ends_with_pool_log() {
+        let p = log_path();
+        assert!(p.ends_with("pool.log"));
+    }
+
+    #[test]
+    fn log_path_is_inside_clust_dir() {
+        let dir = clust_dir();
+        let log = log_path();
+        assert_eq!(log.parent().unwrap(), dir);
     }
 }

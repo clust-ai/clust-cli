@@ -11,11 +11,17 @@ pub fn create_tray_icon() -> Result<(tray_icon::TrayIcon, MenuId), String> {
         .map_err(|e| format!("failed to add quit menu item: {e}"))?;
 
     let icon = make_icon()?;
-    let tray_icon = TrayIconBuilder::new()
+    let mut builder = TrayIconBuilder::new()
         .with_icon(icon)
-        .with_icon_as_template(true)
         .with_tooltip("clust pool")
-        .with_menu(Box::new(menu))
+        .with_menu(Box::new(menu));
+
+    #[cfg(target_os = "macos")]
+    {
+        builder = builder.with_icon_as_template(true);
+    }
+
+    let tray_icon = builder
         .build()
         .map_err(|e| format!("failed to create tray icon: {e}"))?;
 

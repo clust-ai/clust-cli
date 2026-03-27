@@ -37,7 +37,10 @@ pub async fn connect_to_pool() -> io::Result<UnixStream> {
 
     Err(io::Error::new(
         io::ErrorKind::TimedOut,
-        "timed out waiting for pool to start",
+        format!(
+            "timed out waiting for pool to start (check {} for errors)",
+            clust_ipc::log_path().display()
+        ),
     ))
 }
 

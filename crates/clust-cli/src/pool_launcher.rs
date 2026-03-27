@@ -1,3 +1,4 @@
+use std::fs::File;
 use std::io;
 use std::process::{Command, Stdio};
 
@@ -20,10 +21,17 @@ pub fn spawn_pool() -> io::Result<()> {
         ));
     }
 
+    // Ensure ~/.clust/ exists before opening the log file
+    std::fs::create_dir_all(clust_ipc::clust_dir())?;
+
+    // Redirect stderr to a log file so pool errors are captured.
+    // Truncates on each pool start (old session logs are stale).
+    let log_file = File::create(clust_ipc::log_path())?;
+
     let mut cmd = Command::new(&pool_bin);
     cmd.stdin(Stdio::null())
         .stdout(Stdio::null())
-        .stderr(Stdio::null());
+        .stderr(Stdio::from(log_file));
 
     // Detach into own process group so it survives terminal close
     #[cfg(unix)]
