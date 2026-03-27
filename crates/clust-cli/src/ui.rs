@@ -622,6 +622,14 @@ fn render_tab_bar(frame: &mut Frame, area: Rect, active_tab: ActiveTab) {
         ));
     }
 
+    // Tab switching hint
+    spans.push(Span::styled(
+        "  Tab/Shift+Tab",
+        Style::default()
+            .fg(theme::R_TEXT_TERTIARY)
+            .bg(theme::R_BG_RAISED),
+    ));
+
     // Fill remaining width with background
     let content_width: usize = spans.iter().map(|s| s.content.chars().count()).sum();
     let remaining = (area.width as usize).saturating_sub(content_width);
