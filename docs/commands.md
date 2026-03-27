@@ -195,3 +195,4 @@ These shortcuts are active in the `clust ui` dashboard. They are displayed in th
 | `Shift+←` / `Shift+→` | Switch focus between left and right panels |
 | `Tab` | Switch to next tab |
 | `Shift+Tab` | Switch to previous tab |
+| `v` | Toggle agent grouping between by-pool and by-repo (right panel) |

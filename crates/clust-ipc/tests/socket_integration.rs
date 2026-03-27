@@ -39,6 +39,8 @@ async fn request_response_over_real_socket() {
             attached_clients: 1,
             pool: clust_ipc::DEFAULT_POOL.into(),
             working_dir: "/tmp".into(),
+            repo_path: None,
+            branch_name: None,
         }],
     };
     send_message(&mut server_stream, &response).await.unwrap();

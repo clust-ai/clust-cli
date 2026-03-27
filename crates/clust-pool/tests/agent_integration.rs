@@ -18,17 +18,19 @@ async fn spawn_agent_echo_produces_output() {
         let mut pool = state.lock().await;
         clust_pool::agent::spawn_agent(
             &mut pool,
-            None,
-            Some("echo".into()),
-            "/tmp".into(),
-            80,
-            24,
-            false,
-            clust_ipc::DEFAULT_POOL.into(),
+            clust_pool::agent::SpawnAgentParams {
+                prompt: None,
+                agent_binary: Some("echo".into()),
+                working_dir: "/tmp".into(),
+                cols: 80,
+                rows: 24,
+                accept_edits: false,
+                pool: clust_ipc::DEFAULT_POOL.into(),
+                repo_path: None,
+                branch_name: None,
+                is_worktree: false,
+            },
             state.clone(),
-            None,
-            None,
-            false,
         )
         .expect("spawn_agent should succeed")
     };
@@ -88,17 +90,19 @@ async fn spawn_agent_cat_receives_input_and_echoes() {
         let mut pool = state.lock().await;
         clust_pool::agent::spawn_agent(
             &mut pool,
-            None,
-            Some("cat".into()),
-            "/tmp".into(),
-            80,
-            24,
-            false,
-            clust_ipc::DEFAULT_POOL.into(),
+            clust_pool::agent::SpawnAgentParams {
+                prompt: None,
+                agent_binary: Some("cat".into()),
+                working_dir: "/tmp".into(),
+                cols: 80,
+                rows: 24,
+                accept_edits: false,
+                pool: clust_ipc::DEFAULT_POOL.into(),
+                repo_path: None,
+                branch_name: None,
+                is_worktree: false,
+            },
             state.clone(),
-            None,
-            None,
-            false,
         )
         .expect("spawn_agent should succeed")
     };
@@ -166,17 +170,19 @@ async fn multiple_subscribers_receive_same_output() {
         let mut pool = state.lock().await;
         clust_pool::agent::spawn_agent(
             &mut pool,
-            Some("hello from test".into()),
-            Some("echo".into()),
-            "/tmp".into(),
-            80,
-            24,
-            false,
-            clust_ipc::DEFAULT_POOL.into(),
+            clust_pool::agent::SpawnAgentParams {
+                prompt: Some("hello from test".into()),
+                agent_binary: Some("echo".into()),
+                working_dir: "/tmp".into(),
+                cols: 80,
+                rows: 24,
+                accept_edits: false,
+                pool: clust_ipc::DEFAULT_POOL.into(),
+                repo_path: None,
+                branch_name: None,
+                is_worktree: false,
+            },
             state.clone(),
-            None,
-            None,
-            false,
         )
         .expect("spawn_agent should succeed")
     };
@@ -235,17 +241,19 @@ async fn attached_count_tracks_subscribers() {
         let mut pool = state.lock().await;
         clust_pool::agent::spawn_agent(
             &mut pool,
-            None,
-            Some("cat".into()),
-            "/tmp".into(),
-            80,
-            24,
-            false,
-            clust_ipc::DEFAULT_POOL.into(),
+            clust_pool::agent::SpawnAgentParams {
+                prompt: None,
+                agent_binary: Some("cat".into()),
+                working_dir: "/tmp".into(),
+                cols: 80,
+                rows: 24,
+                accept_edits: false,
+                pool: clust_ipc::DEFAULT_POOL.into(),
+                repo_path: None,
+                branch_name: None,
+                is_worktree: false,
+            },
             state.clone(),
-            None,
-            None,
-            false,
         )
         .expect("spawn_agent should succeed")
     };
@@ -283,17 +291,19 @@ async fn stop_agent_terminates_running_process() {
         let mut pool = state.lock().await;
         clust_pool::agent::spawn_agent(
             &mut pool,
-            None,
-            Some("sleep".into()),
-            "/tmp".into(),
-            80,
-            24,
-            false,
-            clust_ipc::DEFAULT_POOL.into(),
+            clust_pool::agent::SpawnAgentParams {
+                prompt: None,
+                agent_binary: Some("sleep".into()),
+                working_dir: "/tmp".into(),
+                cols: 80,
+                rows: 24,
+                accept_edits: false,
+                pool: clust_ipc::DEFAULT_POOL.into(),
+                repo_path: None,
+                branch_name: None,
+                is_worktree: false,
+            },
             state.clone(),
-            None,
-            None,
-            false,
         )
         .expect("spawn_agent should succeed")
     };
@@ -352,17 +362,19 @@ async fn resize_agent_pty() {
         let mut pool = state.lock().await;
         clust_pool::agent::spawn_agent(
             &mut pool,
-            None,
-            Some("cat".into()),
-            "/tmp".into(),
-            80,
-            24,
-            false,
-            clust_ipc::DEFAULT_POOL.into(),
+            clust_pool::agent::SpawnAgentParams {
+                prompt: None,
+                agent_binary: Some("cat".into()),
+                working_dir: "/tmp".into(),
+                cols: 80,
+                rows: 24,
+                accept_edits: false,
+                pool: clust_ipc::DEFAULT_POOL.into(),
+                repo_path: None,
+                branch_name: None,
+                is_worktree: false,
+            },
             state.clone(),
-            None,
-            None,
-            false,
         )
         .expect("spawn_agent should succeed")
     };
@@ -398,17 +410,19 @@ async fn spawn_agent_stores_custom_pool_name() {
         let mut pool = state.lock().await;
         clust_pool::agent::spawn_agent(
             &mut pool,
-            None,
-            Some("cat".into()),
-            "/tmp".into(),
-            80,
-            24,
-            false,
-            "my_feature".into(),
+            clust_pool::agent::SpawnAgentParams {
+                prompt: None,
+                agent_binary: Some("cat".into()),
+                working_dir: "/tmp".into(),
+                cols: 80,
+                rows: 24,
+                accept_edits: false,
+                pool: "my_feature".into(),
+                repo_path: None,
+                branch_name: None,
+                is_worktree: false,
+            },
             state.clone(),
-            None,
-            None,
-            false,
         )
         .expect("spawn_agent should succeed")
     };
@@ -440,17 +454,19 @@ async fn agents_in_different_pools_are_separated() {
         let mut pool = state.lock().await;
         clust_pool::agent::spawn_agent(
             &mut pool,
-            None,
-            Some("cat".into()),
-            "/tmp".into(),
-            80,
-            24,
-            false,
-            clust_ipc::DEFAULT_POOL.into(),
+            clust_pool::agent::SpawnAgentParams {
+                prompt: None,
+                agent_binary: Some("cat".into()),
+                working_dir: "/tmp".into(),
+                cols: 80,
+                rows: 24,
+                accept_edits: false,
+                pool: clust_ipc::DEFAULT_POOL.into(),
+                repo_path: None,
+                branch_name: None,
+                is_worktree: false,
+            },
             state.clone(),
-            None,
-            None,
-            false,
         )
         .expect("spawn default_pool agent")
     };
@@ -459,17 +475,19 @@ async fn agents_in_different_pools_are_separated() {
         let mut pool = state.lock().await;
         clust_pool::agent::spawn_agent(
             &mut pool,
-            None,
-            Some("cat".into()),
-            "/tmp".into(),
-            80,
-            24,
-            false,
-            "my_feature".into(),
+            clust_pool::agent::SpawnAgentParams {
+                prompt: None,
+                agent_binary: Some("cat".into()),
+                working_dir: "/tmp".into(),
+                cols: 80,
+                rows: 24,
+                accept_edits: false,
+                pool: "my_feature".into(),
+                repo_path: None,
+                branch_name: None,
+                is_worktree: false,
+            },
             state.clone(),
-            None,
-            None,
-            false,
         )
         .expect("spawn my_feature agent")
     };

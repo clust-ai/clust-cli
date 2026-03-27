@@ -117,53 +117,58 @@ pub fn resolve_agent_binary(
         .ok_or_else(|| "no default agent configured".to_string())
 }
 
-/// Spawn a new agent process inside a PTY.
-///
-/// Returns the agent ID on success. The agent is added to `state.agents` and
-/// a background task is started to read PTY output and broadcast it.
+/// Parameters for spawning a new agent inside a PTY.
 ///
 /// Git info (`repo_path`, `branch_name`, `is_worktree`) should be pre-computed
 /// by the caller BEFORE acquiring the state lock, to avoid holding the lock
 /// during potentially slow git operations.
+pub struct SpawnAgentParams {
+    pub prompt: Option<String>,
+    pub agent_binary: Option<String>,
+    pub working_dir: String,
+    pub cols: u16,
+    pub rows: u16,
+    pub accept_edits: bool,
+    pub pool: String,
+    pub repo_path: Option<String>,
+    pub branch_name: Option<String>,
+    pub is_worktree: bool,
+}
+
+/// Spawn a new agent process inside a PTY.
+///
+/// Returns the agent ID on success. The agent is added to `state.agents` and
+/// a background task is started to read PTY output and broadcast it.
 pub fn spawn_agent(
     state: &mut PoolState,
-    prompt: Option<String>,
-    agent_binary: Option<String>,
-    working_dir: String,
-    cols: u16,
-    rows: u16,
-    accept_edits: bool,
-    pool: String,
+    params: SpawnAgentParams,
     shared_state: SharedPoolState,
-    repo_path: Option<String>,
-    branch_name: Option<String>,
-    is_worktree: bool,
 ) -> Result<(String, String), String> {
-    let binary = resolve_agent_binary(agent_binary, &state.default_agent)?;
+    let binary = resolve_agent_binary(params.agent_binary, &state.default_agent)?;
     let id = generate_agent_id(&state.agents);
 
     let pty_system = portable_pty::native_pty_system();
     let pair = pty_system
         .openpty(PtySize {
-            rows,
-            cols,
+            rows: params.rows,
+            cols: params.cols,
             pixel_width: 0,
             pixel_height: 0,
         })
         .map_err(|e| format!("PTY open failed: {e}"))?;
 
     let mut cmd = CommandBuilder::new(&binary);
-    if let Some(ref p) = prompt {
+    if let Some(ref p) = params.prompt {
         cmd.arg(p);
     }
-    if accept_edits {
+    if params.accept_edits {
         if let Some(args) = clust_ipc::agents::accept_edits_args_for(&binary) {
             for arg in args {
                 cmd.arg(arg);
             }
         }
     }
-    cmd.cwd(&working_dir);
+    cmd.cwd(&params.working_dir);
 
     let child = pair
         .slave
@@ -197,20 +202,20 @@ pub fn spawn_agent(
         id: id.clone(),
         agent_binary: binary,
         started_at,
-        working_dir,
-        pool,
+        working_dir: params.working_dir,
+        pool: params.pool,
         pid,
         pty_master: pair.master,
         pty_writer: writer,
         output_tx,
         attached_count: Arc::new(AtomicUsize::new(0)),
         client_sizes: HashMap::new(),
-        current_pty_size: (cols, rows),
+        current_pty_size: (params.cols, params.rows),
         active_client_id: None,
         next_client_id: AtomicU64::new(0),
-        repo_path,
-        branch_name,
-        is_worktree,
+        repo_path: params.repo_path,
+        branch_name: params.branch_name,
+        is_worktree: params.is_worktree,
     };
 
     state.agents.insert(id.clone(), entry);
