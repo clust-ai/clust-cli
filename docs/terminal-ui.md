@@ -78,9 +78,23 @@ A full terminal UI (TUI) built with `ratatui` + `crossterm`.
 
 ### Layout
 
-The dashboard has two panels separated by a vertical divider:
+The dashboard has a top tab bar, two content panels separated by a vertical divider, and a bottom status bar.
 
-- **Left panel (40%):** Repository tracker. Shows a tree view of registered git repositories with their local and remote branches. Branches with active agents display a green `●` indicator; branches checked out in worktrees display a `⎇` indicator. The current HEAD branch is highlighted. Displays "No repositories found" when no repos are registered. Uses background colors for visual separation (no borders).
+#### Tab Bar
+
+A 1-row bar at the top of the terminal with three tabs:
+
+| Tab | Description |
+|-----|-------------|
+| `Repositories` | Two-panel view with repo tree and agent cards (default) |
+| `Overview` | Placeholder for future overview dashboard |
+| `Focus` | Placeholder for future focus mode |
+
+The active tab is highlighted with the accent color. A `Tab/Shift+Tab` hint is shown to the right of the tabs.
+
+#### Content Panels (Repositories tab)
+
+- **Left panel (40%):** Repository tracker. Shows a tree view of registered git repositories with their local and remote branches. Branches with active agents display a green `●` indicator; branches checked out in worktrees display a `⎇` indicator. The current HEAD branch is highlighted. Displays "No repositories found" when no repos are registered. Uses background colors for visual separation (no borders). The focused panel shows a bright accent top border; the unfocused panel shows a dim border.
 - **Vertical divider (1 col):** A single-column divider between the two panels.
 - **Right panel (60%):** Shows agent cards grouped by pool name with section headers. Displays the CLUST logo when no agents are running.
 
@@ -95,15 +109,15 @@ On startup, `clust ui` automatically connects to the pool daemon, starting it if
 ### Bottom Status Bar
 
 ```
-● connected  q to quit  Q to quit and stop pool  ↑↓←→ navigate  Shift+←→ panels  Tab switch view  v toggle agents          v0.0.4
+● connected  q to quit  Q to quit and stop pool  ↑↓←→ navigate  Shift+←→ panels  v toggle agents          v0.0.5
 ```
 
 | Section | Description |
 |---------|-------------|
 | Status dot | Green `●` when connected, dim when disconnected |
 | Status label | `connected` or `disconnected` |
-| Shortcuts | `q to quit`, `Q to quit and stop pool`, `↑↓←→ navigate`, `Shift+←→ panels`, `Tab switch view`, `v toggle agents` |
-| Version | Right-aligned, e.g. `v0.0.4` |
+| Shortcuts | `q to quit`, `Q to quit and stop pool`, `↑↓←→ navigate`, `Shift+←→ panels`, `v toggle agents` |
+| Version | Right-aligned, e.g. `v0.0.5` |
 
 ### Keyboard Shortcuts
 

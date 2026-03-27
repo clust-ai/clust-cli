@@ -64,12 +64,22 @@ Input uses **raw stdin byte forwarding** (not crossterm event conversion). This 
 ### Rules
 
 - **Forward raw bytes directly.** Do not convert between event representations. Raw forwarding preserves mouse events, terminal-specific protocols (kitty keyboard, sixel), alt+key, and all escape sequences without loss.
-- **Only intercept the detach key.** Currently Ctrl+Q (byte 0x11). Everything else passes through to the child PTY.
+- **Intercept Ctrl+Q and mouse scroll events.** Ctrl+Q (byte 0x11) is the detach key. Mouse scroll events are intercepted for scrollback navigation (see below). Everything else passes through to the child PTY.
 - **Use SIGWINCH for resize detection** (`tokio::signal::unix::SignalKind::window_change()`), not crossterm events.
-- **Do not enable terminal modes on behalf of the child.** Focus change, mouse capture, bracketed paste — the child application enables these itself, and the escape sequences pass through the raw I/O path.
+- **Mouse button tracking is enabled by clust.** The attached session enables `?1000h` (button press/release) and `?1006h` (SGR encoding) so that scroll wheel events arrive as parseable mouse escape sequences instead of being converted to arrow keys by the terminal emulator in alternate screen mode. This is the one exception to the "don't enable terminal modes on behalf of the child" principle — it's required for scrollback to work. Only button tracking is enabled; `?1003h` (all-motion) is deliberately omitted to avoid flooding stdin with motion events.
+
+## Scrollback
+
+The attached session maintains a scrollback buffer (`scrollback.rs`) that stores agent output as lines. Mouse scroll events are intercepted by `ScrollBreak` in `Intercept` mode and used to navigate the buffer.
+
+- **Scroll up**: enters scrollback mode, renders historical output from the buffer. The status bar shows "SCROLLBACK" with the current offset.
+- **Scroll down**: moves toward live output. When offset reaches 0, exits scrollback mode.
+- **Any keypress** while in scrollback: exits scrollback mode, triggers agent redraw via `ResizeAgent`, and forwards the keypress.
+- **Terminal resize** while in scrollback: exits scrollback mode.
+- Output arriving while in scrollback mode is buffered but not rendered until the user returns to live mode.
 
 ## Status Bar
 
 - Drawn on the bottom row, outside the DECSTBM scroll region.
-- Redrawn only on: initial attach, terminal resize (SIGWINCH).
+- Redrawn only on: initial attach, terminal resize (SIGWINCH), scrollback mode enter/exit.
 - Never redrawn inside the output processing loop.

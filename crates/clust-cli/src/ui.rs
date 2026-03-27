@@ -18,11 +18,14 @@ use ratatui::{
 
 use clust_ipc::{AgentInfo, CliMessage, PoolMessage, RepoInfo};
 
-use crate::{format::{format_attached, format_started}, ipc, theme, version};
+use crate::{
+    format::{format_attached, format_started},
+    ipc, theme, version,
+};
 
 const LOGO_LINES: &[&str] = &[
     "██████╗ ██╗     ██╗   ██╗███████╗████████╗",
-    "██╔════╝██║     ██║   ██║██╔════╝╚══██╔══╝",
+    "██╔═══╝ ██║     ██║   ██║██╔════╝╚══██╔══╝",
     "██║     ██║     ██║   ██║███████╗   ██║   ",
     "██║     ██║     ██║   ██║╚════██║   ██║   ",
     "╚██████╗███████╗╚██████╔╝███████║   ██║   ",
@@ -398,7 +401,10 @@ impl TreeSelection {
     }
 
     fn is_category_collapsed(&self, repo_idx: usize, cat_idx: usize) -> bool {
-        *self.category_collapsed.get(&(repo_idx, cat_idx)).unwrap_or(&false)
+        *self
+            .category_collapsed
+            .get(&(repo_idx, cat_idx))
+            .unwrap_or(&false)
     }
 }
 
@@ -462,30 +468,41 @@ pub fn run(pool_name: &str) -> io::Result<()> {
             let area = frame.area();
 
             // Top-level: tab bar + content area + status bar
-            let [tab_bar_area, content_area, status_area] =
-                Layout::vertical([
-                    Constraint::Length(1),
-                    Constraint::Min(0),
-                    Constraint::Length(1),
-                ])
-                .areas(area);
+            let [tab_bar_area, content_area, status_area] = Layout::vertical([
+                Constraint::Length(1),
+                Constraint::Min(0),
+                Constraint::Length(1),
+            ])
+            .areas(area);
 
             render_tab_bar(frame, tab_bar_area, cur_tab);
 
             match cur_tab {
                 ActiveTab::Repositories => {
                     // Content: left (40%) + divider (1 col) + right (60%)
-                    let [left_area, divider_area, right_area] =
-                        Layout::horizontal([
-                            Constraint::Percentage(40),
-                            Constraint::Length(1),
-                            Constraint::Percentage(60),
-                        ])
-                        .areas(content_area);
+                    let [left_area, divider_area, right_area] = Layout::horizontal([
+                        Constraint::Percentage(40),
+                        Constraint::Length(1),
+                        Constraint::Percentage(60),
+                    ])
+                    .areas(content_area);
 
-                    render_left_panel(frame, left_area, &repos, &selection, cur_focus == FocusPanel::Left);
+                    render_left_panel(
+                        frame,
+                        left_area,
+                        &repos,
+                        &selection,
+                        cur_focus == FocusPanel::Left,
+                    );
                     render_divider(frame, divider_area);
-                    render_right_panel(frame, right_area, &agents, &agent_selection, cur_focus == FocusPanel::Right, agent_view_mode);
+                    render_right_panel(
+                        frame,
+                        right_area,
+                        &agents,
+                        &agent_selection,
+                        cur_focus == FocusPanel::Right,
+                        agent_view_mode,
+                    );
                 }
                 ActiveTab::Overview => {
                     render_placeholder(frame, content_area, "Overview - coming soon");
@@ -550,22 +567,30 @@ pub fn run(pool_name: &str) -> io::Result<()> {
                             // Panel-specific navigation
                             KeyCode::Up => match focus {
                                 FocusPanel::Left => selection.move_up(&repos),
-                                FocusPanel::Right => agent_selection.move_up(&agents, agent_view_mode),
+                                FocusPanel::Right => {
+                                    agent_selection.move_up(&agents, agent_view_mode)
+                                }
                             },
                             KeyCode::Down => match focus {
                                 FocusPanel::Left => selection.move_down(&repos),
-                                FocusPanel::Right => agent_selection.move_down(&agents, agent_view_mode),
+                                FocusPanel::Right => {
+                                    agent_selection.move_down(&agents, agent_view_mode)
+                                }
                             },
                             KeyCode::Right => match focus {
                                 FocusPanel::Left => selection.descend(&repos),
-                                FocusPanel::Right => agent_selection.next_group(&agents, agent_view_mode),
+                                FocusPanel::Right => {
+                                    agent_selection.next_group(&agents, agent_view_mode)
+                                }
                             },
                             KeyCode::Left => match focus {
                                 FocusPanel::Left => selection.ascend(),
-                                FocusPanel::Right => agent_selection.prev_group(&agents, agent_view_mode),
+                                FocusPanel::Right => {
+                                    agent_selection.prev_group(&agents, agent_view_mode)
+                                }
                             },
                             _ => {}
-                        }
+                        },
                         _ => {}
                     }
                 }
@@ -582,7 +607,11 @@ pub fn run(pool_name: &str) -> io::Result<()> {
 
     if pool_stopped {
         let label = if pool_count > 1 { "pools" } else { "pool" };
-        println!("\n  {}{label} stopped{}\n", theme::TEXT_SECONDARY, theme::RESET);
+        println!(
+            "\n  {}{label} stopped{}\n",
+            theme::TEXT_SECONDARY,
+            theme::RESET
+        );
     }
 
     if let Some(ref msg) = *update_notice.lock().unwrap() {
@@ -597,7 +626,11 @@ pub fn run(pool_name: &str) -> io::Result<()> {
 // ---------------------------------------------------------------------------
 
 fn render_tab_bar(frame: &mut Frame, area: Rect, active_tab: ActiveTab) {
-    let tabs = [ActiveTab::Repositories, ActiveTab::Overview, ActiveTab::FocusMode];
+    let tabs = [
+        ActiveTab::Repositories,
+        ActiveTab::Overview,
+        ActiveTab::FocusMode,
+    ];
     let mut spans = Vec::new();
 
     spans.push(Span::styled(" ", Style::default().bg(theme::R_BG_RAISED)));
@@ -606,7 +639,9 @@ fn render_tab_bar(frame: &mut Frame, area: Rect, active_tab: ActiveTab) {
         if i > 0 {
             spans.push(Span::styled(
                 " │ ",
-                Style::default().fg(theme::R_TEXT_TERTIARY).bg(theme::R_BG_RAISED),
+                Style::default()
+                    .fg(theme::R_TEXT_TERTIARY)
+                    .bg(theme::R_BG_RAISED),
             ));
         }
 
@@ -767,8 +802,9 @@ fn build_repo_tree_lines(
 
         // Local Branches section
         if has_local {
-            let cat_selected =
-                is_this_repo && selection.level == TreeLevel::Category && selection.category_idx == 0;
+            let cat_selected = is_this_repo
+                && selection.level == TreeLevel::Category
+                && selection.category_idx == 0;
             let cat_open =
                 is_this_repo && selection.level == TreeLevel::Branch && selection.category_idx == 0;
 
@@ -787,7 +823,11 @@ fn build_repo_tree_lines(
             if let Some(bg_color) = cat_bg {
                 cat_style = cat_style.bg(bg_color);
             }
-            lines.push(pad_line(vec![Span::styled(cat_text, cat_style)], width, cat_bg));
+            lines.push(pad_line(
+                vec![Span::styled(cat_text, cat_style)],
+                width,
+                cat_bg,
+            ));
 
             if !local_cat_collapsed {
                 let continuation = if has_remote { "│" } else { " " };
@@ -811,8 +851,9 @@ fn build_repo_tree_lines(
 
         // Remote Branches section
         if has_remote {
-            let cat_selected =
-                is_this_repo && selection.level == TreeLevel::Category && selection.category_idx == 1;
+            let cat_selected = is_this_repo
+                && selection.level == TreeLevel::Category
+                && selection.category_idx == 1;
             let cat_open =
                 is_this_repo && selection.level == TreeLevel::Branch && selection.category_idx == 1;
 
@@ -830,7 +871,11 @@ fn build_repo_tree_lines(
             if let Some(bg_color) = cat_bg {
                 cat_style = cat_style.bg(bg_color);
             }
-            lines.push(pad_line(vec![Span::styled(cat_text, cat_style)], width, cat_bg));
+            lines.push(pad_line(
+                vec![Span::styled(cat_text, cat_style)],
+                width,
+                cat_bg,
+            ));
 
             if !remote_cat_collapsed {
                 for (i, branch) in repo.remote_branches.iter().enumerate() {
@@ -892,7 +937,10 @@ fn format_branch_line(
         if let Some(bg_color) = bg {
             dot_style = dot_style.bg(bg_color);
         }
-        spans.push(Span::styled(format!("● {} ", branch.active_agent_count), dot_style));
+        spans.push(Span::styled(
+            format!("● {} ", branch.active_agent_count),
+            dot_style,
+        ));
     }
 
     let name_color = if is_selected || branch.is_head {
@@ -984,10 +1032,7 @@ fn render_logo(frame: &mut Frame, area: Rect) {
             theme::R_ACCENT
         };
         let padded = format!("  {:<44}", text);
-        lines.push(Line::from(Span::styled(
-            padded,
-            Style::default().fg(color),
-        )));
+        lines.push(Line::from(Span::styled(padded, Style::default().fg(color))));
     }
 
     lines.push(Line::from(""));
@@ -1029,8 +1074,7 @@ fn render_agent_list(
     focused: bool,
     mode: AgentViewMode,
 ) {
-    let block = Block::default()
-        .padding(Padding::new(1, 1, 0, 0));
+    let block = Block::default().padding(Padding::new(1, 1, 0, 0));
 
     let inner = block.inner(area);
     frame.render_widget(block, area);
@@ -1051,15 +1095,16 @@ fn render_agent_list(
     } else {
         theme::R_TEXT_TERTIARY
     };
-    let indicator = Paragraph::new(Span::styled(
-        "●",
-        Style::default().fg(indicator_color),
-    ))
-    .alignment(Alignment::Right);
+    let indicator = Paragraph::new(Span::styled("●", Style::default().fg(indicator_color)))
+        .alignment(Alignment::Right);
 
     match mode {
-        AgentViewMode::ByPool => render_agent_list_by_pool(frame, inner, agents, agent_sel, focused, &mode_line, &indicator),
-        AgentViewMode::ByRepo => render_agent_list_by_repo(frame, inner, agents, agent_sel, focused, &mode_line, &indicator),
+        AgentViewMode::ByPool => render_agent_list_by_pool(
+            frame, inner, agents, agent_sel, focused, &mode_line, &indicator,
+        ),
+        AgentViewMode::ByRepo => render_agent_list_by_repo(
+            frame, inner, agents, agent_sel, focused, &mode_line, &indicator,
+        ),
     }
 }
 
@@ -1095,21 +1140,22 @@ fn render_agent_list_by_pool(
     let areas = Layout::vertical(constraints).split(inner);
 
     frame.render_widget(mode_line.clone(), areas[0]);
-    frame.render_widget(indicator.clone(), Rect {
-        x: inner.x,
-        y: inner.y,
-        width: inner.width,
-        height: 1,
-    });
+    frame.render_widget(
+        indicator.clone(),
+        Rect {
+            x: inner.x,
+            y: inner.y,
+            width: inner.width,
+            height: 1,
+        },
+    );
 
     let mut area_idx = 2;
     for (pidx, pool_name) in pnames.iter().enumerate() {
-        let pool_header = Paragraph::new(Line::from(vec![
-            Span::styled(
-                format!(" {pool_name}"),
-                Style::default().fg(theme::R_ACCENT),
-            ),
-        ]));
+        let pool_header = Paragraph::new(Line::from(vec![Span::styled(
+            format!(" {pool_name}"),
+            Style::default().fg(theme::R_ACCENT),
+        )]));
         frame.render_widget(pool_header, areas[area_idx]);
         area_idx += 1;
 
@@ -1148,7 +1194,7 @@ fn render_agent_list_by_repo(
     ];
     for repo in &gnames {
         constraints.push(Constraint::Length(1)); // repo header
-        // Collect unique branch names within this repo
+                                                 // Collect unique branch names within this repo
         let mut branches: Vec<&str> = sorted
             .iter()
             .filter(|a| agent_group_key(a, AgentViewMode::ByRepo) == *repo)
@@ -1174,12 +1220,15 @@ fn render_agent_list_by_repo(
     let areas = Layout::vertical(constraints).split(inner);
 
     frame.render_widget(mode_line.clone(), areas[0]);
-    frame.render_widget(indicator.clone(), Rect {
-        x: inner.x,
-        y: inner.y,
-        width: inner.width,
-        height: 1,
-    });
+    frame.render_widget(
+        indicator.clone(),
+        Rect {
+            x: inner.x,
+            y: inner.y,
+            width: inner.width,
+            height: 1,
+        },
+    );
 
     let mut area_idx = 2;
     let mut flat_agent_idx = 0;
@@ -1189,12 +1238,10 @@ fn render_agent_list_by_repo(
             .file_name()
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_else(|| repo.clone());
-        let repo_header = Paragraph::new(Line::from(vec![
-            Span::styled(
-                format!(" {repo_display}"),
-                Style::default().fg(theme::R_ACCENT),
-            ),
-        ]));
+        let repo_header = Paragraph::new(Line::from(vec![Span::styled(
+            format!(" {repo_display}"),
+            Style::default().fg(theme::R_ACCENT),
+        )]));
         frame.render_widget(repo_header, areas[area_idx]);
         area_idx += 1;
 
@@ -1212,12 +1259,10 @@ fn render_agent_list_by_repo(
 
         for branch in &branches {
             // Branch sub-header
-            let branch_header = Paragraph::new(Line::from(vec![
-                Span::styled(
-                    format!("   {branch}"),
-                    Style::default().fg(theme::R_TEXT_SECONDARY),
-                ),
-            ]));
+            let branch_header = Paragraph::new(Line::from(vec![Span::styled(
+                format!("   {branch}"),
+                Style::default().fg(theme::R_TEXT_SECONDARY),
+            )]));
             frame.render_widget(branch_header, areas[area_idx]);
             area_idx += 1;
 
@@ -1237,7 +1282,11 @@ fn render_agent_list_by_repo(
 }
 
 fn render_agent_card(frame: &mut Frame, area: Rect, agent: &AgentInfo, is_selected: bool) {
-    let bg = if is_selected { theme::R_BG_HOVER } else { theme::R_BG_SURFACE };
+    let bg = if is_selected {
+        theme::R_BG_HOVER
+    } else {
+        theme::R_BG_SURFACE
+    };
     let block = Block::default()
         .style(Style::default().bg(bg))
         .padding(Padding::new(1, 1, 0, 0));
@@ -1312,30 +1361,21 @@ fn render_status_bar(
     }
 
     left_spans.extend([
-        Span::styled(
-            "  ",
-            Style::default().bg(theme::R_BG_RAISED),
-        ),
+        Span::styled("  ", Style::default().bg(theme::R_BG_RAISED)),
         Span::styled(
             "q to quit",
             Style::default()
                 .fg(theme::R_TEXT_TERTIARY)
                 .bg(theme::R_BG_RAISED),
         ),
-        Span::styled(
-            "  ",
-            Style::default().bg(theme::R_BG_RAISED),
-        ),
+        Span::styled("  ", Style::default().bg(theme::R_BG_RAISED)),
         Span::styled(
             "Q to quit and stop pool",
             Style::default()
                 .fg(theme::R_TEXT_TERTIARY)
                 .bg(theme::R_BG_RAISED),
         ),
-        Span::styled(
-            "  ",
-            Style::default().bg(theme::R_BG_RAISED),
-        ),
+        Span::styled("  ", Style::default().bg(theme::R_BG_RAISED)),
         Span::styled(
             "↑↓←→ navigate  Shift+←→ panels  v toggle agents",
             Style::default()
@@ -1345,15 +1385,10 @@ fn render_status_bar(
     ]);
 
     if let Some(ref msg) = *update_notice {
-        left_spans.push(Span::styled(
-            "  ",
-            Style::default().bg(theme::R_BG_RAISED),
-        ));
+        left_spans.push(Span::styled("  ", Style::default().bg(theme::R_BG_RAISED)));
         left_spans.push(Span::styled(
             msg.clone(),
-            Style::default()
-                .fg(theme::R_WARNING)
-                .bg(theme::R_BG_RAISED),
+            Style::default().fg(theme::R_WARNING).bg(theme::R_BG_RAISED),
         ));
     }
 
@@ -1369,11 +1404,8 @@ fn render_status_bar(
             .bg(theme::R_BG_RAISED),
     ));
 
-    let [left_area, right_area] = Layout::horizontal([
-        Constraint::Min(0),
-        Constraint::Length(version_width),
-    ])
-    .areas(area);
+    let [left_area, right_area] =
+        Layout::horizontal([Constraint::Min(0), Constraint::Length(version_width)]).areas(area);
 
     frame.render_widget(
         Paragraph::new(left_line).block(Block::default().style(bg)),
@@ -1439,7 +1471,12 @@ mod tests {
 
     // ── Repository tree rendering tests ──────────────────────────
 
-    fn make_branch(name: &str, is_head: bool, agent_count: usize, is_worktree: bool) -> clust_ipc::BranchInfo {
+    fn make_branch(
+        name: &str,
+        is_head: bool,
+        agent_count: usize,
+        is_worktree: bool,
+    ) -> clust_ipc::BranchInfo {
         clust_ipc::BranchInfo {
             name: name.to_string(),
             is_head,
@@ -1448,7 +1485,11 @@ mod tests {
         }
     }
 
-    fn make_repo(name: &str, local: Vec<clust_ipc::BranchInfo>, remote: Vec<clust_ipc::BranchInfo>) -> clust_ipc::RepoInfo {
+    fn make_repo(
+        name: &str,
+        local: Vec<clust_ipc::BranchInfo>,
+        remote: Vec<clust_ipc::BranchInfo>,
+    ) -> clust_ipc::RepoInfo {
         clust_ipc::RepoInfo {
             path: format!("/repos/{name}"),
             name: name.to_string(),
@@ -1481,11 +1522,19 @@ mod tests {
         assert_eq!(lines.len(), 4);
 
         // First line is repo name
-        let first = lines[0].spans.iter().map(|s| s.content.as_ref()).collect::<String>();
+        let first = lines[0]
+            .spans
+            .iter()
+            .map(|s| s.content.as_ref())
+            .collect::<String>();
         assert!(first.contains("myrepo"));
 
         // Second line is section header
-        let second = lines[1].spans.iter().map(|s| s.content.as_ref()).collect::<String>();
+        let second = lines[1]
+            .spans
+            .iter()
+            .map(|s| s.content.as_ref())
+            .collect::<String>();
         assert!(second.contains("Local Branches"));
     }
 
@@ -1502,9 +1551,15 @@ mod tests {
         // repo name + local header + 1 local branch + remote header + 1 remote branch
         assert_eq!(lines.len(), 5);
 
-        let texts: Vec<String> = lines.iter().map(|l| {
-            l.spans.iter().map(|s| s.content.as_ref()).collect::<String>()
-        }).collect();
+        let texts: Vec<String> = lines
+            .iter()
+            .map(|l| {
+                l.spans
+                    .iter()
+                    .map(|s| s.content.as_ref())
+                    .collect::<String>()
+            })
+            .collect();
 
         assert!(texts[0].contains("myrepo"));
         assert!(texts[1].contains("Local Branches"));
@@ -1528,7 +1583,11 @@ mod tests {
         assert_eq!(lines.len(), 7);
 
         // Line 3 (index 3) should be the blank separator
-        let blank = lines[3].spans.iter().map(|s| s.content.as_ref()).collect::<String>();
+        let blank = lines[3]
+            .spans
+            .iter()
+            .map(|s| s.content.as_ref())
+            .collect::<String>();
         assert!(blank.trim().is_empty());
     }
 
@@ -1587,11 +1646,7 @@ mod tests {
                 ],
                 vec![make_branch("origin/main", false, 0, false)],
             ),
-            make_repo(
-                "beta",
-                vec![make_branch("main", true, 0, false)],
-                vec![],
-            ),
+            make_repo("beta", vec![make_branch("main", true, 0, false)], vec![]),
         ]
     }
 
@@ -1647,11 +1702,11 @@ mod tests {
         let mut sel = TreeSelection::default();
         sel.descend(&repos); // -> Category
         sel.descend(&repos); // -> Branch
-        sel.ascend();        // -> Category
+        sel.ascend(); // -> Category
         assert_eq!(sel.level, TreeLevel::Category);
-        sel.ascend();        // -> Repo (ascend always goes up, never collapses)
+        sel.ascend(); // -> Repo (ascend always goes up, never collapses)
         assert_eq!(sel.level, TreeLevel::Repo);
-        sel.ascend();        // no-op, already at top
+        sel.ascend(); // no-op, already at top
         assert_eq!(sel.level, TreeLevel::Repo);
     }
 
@@ -1697,10 +1752,13 @@ mod tests {
     fn selection_descend_skips_empty_category() {
         // beta has only local branches
         let repos = sample_repos();
-        let mut sel = TreeSelection { repo_idx: 1, ..TreeSelection::default() };
+        let mut sel = TreeSelection {
+            repo_idx: 1,
+            ..TreeSelection::default()
+        };
         sel.descend(&repos); // -> Category
         assert_eq!(sel.category_idx, 0); // only local exists
-        // Move down should be no-op (no remote)
+                                         // Move down should be no-op (no remote)
         sel.move_down(&repos);
         assert_eq!(sel.category_idx, 0);
     }
@@ -1753,8 +1811,15 @@ mod tests {
         let repos = sample_repos();
         let sel = TreeSelection::default(); // repo 0 selected, expanded by default
         let lines = build_repo_tree_lines(&repos, &sel, 80);
-        let first = lines[0].spans.iter().map(|s| s.content.as_ref()).collect::<String>();
-        assert!(first.contains("▾"), "expanded repo should have down chevron");
+        let first = lines[0]
+            .spans
+            .iter()
+            .map(|s| s.content.as_ref())
+            .collect::<String>();
+        assert!(
+            first.contains("▾"),
+            "expanded repo should have down chevron"
+        );
     }
 
     #[test]
@@ -1762,12 +1827,18 @@ mod tests {
         let repos = sample_repos();
         let sel = TreeSelection::default(); // repo 0 selected, not repo 1
         let lines = build_repo_tree_lines(&repos, &sel, 80);
-        let beta_line = lines.iter().find(|l| {
-            let text: String = l.spans.iter().map(|s| s.content.as_ref()).collect();
-            text.contains("beta")
-        }).expect("should find beta line");
+        let beta_line = lines
+            .iter()
+            .find(|l| {
+                let text: String = l.spans.iter().map(|s| s.content.as_ref()).collect();
+                text.contains("beta")
+            })
+            .expect("should find beta line");
         let text: String = beta_line.spans.iter().map(|s| s.content.as_ref()).collect();
-        assert!(text.contains("▾"), "non-selected expanded repo should have down chevron");
+        assert!(
+            text.contains("▾"),
+            "non-selected expanded repo should have down chevron"
+        );
     }
 
     #[test]
@@ -1778,12 +1849,18 @@ mod tests {
         sel.descend(&repos); // -> Branch 0 (main)
         let lines = build_repo_tree_lines(&repos, &sel, 80);
         // Branch line for "main" should have indicator
-        let main_line = lines.iter().find(|l| {
-            let text: String = l.spans.iter().map(|s| s.content.as_ref()).collect();
-            text.contains("main") && !text.contains("origin") && !text.contains("Branches")
-        }).expect("should find main branch line");
+        let main_line = lines
+            .iter()
+            .find(|l| {
+                let text: String = l.spans.iter().map(|s| s.content.as_ref()).collect();
+                text.contains("main") && !text.contains("origin") && !text.contains("Branches")
+            })
+            .expect("should find main branch line");
         let text: String = main_line.spans.iter().map(|s| s.content.as_ref()).collect();
-        assert!(text.contains("▸"), "selected branch should have arrow indicator");
+        assert!(
+            text.contains("▸"),
+            "selected branch should have arrow indicator"
+        );
     }
 
     // ── Agent selection state tests ──────────────────────────────
@@ -1818,7 +1895,10 @@ mod tests {
 
     #[test]
     fn agent_selection_clamp_empty() {
-        let mut sel = AgentSelection { group_idx: 5, agent_idx: 3 };
+        let mut sel = AgentSelection {
+            group_idx: 5,
+            agent_idx: 3,
+        };
         sel.clamp(&[], AgentViewMode::ByPool);
         assert_eq!(sel.group_idx, 0);
         assert_eq!(sel.agent_idx, 0);
@@ -1827,7 +1907,10 @@ mod tests {
     #[test]
     fn agent_selection_clamp_shrinks() {
         let agents = sample_agents();
-        let mut sel = AgentSelection { group_idx: 10, agent_idx: 10 };
+        let mut sel = AgentSelection {
+            group_idx: 10,
+            agent_idx: 10,
+        };
         sel.clamp(&agents, AgentViewMode::ByPool);
         assert_eq!(sel.group_idx, 1); // 2 pools: alpha, beta
         assert_eq!(sel.agent_idx, 0); // beta has 1 agent
@@ -1846,7 +1929,10 @@ mod tests {
     #[test]
     fn agent_selection_move_up_within_pool() {
         let agents = sample_agents();
-        let mut sel = AgentSelection { group_idx: 0, agent_idx: 1 };
+        let mut sel = AgentSelection {
+            group_idx: 0,
+            agent_idx: 1,
+        };
         sel.move_up(&agents, AgentViewMode::ByPool);
         assert_eq!(sel.agent_idx, 0);
         sel.move_up(&agents, AgentViewMode::ByPool);
@@ -1867,7 +1953,10 @@ mod tests {
     #[test]
     fn agent_selection_prev_group() {
         let agents = sample_agents();
-        let mut sel = AgentSelection { group_idx: 1, agent_idx: 0 };
+        let mut sel = AgentSelection {
+            group_idx: 1,
+            agent_idx: 0,
+        };
         sel.prev_group(&agents, AgentViewMode::ByPool);
         assert_eq!(sel.group_idx, 0);
         assert_eq!(sel.agent_idx, 0);
@@ -1878,7 +1967,10 @@ mod tests {
     #[test]
     fn agent_selection_next_group_resets_agent_idx() {
         let agents = sample_agents();
-        let mut sel = AgentSelection { group_idx: 0, agent_idx: 1 };
+        let mut sel = AgentSelection {
+            group_idx: 0,
+            agent_idx: 1,
+        };
         sel.next_group(&agents, AgentViewMode::ByPool);
         assert_eq!(sel.group_idx, 1);
         assert_eq!(sel.agent_idx, 0);
@@ -1913,7 +2005,11 @@ mod tests {
         let names = group_names(&agents, AgentViewMode::ByRepo);
         assert_eq!(
             names,
-            vec!["/home/user/project-a", "/home/user/project-b", "No repository"]
+            vec![
+                "/home/user/project-a",
+                "/home/user/project-b",
+                "No repository"
+            ]
         );
     }
 
@@ -1966,7 +2062,10 @@ mod tests {
         assert_eq!(lines.len(), 1);
         let text: String = lines[0].spans.iter().map(|s| s.content.as_ref()).collect();
         assert!(text.contains("myrepo"));
-        assert!(text.contains("▸"), "collapsed repo should have right chevron");
+        assert!(
+            text.contains("▸"),
+            "collapsed repo should have right chevron"
+        );
     }
 
     #[test]

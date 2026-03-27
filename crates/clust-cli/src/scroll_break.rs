@@ -21,6 +21,20 @@ pub enum ScrollMode {
     Full,
     /// Rate-limited — at most `max_per_sec` scroll events forwarded per second.
     RateLimited { max_per_sec: u32 },
+    /// Intercept all scroll events — never forward them to the agent.
+    /// All mouse events (scroll and non-scroll) are stripped from output.
+    /// Scroll directions are reported via `ScrollFilterResult`.
+    Intercept,
+}
+
+/// Result of filtering input bytes with scroll interception.
+pub struct ScrollFilterResult {
+    /// Bytes to forward to the agent (all mouse events removed).
+    pub bytes: Vec<u8>,
+    /// Number of scroll-up events intercepted.
+    pub scroll_up: u32,
+    /// Number of scroll-down events intercepted.
+    pub scroll_down: u32,
 }
 
 // ── Parser state ─────────────────────────────────────────────────────
@@ -40,12 +54,16 @@ enum State {
 
 // ── ScrollBreak ──────────────────────────────────────────────────────
 
-/// Input filter that throttles mouse scroll events in raw terminal byte streams.
+/// Input filter that detects and intercepts mouse scroll events in raw
+/// terminal byte streams. Supports rate-limiting and full interception modes.
 pub struct ScrollBreak {
+    #[allow(dead_code)]
     mode: ScrollMode,
-    /// Minimum time between forwarded scroll events.
+    /// Minimum time between forwarded scroll events (rate-limit mode only).
+    #[allow(dead_code)]
     min_interval: Duration,
-    /// Timestamp of the last scroll event that was forwarded.
+    /// Timestamp of the last scroll event that was forwarded (rate-limit mode only).
+    #[allow(dead_code)]
     last_scroll: Option<Instant>,
     /// Buffer for partial escape sequences that span read chunk boundaries.
     pending: Vec<u8>,
@@ -54,7 +72,7 @@ pub struct ScrollBreak {
 impl ScrollBreak {
     pub fn new(mode: ScrollMode) -> Self {
         let min_interval = match &mode {
-            ScrollMode::Full => Duration::ZERO,
+            ScrollMode::Full | ScrollMode::Intercept => Duration::ZERO,
             ScrollMode::RateLimited { max_per_sec } => {
                 if *max_per_sec == 0 {
                     Duration::MAX
@@ -72,6 +90,8 @@ impl ScrollBreak {
     }
 
     /// Filter a chunk of raw input bytes. Returns bytes to forward to the agent.
+    /// Used in rate-limit and full modes (not intercept mode).
+    #[allow(dead_code)]
     pub fn filter(&mut self, data: &[u8]) -> Vec<u8> {
         self.filter_at(data, Instant::now())
     }
@@ -188,6 +208,8 @@ impl ScrollBreak {
     fn should_allow_scroll(&mut self, now: Instant) -> bool {
         match self.mode {
             ScrollMode::Full => true,
+            // Intercept mode uses filter_intercept_at, not this path.
+            ScrollMode::Intercept => unreachable!(),
             ScrollMode::RateLimited { max_per_sec } => {
                 if max_per_sec == 0 {
                     return false;
@@ -207,6 +229,118 @@ impl ScrollBreak {
                     }
                 }
             }
+        }
+    }
+
+    /// Filter with scroll interception. All mouse events are stripped from the
+    /// output; scroll events are counted and reported in the result.
+    pub fn filter_intercept(&mut self, data: &[u8]) -> ScrollFilterResult {
+        self.filter_intercept_at(data, Instant::now())
+    }
+
+    /// Intercept filter with an explicit timestamp (for deterministic testing).
+    fn filter_intercept_at(&mut self, data: &[u8], _now: Instant) -> ScrollFilterResult {
+        let mut input = std::mem::take(&mut self.pending);
+        input.extend_from_slice(data);
+
+        // Safety valve: if buffer is too large, flush everything
+        if input.len() > MAX_PENDING {
+            return ScrollFilterResult {
+                bytes: input,
+                scroll_up: 0,
+                scroll_down: 0,
+            };
+        }
+
+        let mut output = Vec::with_capacity(input.len());
+        let mut state = State::Ground;
+        let mut seq_start: usize = 0;
+        let mut scroll_up: u32 = 0;
+        let mut scroll_down: u32 = 0;
+
+        for (i, &byte) in input.iter().enumerate() {
+            match state {
+                State::Ground => {
+                    if byte == 0x1b {
+                        state = State::Escape;
+                        seq_start = i;
+                    } else {
+                        output.push(byte);
+                    }
+                }
+                State::Escape => {
+                    if byte == b'[' {
+                        state = State::Csi;
+                    } else {
+                        output.extend_from_slice(&input[seq_start..=i]);
+                        state = State::Ground;
+                    }
+                }
+                State::Csi => {
+                    match byte {
+                        0x40..=0x7e => {
+                            let params = &input[seq_start + 2..i];
+                            if byte == b'M' && params.is_empty() {
+                                // Legacy mouse introducer
+                                state = State::LegacyMouse { remaining: 3 };
+                            } else if (byte == b'M' || byte == b'm')
+                                && params.first() == Some(&b'<')
+                            {
+                                // SGR mouse event — count scroll, drop all mouse events
+                                let button = parse_sgr_button(&params[1..]);
+                                if is_scroll_button(button) {
+                                    if is_scroll_down(button) {
+                                        scroll_down += 1;
+                                    } else {
+                                        scroll_up += 1;
+                                    }
+                                }
+                                // All mouse events dropped in intercept mode
+                                state = State::Ground;
+                            } else {
+                                // Non-mouse CSI sequence — forward unchanged
+                                output.extend_from_slice(&input[seq_start..=i]);
+                                state = State::Ground;
+                            }
+                        }
+                        0x20..=0x3f => {
+                            // Continue accumulating
+                        }
+                        _ => {
+                            output.extend_from_slice(&input[seq_start..=i]);
+                            state = State::Ground;
+                        }
+                    }
+                }
+                State::LegacyMouse { remaining } => {
+                    let remaining = remaining - 1;
+                    if remaining == 0 {
+                        let button_byte = input[seq_start + 3];
+                        let button = (button_byte as u32).wrapping_sub(32);
+                        if is_scroll_button(button) {
+                            if is_scroll_down(button) {
+                                scroll_down += 1;
+                            } else {
+                                scroll_up += 1;
+                            }
+                        }
+                        // All mouse events dropped in intercept mode
+                        state = State::Ground;
+                    } else {
+                        state = State::LegacyMouse { remaining };
+                    }
+                }
+            }
+        }
+
+        if state != State::Ground {
+            self.pending = input[seq_start..].to_vec();
+        }
+
+        ScrollFilterResult {
+            bytes: output,
+            scroll_up,
+            scroll_down,
         }
     }
 }
@@ -234,6 +368,12 @@ fn parse_sgr_button(params: &[u8]) -> u32 {
 /// Scroll events have bit 6 set and bit 7 clear: (button & 0xC0) == 0x40.
 fn is_scroll_button(button: u32) -> bool {
     (button & 0xC0) == 0x40
+}
+
+/// Check if a scroll button is scroll-down (vs scroll-up).
+/// Button 64 = scroll up, 65 = scroll down (bit 0 distinguishes direction).
+fn is_scroll_down(button: u32) -> bool {
+    (button & 0x01) != 0
 }
 
 #[cfg(test)]
@@ -712,5 +852,119 @@ mod tests {
         // Extended button 8 (bit 7 set) — not a scroll event
         assert!(!is_scroll_button(128));
         assert!(!is_scroll_button(129));
+    }
+
+    // ── Intercept mode tests ────────────────────────────────────────
+
+    fn intercept() -> ScrollBreak {
+        ScrollBreak::new(ScrollMode::Intercept)
+    }
+
+    #[test]
+    fn intercept_plain_text_passes_through() {
+        let mut sb = intercept();
+        let r = sb.filter_intercept(b"hello world");
+        assert_eq!(r.bytes, b"hello world");
+        assert_eq!(r.scroll_up, 0);
+        assert_eq!(r.scroll_down, 0);
+    }
+
+    #[test]
+    fn intercept_scroll_up_counted_and_stripped() {
+        let mut sb = intercept();
+        let scroll = sgr_mouse(64, 10, 20, true);
+        let r = sb.filter_intercept(&scroll);
+        assert!(r.bytes.is_empty());
+        assert_eq!(r.scroll_up, 1);
+        assert_eq!(r.scroll_down, 0);
+    }
+
+    #[test]
+    fn intercept_scroll_down_counted_and_stripped() {
+        let mut sb = intercept();
+        let scroll = sgr_mouse(65, 10, 20, true);
+        let r = sb.filter_intercept(&scroll);
+        assert!(r.bytes.is_empty());
+        assert_eq!(r.scroll_up, 0);
+        assert_eq!(r.scroll_down, 1);
+    }
+
+    #[test]
+    fn intercept_multiple_scrolls() {
+        let mut sb = intercept();
+        let mut input = Vec::new();
+        input.extend_from_slice(&sgr_mouse(64, 10, 20, true)); // up
+        input.extend_from_slice(&sgr_mouse(64, 10, 21, true)); // up
+        input.extend_from_slice(&sgr_mouse(65, 10, 22, true)); // down
+        let r = sb.filter_intercept(&input);
+        assert!(r.bytes.is_empty());
+        assert_eq!(r.scroll_up, 2);
+        assert_eq!(r.scroll_down, 1);
+    }
+
+    #[test]
+    fn intercept_non_scroll_mouse_stripped() {
+        let mut sb = intercept();
+        // Left click — should be stripped (all mouse events removed)
+        let click = sgr_mouse(0, 15, 20, true);
+        let r = sb.filter_intercept(&click);
+        assert!(r.bytes.is_empty());
+        assert_eq!(r.scroll_up, 0);
+        assert_eq!(r.scroll_down, 0);
+    }
+
+    #[test]
+    fn intercept_mixed_scroll_and_text() {
+        let mut sb = intercept();
+        let mut input = b"hello".to_vec();
+        input.extend_from_slice(&sgr_mouse(64, 10, 20, true)); // scroll up
+        input.extend_from_slice(b"world");
+        input.extend_from_slice(&sgr_mouse(65, 10, 21, true)); // scroll down
+        input.extend_from_slice(b"end");
+        let r = sb.filter_intercept(&input);
+        assert_eq!(r.bytes, b"helloworldend");
+        assert_eq!(r.scroll_up, 1);
+        assert_eq!(r.scroll_down, 1);
+    }
+
+    #[test]
+    fn intercept_non_mouse_csi_passes_through() {
+        let mut sb = intercept();
+        // Cursor position and color codes should pass through
+        let r = sb.filter_intercept(b"\x1b[1;2H\x1b[31m");
+        assert_eq!(r.bytes, b"\x1b[1;2H\x1b[31m");
+        assert_eq!(r.scroll_up, 0);
+        assert_eq!(r.scroll_down, 0);
+    }
+
+    #[test]
+    fn intercept_legacy_scroll_counted() {
+        let mut sb = intercept();
+        let scroll_up = legacy_mouse(64, 10, 20);
+        let r = sb.filter_intercept(&scroll_up);
+        assert!(r.bytes.is_empty());
+        assert_eq!(r.scroll_up, 1);
+        assert_eq!(r.scroll_down, 0);
+    }
+
+    #[test]
+    fn intercept_legacy_non_scroll_stripped() {
+        let mut sb = intercept();
+        let click = legacy_mouse(0, 10, 20);
+        let r = sb.filter_intercept(&click);
+        assert!(r.bytes.is_empty());
+        assert_eq!(r.scroll_up, 0);
+        assert_eq!(r.scroll_down, 0);
+    }
+
+    #[test]
+    fn intercept_split_across_chunks() {
+        let mut sb = intercept();
+        let r1 = sb.filter_intercept(b"text\x1b[<64;10;");
+        assert_eq!(r1.bytes, b"text");
+        assert_eq!(r1.scroll_up, 0);
+        let r2 = sb.filter_intercept(b"20M more");
+        assert_eq!(r2.bytes, b" more");
+        assert_eq!(r2.scroll_up, 1);
     }
 }
