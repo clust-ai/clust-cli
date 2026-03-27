@@ -4,6 +4,7 @@ mod ipc;
 mod output_filter;
 mod pool_launcher;
 mod scroll_break;
+mod scrollback;
 mod terminal;
 mod theme;
 mod ui;
@@ -24,7 +25,7 @@ fn print_logo() {
     println!("  {TEXT_TERTIARY}┌──────────────────────────────────────────────┐{RESET}");
     println!("  {TEXT_TERTIARY}│{RESET}                                              {TEXT_TERTIARY}│{RESET}");
     println!("  {TEXT_TERTIARY}│{ACCENT}   ██████╗██╗     ██╗   ██╗███████╗████████╗{RESET}  {TEXT_TERTIARY}│{RESET}");
-    println!("  {TEXT_TERTIARY}│{ACCENT}  ██╔════╝██║     ██║   ██║██╔════╝╚══██╔══╝{RESET}  {TEXT_TERTIARY}│{RESET}");
+    println!("  {TEXT_TERTIARY}│{ACCENT}  ██╔═══╝ ██║     ██║   ██║██╔════╝╚══██╔══╝{RESET}  {TEXT_TERTIARY}│{RESET}");
     println!("  {TEXT_TERTIARY}│{ACCENT_BRIGHT}  ██║     ██║     ██║   ██║███████╗   ██║{RESET}     {TEXT_TERTIARY}│{RESET}");
     println!("  {TEXT_TERTIARY}│{ACCENT_BRIGHT}  ██║     ██║     ██║   ██║╚════██║   ██║{RESET}     {TEXT_TERTIARY}│{RESET}");
     println!("  {TEXT_TERTIARY}│{ACCENT}  ╚██████╗███████╗╚██████╔╝███████║   ██║{RESET}     {TEXT_TERTIARY}│{RESET}");
@@ -86,7 +87,12 @@ async fn main() {
     }
 
     // Subcommand: repo
-    if let Some(cli::Commands::Repo { register, remove, stop }) = args.command {
+    if let Some(cli::Commands::Repo {
+        register,
+        remove,
+        stop,
+    }) = args.command
+    {
         if register {
             handle_register().await;
         } else if remove {
@@ -131,10 +137,7 @@ async fn main() {
                 Ok(mut stream) => match ipc::send_stop_agent(&mut stream, id_or_empty).await {
                     Ok(()) => stop_spin(spinner, &format!("agent {id_or_empty} stopped")),
                     Err(e) => {
-                        stop_spin_err(
-                            spinner,
-                            &format!("failed to stop agent {id_or_empty}: {e}"),
-                        );
+                        stop_spin_err(spinner, &format!("failed to stop agent {id_or_empty}: {e}"));
                         std::process::exit(1);
                     }
                 },
@@ -159,7 +162,14 @@ async fn main() {
     }
 
     // Default: start an agent and attach (or -b for background)
-    handle_start(args.prompt, args.background, args.accept_edits, args.use_agent, pool_name).await;
+    handle_start(
+        args.prompt,
+        args.background,
+        args.accept_edits,
+        args.use_agent,
+        pool_name,
+    )
+    .await;
 }
 
 /// Check if a default agent is configured. If not, show the first-run picker.
@@ -211,7 +221,10 @@ async fn check_default_and_prompt() -> Option<Option<String>> {
                     Ok(PoolMessage::Error { message }) => {
                         eprintln!(
                             "  {}✘{} {}failed to set default: {message}{}",
-                            theme::ERROR, theme::RESET, theme::TEXT_PRIMARY, theme::RESET,
+                            theme::ERROR,
+                            theme::RESET,
+                            theme::TEXT_PRIMARY,
+                            theme::RESET,
                         );
                     }
                     _ => {}
@@ -223,7 +236,10 @@ async fn check_default_and_prompt() -> Option<Option<String>> {
         }
         println!(
             "  {}✔{} {}default agent set to {binary}{}\n",
-            theme::SUCCESS, theme::RESET, theme::TEXT_PRIMARY, theme::RESET,
+            theme::SUCCESS,
+            theme::RESET,
+            theme::TEXT_PRIMARY,
+            theme::RESET,
         );
         return Some(Some(binary));
     }
@@ -250,7 +266,10 @@ async fn check_default_and_prompt() -> Option<Option<String>> {
                         Ok(PoolMessage::Error { message }) => {
                             eprintln!(
                                 "  {}✘{} {}failed to set default: {message}{}",
-                                theme::ERROR, theme::RESET, theme::TEXT_PRIMARY, theme::RESET,
+                                theme::ERROR,
+                                theme::RESET,
+                                theme::TEXT_PRIMARY,
+                                theme::RESET,
                             );
                         }
                         _ => {}
@@ -356,19 +375,18 @@ async fn handle_start(
         std::process::exit(1);
     });
 
-    let response: PoolMessage =
-        clust_ipc::recv_message(&mut stream)
-            .await
-            .unwrap_or_else(|e| {
-                eprintln!(
-                    "\n  {}✘{} {}failed to read response: {e}{}\n",
-                    theme::ERROR,
-                    theme::RESET,
-                    theme::TEXT_PRIMARY,
-                    theme::RESET,
-                );
-                std::process::exit(1);
-            });
+    let response: PoolMessage = clust_ipc::recv_message(&mut stream)
+        .await
+        .unwrap_or_else(|e| {
+            eprintln!(
+                "\n  {}✘{} {}failed to read response: {e}{}\n",
+                theme::ERROR,
+                theme::RESET,
+                theme::TEXT_PRIMARY,
+                theme::RESET,
+            );
+            std::process::exit(1);
+        });
 
     match response {
         PoolMessage::AgentStarted { id, agent_binary } => {
@@ -439,19 +457,18 @@ async fn handle_attach(id: String) {
             std::process::exit(1);
         });
 
-    let response: PoolMessage =
-        clust_ipc::recv_message(&mut stream)
-            .await
-            .unwrap_or_else(|e| {
-                eprintln!(
-                    "\n  {}✘{} {}failed to read response: {e}{}\n",
-                    theme::ERROR,
-                    theme::RESET,
-                    theme::TEXT_PRIMARY,
-                    theme::RESET,
-                );
-                std::process::exit(1);
-            });
+    let response: PoolMessage = clust_ipc::recv_message(&mut stream)
+        .await
+        .unwrap_or_else(|e| {
+            eprintln!(
+                "\n  {}✘{} {}failed to read response: {e}{}\n",
+                theme::ERROR,
+                theme::RESET,
+                theme::TEXT_PRIMARY,
+                theme::RESET,
+            );
+            std::process::exit(1);
+        });
 
     match response {
         PoolMessage::AgentAttached { id, agent_binary } => {
@@ -504,37 +521,31 @@ async fn handle_ls(select: bool, pool: Option<String>) {
         }
     };
 
-    clust_ipc::send_message(
-        &mut stream,
-        &CliMessage::ListAgents {
-            pool: pool.clone(),
-        },
-    )
-    .await
-    .unwrap_or_else(|e| {
-        eprintln!(
-            "\n  {}✘{} {}failed to send list: {e}{}\n",
-            theme::ERROR,
-            theme::RESET,
-            theme::TEXT_PRIMARY,
-            theme::RESET,
-        );
-        std::process::exit(1);
-    });
+    clust_ipc::send_message(&mut stream, &CliMessage::ListAgents { pool: pool.clone() })
+        .await
+        .unwrap_or_else(|e| {
+            eprintln!(
+                "\n  {}✘{} {}failed to send list: {e}{}\n",
+                theme::ERROR,
+                theme::RESET,
+                theme::TEXT_PRIMARY,
+                theme::RESET,
+            );
+            std::process::exit(1);
+        });
 
-    let response: PoolMessage =
-        clust_ipc::recv_message(&mut stream)
-            .await
-            .unwrap_or_else(|e| {
-                eprintln!(
-                    "\n  {}✘{} {}failed to read response: {e}{}\n",
-                    theme::ERROR,
-                    theme::RESET,
-                    theme::TEXT_PRIMARY,
-                    theme::RESET,
-                );
-                std::process::exit(1);
-            });
+    let response: PoolMessage = clust_ipc::recv_message(&mut stream)
+        .await
+        .unwrap_or_else(|e| {
+            eprintln!(
+                "\n  {}✘{} {}failed to read response: {e}{}\n",
+                theme::ERROR,
+                theme::RESET,
+                theme::TEXT_PRIMARY,
+                theme::RESET,
+            );
+            std::process::exit(1);
+        });
 
     match response {
         PoolMessage::AgentList { mut agents } => {
@@ -542,7 +553,8 @@ async fn handle_ls(select: bool, pool: Option<String>) {
             if agents.is_empty() {
                 println!(
                     "  {}no running agents{}",
-                    theme::TEXT_SECONDARY, theme::RESET,
+                    theme::TEXT_SECONDARY,
+                    theme::RESET,
                 );
             } else if pool.is_some() {
                 // Filtered to a single pool — flat display, no header
@@ -556,10 +568,7 @@ async fn handle_ls(select: bool, pool: Option<String>) {
                         if current_pool.is_some() {
                             println!(); // blank line between pools
                         }
-                        println!(
-                            "  {}{}{}",
-                            theme::ACCENT, agent.pool, theme::RESET,
-                        );
+                        println!("  {}{}{}", theme::ACCENT, agent.pool, theme::RESET,);
                         print_agent_header();
                         current_pool = Some(&agent.pool);
                     }
@@ -658,14 +667,9 @@ async fn handle_select(pool: Option<String>) {
     // Fetch agent list (pool might not be running)
     let agents = match ipc::try_connect().await {
         Ok(mut stream) => {
-            if clust_ipc::send_message(
-                &mut stream,
-                &CliMessage::ListAgents {
-                    pool: pool.clone(),
-                },
-            )
-            .await
-            .is_err()
+            if clust_ipc::send_message(&mut stream, &CliMessage::ListAgents { pool: pool.clone() })
+                .await
+                .is_err()
             {
                 vec![]
             } else {
@@ -895,7 +899,10 @@ async fn handle_default_picker() {
                         Ok(PoolMessage::Error { message }) => {
                             eprintln!(
                                 "  {}✘{} {}failed to set default: {message}{}\n",
-                                theme::ERROR, theme::RESET, theme::TEXT_PRIMARY, theme::RESET,
+                                theme::ERROR,
+                                theme::RESET,
+                                theme::TEXT_PRIMARY,
+                                theme::RESET,
                             );
                         }
                         _ => {}
@@ -913,7 +920,10 @@ async fn handle_default_picker() {
             } else {
                 eprintln!(
                     "  {}✘{} {}failed to set default agent{}\n",
-                    theme::ERROR, theme::RESET, theme::TEXT_PRIMARY, theme::RESET,
+                    theme::ERROR,
+                    theme::RESET,
+                    theme::TEXT_PRIMARY,
+                    theme::RESET,
                 );
             }
         }
@@ -935,11 +945,8 @@ async fn handle_register() {
         }
     };
 
-    if let Err(e) = clust_ipc::send_message(
-        &mut stream,
-        &CliMessage::RegisterRepo { path: working_dir },
-    )
-    .await
+    if let Err(e) =
+        clust_ipc::send_message(&mut stream, &CliMessage::RegisterRepo { path: working_dir }).await
     {
         stop_spin_err(spinner, &format!("failed to send register: {e}"));
         std::process::exit(1);
@@ -970,21 +977,20 @@ async fn handle_repo_remove() {
     // Yellow warning
     println!(
         "  {}⚠ this will stop all agents working in this repo and remove it from clust{}",
-        theme::WARNING, theme::RESET
+        theme::WARNING,
+        theme::RESET
     );
     println!();
 
     // Confirmation prompt
     eprint!(
         "  {}are you sure? [y/N]{} ",
-        theme::TEXT_PRIMARY, theme::RESET
+        theme::TEXT_PRIMARY,
+        theme::RESET
     );
     let mut input = String::new();
     if std::io::stdin().read_line(&mut input).is_err() || !matches!(input.trim(), "y" | "Y") {
-        println!(
-            "\n  {}cancelled{}",
-            theme::TEXT_SECONDARY, theme::RESET
-        );
+        println!("\n  {}cancelled{}", theme::TEXT_SECONDARY, theme::RESET);
         println!();
         return;
     }
@@ -1004,7 +1010,10 @@ async fn handle_repo_remove() {
             if stopped > 0 {
                 stop_spin(
                     spinner,
-                    &format!("repository '{name}' removed ({stopped} agent{} stopped)", if stopped == 1 { "" } else { "s" }),
+                    &format!(
+                        "repository '{name}' removed ({stopped} agent{} stopped)",
+                        if stopped == 1 { "" } else { "s" }
+                    ),
                 );
             } else {
                 stop_spin(spinner, &format!("repository '{name}' removed"));
@@ -1072,7 +1081,9 @@ fn run_default_selector(
     write!(
         stdout,
         "  {}{}{}\n\n",
-        theme::TEXT_SECONDARY, header, theme::RESET,
+        theme::TEXT_SECONDARY,
+        header,
+        theme::RESET,
     )
     .unwrap();
     stdout.flush().unwrap();
@@ -1180,7 +1191,12 @@ fn render_default_selector(
             };
             format!(
                 "{}{}{} {}({}){}{untested_tag}{check}",
-                name_color, agent.display_name, theme::RESET, bin_color, agent.binary, theme::RESET,
+                name_color,
+                agent.display_name,
+                theme::RESET,
+                bin_color,
+                agent.binary,
+                theme::RESET,
             )
         } else {
             // Custom
@@ -1195,7 +1211,8 @@ fn render_default_selector(
             let check = if is_custom_current {
                 format!(
                     " {}✔{} {}({}){}",
-                    theme::SUCCESS, theme::RESET,
+                    theme::SUCCESS,
+                    theme::RESET,
                     theme::TEXT_SECONDARY,
                     current.unwrap(),
                     theme::RESET,
@@ -1225,7 +1242,8 @@ fn read_custom_agent() -> DefaultPickerResult {
     write!(
         stdout,
         "\r\x1b[2K  {}agent command:{} ",
-        theme::TEXT_SECONDARY, theme::RESET,
+        theme::TEXT_SECONDARY,
+        theme::RESET,
     )
     .unwrap();
     stdout.flush().unwrap();
