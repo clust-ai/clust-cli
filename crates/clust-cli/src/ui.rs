@@ -12,7 +12,7 @@ use ratatui::{
     layout::{Alignment, Constraint, Flex, Layout, Rect},
     style::{Color, Style},
     text::{Line, Span},
-    widgets::{Block, Padding, Paragraph},
+    widgets::{Block, Borders, Clear, Padding, Paragraph},
     Frame, Terminal,
 };
 
@@ -445,6 +445,8 @@ pub fn run(pool_name: &str) -> io::Result<()> {
 
     let mut pool_stopped = false;
     let mut pool_count: usize = 1;
+    let mut show_help = false;
+    let mut last_help_press = Instant::now();
 
     loop {
         // Periodically fetch agent list and repo state from pool
@@ -459,10 +461,15 @@ pub fn run(pool_name: &str) -> io::Result<()> {
             last_repo_fetch = Instant::now();
         }
 
+        if show_help && last_help_press.elapsed() > Duration::from_millis(250) {
+            show_help = false;
+        }
+
         let pool_status = pool_running;
         let notice = update_notice.lock().unwrap().clone();
         let cur_focus = focus;
         let cur_tab = active_tab;
+        let show_help_now = show_help;
 
         terminal.draw(|frame| {
             let area = frame.area();
@@ -513,6 +520,10 @@ pub fn run(pool_name: &str) -> io::Result<()> {
             }
 
             render_status_bar(frame, status_area, pool_status, &notice, pool_name);
+
+            if show_help_now {
+                render_help_overlay(frame, content_area, cur_tab);
+            }
         })?;
 
         if event::poll(Duration::from_millis(100))? {
@@ -520,6 +531,11 @@ pub fn run(pool_name: &str) -> io::Result<()> {
                 Event::Key(key) if key.kind == KeyEventKind::Press => {
                     match key.code {
                         KeyCode::Char('q') | KeyCode::Esc => break,
+                        KeyCode::Char('c')
+                            if key.modifiers.contains(KeyModifiers::CONTROL) =>
+                        {
+                            break
+                        }
                         KeyCode::Char('Q') => {
                             let mut names: Vec<&str> =
                                 agents.iter().map(|a| a.pool.as_str()).collect();
@@ -540,6 +556,10 @@ pub fn run(pool_name: &str) -> io::Result<()> {
                         }
                         KeyCode::BackTab => {
                             active_tab = active_tab.prev();
+                        }
+                        KeyCode::Char('?') => {
+                            show_help = true;
+                            last_help_press = Instant::now();
                         }
                         // Repositories tab navigation
                         _ if active_tab == ActiveTab::Repositories => match key.code {
@@ -592,6 +612,10 @@ pub fn run(pool_name: &str) -> io::Result<()> {
                             _ => {}
                         },
                         _ => {}
+                    }
+                    // Dismiss help overlay on any non-? keypress
+                    if key.code != KeyCode::Char('?') {
+                        show_help = false;
                     }
                 }
                 Event::Resize(_, _) => {
@@ -1302,14 +1326,24 @@ fn render_agent_card(frame: &mut Frame, area: Rect, agent: &AgentInfo, is_select
             &agent.id,
             Style::default().fg(theme::R_ACCENT),
         )),
-        Line::from(vec![
-            Span::styled(
-                agent.agent_binary.clone(),
-                Style::default().fg(theme::R_TEXT_PRIMARY),
-            ),
-            Span::raw("  "),
-            Span::styled("● running", Style::default().fg(theme::R_SUCCESS)),
-        ]),
+        Line::from({
+            let mut spans = vec![
+                Span::styled(
+                    agent.agent_binary.clone(),
+                    Style::default().fg(theme::R_TEXT_PRIMARY),
+                ),
+                Span::raw("  "),
+                Span::styled("● running", Style::default().fg(theme::R_SUCCESS)),
+            ];
+            if let Some(ref branch) = agent.branch_name {
+                spans.push(Span::raw("  "));
+                spans.push(Span::styled(
+                    format!("\u{e0a0} {branch}"),
+                    Style::default().fg(theme::R_TEXT_SECONDARY),
+                ));
+            }
+            spans
+        }),
         Line::from(vec![
             Span::styled(
                 format!("started {started}"),
@@ -1363,21 +1397,7 @@ fn render_status_bar(
     left_spans.extend([
         Span::styled("  ", Style::default().bg(theme::R_BG_RAISED)),
         Span::styled(
-            "q to quit",
-            Style::default()
-                .fg(theme::R_TEXT_TERTIARY)
-                .bg(theme::R_BG_RAISED),
-        ),
-        Span::styled("  ", Style::default().bg(theme::R_BG_RAISED)),
-        Span::styled(
-            "Q to quit and stop pool",
-            Style::default()
-                .fg(theme::R_TEXT_TERTIARY)
-                .bg(theme::R_BG_RAISED),
-        ),
-        Span::styled("  ", Style::default().bg(theme::R_BG_RAISED)),
-        Span::styled(
-            "↑↓←→ navigate  Shift+←→ panels  v toggle agents",
+            "q quit  Q stop+quit  Hold ? for keys",
             Style::default()
                 .fg(theme::R_TEXT_TERTIARY)
                 .bg(theme::R_BG_RAISED),
@@ -1417,6 +1437,68 @@ fn render_status_bar(
             .block(Block::default().style(bg)),
         right_area,
     );
+}
+
+fn render_help_overlay(frame: &mut Frame, area: Rect, active_tab: ActiveTab) {
+    let mut bindings: Vec<(&str, &str)> = vec![
+        ("q / Esc", "Quit"),
+        ("Q", "Quit and stop pool"),
+        ("Ctrl+C", "Quit"),
+        ("Tab", "Next tab"),
+        ("Shift+Tab", "Previous tab"),
+    ];
+
+    if active_tab == ActiveTab::Repositories {
+        bindings.extend([
+            ("↑ / ↓", "Navigate items"),
+            ("← / →", "Collapse / expand"),
+            ("Shift+←/→", "Switch panel"),
+            ("Enter", "Toggle collapse"),
+            ("v", "Toggle agent grouping"),
+        ]);
+    }
+
+    let modal_width: u16 = 38;
+    let modal_height: u16 = bindings.len() as u16 + 2; // +2 for border
+
+    let [horz_area] = Layout::horizontal([Constraint::Length(modal_width)])
+        .flex(Flex::Center)
+        .areas(area);
+
+    let modal_rect = Rect {
+        x: horz_area.x,
+        y: area.y + area.height.saturating_sub(modal_height),
+        width: modal_width,
+        height: modal_height.min(area.height),
+    };
+
+    frame.render_widget(Clear, modal_rect);
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(theme::R_TEXT_TERTIARY))
+        .style(Style::default().bg(theme::R_BG_OVERLAY));
+
+    let inner = block.inner(modal_rect);
+    frame.render_widget(block, modal_rect);
+
+    let lines: Vec<Line> = bindings
+        .iter()
+        .map(|(key, desc)| {
+            Line::from(vec![
+                Span::styled(
+                    format!(" {:<14}", key),
+                    Style::default().fg(theme::R_ACCENT),
+                ),
+                Span::styled(
+                    desc.to_string(),
+                    Style::default().fg(theme::R_TEXT_PRIMARY),
+                ),
+            ])
+        })
+        .collect();
+
+    frame.render_widget(Paragraph::new(lines), inner);
 }
 
 // ---------------------------------------------------------------------------
