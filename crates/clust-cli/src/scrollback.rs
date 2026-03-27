@@ -204,10 +204,11 @@ fn sanitize_for_scrollback(input: &str) -> String {
                     SanitizeState::OscString
                 };
             }
-            SanitizeState::StringCommand => match byte {
-                0x1b => state = SanitizeState::StringCommandEsc,
-                _ => {}
-            },
+            SanitizeState::StringCommand => {
+                if byte == 0x1b {
+                    state = SanitizeState::StringCommandEsc;
+                }
+            }
             SanitizeState::StringCommandEsc => {
                 state = if byte == b'\\' {
                     SanitizeState::Ground

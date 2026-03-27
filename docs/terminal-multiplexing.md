@@ -64,19 +64,23 @@ Input uses **raw stdin byte forwarding** (not crossterm event conversion). This 
 ### Rules
 
 - **Forward raw bytes directly.** Do not convert between event representations. Raw forwarding preserves mouse events, terminal-specific protocols (kitty keyboard, sixel), alt+key, and all escape sequences without loss.
-- **Intercept Ctrl+Q and mouse scroll events.** Ctrl+Q (byte 0x11) is the detach key. Mouse scroll events are intercepted for scrollback navigation (see below). Everything else passes through to the child PTY.
+- **Intercept only Ctrl+Q and PageUp in live mode.** Ctrl+Q (byte 0x11) is the detach key. PageUp (`\x1b[5~`) enters scrollback mode. All other input — including mouse scroll events — is forwarded to the child PTY so agents can use native scrolling.
 - **Use SIGWINCH for resize detection** (`tokio::signal::unix::SignalKind::window_change()`), not crossterm events.
-- **Mouse button tracking is enabled by clust.** The attached session enables `?1000h` (button press/release) and `?1006h` (SGR encoding) so that scroll wheel events arrive as parseable mouse escape sequences instead of being converted to arrow keys by the terminal emulator in alternate screen mode. This is the one exception to the "don't enable terminal modes on behalf of the child" principle — it's required for scrollback to work. Only button tracking is enabled; `?1003h` (all-motion) is deliberately omitted to avoid flooding stdin with motion events.
+- **Mouse button tracking is enabled by clust.** The attached session enables `?1000h` (button press/release) and `?1006h` (SGR encoding) so that scroll wheel events arrive as parseable mouse escape sequences instead of being converted to arrow keys by the terminal emulator in alternate screen mode. Mouse events are forwarded to the agent in live mode. Only button tracking is enabled; `?1003h` (all-motion) is deliberately omitted to avoid flooding stdin with motion events.
 
 ## Scrollback
 
-The attached session maintains a scrollback buffer (`scrollback.rs`) that stores agent output as lines. Mouse scroll events are intercepted by `ScrollBreak` in `Intercept` mode and used to navigate the buffer.
+The attached session maintains a scrollback buffer (`scrollback.rs`) that stores agent output as sanitized lines (non-SGR ANSI escape sequences are stripped, bare `\r` is handled as overwrite). PageUp enters scrollback mode; mouse scroll events are intercepted by `ScrollBreak` in `Intercept` mode only while in scrollback mode.
 
-- **Scroll up**: enters scrollback mode, renders historical output from the buffer. The status bar shows "SCROLLBACK" with the current offset.
-- **Scroll down**: moves toward live output. When offset reaches 0, exits scrollback mode.
-- **Any keypress** while in scrollback: exits scrollback mode, triggers agent redraw via `ResizeAgent`, and forwards the keypress.
+When entering scrollback mode, the current `total_lines` is recorded as an anchor. The scroll offset is bounded by this anchor so the ceiling doesn't rise as new output arrives. New lines that arrive while scrolled back automatically adjust the offset to keep the viewport stable.
+
+- **PageUp** (live mode): enters scrollback mode one page up, if the buffer has enough content. The status bar shows "SCROLLBACK" with the current offset.
+- **PageUp** (scrollback mode): scrolls up by one page.
+- **PageDown** (scrollback mode): scrolls down by one page. When offset reaches 0, exits scrollback mode.
+- **Mouse scroll up/down** (scrollback mode): navigates by `SCROLL_STEP` lines.
+- **Any other keypress** while in scrollback: exits scrollback mode, triggers agent redraw via `ResizeAgent`, and forwards the keypress.
 - **Terminal resize** while in scrollback: exits scrollback mode.
-- Output arriving while in scrollback mode is buffered but not rendered until the user returns to live mode.
+- Output arriving while in scrollback mode is stored in the buffer and the scroll offset is adjusted, but not rendered to stdout until the user returns to live mode.
 
 ## Status Bar
 
