@@ -85,44 +85,82 @@ impl ActiveTab {
 }
 
 // ---------------------------------------------------------------------------
+// Agent view mode
+// ---------------------------------------------------------------------------
+
+/// Controls how agents are grouped in the right panel.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum AgentViewMode {
+    /// Group agents by their pool name (default).
+    ByPool,
+    /// Group agents by their git repository path.
+    ByRepo,
+}
+
+// ---------------------------------------------------------------------------
 // Agent selection state (right panel)
 // ---------------------------------------------------------------------------
 
-/// Returns sorted, deduplicated pool names from an agent list.
-fn pool_names(agents: &[AgentInfo]) -> Vec<String> {
-    let mut names: Vec<String> = agents.iter().map(|a| a.pool.clone()).collect();
+/// Returns sorted, deduplicated group names from an agent list based on view mode.
+fn group_names(agents: &[AgentInfo], mode: AgentViewMode) -> Vec<String> {
+    let mut names: Vec<String> = agents
+        .iter()
+        .map(|a| match mode {
+            AgentViewMode::ByPool => a.pool.clone(),
+            AgentViewMode::ByRepo => a
+                .repo_path
+                .clone()
+                .unwrap_or_else(|| "No repository".to_string()),
+        })
+        .collect();
     names.sort();
     names.dedup();
     names
 }
 
-/// Tracks the user's cursor position within the agent panel (pool + agent).
+/// Returns the group key for an agent based on view mode.
+fn agent_group_key(agent: &AgentInfo, mode: AgentViewMode) -> String {
+    match mode {
+        AgentViewMode::ByPool => agent.pool.clone(),
+        AgentViewMode::ByRepo => agent
+            .repo_path
+            .clone()
+            .unwrap_or_else(|| "No repository".to_string()),
+    }
+}
+
+/// Tracks the user's cursor position within the agent panel (group + agent).
 #[derive(Default)]
 struct AgentSelection {
-    pool_idx: usize,
+    group_idx: usize,
     agent_idx: usize,
 }
 
 impl AgentSelection {
-    /// Returns the number of agents in the currently selected pool.
-    fn agent_count(&self, agents: &[AgentInfo]) -> usize {
-        let names = pool_names(agents);
+    /// Returns the number of agents in the currently selected group.
+    fn agent_count(&self, agents: &[AgentInfo], mode: AgentViewMode) -> usize {
+        let names = group_names(agents, mode);
         names
-            .get(self.pool_idx)
-            .map(|pool| agents.iter().filter(|a| &a.pool == pool).count())
+            .get(self.group_idx)
+            .map(|group| {
+                agents
+                    .iter()
+                    .filter(|a| agent_group_key(a, mode) == *group)
+                    .count()
+            })
             .unwrap_or(0)
     }
 
     /// Adjust indices to stay within bounds after data refresh.
-    fn clamp(&mut self, agents: &[AgentInfo]) {
-        let names = pool_names(agents);
+    fn clamp(&mut self, agents: &[AgentInfo], mode: AgentViewMode) {
+        let names = group_names(agents, mode);
         if names.is_empty() {
-            self.pool_idx = 0;
+            self.group_idx = 0;
             self.agent_idx = 0;
             return;
         }
-        self.pool_idx = self.pool_idx.min(names.len() - 1);
-        let ac = self.agent_count(agents);
+        self.group_idx = self.group_idx.min(names.len() - 1);
+        let ac = self.agent_count(agents, mode);
         if ac > 0 {
             self.agent_idx = self.agent_idx.min(ac - 1);
         } else {
@@ -130,37 +168,37 @@ impl AgentSelection {
         }
     }
 
-    fn move_up(&mut self, agents: &[AgentInfo]) {
-        if pool_names(agents).is_empty() {
+    fn move_up(&mut self, agents: &[AgentInfo], mode: AgentViewMode) {
+        if group_names(agents, mode).is_empty() {
             return;
         }
         self.agent_idx = self.agent_idx.saturating_sub(1);
     }
 
-    fn move_down(&mut self, agents: &[AgentInfo]) {
-        let ac = self.agent_count(agents);
+    fn move_down(&mut self, agents: &[AgentInfo], mode: AgentViewMode) {
+        let ac = self.agent_count(agents, mode);
         if ac > 0 {
             self.agent_idx = (self.agent_idx + 1).min(ac - 1);
         }
     }
 
-    fn prev_pool(&mut self, agents: &[AgentInfo]) {
-        if pool_names(agents).is_empty() {
+    fn prev_group(&mut self, agents: &[AgentInfo], mode: AgentViewMode) {
+        if group_names(agents, mode).is_empty() {
             return;
         }
-        if self.pool_idx > 0 {
-            self.pool_idx -= 1;
+        if self.group_idx > 0 {
+            self.group_idx -= 1;
             self.agent_idx = 0;
         }
     }
 
-    fn next_pool(&mut self, agents: &[AgentInfo]) {
-        let names = pool_names(agents);
+    fn next_group(&mut self, agents: &[AgentInfo], mode: AgentViewMode) {
+        let names = group_names(agents, mode);
         if names.is_empty() {
             return;
         }
-        if self.pool_idx + 1 < names.len() {
-            self.pool_idx += 1;
+        if self.group_idx + 1 < names.len() {
+            self.group_idx += 1;
             self.agent_idx = 0;
         }
     }
@@ -319,11 +357,11 @@ impl TreeSelection {
             }
             TreeLevel::Category => {
                 // Only descend if expanded; collapsed categories require Enter to open
-                if !self.is_category_collapsed(self.repo_idx, self.category_idx) {
-                    if self.branch_count(repos) > 0 {
-                        self.level = TreeLevel::Branch;
-                        self.branch_idx = 0;
-                    }
+                if !self.is_category_collapsed(self.repo_idx, self.category_idx)
+                    && self.branch_count(repos) > 0
+                {
+                    self.level = TreeLevel::Branch;
+                    self.branch_idx = 0;
                 }
             }
             TreeLevel::Branch => {} // already deepest
@@ -394,6 +432,7 @@ pub fn run(pool_name: &str) -> io::Result<()> {
     let mut selection = TreeSelection::default();
     let mut focus = FocusPanel::Left;
     let mut agent_selection = AgentSelection::default();
+    let mut agent_view_mode = AgentViewMode::ByPool;
     let mut active_tab = ActiveTab::Repositories;
     let mut last_agent_fetch = Instant::now() - Duration::from_secs(10);
     let mut last_repo_fetch = Instant::now() - Duration::from_secs(10);
@@ -405,7 +444,7 @@ pub fn run(pool_name: &str) -> io::Result<()> {
         // Periodically fetch agent list and repo state from pool
         if pool_running && last_agent_fetch.elapsed() >= AGENT_FETCH_INTERVAL {
             agents = fetch_agents();
-            agent_selection.clamp(&agents);
+            agent_selection.clamp(&agents, agent_view_mode);
             last_agent_fetch = Instant::now();
         }
         if pool_running && last_repo_fetch.elapsed() >= AGENT_FETCH_INTERVAL {
@@ -446,7 +485,7 @@ pub fn run(pool_name: &str) -> io::Result<()> {
 
                     render_left_panel(frame, left_area, &repos, &selection, cur_focus == FocusPanel::Left);
                     render_divider(frame, divider_area);
-                    render_right_panel(frame, right_area, &agents, &agent_selection, cur_focus == FocusPanel::Right);
+                    render_right_panel(frame, right_area, &agents, &agent_selection, cur_focus == FocusPanel::Right, agent_view_mode);
                 }
                 ActiveTab::Overview => {
                     render_placeholder(frame, content_area, "Overview - coming soon");
@@ -500,22 +539,30 @@ pub fn run(pool_name: &str) -> io::Result<()> {
                                     selection.toggle_collapse();
                                 }
                             }
+                            // Toggle agent view mode (right panel only)
+                            KeyCode::Char('v') if focus == FocusPanel::Right => {
+                                agent_view_mode = match agent_view_mode {
+                                    AgentViewMode::ByPool => AgentViewMode::ByRepo,
+                                    AgentViewMode::ByRepo => AgentViewMode::ByPool,
+                                };
+                                agent_selection = AgentSelection::default();
+                            }
                             // Panel-specific navigation
                             KeyCode::Up => match focus {
                                 FocusPanel::Left => selection.move_up(&repos),
-                                FocusPanel::Right => agent_selection.move_up(&agents),
+                                FocusPanel::Right => agent_selection.move_up(&agents, agent_view_mode),
                             },
                             KeyCode::Down => match focus {
                                 FocusPanel::Left => selection.move_down(&repos),
-                                FocusPanel::Right => agent_selection.move_down(&agents),
+                                FocusPanel::Right => agent_selection.move_down(&agents, agent_view_mode),
                             },
                             KeyCode::Right => match focus {
                                 FocusPanel::Left => selection.descend(&repos),
-                                FocusPanel::Right => agent_selection.next_pool(&agents),
+                                FocusPanel::Right => agent_selection.next_group(&agents, agent_view_mode),
                             },
                             KeyCode::Left => match focus {
                                 FocusPanel::Left => selection.ascend(),
-                                FocusPanel::Right => agent_selection.prev_pool(&agents),
+                                FocusPanel::Right => agent_selection.prev_group(&agents, agent_view_mode),
                             },
                             _ => {}
                         }
@@ -641,22 +688,30 @@ fn render_left_panel(
 
         frame.render_widget(text, centered);
     } else {
-        let header_color = if focused {
-            theme::R_ACCENT_BRIGHT
-        } else {
-            theme::R_TEXT_PRIMARY
-        };
-        let mut lines = vec![
-            Line::from(Span::styled(
-                "Repositories",
-                Style::default().fg(header_color),
-            )),
-            Line::from(""),
-        ];
+        let mut lines = vec![];
         lines.extend(build_repo_tree_lines(repos, selection, inner.width));
         let paragraph = Paragraph::new(lines);
         frame.render_widget(paragraph, inner);
     }
+
+    // Focus indicator in top-right corner
+    let indicator_color = if focused {
+        theme::R_ACCENT_BRIGHT
+    } else {
+        theme::R_TEXT_TERTIARY
+    };
+    let indicator = Paragraph::new(Span::styled(
+        "●",
+        Style::default().fg(indicator_color).bg(theme::R_BG_SURFACE),
+    ))
+    .alignment(Alignment::Right);
+    let indicator_area = Rect {
+        x: inner.x,
+        y: inner.y,
+        width: inner.width,
+        height: 1,
+    };
+    frame.render_widget(indicator, indicator_area);
 }
 
 fn build_repo_tree_lines(
@@ -876,6 +931,7 @@ fn render_right_panel(
     agents: &[AgentInfo],
     agent_sel: &AgentSelection,
     focused: bool,
+    mode: AgentViewMode,
 ) {
     frame.render_widget(
         Block::default().style(Style::default().bg(theme::R_BG_BASE)),
@@ -884,8 +940,26 @@ fn render_right_panel(
 
     if agents.is_empty() {
         render_logo(frame, area);
+        // Focus indicator even when empty
+        let indicator_color = if focused {
+            theme::R_ACCENT_BRIGHT
+        } else {
+            theme::R_TEXT_TERTIARY
+        };
+        let indicator = Paragraph::new(Span::styled(
+            "●",
+            Style::default().fg(indicator_color).bg(theme::R_BG_BASE),
+        ))
+        .alignment(Alignment::Right);
+        let indicator_area = Rect {
+            x: area.x + 1,
+            y: area.y,
+            width: area.width.saturating_sub(2),
+            height: 1,
+        };
+        frame.render_widget(indicator, indicator_area);
     } else {
-        render_agent_list(frame, area, agents, agent_sel, focused);
+        render_agent_list(frame, area, agents, agent_sel, focused, mode);
     }
 }
 
@@ -945,6 +1019,7 @@ fn render_agent_list(
     agents: &[AgentInfo],
     agent_sel: &AgentSelection,
     focused: bool,
+    mode: AgentViewMode,
 ) {
     let block = Block::default()
         .padding(Padding::new(1, 1, 0, 0));
@@ -952,16 +1027,52 @@ fn render_agent_list(
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
-    // Group agents by pool (sorted)
+    // Mode label + spacer
+    let mode_label = match mode {
+        AgentViewMode::ByPool => "by pool",
+        AgentViewMode::ByRepo => "by repo",
+    };
+    let mode_line = Paragraph::new(Line::from(Span::styled(
+        mode_label,
+        Style::default().fg(theme::R_TEXT_TERTIARY),
+    )));
+
+    // Focus indicator in top-right corner (overlaid on mode label line)
+    let indicator_color = if focused {
+        theme::R_ACCENT_BRIGHT
+    } else {
+        theme::R_TEXT_TERTIARY
+    };
+    let indicator = Paragraph::new(Span::styled(
+        "●",
+        Style::default().fg(indicator_color),
+    ))
+    .alignment(Alignment::Right);
+
+    match mode {
+        AgentViewMode::ByPool => render_agent_list_by_pool(frame, inner, agents, agent_sel, focused, &mode_line, &indicator),
+        AgentViewMode::ByRepo => render_agent_list_by_repo(frame, inner, agents, agent_sel, focused, &mode_line, &indicator),
+    }
+}
+
+fn render_agent_list_by_pool(
+    frame: &mut Frame,
+    inner: Rect,
+    agents: &[AgentInfo],
+    agent_sel: &AgentSelection,
+    focused: bool,
+    mode_line: &Paragraph<'_>,
+    indicator: &Paragraph<'_>,
+) {
     let mut sorted: Vec<&AgentInfo> = agents.iter().collect();
     sorted.sort_by(|a, b| a.pool.cmp(&b.pool).then(a.started_at.cmp(&b.started_at)));
 
     let mut pnames: Vec<&str> = sorted.iter().map(|a| a.pool.as_str()).collect();
     pnames.dedup();
 
-    // Build layout: header + spacer + pool headers + agent cards
+    // Build layout: mode label + spacer + pool headers + agent cards
     let mut constraints: Vec<Constraint> = vec![
-        Constraint::Length(1), // "Agents" header
+        Constraint::Length(1), // mode label
         Constraint::Length(1), // spacer
     ];
     for pool_name in &pnames {
@@ -971,25 +1082,20 @@ fn render_agent_list(
             constraints.push(Constraint::Length(4)); // agent card
         }
     }
-    constraints.push(Constraint::Min(0)); // absorb remaining space
+    constraints.push(Constraint::Min(0));
 
     let areas = Layout::vertical(constraints).split(inner);
 
-    // Inline header
-    let header_color = if focused {
-        theme::R_ACCENT_BRIGHT
-    } else {
-        theme::R_TEXT_PRIMARY
-    };
-    let header = Paragraph::new(Line::from(Span::styled(
-        "Agents",
-        Style::default().fg(header_color),
-    )));
-    frame.render_widget(header, areas[0]);
+    frame.render_widget(mode_line.clone(), areas[0]);
+    frame.render_widget(indicator.clone(), Rect {
+        x: inner.x,
+        y: inner.y,
+        width: inner.width,
+        height: 1,
+    });
 
     let mut area_idx = 2;
     for (pidx, pool_name) in pnames.iter().enumerate() {
-        // Pool header
         let pool_header = Paragraph::new(Line::from(vec![
             Span::styled(
                 format!(" {pool_name}"),
@@ -999,12 +1105,126 @@ fn render_agent_list(
         frame.render_widget(pool_header, areas[area_idx]);
         area_idx += 1;
 
-        // Agent cards for this pool
         for (aidx, agent) in sorted.iter().filter(|a| a.pool == *pool_name).enumerate() {
-            let is_selected = focused && pidx == agent_sel.pool_idx && aidx == agent_sel.agent_idx;
+            let is_selected = focused && pidx == agent_sel.group_idx && aidx == agent_sel.agent_idx;
             render_agent_card(frame, areas[area_idx], agent, is_selected);
             area_idx += 1;
         }
+    }
+}
+
+fn render_agent_list_by_repo(
+    frame: &mut Frame,
+    inner: Rect,
+    agents: &[AgentInfo],
+    agent_sel: &AgentSelection,
+    focused: bool,
+    mode_line: &Paragraph<'_>,
+    indicator: &Paragraph<'_>,
+) {
+    let mut sorted: Vec<&AgentInfo> = agents.iter().collect();
+    sorted.sort_by(|a, b| {
+        let ak = agent_group_key(a, AgentViewMode::ByRepo);
+        let bk = agent_group_key(b, AgentViewMode::ByRepo);
+        ak.cmp(&bk)
+            .then(a.branch_name.cmp(&b.branch_name))
+            .then(a.started_at.cmp(&b.started_at))
+    });
+
+    let gnames = group_names(agents, AgentViewMode::ByRepo);
+
+    // Build layout: mode label + spacer + repo/branch headers + agent cards
+    let mut constraints: Vec<Constraint> = vec![
+        Constraint::Length(1), // mode label
+        Constraint::Length(1), // spacer
+    ];
+    for repo in &gnames {
+        constraints.push(Constraint::Length(1)); // repo header
+        // Collect unique branch names within this repo
+        let mut branches: Vec<&str> = sorted
+            .iter()
+            .filter(|a| agent_group_key(a, AgentViewMode::ByRepo) == *repo)
+            .map(|a| a.branch_name.as_deref().unwrap_or("no branch"))
+            .collect();
+        branches.dedup();
+        for branch in &branches {
+            constraints.push(Constraint::Length(1)); // branch sub-header
+            let count = sorted
+                .iter()
+                .filter(|a| {
+                    agent_group_key(a, AgentViewMode::ByRepo) == *repo
+                        && a.branch_name.as_deref().unwrap_or("no branch") == *branch
+                })
+                .count();
+            for _ in 0..count {
+                constraints.push(Constraint::Length(4)); // agent card
+            }
+        }
+    }
+    constraints.push(Constraint::Min(0));
+
+    let areas = Layout::vertical(constraints).split(inner);
+
+    frame.render_widget(mode_line.clone(), areas[0]);
+    frame.render_widget(indicator.clone(), Rect {
+        x: inner.x,
+        y: inner.y,
+        width: inner.width,
+        height: 1,
+    });
+
+    let mut area_idx = 2;
+    let mut flat_agent_idx = 0;
+    for (gidx, repo) in gnames.iter().enumerate() {
+        // Repo header — show just the repo name (last path component)
+        let repo_display = std::path::Path::new(repo)
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| repo.clone());
+        let repo_header = Paragraph::new(Line::from(vec![
+            Span::styled(
+                format!(" {repo_display}"),
+                Style::default().fg(theme::R_ACCENT),
+            ),
+        ]));
+        frame.render_widget(repo_header, areas[area_idx]);
+        area_idx += 1;
+
+        // Branch sub-groups
+        let repo_agents: Vec<&AgentInfo> = sorted
+            .iter()
+            .filter(|a| agent_group_key(a, AgentViewMode::ByRepo) == *repo)
+            .copied()
+            .collect();
+        let mut branches: Vec<&str> = repo_agents
+            .iter()
+            .map(|a| a.branch_name.as_deref().unwrap_or("no branch"))
+            .collect();
+        branches.dedup();
+
+        for branch in &branches {
+            // Branch sub-header
+            let branch_header = Paragraph::new(Line::from(vec![
+                Span::styled(
+                    format!("   {branch}"),
+                    Style::default().fg(theme::R_TEXT_SECONDARY),
+                ),
+            ]));
+            frame.render_widget(branch_header, areas[area_idx]);
+            area_idx += 1;
+
+            for agent in repo_agents
+                .iter()
+                .filter(|a| a.branch_name.as_deref().unwrap_or("no branch") == *branch)
+            {
+                let is_selected =
+                    focused && gidx == agent_sel.group_idx && flat_agent_idx == agent_sel.agent_idx;
+                render_agent_card(frame, areas[area_idx], agent, is_selected);
+                area_idx += 1;
+                flat_agent_idx += 1;
+            }
+        }
+        flat_agent_idx = 0; // reset for next repo group
     }
 }
 
@@ -1109,7 +1329,7 @@ fn render_status_bar(
             Style::default().bg(theme::R_BG_RAISED),
         ),
         Span::styled(
-            "↑↓←→ navigate  Shift+←→ panels  Tab switch view",
+            "↑↓←→ navigate  Shift+←→ panels  v toggle agents",
             Style::default()
                 .fg(theme::R_TEXT_TERTIARY)
                 .bg(theme::R_BG_RAISED),
@@ -1568,6 +1788,8 @@ mod tests {
             attached_clients: 0,
             pool: pool.to_string(),
             working_dir: "/tmp".to_string(),
+            repo_path: None,
+            branch_name: None,
         }
     }
 
@@ -1582,24 +1804,24 @@ mod tests {
     #[test]
     fn agent_selection_default_is_first() {
         let sel = AgentSelection::default();
-        assert_eq!(sel.pool_idx, 0);
+        assert_eq!(sel.group_idx, 0);
         assert_eq!(sel.agent_idx, 0);
     }
 
     #[test]
     fn agent_selection_clamp_empty() {
-        let mut sel = AgentSelection { pool_idx: 5, agent_idx: 3 };
-        sel.clamp(&[]);
-        assert_eq!(sel.pool_idx, 0);
+        let mut sel = AgentSelection { group_idx: 5, agent_idx: 3 };
+        sel.clamp(&[], AgentViewMode::ByPool);
+        assert_eq!(sel.group_idx, 0);
         assert_eq!(sel.agent_idx, 0);
     }
 
     #[test]
     fn agent_selection_clamp_shrinks() {
         let agents = sample_agents();
-        let mut sel = AgentSelection { pool_idx: 10, agent_idx: 10 };
-        sel.clamp(&agents);
-        assert_eq!(sel.pool_idx, 1); // 2 pools: alpha, beta
+        let mut sel = AgentSelection { group_idx: 10, agent_idx: 10 };
+        sel.clamp(&agents, AgentViewMode::ByPool);
+        assert_eq!(sel.group_idx, 1); // 2 pools: alpha, beta
         assert_eq!(sel.agent_idx, 0); // beta has 1 agent
     }
 
@@ -1607,58 +1829,84 @@ mod tests {
     fn agent_selection_move_down_within_pool() {
         let agents = sample_agents();
         let mut sel = AgentSelection::default(); // pool 0 (alpha), agent 0
-        sel.move_down(&agents);
+        sel.move_down(&agents, AgentViewMode::ByPool);
         assert_eq!(sel.agent_idx, 1); // alpha has 2 agents
-        sel.move_down(&agents);
+        sel.move_down(&agents, AgentViewMode::ByPool);
         assert_eq!(sel.agent_idx, 1); // saturates
     }
 
     #[test]
     fn agent_selection_move_up_within_pool() {
         let agents = sample_agents();
-        let mut sel = AgentSelection { pool_idx: 0, agent_idx: 1 };
-        sel.move_up(&agents);
+        let mut sel = AgentSelection { group_idx: 0, agent_idx: 1 };
+        sel.move_up(&agents, AgentViewMode::ByPool);
         assert_eq!(sel.agent_idx, 0);
-        sel.move_up(&agents);
+        sel.move_up(&agents, AgentViewMode::ByPool);
         assert_eq!(sel.agent_idx, 0); // saturates
     }
 
     #[test]
-    fn agent_selection_next_pool() {
+    fn agent_selection_next_group() {
         let agents = sample_agents();
         let mut sel = AgentSelection::default();
-        sel.next_pool(&agents);
-        assert_eq!(sel.pool_idx, 1);
-        assert_eq!(sel.agent_idx, 0); // reset on pool switch
-        sel.next_pool(&agents);
-        assert_eq!(sel.pool_idx, 1); // saturates
+        sel.next_group(&agents, AgentViewMode::ByPool);
+        assert_eq!(sel.group_idx, 1);
+        assert_eq!(sel.agent_idx, 0); // reset on group switch
+        sel.next_group(&agents, AgentViewMode::ByPool);
+        assert_eq!(sel.group_idx, 1); // saturates
     }
 
     #[test]
-    fn agent_selection_prev_pool() {
+    fn agent_selection_prev_group() {
         let agents = sample_agents();
-        let mut sel = AgentSelection { pool_idx: 1, agent_idx: 0 };
-        sel.prev_pool(&agents);
-        assert_eq!(sel.pool_idx, 0);
+        let mut sel = AgentSelection { group_idx: 1, agent_idx: 0 };
+        sel.prev_group(&agents, AgentViewMode::ByPool);
+        assert_eq!(sel.group_idx, 0);
         assert_eq!(sel.agent_idx, 0);
-        sel.prev_pool(&agents);
-        assert_eq!(sel.pool_idx, 0); // saturates
+        sel.prev_group(&agents, AgentViewMode::ByPool);
+        assert_eq!(sel.group_idx, 0); // saturates
     }
 
     #[test]
-    fn agent_selection_next_pool_resets_agent_idx() {
+    fn agent_selection_next_group_resets_agent_idx() {
         let agents = sample_agents();
-        let mut sel = AgentSelection { pool_idx: 0, agent_idx: 1 };
-        sel.next_pool(&agents);
-        assert_eq!(sel.pool_idx, 1);
+        let mut sel = AgentSelection { group_idx: 0, agent_idx: 1 };
+        sel.next_group(&agents, AgentViewMode::ByPool);
+        assert_eq!(sel.group_idx, 1);
         assert_eq!(sel.agent_idx, 0);
     }
 
     #[test]
-    fn pool_names_sorted_deduped() {
+    fn group_names_by_pool_sorted_deduped() {
         let agents = sample_agents();
-        let names = pool_names(&agents);
+        let names = group_names(&agents, AgentViewMode::ByPool);
         assert_eq!(names, vec!["alpha", "beta"]);
+    }
+
+    #[test]
+    fn group_names_by_repo() {
+        let agents = vec![
+            AgentInfo {
+                repo_path: Some("/home/user/project-a".into()),
+                branch_name: Some("main".into()),
+                ..make_agent("a1", "default")
+            },
+            AgentInfo {
+                repo_path: Some("/home/user/project-b".into()),
+                branch_name: Some("dev".into()),
+                ..make_agent("b1", "default")
+            },
+            AgentInfo {
+                repo_path: None,
+                branch_name: None,
+                ..make_agent("c1", "default")
+            },
+        ];
+        let names = group_names(&agents, AgentViewMode::ByRepo);
+        assert_eq!(
+            names,
+            vec!["/home/user/project-a", "/home/user/project-b", "No repository"]
+        );
     }
 
     // ── Collapse state tests ──────────────────────────────────────

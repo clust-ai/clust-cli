@@ -95,14 +95,14 @@ On startup, `clust ui` automatically connects to the pool daemon, starting it if
 ### Bottom Status Bar
 
 ```
-● connected  q to quit  Q to quit and stop pool  ↑↓←→ navigate  Shift+←→ panels  Tab switch view          v0.0.4
+● connected  q to quit  Q to quit and stop pool  ↑↓←→ navigate  Shift+←→ panels  Tab switch view  v toggle agents          v0.0.4
 ```
 
 | Section | Description |
 |---------|-------------|
 | Status dot | Green `●` when connected, dim when disconnected |
 | Status label | `connected` or `disconnected` |
-| Shortcuts | `q to quit`, `Q to quit and stop pool`, `↑↓←→ navigate`, `Shift+←→ panels`, `Tab switch view` |
+| Shortcuts | `q to quit`, `Q to quit and stop pool`, `↑↓←→ navigate`, `Shift+←→ panels`, `Tab switch view`, `v toggle agents` |
 | Version | Right-aligned, e.g. `v0.0.4` |
 
 ### Keyboard Shortcuts
@@ -118,3 +118,4 @@ On startup, `clust ui` automatically connects to the pool daemon, starting it if
 | `Shift+←` / `Shift+→` | Switch focus between left and right panels |
 | `Tab` | Switch to next tab |
 | `Shift+Tab` | Switch to previous tab |
+| `v` | Toggle agent grouping between by-pool and by-repo (right panel) |

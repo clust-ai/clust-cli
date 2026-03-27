@@ -47,6 +47,8 @@ pub struct AgentInfo {
     pub attached_clients: usize,
     pub pool: String,
     pub working_dir: String,
+    pub repo_path: Option<String>,
+    pub branch_name: Option<String>,
 }
 
 /// Info about a registered repository, returned in RepoList.
@@ -338,6 +340,8 @@ mod tests {
                     attached_clients: 2,
                     pool: DEFAULT_POOL.into(),
                     working_dir: "/tmp/project".into(),
+                    repo_path: Some("/tmp/project".into()),
+                    branch_name: Some("main".into()),
                 },
                 AgentInfo {
                     id: "bbb222".into(),
@@ -346,6 +350,8 @@ mod tests {
                     attached_clients: 0,
                     pool: "my_feature".into(),
                     working_dir: "/home/user/code".into(),
+                    repo_path: None,
+                    branch_name: None,
                 },
             ],
         })

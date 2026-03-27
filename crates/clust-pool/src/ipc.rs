@@ -90,17 +90,19 @@ async fn handle_connection(
                 let mut pool_state = state.lock().await;
                 agent::spawn_agent(
                     &mut pool_state,
-                    prompt,
-                    agent_binary,
-                    working_dir,
-                    cols,
-                    rows,
-                    accept_edits,
-                    pool,
+                    agent::SpawnAgentParams {
+                        prompt,
+                        agent_binary,
+                        working_dir,
+                        cols,
+                        rows,
+                        accept_edits,
+                        pool,
+                        repo_path,
+                        branch_name,
+                        is_worktree,
+                    },
                     state.clone(),
-                    repo_path,
-                    branch_name,
-                    is_worktree,
                 )
             };
             match result {
@@ -182,6 +184,8 @@ async fn handle_connection(
                             .load(Ordering::Relaxed),
                         pool: e.pool.clone(),
                         working_dir: e.working_dir.clone(),
+                        repo_path: e.repo_path.clone(),
+                        branch_name: e.branch_name.clone(),
                     })
                     .collect()
             };
