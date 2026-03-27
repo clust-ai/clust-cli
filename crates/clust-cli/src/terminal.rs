@@ -1,5 +1,4 @@
 use std::io::{self, Write};
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use crossterm::{
@@ -22,6 +21,21 @@ const CTRL_Q: u8 = 0x11;
 
 /// Number of lines scrolled per mouse wheel click.
 const SCROLL_STEP: usize = 3;
+
+/// PageUp escape sequence.
+const PAGE_UP: &[u8] = b"\x1b[5~";
+
+/// PageDown escape sequence.
+const PAGE_DOWN: &[u8] = b"\x1b[6~";
+
+/// Scrollback navigation state shared between input and output tasks.
+struct ScrollState {
+    /// Current scroll offset (0 = live mode, >0 = scrolled back).
+    offset: usize,
+    /// Total lines in the buffer when scrollback mode was entered.
+    /// Used as the anchor so max_offset doesn't grow while scrolled back.
+    anchored_total: usize,
+}
 
 /// Commands sent from the input task to the output task for scrollback.
 enum ScrollCommand {
@@ -110,14 +124,17 @@ impl AttachedSession {
         let mut reader = self.reader;
 
         // Shared state for scrollback
-        let scroll_offset = Arc::new(AtomicUsize::new(0)); // 0 = live mode
+        let scroll_state = Arc::new(Mutex::new(ScrollState {
+            offset: 0,
+            anchored_total: 0,
+        }));
         let scrollback = Arc::new(Mutex::new(ScrollbackBuffer::new()));
         let (scroll_cmd_tx, mut scroll_cmd_rx) = mpsc::channel::<ScrollCommand>(16);
 
         // Task 1: Read PoolMessages (output/exit) and render to terminal.
         // Output passes through the filter chain to prevent split escape sequences.
         // All output is stored in the scrollback buffer for scroll-back viewing.
-        let scroll_offset_out = Arc::clone(&scroll_offset);
+        let scroll_state_out = Arc::clone(&scroll_state);
         let scrollback_out = Arc::clone(&scrollback);
         let agent_id_for_bar = agent_id.clone();
         let agent_binary_for_bar = agent_binary.clone();
@@ -132,13 +149,30 @@ impl AttachedSession {
                             Ok(PoolMessage::AgentOutput { data, .. }) => {
                                 let filtered = filter_chain.filter(&data);
                                 if !filtered.is_empty() {
-                                    // Always store in scrollback buffer
+                                    // Store in scrollback and adjust offset if scrolled
+                                    let should_write;
                                     {
-                                        scrollback_out.lock().unwrap().push(&filtered);
+                                        let mut sb = scrollback_out.lock().unwrap();
+                                        let lines_before = sb.total_lines();
+                                        sb.push(&filtered);
+                                        let new_lines = sb.total_lines().saturating_sub(lines_before);
+                                        drop(sb);
+
+                                        let mut state = scroll_state_out.lock().unwrap();
+                                        if state.offset > 0 && new_lines > 0 {
+                                            // Adjust offset to keep viewport stable
+                                            state.offset += new_lines;
+                                            state.anchored_total += new_lines;
+                                            // Cap at max
+                                            let (_, total_rows) = terminal::size().unwrap_or((80, 24));
+                                            let vp = total_rows.saturating_sub(1).max(1) as usize;
+                                            let max = state.anchored_total.saturating_sub(vp);
+                                            state.offset = state.offset.min(max);
+                                        }
+                                        should_write = state.offset == 0;
                                     }
 
-                                    // Only write to stdout if in live mode
-                                    if scroll_offset_out.load(Ordering::Relaxed) == 0 {
+                                    if should_write {
                                         let mut stdout = io::stdout().lock();
                                         let _ = stdout.write_all(&filtered);
                                         let _ = stdout.flush();
@@ -160,7 +194,7 @@ impl AttachedSession {
                     cmd = scroll_cmd_rx.recv() => {
                         match cmd {
                             Some(ScrollCommand::Redraw) => {
-                                let offset = scroll_offset_out.load(Ordering::Relaxed);
+                                let offset = scroll_state_out.lock().unwrap().offset;
                                 let (_, total_rows) = terminal::size().unwrap_or((80, 24));
                                 let viewport_height = total_rows.saturating_sub(1).max(1) as usize;
                                 render_scrollback(
@@ -192,7 +226,7 @@ impl AttachedSession {
             let remaining = filter_chain.flush();
             if !remaining.is_empty() {
                 scrollback_out.lock().unwrap().push(&remaining);
-                if scroll_offset_out.load(Ordering::Relaxed) == 0 {
+                if scroll_state_out.lock().unwrap().offset == 0 {
                     let mut stdout = io::stdout().lock();
                     let _ = stdout.write_all(&remaining);
                     let _ = stdout.flush();
@@ -203,9 +237,10 @@ impl AttachedSession {
         });
 
         // Task 2: Read raw stdin bytes and forward to pool.
-        // Mouse scroll events are intercepted for scrollback navigation.
-        // All other input passes through to the agent.
-        let scroll_offset_in = Arc::clone(&scroll_offset);
+        // In live mode, all input (including mouse scroll) is forwarded to the agent.
+        // PageUp enters scrollback mode; in scrollback mode, mouse scroll and
+        // PageUp/PageDown navigate the buffer. Any other keypress exits scrollback.
+        let scroll_state_in = Arc::clone(&scroll_state);
         let scrollback_in = Arc::clone(&scrollback);
         let agent_id_for_input = agent_id.clone();
         let agent_binary_for_input = agent_binary.clone();
@@ -232,22 +267,24 @@ impl AttachedSession {
                                 // Ctrl+Q = detach
                                 if let Some(pos) = data.iter().position(|&b| b == CTRL_Q) {
                                     // Exit scrollback if active
-                                    if scroll_offset_in.load(Ordering::Relaxed) > 0 {
-                                        scroll_offset_in.store(0, Ordering::Relaxed);
+                                    let was_scrolled = {
+                                        let mut state = scroll_state_in.lock().unwrap();
+                                        let was = state.offset > 0;
+                                        state.offset = 0;
+                                        was
+                                    };
+                                    if was_scrolled {
                                         let _ = scroll_cmd_tx.send(ScrollCommand::ExitScrollback).await;
                                     }
                                     // Forward any bytes before Ctrl+Q
                                     if pos > 0 {
-                                        let result = scroll_break.filter_intercept(&data[..pos]);
-                                        if !result.bytes.is_empty() {
-                                            let _ = clust_ipc::send_message_write(
-                                                &mut writer,
-                                                &CliMessage::AgentInput {
-                                                    id: agent_id_for_input.clone(),
-                                                    data: result.bytes,
-                                                },
-                                            ).await;
-                                        }
+                                        let _ = clust_ipc::send_message_write(
+                                            &mut writer,
+                                            &CliMessage::AgentInput {
+                                                id: agent_id_for_input.clone(),
+                                                data: data[..pos].to_vec(),
+                                            },
+                                        ).await;
                                     }
                                     let _ = clust_ipc::send_message_write(
                                         &mut writer,
@@ -258,80 +295,161 @@ impl AttachedSession {
                                     return SessionEnd::Detached;
                                 }
 
-                                // Filter input — intercept scroll events
-                                let result = scroll_break.filter_intercept(data);
+                                let in_scrollback = scroll_state_in.lock().unwrap().offset > 0;
 
-                                // Handle scroll events for scrollback navigation
-                                if result.scroll_up > 0 || result.scroll_down > 0 {
-                                    let (_, total_rows) = terminal::size().unwrap_or((80, 24));
-                                    let viewport_height = total_rows.saturating_sub(1).max(1) as usize;
-                                    let max_offset = {
-                                        let sb = scrollback_in.lock().unwrap();
-                                        sb.total_lines().saturating_sub(viewport_height)
-                                    };
+                                if !in_scrollback {
+                                    // ── Live mode ─────────────────────────────
+                                    // Check for PageUp to enter scrollback
+                                    if let Some(pos) = find_sequence(data, PAGE_UP) {
+                                        let (_, total_rows) = terminal::size().unwrap_or((80, 24));
+                                        let viewport_height = total_rows.saturating_sub(1).max(1) as usize;
+                                        let total_lines = scrollback_in.lock().unwrap().total_lines();
 
-                                    let current = scroll_offset_in.load(Ordering::Relaxed);
-                                    let mut new_offset = current;
-                                    new_offset = new_offset
-                                        .saturating_add(result.scroll_up as usize * SCROLL_STEP)
-                                        .min(max_offset);
-                                    new_offset = new_offset
-                                        .saturating_sub(result.scroll_down as usize * SCROLL_STEP);
+                                        if total_lines > viewport_height {
+                                            // Enter scrollback mode
+                                            {
+                                                let mut state = scroll_state_in.lock().unwrap();
+                                                state.offset = viewport_height;
+                                                state.anchored_total = total_lines;
+                                            }
 
-                                    if new_offset != current {
-                                        scroll_offset_in.store(new_offset, Ordering::Relaxed);
-                                        if new_offset == 0 {
-                                            // Scrolled back to live — exit scrollback
-                                            let _ = scroll_cmd_tx.send(ScrollCommand::ExitScrollback).await;
-                                            // Trigger agent redraw
-                                            let (cols, rows) = terminal::size().unwrap_or((80, 24));
+                                            // Forward bytes before PageUp
+                                            if pos > 0 {
+                                                let _ = clust_ipc::send_message_write(
+                                                    &mut writer,
+                                                    &CliMessage::AgentInput {
+                                                        id: agent_id_for_input.clone(),
+                                                        data: data[..pos].to_vec(),
+                                                    },
+                                                ).await;
+                                            }
+                                            // Forward bytes after PageUp
+                                            let after = pos + PAGE_UP.len();
+                                            if after < data.len() {
+                                                let _ = clust_ipc::send_message_write(
+                                                    &mut writer,
+                                                    &CliMessage::AgentInput {
+                                                        id: agent_id_for_input.clone(),
+                                                        data: data[after..].to_vec(),
+                                                    },
+                                                ).await;
+                                            }
+
+                                            let _ = scroll_cmd_tx.send(ScrollCommand::Redraw).await;
+                                        } else {
+                                            // Not enough content — forward PageUp to agent
                                             let _ = clust_ipc::send_message_write(
                                                 &mut writer,
-                                                &CliMessage::ResizeAgent {
+                                                &CliMessage::AgentInput {
                                                     id: agent_id_for_input.clone(),
-                                                    cols,
-                                                    rows: rows.saturating_sub(1).max(1),
+                                                    data: data.to_vec(),
                                                 },
+                                            ).await;
+                                        }
+                                    } else {
+                                        // Forward all bytes to agent (including mouse scroll)
+                                        let _ = clust_ipc::send_message_write(
+                                            &mut writer,
+                                            &CliMessage::AgentInput {
+                                                id: agent_id_for_input.clone(),
+                                                data: data.to_vec(),
+                                            },
+                                        ).await;
+                                    }
+                                } else {
+                                    // ── Scrollback mode ──────────────────────
+                                    let (_, total_rows) = terminal::size().unwrap_or((80, 24));
+                                    let viewport_height = total_rows.saturating_sub(1).max(1) as usize;
+
+                                    // PageUp: scroll up by a page
+                                    if find_sequence(data, PAGE_UP).is_some() {
+                                        {
+                                            let mut state = scroll_state_in.lock().unwrap();
+                                            let max = state.anchored_total.saturating_sub(viewport_height);
+                                            state.offset = state.offset.saturating_add(viewport_height).min(max);
+                                        }
+                                        let _ = scroll_cmd_tx.send(ScrollCommand::Redraw).await;
+                                        continue;
+                                    }
+
+                                    // PageDown: scroll down by a page
+                                    if find_sequence(data, PAGE_DOWN).is_some() {
+                                        let reached_live = {
+                                            let mut state = scroll_state_in.lock().unwrap();
+                                            state.offset = state.offset.saturating_sub(viewport_height);
+                                            state.offset == 0
+                                        };
+                                        if reached_live {
+                                            let _ = scroll_cmd_tx.send(ScrollCommand::ExitScrollback).await;
+                                            trigger_agent_redraw(
+                                                &mut writer,
+                                                &agent_id_for_input,
                                             ).await;
                                         } else {
                                             let _ = scroll_cmd_tx.send(ScrollCommand::Redraw).await;
                                         }
+                                        continue;
                                     }
-                                }
 
-                                // Handle non-scroll input
-                                if !result.bytes.is_empty() {
-                                    // Exit scrollback mode on any keypress
-                                    if scroll_offset_in.load(Ordering::Relaxed) > 0 {
-                                        scroll_offset_in.store(0, Ordering::Relaxed);
+                                    // Filter for mouse scroll events
+                                    let result = scroll_break.filter_intercept(data);
+
+                                    if result.scroll_up > 0 || result.scroll_down > 0 {
+                                        let (changed, reached_live) = {
+                                            let mut state = scroll_state_in.lock().unwrap();
+                                            let max = state.anchored_total.saturating_sub(viewport_height);
+                                            let prev = state.offset;
+                                            state.offset = state.offset
+                                                .saturating_add(result.scroll_up as usize * SCROLL_STEP)
+                                                .min(max);
+                                            state.offset = state.offset
+                                                .saturating_sub(result.scroll_down as usize * SCROLL_STEP);
+                                            (state.offset != prev, state.offset == 0)
+                                        };
+                                        if changed {
+                                            if reached_live {
+                                                let _ = scroll_cmd_tx.send(ScrollCommand::ExitScrollback).await;
+                                                trigger_agent_redraw(
+                                                    &mut writer,
+                                                    &agent_id_for_input,
+                                                ).await;
+                                            } else {
+                                                let _ = scroll_cmd_tx.send(ScrollCommand::Redraw).await;
+                                            }
+                                        }
+                                    }
+
+                                    // Any non-scroll keypress exits scrollback
+                                    if !result.bytes.is_empty() {
+                                        {
+                                            scroll_state_in.lock().unwrap().offset = 0;
+                                        }
                                         let _ = scroll_cmd_tx.send(ScrollCommand::ExitScrollback).await;
-                                        // Trigger agent redraw
-                                        let (cols, rows) = terminal::size().unwrap_or((80, 24));
+                                        trigger_agent_redraw(
+                                            &mut writer,
+                                            &agent_id_for_input,
+                                        ).await;
                                         let _ = clust_ipc::send_message_write(
                                             &mut writer,
-                                            &CliMessage::ResizeAgent {
+                                            &CliMessage::AgentInput {
                                                 id: agent_id_for_input.clone(),
-                                                cols,
-                                                rows: rows.saturating_sub(1).max(1),
+                                                data: result.bytes,
                                             },
                                         ).await;
                                     }
-
-                                    let _ = clust_ipc::send_message_write(
-                                        &mut writer,
-                                        &CliMessage::AgentInput {
-                                            id: agent_id_for_input.clone(),
-                                            data: result.bytes,
-                                        },
-                                    ).await;
                                 }
                             }
                         }
                     }
                     _ = sigwinch.recv() => {
                         // Exit scrollback on resize
-                        if scroll_offset_in.load(Ordering::Relaxed) > 0 {
-                            scroll_offset_in.store(0, Ordering::Relaxed);
+                        let was_scrolled = {
+                            let mut state = scroll_state_in.lock().unwrap();
+                            let was = state.offset > 0;
+                            state.offset = 0;
+                            was
+                        };
+                        if was_scrolled {
                             let _ = scroll_cmd_tx.send(ScrollCommand::ExitScrollback).await;
                         }
 
@@ -371,6 +489,27 @@ enum SessionEnd {
     AgentExited(i32),
     PoolShutdown,
     ConnectionLost,
+}
+
+// ── Helpers ─────────────────────────────────────────────────────────
+
+/// Find a byte sequence in a data buffer.
+fn find_sequence(data: &[u8], seq: &[u8]) -> Option<usize> {
+    data.windows(seq.len()).position(|w| w == seq)
+}
+
+/// Send a ResizeAgent message to trigger an agent redraw after exiting scrollback.
+async fn trigger_agent_redraw(writer: &mut OwnedWriteHalf, agent_id: &str) {
+    let (cols, rows) = terminal::size().unwrap_or((80, 24));
+    let _ = clust_ipc::send_message_write(
+        writer,
+        &CliMessage::ResizeAgent {
+            id: agent_id.to_string(),
+            cols,
+            rows: rows.saturating_sub(1).max(1),
+        },
+    )
+    .await;
 }
 
 // ── Mouse tracking ──────────────────────────────────────────────────
@@ -476,7 +615,7 @@ fn render_scrollback(
          {TEXT_TERTIARY}│{RESET_FG} \
          {TEXT_SECONDARY}{total_lines} total{RESET_FG} \
          {TEXT_TERTIARY}│{RESET_FG} \
-         {TEXT_TERTIARY}press any key to return{RESET_FG}",
+         {TEXT_TERTIARY}PgUp/PgDn scroll, any key to exit{RESET_FG}",
         ACCENT = theme::ACCENT,
         TEXT_SECONDARY = theme::TEXT_SECONDARY,
         TEXT_TERTIARY = theme::TEXT_TERTIARY,
@@ -498,4 +637,3 @@ fn exit_scrollback_mode(viewport_rows: u16) {
     let _ = write!(stdout, "\x1b[1;1H");
     let _ = stdout.flush();
 }
-
