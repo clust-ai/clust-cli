@@ -307,10 +307,8 @@ impl TreeSelection {
         }
         match self.level {
             TreeLevel::Repo => {
-                if self.is_repo_collapsed(self.repo_idx) {
-                    // Expand, don't descend
-                    self.repo_collapsed.insert(self.repo_idx, false);
-                } else {
+                // Only descend if expanded; collapsed repos require Enter to open
+                if !self.is_repo_collapsed(self.repo_idx) {
                     let cats = self.visible_categories(repos);
                     if !cats.is_empty() {
                         self.level = TreeLevel::Category;
@@ -320,39 +318,23 @@ impl TreeSelection {
                 }
             }
             TreeLevel::Category => {
-                if self.is_category_collapsed(self.repo_idx, self.category_idx) {
-                    self.category_collapsed.insert(
-                        (self.repo_idx, self.category_idx),
-                        false,
-                    );
-                } else if self.branch_count(repos) > 0 {
-                    self.level = TreeLevel::Branch;
-                    self.branch_idx = 0;
+                // Only descend if expanded; collapsed categories require Enter to open
+                if !self.is_category_collapsed(self.repo_idx, self.category_idx) {
+                    if self.branch_count(repos) > 0 {
+                        self.level = TreeLevel::Branch;
+                        self.branch_idx = 0;
+                    }
                 }
             }
             TreeLevel::Branch => {} // already deepest
         }
     }
 
-    /// Left arrow: collapse if expanded, or ascend if already collapsed/at top.
+    /// Left arrow: navigate up one level (never collapses — use Enter to toggle).
     fn ascend(&mut self) {
         match self.level {
-            TreeLevel::Repo => {
-                // Collapse if expanded
-                if !self.is_repo_collapsed(self.repo_idx) {
-                    self.repo_collapsed.insert(self.repo_idx, true);
-                }
-            }
-            TreeLevel::Category => {
-                if !self.is_category_collapsed(self.repo_idx, self.category_idx) {
-                    self.category_collapsed.insert(
-                        (self.repo_idx, self.category_idx),
-                        true,
-                    );
-                } else {
-                    self.level = TreeLevel::Repo;
-                }
-            }
+            TreeLevel::Repo => {} // already at top
+            TreeLevel::Category => self.level = TreeLevel::Repo,
             TreeLevel::Branch => self.level = TreeLevel::Category,
         }
     }
@@ -1439,13 +1421,9 @@ mod tests {
         sel.descend(&repos); // -> Branch
         sel.ascend();        // -> Category
         assert_eq!(sel.level, TreeLevel::Category);
-        sel.ascend();        // collapse category (stays at Category)
-        assert_eq!(sel.level, TreeLevel::Category);
-        assert!(sel.is_category_collapsed(0, 0));
-        sel.ascend();        // now ascend to Repo (category is collapsed)
+        sel.ascend();        // -> Repo (ascend always goes up, never collapses)
         assert_eq!(sel.level, TreeLevel::Repo);
-        sel.ascend();        // collapse repo
-        assert!(sel.is_repo_collapsed(0));
+        sel.ascend();        // no-op, already at top
         assert_eq!(sel.level, TreeLevel::Repo);
     }
 
@@ -1755,24 +1733,24 @@ mod tests {
     }
 
     #[test]
-    fn descend_into_collapsed_expands() {
+    fn descend_into_collapsed_is_noop() {
         let repos = sample_repos();
         let mut sel = TreeSelection::default();
         sel.toggle_collapse(); // collapse repo 0
         assert!(sel.is_repo_collapsed(0));
         assert_eq!(sel.level, TreeLevel::Repo);
 
-        sel.descend(&repos); // should expand, NOT descend
-        assert!(!sel.is_repo_collapsed(0));
-        assert_eq!(sel.level, TreeLevel::Repo); // still at repo level
+        sel.descend(&repos); // should be a no-op — Enter required to expand
+        assert!(sel.is_repo_collapsed(0));
+        assert_eq!(sel.level, TreeLevel::Repo);
     }
 
     #[test]
-    fn ascend_from_expanded_collapses() {
+    fn ascend_from_repo_is_noop() {
         let mut sel = TreeSelection::default();
         assert!(!sel.is_repo_collapsed(0));
-        sel.ascend(); // collapse at repo level
-        assert!(sel.is_repo_collapsed(0));
+        sel.ascend(); // already at top — no-op, does NOT collapse
+        assert!(!sel.is_repo_collapsed(0));
         assert_eq!(sel.level, TreeLevel::Repo);
     }
 
@@ -1802,15 +1780,12 @@ mod tests {
     }
 
     #[test]
-    fn ascend_from_collapsed_category_ascends() {
+    fn ascend_from_category_goes_to_repo() {
         let repos = sample_repos();
         let mut sel = TreeSelection::default();
         sel.descend(&repos); // -> Category
-        // Collapse the category first
-        sel.toggle_collapse();
-        assert!(sel.is_category_collapsed(0, 0));
-        // Ascend should go to Repo level since category is already collapsed
-        sel.ascend();
+        assert_eq!(sel.level, TreeLevel::Category);
+        sel.ascend(); // always goes to Repo level
         assert_eq!(sel.level, TreeLevel::Repo);
     }
 }

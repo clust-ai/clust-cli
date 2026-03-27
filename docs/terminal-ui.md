@@ -86,7 +86,7 @@ The dashboard has two panels separated by a vertical divider:
 
 Agent cards show: ID, binary name, status, start time, and attached terminal count.
 
-Repositories are registered via `clust -r` or auto-registered when an agent is launched inside a git repo. Branch data is fetched from the local git state every 2 seconds (no network calls or authentication required).
+Repositories are registered via `clust repo -R` or auto-registered when an agent is launched inside a git repo. Branch data is fetched from the local git state every 2 seconds (no network calls or authentication required).
 
 ### Auto-connect
 
