@@ -1,28 +1,28 @@
 use std::io;
 use std::sync::atomic::Ordering;
+use std::sync::Arc;
 
-use tao::event_loop::EventLoopProxy;
 use tokio::net::unix::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::net::UnixListener;
 
 use clust_ipc::{CliMessage, PoolMessage};
 
 use crate::agent::{self, AgentEvent, SharedPoolState};
-use crate::PoolEvent;
+use crate::ShutdownSignal;
 
 /// Run the IPC server, listening for CLI connections on the Unix domain socket.
 /// Runs inside a tokio runtime on a background thread.
 pub async fn run_ipc_server(
-    shutdown_proxy: EventLoopProxy<PoolEvent>,
+    shutdown_signal: Arc<dyn ShutdownSignal>,
     state: SharedPoolState,
 ) {
-    if let Err(e) = run(shutdown_proxy, state).await {
+    if let Err(e) = run(shutdown_signal, state).await {
         eprintln!("ipc server error: {e}");
     }
 }
 
 async fn run(
-    shutdown_proxy: EventLoopProxy<PoolEvent>,
+    shutdown_signal: Arc<dyn ShutdownSignal>,
     state: SharedPoolState,
 ) -> io::Result<()> {
     let dir = clust_ipc::clust_dir();
@@ -46,10 +46,10 @@ async fn run(
     loop {
         let (stream, _addr) = listener.accept().await?;
 
-        let proxy = shutdown_proxy.clone();
+        let signal = shutdown_signal.clone();
         let state = state.clone();
         tokio::spawn(async move {
-            if let Err(e) = handle_connection(stream, proxy, state).await {
+            if let Err(e) = handle_connection(stream, signal, state).await {
                 eprintln!("connection error: {e}");
             }
         });
@@ -58,7 +58,7 @@ async fn run(
 
 async fn handle_connection(
     stream: tokio::net::UnixStream,
-    shutdown_proxy: EventLoopProxy<PoolEvent>,
+    shutdown_signal: Arc<dyn ShutdownSignal>,
     state: SharedPoolState,
 ) -> io::Result<()> {
     // Split for bidirectional streaming; first message determines the mode.
@@ -197,7 +197,7 @@ async fn handle_connection(
             // Clean up socket file before signaling shutdown
             let _ = tokio::fs::remove_file(clust_ipc::socket_path()).await;
 
-            let _ = shutdown_proxy.send_event(PoolEvent::Shutdown);
+            shutdown_signal.signal_shutdown();
         }
         CliMessage::StopAgent { id } => {
             let exists = {

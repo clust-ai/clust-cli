@@ -1,44 +1,60 @@
 use std::sync::Arc;
 
 use tokio::sync::Mutex;
-use tao::event::{Event, StartCause};
-use tao::event_loop::{ControlFlow, EventLoopBuilder};
-use tray_icon::menu::{MenuEvent, MenuId};
 
-use clust_pool::PoolEvent;
 use clust_pool::agent::SharedPoolState;
+use clust_pool::ShutdownSignal;
 
 fn main() {
     let state = Arc::new(Mutex::new(clust_pool::agent::PoolState::new()));
 
+    if clust_pool::has_display() {
+        run_gui_mode(state);
+    } else {
+        run_headless_mode(state);
+    }
+}
+
+/// Run with tao event loop and tray icon (macOS, Linux with display).
+fn run_gui_mode(state: SharedPoolState) {
+    use tao::event::{Event, StartCause};
+    use tao::event_loop::{ControlFlow, EventLoopBuilder};
+    use tray_icon::menu::{MenuEvent, MenuId};
+
+    use clust_pool::PoolEvent;
+
     let event_loop = EventLoopBuilder::<PoolEvent>::with_user_event().build();
     let proxy = event_loop.create_proxy();
+
+    let shutdown_signal: Arc<dyn ShutdownSignal> =
+        Arc::new(clust_pool::TaoShutdownSignal::new(proxy));
 
     // Channel for triggering async shutdown from the main thread (tray quit)
     let (shutdown_tx, mut shutdown_rx) = tokio::sync::mpsc::unbounded_channel::<()>();
 
     // Spawn tokio runtime on a background thread for the IPC server and signal handlers
-    let state_clone = state.clone();
-    let signal_proxy = proxy.clone();
+    let ipc_signal = shutdown_signal.clone();
+    let ipc_state = state.clone();
+    let signal_signal = shutdown_signal.clone();
     let signal_state = state.clone();
     let tray_shutdown_state = state.clone();
-    let tray_shutdown_proxy = proxy.clone();
+    let tray_shutdown_signal = shutdown_signal.clone();
     std::thread::spawn(move || {
         let rt = tokio::runtime::Runtime::new().expect("failed to create tokio runtime");
         rt.block_on(async move {
             // Spawn signal handler for clean shutdown on SIGTERM/SIGINT
-            tokio::spawn(handle_signals(signal_proxy, signal_state));
+            tokio::spawn(handle_signals(signal_signal, signal_state));
 
             // Spawn handler for tray quit → async agent shutdown
             tokio::spawn(async move {
                 if shutdown_rx.recv().await.is_some() {
                     clust_pool::agent::shutdown_agents(&tray_shutdown_state).await;
                     let _ = tokio::fs::remove_file(clust_ipc::socket_path()).await;
-                    let _ = tray_shutdown_proxy.send_event(PoolEvent::Shutdown);
+                    tray_shutdown_signal.signal_shutdown();
                 }
             });
 
-            clust_pool::ipc::run_ipc_server(proxy, state_clone).await;
+            clust_pool::ipc::run_ipc_server(ipc_signal, ipc_state).await;
         });
     });
 
@@ -68,30 +84,66 @@ fn main() {
                     use tao::platform::macos::{ActivationPolicy, EventLoopWindowTargetExtMacOS};
                     _event_loop.set_activation_policy_at_runtime(ActivationPolicy::Accessory);
                 }
-                let (icon, qid) = clust_pool::tray::create_tray_icon();
-                tray_icon_holder = Some(icon);
-                quit_id = Some(qid);
+                match clust_pool::tray::create_tray_icon() {
+                    Ok((icon, qid)) => {
+                        tray_icon_holder = Some(icon);
+                        quit_id = Some(qid);
+                    }
+                    Err(e) => {
+                        eprintln!("warning: tray icon unavailable: {e}");
+                    }
+                }
             }
             Event::UserEvent(PoolEvent::Shutdown) => {
-                shutdown(&mut tray_icon_holder, control_flow);
+                shutdown_gui(&mut tray_icon_holder, control_flow);
             }
             _ => {}
         }
     });
 }
 
-fn shutdown(
+/// Run as a pure daemon without GUI (headless Linux).
+fn run_headless_mode(state: SharedPoolState) {
+    let rt = tokio::runtime::Runtime::new().expect("failed to create tokio runtime");
+
+    rt.block_on(async move {
+        let (shutdown_tx, mut shutdown_rx) = tokio::sync::mpsc::unbounded_channel::<()>();
+
+        let shutdown_signal: Arc<dyn ShutdownSignal> =
+            Arc::new(clust_pool::TokioShutdownSignal::new(shutdown_tx));
+
+        // Spawn signal handler
+        let signal_signal = shutdown_signal.clone();
+        let signal_state = state.clone();
+        tokio::spawn(handle_signals(signal_signal, signal_state));
+
+        // Spawn IPC server
+        let ipc_signal = shutdown_signal.clone();
+        let ipc_state = state.clone();
+        tokio::spawn(async move {
+            clust_pool::ipc::run_ipc_server(ipc_signal, ipc_state).await;
+        });
+
+        // Block until shutdown signal received
+        shutdown_rx.recv().await;
+
+        // Clean up
+        let _ = tokio::fs::remove_file(clust_ipc::socket_path()).await;
+    });
+}
+
+fn shutdown_gui(
     tray_icon_holder: &mut Option<tray_icon::TrayIcon>,
-    control_flow: &mut ControlFlow,
+    control_flow: &mut tao::event_loop::ControlFlow,
 ) {
     tray_icon_holder.take();
     let _ = std::fs::remove_file(clust_ipc::socket_path());
-    *control_flow = ControlFlow::Exit;
+    *control_flow = tao::event_loop::ControlFlow::Exit;
     std::process::exit(0);
 }
 
 async fn handle_signals(
-    proxy: tao::event_loop::EventLoopProxy<PoolEvent>,
+    shutdown_signal: Arc<dyn ShutdownSignal>,
     state: SharedPoolState,
 ) {
     use tokio::signal::unix::{signal, SignalKind};
@@ -106,5 +158,5 @@ async fn handle_signals(
 
     clust_pool::agent::shutdown_agents(&state).await;
     let _ = tokio::fs::remove_file(clust_ipc::socket_path()).await;
-    let _ = proxy.send_event(PoolEvent::Shutdown);
+    shutdown_signal.signal_shutdown();
 }
