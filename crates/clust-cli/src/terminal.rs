@@ -15,6 +15,7 @@ use crate::output_filter::{EscapeSequenceAssembler, FilterChain};
 use crate::scroll_break::{ScrollBreak, ScrollMode};
 use crate::scrollback::ScrollbackBuffer;
 use crate::theme;
+use crate::version;
 
 /// Ctrl+Q raw byte (DC1/XON) — used as the detach key.
 const CTRL_Q: u8 = 0x11;
@@ -72,6 +73,15 @@ impl AttachedSession {
     ///
     /// Returns when the user detaches (Ctrl+Q) or the agent exits.
     pub async fn run(self) -> io::Result<()> {
+        // Check for updates in background
+        let update_notice: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
+        let notice_clone = update_notice.clone();
+        std::thread::spawn(move || {
+            if let Some(msg) = version::check_update() {
+                *notice_clone.lock().unwrap() = Some(msg);
+            }
+        });
+
         io::stdout().execute(EnterAlternateScreen)?;
         enable_raw_mode()?;
 
@@ -96,6 +106,10 @@ impl AttachedSession {
         disable_mouse_tracking();
         disable_raw_mode()?;
         io::stdout().execute(LeaveAlternateScreen)?;
+
+        if let Some(ref msg) = *update_notice.lock().unwrap() {
+            println!("\n  {}{msg}{}\n", theme::WARNING, theme::RESET);
+        }
 
         result
     }

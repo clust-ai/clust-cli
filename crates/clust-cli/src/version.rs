@@ -51,7 +51,7 @@ impl fmt::Display for Version {
 pub(crate) fn format_update_message(current: &Version, latest: &Version) -> Option<String> {
     if latest > current {
         Some(format!(
-            "update available: {current} \u{2192} {latest} (visit github.com/clust-ai/clust-cli)"
+            "update available: {current} \u{2192} {latest} (brew update && brew upgrade clust)"
         ))
     } else {
         None
