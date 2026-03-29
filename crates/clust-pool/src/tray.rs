@@ -11,6 +11,7 @@ pub fn create_tray_icon() -> Result<(tray_icon::TrayIcon, MenuId), String> {
         .map_err(|e| format!("failed to add quit menu item: {e}"))?;
 
     let icon = make_icon()?;
+    #[allow(unused_mut)]
     let mut builder = TrayIconBuilder::new()
         .with_icon(icon)
         .with_tooltip("clust pool")
