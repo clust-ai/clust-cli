@@ -251,8 +251,8 @@ impl AttachedSession {
         });
 
         // Task 2: Read raw stdin bytes and forward to pool.
-        // In live mode, all input (including mouse scroll) is forwarded to the agent.
-        // PageUp enters scrollback mode; in scrollback mode, mouse scroll and
+        // In live mode, mouse scroll-up enters scrollback; other input forwarded to agent.
+        // PageUp also enters scrollback; in scrollback mode, mouse scroll and
         // PageUp/PageDown navigate the buffer. Any other keypress exits scrollback.
         let scroll_state_in = Arc::clone(&scroll_state);
         let scrollback_in = Arc::clone(&scrollback);
@@ -361,14 +361,36 @@ impl AttachedSession {
                                             ).await;
                                         }
                                     } else {
-                                        // Forward all bytes to agent (including mouse scroll)
-                                        let _ = clust_ipc::send_message_write(
-                                            &mut writer,
-                                            &CliMessage::AgentInput {
-                                                id: agent_id_for_input.clone(),
-                                                data: data.to_vec(),
-                                            },
-                                        ).await;
+                                        // Intercept scroll-up to enter scrollback;
+                                        // non-scroll bytes forwarded to agent.
+                                        let result = scroll_break.filter_scroll_only(data);
+
+                                        if result.scroll_up > 0 {
+                                            let (_, total_rows) = terminal::size().unwrap_or((80, 24));
+                                            let viewport_height = total_rows.saturating_sub(1).max(1) as usize;
+                                            let total_lines = scrollback_in.lock().unwrap().total_lines();
+
+                                            if total_lines > viewport_height {
+                                                {
+                                                    let mut state = scroll_state_in.lock().unwrap();
+                                                    let max = total_lines.saturating_sub(viewport_height);
+                                                    state.offset = (result.scroll_up as usize * SCROLL_STEP).min(max);
+                                                    state.anchored_total = total_lines;
+                                                }
+                                                let _ = scroll_cmd_tx.send(ScrollCommand::Redraw).await;
+                                            }
+                                        }
+
+                                        // Forward non-scroll bytes to agent
+                                        if !result.bytes.is_empty() {
+                                            let _ = clust_ipc::send_message_write(
+                                                &mut writer,
+                                                &CliMessage::AgentInput {
+                                                    id: agent_id_for_input.clone(),
+                                                    data: result.bytes,
+                                                },
+                                            ).await;
+                                        }
                                     }
                                 } else {
                                     // ── Scrollback mode ──────────────────────
