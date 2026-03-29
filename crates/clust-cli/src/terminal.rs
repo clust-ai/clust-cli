@@ -106,6 +106,7 @@ impl AttachedSession {
         disable_mouse_tracking();
         disable_raw_mode()?;
         io::stdout().execute(LeaveAlternateScreen)?;
+        println!();
 
         if let Some(ref msg) = *update_notice.lock().unwrap() {
             println!("\n  {}{msg}{}\n", theme::WARNING, theme::RESET);
@@ -187,8 +188,21 @@ impl AttachedSession {
                                     }
 
                                     if should_write {
+                                        let (_, total_rows) = terminal::size().unwrap_or((80, 24));
+                                        let vp = total_rows.saturating_sub(1).max(1);
                                         let mut stdout = io::stdout().lock();
                                         let _ = stdout.write_all(&filtered);
+                                        // Re-apply scroll region and status bar in case
+                                        // agent output contained sequences that reset them.
+                                        let _ = write!(stdout, "\x1b7");
+                                        let _ = write!(stdout, "\x1b[1;{vp}r");
+                                        write_status_bar_content(
+                                            &mut stdout,
+                                            &agent_id_for_bar,
+                                            &agent_binary_for_bar,
+                                            total_rows,
+                                        );
+                                        let _ = write!(stdout, "\x1b8");
                                         let _ = stdout.flush();
                                     }
                                 }
@@ -580,20 +594,13 @@ fn set_scroll_region(bottom_row: u16) {
     let _ = stdout.flush();
 }
 
-/// Draw the status bar on the bottom row of the terminal.
-fn draw_status_bar(agent_id: &str, agent_binary: &str, total_rows: u16) {
-    let mut stdout = io::stdout().lock();
-    // Save cursor position
-    let _ = write!(stdout, "\x1b7");
-    // Move to the last row
-    let _ = write!(stdout, "\x1b[{total_rows};1H");
-    // Background color
-    let _ = write!(stdout, "{}", theme::BG_RAISED);
-    // Clear the line
-    let _ = write!(stdout, "\x1b[2K");
-    // Render status bar content
+/// Write status bar content at the given row. Does not save/restore cursor.
+fn write_status_bar_content(w: &mut impl Write, agent_id: &str, agent_binary: &str, total_rows: u16) {
+    let _ = write!(w, "\x1b[{total_rows};1H");
+    let _ = write!(w, "{}", theme::BG_RAISED);
+    let _ = write!(w, "\x1b[2K");
     let _ = write!(
-        stdout,
+        w,
         " {ACCENT}clust{RESET_FG}  {TEXT_PRIMARY}{agent_id}{RESET_FG} \
          {TEXT_TERTIARY}│{RESET_FG} \
          {TEXT_SECONDARY}{agent_binary}{RESET_FG} \
@@ -605,9 +612,14 @@ fn draw_status_bar(agent_id: &str, agent_binary: &str, total_rows: u16) {
         TEXT_TERTIARY = theme::TEXT_TERTIARY,
         RESET_FG = theme::RESET_FG,
     );
-    // Reset background
-    let _ = write!(stdout, "{}", theme::RESET_BG);
-    // Restore cursor position
+    let _ = write!(w, "{}", theme::RESET_BG);
+}
+
+/// Draw the status bar on the bottom row of the terminal.
+fn draw_status_bar(agent_id: &str, agent_binary: &str, total_rows: u16) {
+    let mut stdout = io::stdout().lock();
+    let _ = write!(stdout, "\x1b7");
+    write_status_bar_content(&mut stdout, agent_id, agent_binary, total_rows);
     let _ = write!(stdout, "\x1b8");
     let _ = stdout.flush();
 }
