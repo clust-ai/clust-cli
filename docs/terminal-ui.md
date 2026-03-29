@@ -109,13 +109,15 @@ A multi-agent terminal overview that displays all active agents side-by-side wit
 ```
 ┌─────────────────────────────────────────────────────┐
 │ [options bar]                                       │
-├──────────────────────┬──────────────────────────────┤
-│ ▎a3f8c1 · claude ●  │  b7e2d9 · claude ●           │
-│                      │                              │
-│  Agent PTY output    │  Agent PTY output            │
-│  (VTE emulated)      │  (VTE emulated)              │
-│                      │                              │
-├──────────────────────┴──────────────────────────────┤
+├──────────────────────┬──────────────────┬───────────┤
+│┌────────────────────┐│┌────────────────┐│┌─────────┐│
+││ a3f8c1 · claude ●  │││ b7e2d9 · claude│││ c4a1e0 ·││
+││                    │││                │││         ││
+││ Agent PTY output   │││ Agent PTY out  │││ (partial││
+││ (VTE emulated)     │││ (VTE emulated) │││  view)  ││
+││                    │││                │││         ││
+│└────────────────────┘│└────────────────┘│└─────────┘│
+├──────────────────────┴──────────────────┴───────────┤
 │ ● connected  Shift+↓ enter terminal  ...    v0.0.7 │
 └─────────────────────────────────────────────────────┘
 ```
@@ -123,16 +125,17 @@ A multi-agent terminal overview that displays all active agents side-by-side wit
 **Layout:**
 
 - **Options bar (1 row):** Top row, reserved for future filter buttons. Background changes based on focus.
-- **Agent panels (horizontal):** Equal-width columns, minimum 40 columns each. When more agents exist than fit on screen, horizontal scrolling is enabled with `◀ N` / `N ▶` indicators.
-- Each panel has a **header row** showing agent ID (accent-colored), separator, agent binary name, and status indicator (`●` green for running, `[exited]` red for exited).
-- The **terminal area** below the header renders the agent's PTY output using a VTE-based virtual terminal emulator with full ANSI support (cursor movement, SGR colors/styles, erase operations, scroll regions, line wrapping).
+- **Agent panels (horizontal):** Fixed-width columns sized so exactly 2.5 panels fit across the screen (showing 2 full panels + half of a third), with a minimum width of 40 columns. When more agents exist than fit on screen, horizontal scrolling is enabled with `◀ N` / `N ▶` indicators.
+- Each panel has **box-drawing borders** (top, bottom, left, right). The border color is accent blue when the panel is focused, and subtle gray when unfocused.
+- Inside the border, a **header row** shows agent ID (accent-colored), separator, agent binary name, and status indicator (`●` green for running, `[exited]` red for exited).
+- The **terminal area** below the header renders the agent's PTY output using a VTE-based virtual terminal emulator with full ANSI support (cursor movement, SGR colors/styles, erase operations, scroll regions, line wrapping). The VTE terminal gets the inner width (total panel width minus 2 border columns).
 
 **Focus modes:**
 
 | Focus | Description |
 |-------|-------------|
 | Options Bar | Default. Navigation keys scroll viewport or enter terminal. |
-| Terminal(N) | All keyboard input is forwarded directly to the focused agent, except Shift+arrow keys. Focused panel has an accent-colored left border (`▎`). |
+| Terminal(N) | All keyboard input is forwarded directly to the focused agent, except Shift+arrow keys. Focused panel has accent-blue borders; unfocused panels have subtle gray borders. |
 
 **Keyboard shortcuts (Overview tab):**
 
