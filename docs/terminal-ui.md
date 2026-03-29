@@ -94,9 +94,9 @@ The active tab is highlighted with the accent color. A `Tab/Shift+Tab` hint is s
 
 #### Content Panels (Repositories tab)
 
-- **Left panel (40%):** Repository tracker. Shows a tree view of registered git repositories with their local and remote branches. Branches with active agents display a green `●` indicator; branches checked out in worktrees display a `⎇` indicator. The current HEAD branch is highlighted. Displays "No repositories found" when no repos are registered. Uses background colors for visual separation (no borders). The focused panel shows a bright accent top border; the unfocused panel shows a dim border.
+- **Left panel (40%):** Repository tracker with `(2,2,1,0)` padding. Shows a tree view of registered git repositories with their local and remote branches. Repository names are rendered as UPPERCASE Bold for visual weight. A blank spacer line separates the repo header from its category sections, and another blank spacer separates the Local and Remote branch sections. Tree connectors use `├──` / `└──` for clear hierarchy. Branch names are rendered Bold. Branches with active agents display a green `●` indicator with count; branches checked out in worktrees display a `⎇` indicator. The current HEAD branch is highlighted. Displays "No repositories found" when no repos are registered. Uses background colors for visual separation (no borders). The focused panel shows a bright accent dot; the unfocused panel shows a dim dot.
 - **Vertical divider (1 col):** A single-column divider between the two panels.
-- **Right panel (60%):** Shows agent cards grouped by pool name with section headers. Displays the CLUST logo when no agents are running.
+- **Right panel (60%):** Shows agent cards grouped by pool name (or by repo) with section headers, `(2,2,0,0)` padding. 1-line gaps separate agent cards within a group and a 1-line spacer follows each group header. Displays the CLUST logo when no agents are running.
 
 Agent cards show: ID, binary name, status, start time, and attached terminal count.
 
@@ -109,7 +109,7 @@ On startup, `clust ui` automatically connects to the pool daemon, starting it if
 ### Bottom Status Bar
 
 ```
-● connected  q to quit  Q to quit and stop pool  ↑↓←→ navigate  Shift+←→ panels  v toggle agents          v0.0.5
+● connected  q to quit  Q to quit and stop pool  ↑↓←→ navigate  Shift+←→ panels  v toggle agents          v0.0.7
 ```
 
 | Section | Description |
@@ -117,7 +117,7 @@ On startup, `clust ui` automatically connects to the pool daemon, starting it if
 | Status dot | Green `●` when connected, dim when disconnected |
 | Status label | `connected` or `disconnected` |
 | Shortcuts | `q to quit`, `Q to quit and stop pool`, `↑↓←→ navigate`, `Shift+←→ panels`, `v toggle agents` |
-| Version | Right-aligned, e.g. `v0.0.5` |
+| Version | Right-aligned, e.g. `v0.0.7` |
 
 ### Keyboard Shortcuts
 
