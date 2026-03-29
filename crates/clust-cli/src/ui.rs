@@ -448,7 +448,6 @@ pub fn run(pool_name: &str) -> io::Result<()> {
     let mut pool_stopped = false;
     let mut pool_count: usize = 1;
     let mut show_help = false;
-    let mut last_help_press = Instant::now();
 
     loop {
         // Periodically fetch agent list and repo state from pool
@@ -461,10 +460,6 @@ pub fn run(pool_name: &str) -> io::Result<()> {
             repos = fetch_repos();
             selection.clamp(&repos);
             last_repo_fetch = Instant::now();
-        }
-
-        if show_help && last_help_press.elapsed() > Duration::from_millis(250) {
-            show_help = false;
         }
 
         let pool_status = pool_running;
@@ -560,8 +555,7 @@ pub fn run(pool_name: &str) -> io::Result<()> {
                             active_tab = active_tab.prev();
                         }
                         KeyCode::Char('?') => {
-                            show_help = true;
-                            last_help_press = Instant::now();
+                            show_help = !show_help;
                         }
                         // Repositories tab navigation
                         _ if active_tab == ActiveTab::Repositories => match key.code {
