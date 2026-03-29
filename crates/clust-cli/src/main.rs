@@ -2,6 +2,7 @@ mod cli;
 mod format;
 mod ipc;
 mod output_filter;
+mod overview;
 mod pool_launcher;
 mod scroll_break;
 mod scrollback;

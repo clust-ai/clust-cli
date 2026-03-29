@@ -20,7 +20,9 @@ use clust_ipc::{AgentInfo, CliMessage, PoolMessage, RepoInfo};
 
 use crate::{
     format::{format_attached, format_started},
-    ipc, theme, version,
+    ipc,
+    overview::{self, OverviewFocus, OverviewState},
+    theme, version,
 };
 
 const LOGO_LINES: &[&str] = &[
@@ -448,13 +450,21 @@ pub fn run(pool_name: &str) -> io::Result<()> {
     let mut pool_stopped = false;
     let mut pool_count: usize = 1;
     let mut show_help = false;
+    let mut last_help_press = Instant::now();
+    let mut overview_state = OverviewState::new();
+    let mut last_content_area = Rect::default();
 
     loop {
+        // Drain overview output events (non-blocking, runs regardless of tab)
+        overview_state.drain_output_events();
+
         // Periodically fetch agent list and repo state from pool
+        let mut agents_refreshed = false;
         if pool_running && last_agent_fetch.elapsed() >= AGENT_FETCH_INTERVAL {
             agents = fetch_agents();
             agent_selection.clamp(&agents, agent_view_mode);
             last_agent_fetch = Instant::now();
+            agents_refreshed = true;
         }
         if pool_running && last_repo_fetch.elapsed() >= AGENT_FETCH_INTERVAL {
             repos = fetch_repos();
@@ -462,10 +472,21 @@ pub fn run(pool_name: &str) -> io::Result<()> {
             last_repo_fetch = Instant::now();
         }
 
+        // Sync overview agent connections when agents are refreshed
+        if agents_refreshed && active_tab == ActiveTab::Overview {
+            overview_state.sync_agents(&agents, last_content_area);
+        }
+
+        if show_help && last_help_press.elapsed() > Duration::from_millis(250) {
+            show_help = false;
+        }
+
+
         let pool_status = pool_running;
         let notice = update_notice.lock().unwrap().clone();
         let cur_focus = focus;
         let cur_tab = active_tab;
+        let overview_focus = overview_state.focus;
         let show_help_now = show_help;
 
         terminal.draw(|frame| {
@@ -478,6 +499,8 @@ pub fn run(pool_name: &str) -> io::Result<()> {
                 Constraint::Length(1),
             ])
             .areas(area);
+
+            last_content_area = content_area;
 
             render_tab_bar(frame, tab_bar_area, cur_tab);
 
@@ -509,14 +532,22 @@ pub fn run(pool_name: &str) -> io::Result<()> {
                     );
                 }
                 ActiveTab::Overview => {
-                    render_placeholder(frame, content_area, "Overview - coming soon");
+                    overview::render_overview(frame, content_area, &overview_state);
                 }
                 ActiveTab::FocusMode => {
                     render_placeholder(frame, content_area, "Focus mode - coming soon");
                 }
             }
 
-            render_status_bar(frame, status_area, pool_status, &notice, pool_name);
+            render_status_bar(
+                frame,
+                status_area,
+                pool_status,
+                &notice,
+                pool_name,
+                cur_tab,
+                overview_focus,
+            );
 
             if show_help_now {
                 render_help_overlay(frame, content_area, cur_tab);
@@ -526,101 +557,195 @@ pub fn run(pool_name: &str) -> io::Result<()> {
         if event::poll(Duration::from_millis(100))? {
             match event::read()? {
                 Event::Key(key) if key.kind == KeyEventKind::Press => {
-                    match key.code {
-                        KeyCode::Char('q') | KeyCode::Esc => break,
-                        KeyCode::Char('c')
-                            if key.modifiers.contains(KeyModifiers::CONTROL) =>
+                    // When overview terminal is focused, intercept all keys
+                    // except Shift+arrows — everything else goes to the agent.
+                    if active_tab == ActiveTab::Overview
+                        && matches!(overview_state.focus, OverviewFocus::Terminal(_))
+                    {
+                        let shift = key.modifiers.contains(KeyModifiers::SHIFT);
+                        if shift {
+                            match key.code {
+                                KeyCode::Up => overview_state.exit_terminal(),
+                                KeyCode::Left => overview_state.focus_prev(),
+                                KeyCode::Right => overview_state.focus_next(),
+                                _ => {
+                                    // Shift+other key — forward to agent
+                                    if let Some(bytes) =
+                                        overview::input::key_event_to_bytes(&key)
+                                    {
+                                        overview_state.send_input(bytes);
+                                    }
+                                }
+                            }
+                        } else if let Some(bytes) =
+                            overview::input::key_event_to_bytes(&key)
                         {
-                            break
+                            overview_state.send_input(bytes);
                         }
-                        KeyCode::Char('Q') => {
-                            let mut names: Vec<&str> =
-                                agents.iter().map(|a| a.pool.as_str()).collect();
-                            names.sort();
-                            names.dedup();
-                            pool_count = names.len().max(1);
-                            block_on_async(async {
-                                if let Ok(mut stream) = ipc::try_connect().await {
-                                    let _ = ipc::send_stop(&mut stream).await;
-                                }
-                            });
-                            pool_stopped = true;
-                            break;
-                        }
-                        // Tab switching (works on all tabs)
-                        KeyCode::Tab => {
-                            active_tab = active_tab.next();
-                        }
-                        KeyCode::BackTab => {
-                            active_tab = active_tab.prev();
-                        }
-                        KeyCode::Char('?') => {
-                            show_help = !show_help;
-                        }
-                        // Repositories tab navigation
-                        _ if active_tab == ActiveTab::Repositories => match key.code {
-                            // Shift+Arrow: switch panel focus
-                            KeyCode::Left if key.modifiers.contains(KeyModifiers::SHIFT) => {
-                                focus = FocusPanel::Left;
+                    } else {
+                        // Normal key handling (options bar, other tabs)
+                        match key.code {
+                            KeyCode::Char('q') | KeyCode::Esc => break,
+                            KeyCode::Char('c')
+                                if key.modifiers.contains(KeyModifiers::CONTROL) =>
+                            {
+                                break
                             }
-                            KeyCode::Right if key.modifiers.contains(KeyModifiers::SHIFT) => {
-                                focus = FocusPanel::Right;
+                            KeyCode::Char('Q') => {
+                                let mut names: Vec<&str> =
+                                    agents.iter().map(|a| a.pool.as_str()).collect();
+                                names.sort();
+                                names.dedup();
+                                pool_count = names.len().max(1);
+                                block_on_async(async {
+                                    if let Ok(mut stream) = ipc::try_connect().await {
+                                        let _ = ipc::send_stop(&mut stream).await;
+                                    }
+                                });
+                                pool_stopped = true;
+                                break;
                             }
-                            // Toggle collapse (left panel only)
-                            KeyCode::Enter => {
-                                if focus == FocusPanel::Left {
-                                    selection.toggle_collapse();
+                            // Tab switching
+                            KeyCode::Tab => {
+                                let prev_tab = active_tab;
+                                active_tab = active_tab.next();
+                                // Initialize overview on first switch
+                                if active_tab == ActiveTab::Overview
+                                    && !overview_state.initialized
+                                {
+                                    overview_state
+                                        .sync_agents(&agents, last_content_area);
+                                }
+                                _ = prev_tab;
+                            }
+                            KeyCode::BackTab => {
+                                let prev_tab = active_tab;
+                                active_tab = active_tab.prev();
+                                if active_tab == ActiveTab::Overview
+                                    && !overview_state.initialized
+                                {
+                                    overview_state
+                                        .sync_agents(&agents, last_content_area);
+                                }
+                                _ = prev_tab;
+                            }
+                            KeyCode::Char('?') => {
+                                show_help = true;
+                                last_help_press = Instant::now();
+                            }
+                            // Overview OptionsBar navigation
+                            _ if active_tab == ActiveTab::Overview => {
+                                let shift =
+                                    key.modifiers.contains(KeyModifiers::SHIFT);
+                                match key.code {
+                                    KeyCode::Down if shift => {
+                                        overview_state.enter_terminal();
+                                    }
+                                    KeyCode::Left if shift => {
+                                        overview_state
+                                            .scroll_left();
+                                    }
+                                    KeyCode::Right if shift => {
+                                        overview_state
+                                            .scroll_right(last_content_area.width);
+                                    }
+                                    _ => {}
                                 }
                             }
-                            // Toggle agent view mode (right panel only)
-                            KeyCode::Char('v') if focus == FocusPanel::Right => {
-                                agent_view_mode = match agent_view_mode {
-                                    AgentViewMode::ByPool => AgentViewMode::ByRepo,
-                                    AgentViewMode::ByRepo => AgentViewMode::ByPool,
-                                };
-                                agent_selection = AgentSelection::default();
+                            // Repositories tab navigation
+                            _ if active_tab == ActiveTab::Repositories => {
+                                match key.code {
+                                    KeyCode::Left
+                                        if key
+                                            .modifiers
+                                            .contains(KeyModifiers::SHIFT) =>
+                                    {
+                                        focus = FocusPanel::Left;
+                                    }
+                                    KeyCode::Right
+                                        if key
+                                            .modifiers
+                                            .contains(KeyModifiers::SHIFT) =>
+                                    {
+                                        focus = FocusPanel::Right;
+                                    }
+                                    KeyCode::Enter => {
+                                        if focus == FocusPanel::Left {
+                                            selection.toggle_collapse();
+                                        }
+                                    }
+                                    KeyCode::Char('v')
+                                        if focus == FocusPanel::Right =>
+                                    {
+                                        agent_view_mode = match agent_view_mode {
+                                            AgentViewMode::ByPool => {
+                                                AgentViewMode::ByRepo
+                                            }
+                                            AgentViewMode::ByRepo => {
+                                                AgentViewMode::ByPool
+                                            }
+                                        };
+                                        agent_selection = AgentSelection::default();
+                                    }
+                                    KeyCode::Up => match focus {
+                                        FocusPanel::Left => {
+                                            selection.move_up(&repos)
+                                        }
+                                        FocusPanel::Right => {
+                                            agent_selection
+                                                .move_up(&agents, agent_view_mode)
+                                        }
+                                    },
+                                    KeyCode::Down => match focus {
+                                        FocusPanel::Left => {
+                                            selection.move_down(&repos)
+                                        }
+                                        FocusPanel::Right => {
+                                            agent_selection
+                                                .move_down(&agents, agent_view_mode)
+                                        }
+                                    },
+                                    KeyCode::Right => match focus {
+                                        FocusPanel::Left => {
+                                            selection.descend(&repos)
+                                        }
+                                        FocusPanel::Right => {
+                                            agent_selection
+                                                .next_group(&agents, agent_view_mode)
+                                        }
+                                    },
+                                    KeyCode::Left => match focus {
+                                        FocusPanel::Left => selection.ascend(),
+                                        FocusPanel::Right => {
+                                            agent_selection
+                                                .prev_group(&agents, agent_view_mode)
+                                        }
+                                    },
+                                    _ => {}
+                                }
                             }
-                            // Panel-specific navigation
-                            KeyCode::Up => match focus {
-                                FocusPanel::Left => selection.move_up(&repos),
-                                FocusPanel::Right => {
-                                    agent_selection.move_up(&agents, agent_view_mode)
-                                }
-                            },
-                            KeyCode::Down => match focus {
-                                FocusPanel::Left => selection.move_down(&repos),
-                                FocusPanel::Right => {
-                                    agent_selection.move_down(&agents, agent_view_mode)
-                                }
-                            },
-                            KeyCode::Right => match focus {
-                                FocusPanel::Left => selection.descend(&repos),
-                                FocusPanel::Right => {
-                                    agent_selection.next_group(&agents, agent_view_mode)
-                                }
-                            },
-                            KeyCode::Left => match focus {
-                                FocusPanel::Left => selection.ascend(),
-                                FocusPanel::Right => {
-                                    agent_selection.prev_group(&agents, agent_view_mode)
-                                }
-                            },
                             _ => {}
-                        },
-                        _ => {}
-                    }
-                    // Dismiss help overlay on any non-? keypress
-                    if key.code != KeyCode::Char('?') {
-                        show_help = false;
+                        }
+                        // Dismiss help overlay on any non-? keypress
+                        if key.code != KeyCode::Char('?') {
+                            show_help = false;
+                        }
                     }
                 }
                 Event::Resize(_, _) => {
-                    // Continue to redraw immediately with new terminal size
+                    // Handle overview resize
+                    if active_tab == ActiveTab::Overview {
+                        overview_state
+                            .handle_resize(agents.len(), last_content_area);
+                    }
                 }
                 _ => {}
             }
         }
     }
+
+    // Clean up overview connections before exiting
+    overview_state.shutdown();
 
     disable_raw_mode()?;
     io::stdout().execute(LeaveAlternateScreen)?;
@@ -1389,6 +1514,8 @@ fn render_status_bar(
     pool_running: bool,
     update_notice: &Option<String>,
     pool_name: &str,
+    active_tab: ActiveTab,
+    overview_focus: OverviewFocus,
 ) {
     let bg = Style::default().bg(theme::R_BG_RAISED);
 
@@ -1417,10 +1544,23 @@ fn render_status_bar(
         ));
     }
 
+    let hint_text = if active_tab == ActiveTab::Overview {
+        match overview_focus {
+            OverviewFocus::Terminal(_) => {
+                "Shift+\u{2191} options  Shift+\u{2190}/\u{2192} switch agent"
+            }
+            OverviewFocus::OptionsBar => {
+                "Shift+\u{2193} enter terminal  Shift+\u{2190}/\u{2192} scroll  q quit  Hold ? for keys"
+            }
+        }
+    } else {
+        "q quit  Q stop+quit  Hold ? for keys"
+    };
+
     left_spans.extend([
         Span::styled("  ", Style::default().bg(theme::R_BG_RAISED)),
         Span::styled(
-            "q quit  Q stop+quit  Hold ? for keys",
+            hint_text,
             Style::default()
                 .fg(theme::R_TEXT_TERTIARY)
                 .bg(theme::R_BG_RAISED),
