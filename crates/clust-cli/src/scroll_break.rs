@@ -235,11 +235,18 @@ impl ScrollBreak {
     /// Filter with scroll interception. All mouse events are stripped from the
     /// output; scroll events are counted and reported in the result.
     pub fn filter_intercept(&mut self, data: &[u8]) -> ScrollFilterResult {
-        self.filter_intercept_at(data, Instant::now())
+        self.filter_mouse_internal(data, true)
     }
 
-    /// Intercept filter with an explicit timestamp (for deterministic testing).
-    fn filter_intercept_at(&mut self, data: &[u8], _now: Instant) -> ScrollFilterResult {
+    /// Filter input, stripping only scroll mouse events.
+    /// Non-scroll mouse events and all other bytes pass through unchanged.
+    pub fn filter_scroll_only(&mut self, data: &[u8]) -> ScrollFilterResult {
+        self.filter_mouse_internal(data, false)
+    }
+
+    /// Internal: detect mouse events, strip scroll events (counted in result),
+    /// optionally strip non-scroll mouse events too (`strip_all_mouse`).
+    fn filter_mouse_internal(&mut self, data: &[u8], strip_all_mouse: bool) -> ScrollFilterResult {
         let mut input = std::mem::take(&mut self.pending);
         input.extend_from_slice(data);
 
@@ -294,8 +301,9 @@ impl ScrollBreak {
                                     } else {
                                         scroll_up += 1;
                                     }
+                                } else if !strip_all_mouse {
+                                    output.extend_from_slice(&input[seq_start..=i]);
                                 }
-                                // All mouse events dropped in intercept mode
                                 state = State::Ground;
                             } else {
                                 // Non-mouse CSI sequence — forward unchanged
@@ -323,8 +331,9 @@ impl ScrollBreak {
                             } else {
                                 scroll_up += 1;
                             }
+                        } else if !strip_all_mouse {
+                            output.extend_from_slice(&input[seq_start..=i]);
                         }
-                        // All mouse events dropped in intercept mode
                         state = State::Ground;
                     } else {
                         state = State::LegacyMouse { remaining };
@@ -966,5 +975,75 @@ mod tests {
         let r2 = sb.filter_intercept(b"20M more");
         assert_eq!(r2.bytes, b" more");
         assert_eq!(r2.scroll_up, 1);
+    }
+
+    // ── filter_scroll_only tests ────────────────────────────────────
+
+    fn scroll_only() -> ScrollBreak {
+        ScrollBreak::new(ScrollMode::Intercept)
+    }
+
+    #[test]
+    fn scroll_only_strips_scroll_up() {
+        let mut sb = scroll_only();
+        let scroll = sgr_mouse(64, 10, 20, true);
+        let r = sb.filter_scroll_only(&scroll);
+        assert!(r.bytes.is_empty());
+        assert_eq!(r.scroll_up, 1);
+        assert_eq!(r.scroll_down, 0);
+    }
+
+    #[test]
+    fn scroll_only_strips_scroll_down() {
+        let mut sb = scroll_only();
+        let scroll = sgr_mouse(65, 10, 20, true);
+        let r = sb.filter_scroll_only(&scroll);
+        assert!(r.bytes.is_empty());
+        assert_eq!(r.scroll_up, 0);
+        assert_eq!(r.scroll_down, 1);
+    }
+
+    #[test]
+    fn scroll_only_keeps_non_scroll_mouse() {
+        let mut sb = scroll_only();
+        // Left click (button 0) — should pass through
+        let click = sgr_mouse(0, 15, 20, true);
+        let r = sb.filter_scroll_only(&click);
+        assert_eq!(r.bytes, click);
+        assert_eq!(r.scroll_up, 0);
+        assert_eq!(r.scroll_down, 0);
+    }
+
+    #[test]
+    fn scroll_only_keeps_legacy_non_scroll_mouse() {
+        let mut sb = scroll_only();
+        let click = legacy_mouse(0, 10, 20);
+        let r = sb.filter_scroll_only(&click);
+        assert_eq!(r.bytes, click);
+        assert_eq!(r.scroll_up, 0);
+    }
+
+    #[test]
+    fn scroll_only_mixed_scroll_and_click() {
+        let mut sb = scroll_only();
+        let mut input = Vec::new();
+        input.extend_from_slice(&sgr_mouse(64, 10, 20, true)); // scroll up
+        input.extend_from_slice(&sgr_mouse(0, 15, 20, true)); // left click
+        input.extend_from_slice(b"text");
+        input.extend_from_slice(&sgr_mouse(65, 10, 21, true)); // scroll down
+        let r = sb.filter_scroll_only(&input);
+        let mut expected = sgr_mouse(0, 15, 20, true);
+        expected.extend_from_slice(b"text");
+        assert_eq!(r.bytes, expected);
+        assert_eq!(r.scroll_up, 1);
+        assert_eq!(r.scroll_down, 1);
+    }
+
+    #[test]
+    fn scroll_only_non_mouse_csi_passes_through() {
+        let mut sb = scroll_only();
+        let r = sb.filter_scroll_only(b"\x1b[1;2H\x1b[31m");
+        assert_eq!(r.bytes, b"\x1b[1;2H\x1b[31m");
+        assert_eq!(r.scroll_up, 0);
     }
 }
