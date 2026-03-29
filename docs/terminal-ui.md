@@ -87,7 +87,7 @@ A 1-row bar at the top of the terminal with three tabs:
 | Tab | Description |
 |-----|-------------|
 | `Repositories` | Two-panel view with repo tree and agent cards (default) |
-| `Overview` | Placeholder for future overview dashboard |
+| `Overview` | Multi-agent terminal overview with horizontal panels |
 | `Focus` | Placeholder for future focus mode |
 
 The active tab is highlighted with the accent color. A `Tab/Shift+Tab` hint is shown to the right of the tabs.
@@ -101,6 +101,58 @@ The active tab is highlighted with the accent color. A `Tab/Shift+Tab` hint is s
 Agent cards show: ID, binary name, status, start time, and attached terminal count.
 
 Repositories are registered via `clust repo -R` or auto-registered when an agent is launched inside a git repo. Branch data is fetched from the local git state every 2 seconds (no network calls or authentication required).
+
+#### Overview Tab
+
+A multi-agent terminal overview that displays all active agents side-by-side with live terminal output. Each agent gets its own panel with a full VTE terminal emulator.
+
+```
+┌─────────────────────────────────────────────────────┐
+│ [options bar]                                       │
+├──────────────────────┬──────────────────────────────┤
+│ ▎a3f8c1 · claude ●  │  b7e2d9 · claude ●           │
+│                      │                              │
+│  Agent PTY output    │  Agent PTY output            │
+│  (VTE emulated)      │  (VTE emulated)              │
+│                      │                              │
+├──────────────────────┴──────────────────────────────┤
+│ ● connected  Shift+↓ enter terminal  ...    v0.0.7 │
+└─────────────────────────────────────────────────────┘
+```
+
+**Layout:**
+
+- **Options bar (1 row):** Top row, reserved for future filter buttons. Background changes based on focus.
+- **Agent panels (horizontal):** Equal-width columns, minimum 40 columns each. When more agents exist than fit on screen, horizontal scrolling is enabled with `◀ N` / `N ▶` indicators.
+- Each panel has a **header row** showing agent ID (accent-colored), separator, agent binary name, and status indicator (`●` green for running, `[exited]` red for exited).
+- The **terminal area** below the header renders the agent's PTY output using a VTE-based virtual terminal emulator with full ANSI support (cursor movement, SGR colors/styles, erase operations, scroll regions, line wrapping).
+
+**Focus modes:**
+
+| Focus | Description |
+|-------|-------------|
+| Options Bar | Default. Navigation keys scroll viewport or enter terminal. |
+| Terminal(N) | All keyboard input is forwarded directly to the focused agent, except Shift+arrow keys. Focused panel has an accent-colored left border (`▎`). |
+
+**Keyboard shortcuts (Overview tab):**
+
+| Context | Shortcut | Action |
+|---------|----------|--------|
+| Options Bar | `Shift+↓` | Enter terminal focus (returns to last focused panel) |
+| Options Bar | `Shift+←` / `Shift+→` | Scroll viewport left/right |
+| Terminal | `Shift+↑` | Return to options bar |
+| Terminal | `Shift+←` / `Shift+→` | Switch focus to previous/next agent panel |
+| Terminal | Any other key | Forwarded to the focused agent's PTY |
+
+**Implementation:**
+
+- Each agent panel runs a **background tokio task** that maintains its own IPC streaming connection to the pool (attach, receive output, forward input).
+- Output events are sent to the UI thread via an `mpsc` channel and drained each frame.
+- `VirtualTerminal` wraps a `vte` parser (`vte = 0.13`) and a `Screen` grid that implements `vte::Perform` for full ANSI escape sequence handling.
+- `key_event_to_bytes()` converts `crossterm::KeyEvent` to raw terminal byte sequences for agent input forwarding.
+- Lazy initialization: overview connections are only established on first switch to the Overview tab.
+- On terminal resize, all panels are resized and the pool is notified via `ResizeAgent`.
+- On exit, all connections are detached and background tasks are aborted.
 
 ### Auto-connect
 
@@ -116,20 +168,43 @@ On startup, `clust ui` automatically connects to the pool daemon, starting it if
 |---------|-------------|
 | Status dot | Green `●` when connected, dim when disconnected |
 | Status label | `connected` or `disconnected` |
-| Shortcuts | `q to quit`, `Q to quit and stop pool`, `↑↓←→ navigate`, `Shift+←→ panels`, `v toggle agents` |
+| Shortcuts | Context-aware hints: on Repositories tab shows `q quit`, `Q stop+quit`, navigation hints; on Overview tab shows focus-dependent hints (e.g. `Shift+↓ enter terminal` or `Shift+↑ options`) |
 | Version | Right-aligned, e.g. `v0.0.7` |
 
 ### Keyboard Shortcuts
+
+**Global (all tabs, unless overridden):**
 
 | Shortcut | Action |
 |----------|--------|
 | `q` / `Esc` | Quit the UI (pool keeps running) |
 | `Q` | Quit the UI and stop the pool |
+| `Tab` | Switch to next tab |
+| `Shift+Tab` | Switch to previous tab |
+| `?` (hold) | Show keyboard shortcut overlay |
+
+**Repositories tab:**
+
+| Shortcut | Action |
+|----------|--------|
 | `↑` / `↓` | Move selection within current level |
 | `→` | Descend into selected item, or expand if collapsed |
 | `←` | Collapse current item, or ascend to parent level |
 | `Enter` | Toggle collapse/expand on repos and categories |
 | `Shift+←` / `Shift+→` | Switch focus between left and right panels |
-| `Tab` | Switch to next tab |
-| `Shift+Tab` | Switch to previous tab |
 | `v` | Toggle agent grouping between by-pool and by-repo (right panel) |
+
+**Overview tab (Options Bar focused):**
+
+| Shortcut | Action |
+|----------|--------|
+| `Shift+↓` | Enter terminal focus |
+| `Shift+←` / `Shift+→` | Scroll viewport left/right |
+
+**Overview tab (Terminal focused):**
+
+| Shortcut | Action |
+|----------|--------|
+| `Shift+↑` | Exit terminal, return to options bar |
+| `Shift+←` / `Shift+→` | Switch to previous/next agent panel |
+| All other keys | Forwarded to the focused agent's PTY |

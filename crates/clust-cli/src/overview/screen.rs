@@ -175,20 +175,20 @@ impl Screen {
         match mode {
             // From cursor to end of line
             0 => {
-                for c in self.cursor_col..self.cols {
-                    row[c] = Cell::default();
+                for cell in row.iter_mut().take(self.cols).skip(self.cursor_col) {
+                    *cell = Cell::default();
                 }
             }
             // From start of line to cursor
             1 => {
-                for c in 0..=self.cursor_col.min(self.cols - 1) {
-                    row[c] = Cell::default();
+                for cell in row.iter_mut().take(self.cursor_col.min(self.cols - 1) + 1) {
+                    *cell = Cell::default();
                 }
             }
             // Entire line
             2 => {
-                for c in 0..self.cols {
-                    row[c] = Cell::default();
+                for cell in row.iter_mut().take(self.cols) {
+                    *cell = Cell::default();
                 }
             }
             _ => {}
@@ -364,7 +364,7 @@ impl Perform for Screen {
         self.wrap_pending = false;
         match byte {
             // Line feed / vertical tab / form feed
-            0x0A | 0x0B | 0x0C => self.linefeed(),
+            0x0A..=0x0C => self.linefeed(),
             // Carriage return
             0x0D => self.cursor_col = 0,
             // Backspace
@@ -544,8 +544,8 @@ impl Perform for Screen {
                 if self.cursor_row < self.rows {
                     let row = &mut self.grid[self.cursor_row];
                     let end = (self.cursor_col + n).min(self.cols);
-                    for c in self.cursor_col..end {
-                        row[c] = Cell::default();
+                    for cell in row.iter_mut().take(end).skip(self.cursor_col) {
+                        *cell = Cell::default();
                     }
                 }
             }
