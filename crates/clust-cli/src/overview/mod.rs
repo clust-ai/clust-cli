@@ -5,7 +5,7 @@ use ratatui::{
     layout::{Constraint, Layout, Rect},
     style::Style,
     text::{Line, Span},
-    widgets::Paragraph,
+    widgets::{Block, Borders, Paragraph},
     Frame,
 };
 use tokio::sync::mpsc;
@@ -19,6 +19,12 @@ use self::screen::VirtualTerminal;
 
 /// Minimum width in columns for a single agent panel.
 const MIN_PANEL_WIDTH: u16 = 40;
+
+/// Calculate the total panel width (including borders) for a given available width.
+/// Targets 2.5 panels across the screen so the user sees 2 full + half of a third.
+fn panel_total_width(available_width: u16) -> u16 {
+    (available_width * 2 / 5).max(MIN_PANEL_WIDTH)
+}
 
 // ---------------------------------------------------------------------------
 // Types
@@ -174,7 +180,9 @@ impl OverviewState {
         if self.panels.is_empty() {
             return 0;
         }
-        let max_fit = (width / MIN_PANEL_WIDTH).max(1) as usize;
+        let pw = panel_total_width(width);
+        // Ceiling division so the partially-visible panel is included.
+        let max_fit = ((width + pw - 1) / pw).max(1) as usize;
         max_fit.min(self.panels.len() - self.scroll_offset)
     }
 
@@ -277,12 +285,13 @@ impl OverviewState {
         // Content area already excludes the tab bar and status bar.
         // We subtract 1 row for the options bar.
         let available_height = content_area.height.saturating_sub(1);
-        // Each panel has a 1-row header, rest is terminal content
-        self.panel_rows = available_height.saturating_sub(1).max(1);
+        // Each panel has: top border (1) + header (1) + terminal content + bottom border (1)
+        self.panel_rows = available_height.saturating_sub(3).max(1);
 
-        let max_fit = (content_area.width / MIN_PANEL_WIDTH).max(1) as usize;
-        let visible = max_fit.min(agent_count);
-        self.panel_cols = (content_area.width / visible as u16).max(MIN_PANEL_WIDTH);
+        // Panel width targets 2.5 panels across the screen.
+        // VTE terminal gets the inner width: total minus 2 border columns.
+        let pw = panel_total_width(content_area.width);
+        self.panel_cols = pw.saturating_sub(2).max(1);
     }
 
     fn spawn_agent_connection(&mut self, agent: &AgentInfo) {
@@ -493,9 +502,10 @@ pub fn render_overview(frame: &mut Frame, area: Rect, state: &OverviewState) {
     let visible_panels = &state.panels[state.scroll_offset..end];
     let actual_visible = visible_panels.len();
 
-    // Divide horizontally into equal columns
+    // Fixed-width columns so 2.5 panels fit on screen
+    let pw = panel_total_width(panels_area.width);
     let constraints: Vec<Constraint> = (0..actual_visible)
-        .map(|_| Constraint::Ratio(1, actual_visible as u32))
+        .map(|_| Constraint::Length(pw))
         .collect();
     let panel_areas = Layout::horizontal(constraints).split(panels_area);
 
@@ -562,16 +572,35 @@ fn render_options_bar(frame: &mut Frame, area: Rect, focused: bool) {
 }
 
 fn render_agent_panel(frame: &mut Frame, area: Rect, panel: &AgentPanel, focused: bool) {
-    if area.height < 2 {
+    if area.height < 3 {
         return;
     }
 
-    // Split into header (1 row) + terminal content
+    // Border color indicates focus
+    let border_color = if focused {
+        theme::R_ACCENT_BRIGHT
+    } else {
+        theme::R_TEXT_TERTIARY
+    };
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(border_color))
+        .style(Style::default().bg(theme::R_BG_BASE));
+
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    if inner.height < 1 {
+        return;
+    }
+
+    // Split inner area into header (1 row) + terminal content
     let [header_area, content_area] = Layout::vertical([
         Constraint::Length(1),
         Constraint::Min(0),
     ])
-    .areas(area);
+    .areas(inner);
 
     // Header
     let header_bg = if focused {
@@ -639,27 +668,6 @@ fn render_agent_panel(frame: &mut Frame, area: Rect, panel: &AgentPanel, focused
     let lines = panel.vterm.screen.to_ratatui_lines();
     let paragraph = Paragraph::new(lines).style(Style::default().bg(theme::R_BG_BASE));
     frame.render_widget(paragraph, content_area);
-
-    // Focused panel: accent left border
-    if focused && area.width > 0 {
-        for row in area.y..area.y + area.height {
-            let border_area = Rect {
-                x: area.x,
-                y: row,
-                width: 1,
-                height: 1,
-            };
-            frame.render_widget(
-                Paragraph::new(Line::from(Span::styled(
-                    "▎",
-                    Style::default()
-                        .fg(theme::R_ACCENT_BRIGHT)
-                        .bg(theme::R_BG_BASE),
-                ))),
-                border_area,
-            );
-        }
-    }
 }
 
 fn render_empty_state(frame: &mut Frame, area: Rect) {
