@@ -401,10 +401,12 @@ impl TreeSelection {
     }
 
     fn is_category_collapsed(&self, repo_idx: usize, cat_idx: usize) -> bool {
+        // Remote branches (cat_idx 1) are collapsed by default
+        let default = cat_idx == 1;
         *self
             .category_collapsed
             .get(&(repo_idx, cat_idx))
-            .unwrap_or(&false)
+            .unwrap_or(&default)
     }
 }
 
@@ -805,7 +807,7 @@ fn build_repo_tree_lines(
             (theme::R_ACCENT, None)
         };
 
-        let text = format!(" {chevron} {}", repo.name.to_uppercase());
+        let text = format!(" {chevron} {}", repo.name);
         let mut style = Style::default().fg(name_color).add_modifier(Modifier::BOLD);
         if let Some(bg_color) = bg {
             style = style.bg(bg_color);
@@ -814,14 +816,8 @@ fn build_repo_tree_lines(
 
         // Skip children if repo is collapsed
         if repo_collapsed {
-            if repo_idx < repos.len() - 1 {
-                lines.push(Line::from(""));
-            }
             continue;
         }
-
-        // Spacer between repo header and category sections
-        lines.push(Line::from(""));
 
         let has_local = !repo.local_branches.is_empty();
         let has_remote = !repo.remote_branches.is_empty();
@@ -877,11 +873,6 @@ fn build_repo_tree_lines(
             }
         }
 
-        // Spacer between Local and Remote sections
-        if has_local && has_remote {
-            lines.push(Line::from(""));
-        }
-
         // Remote Branches section
         if has_remote {
             let cat_selected = is_this_repo
@@ -929,10 +920,6 @@ fn build_repo_tree_lines(
             }
         }
 
-        // Blank line between repos (not after last)
-        if repo_idx < repos.len() - 1 {
-            lines.push(Line::from(""));
-        }
     }
 
     lines
@@ -1642,8 +1629,8 @@ mod tests {
         let sel = TreeSelection::default();
         let lines = build_repo_tree_lines(&[repo], &sel, 80);
 
-        // Should have: repo name + spacer + "Local Branches" header + 2 branch lines
-        assert_eq!(lines.len(), 5);
+        // Should have: repo name + "Local Branches" header + 2 branch lines
+        assert_eq!(lines.len(), 4);
 
         // First line is repo name
         let first = lines[0]
@@ -1651,15 +1638,15 @@ mod tests {
             .iter()
             .map(|s| s.content.as_ref())
             .collect::<String>();
-        assert!(first.contains("MYREPO"));
+        assert!(first.contains("myrepo"));
 
-        // Third line is section header (after spacer)
-        let third = lines[2]
+        // Second line is section header
+        let second = lines[1]
             .spans
             .iter()
             .map(|s| s.content.as_ref())
             .collect::<String>();
-        assert!(third.contains("Local Branches"));
+        assert!(second.contains("Local Branches"));
     }
 
     #[test]
@@ -1672,8 +1659,8 @@ mod tests {
         let sel = TreeSelection::default();
         let lines = build_repo_tree_lines(&[repo], &sel, 80);
 
-        // repo name + spacer + local header + 1 local branch + spacer + remote header + 1 remote branch
-        assert_eq!(lines.len(), 7);
+        // repo name + local header + 1 local branch + remote header (collapsed by default)
+        assert_eq!(lines.len(), 4);
 
         let texts: Vec<String> = lines
             .iter()
@@ -1685,11 +1672,10 @@ mod tests {
             })
             .collect();
 
-        assert!(texts[0].contains("MYREPO"));
-        assert!(texts[2].contains("Local Branches"));
-        assert!(texts[3].contains("main"));
-        assert!(texts[5].contains("Remote Branches"));
-        assert!(texts[6].contains("origin/main"));
+        assert!(texts[0].contains("myrepo"));
+        assert!(texts[1].contains("Local Branches"));
+        assert!(texts[2].contains("main"));
+        assert!(texts[3].contains("Remote Branches"));
     }
 
     #[test]
@@ -1701,18 +1687,9 @@ mod tests {
         let sel = TreeSelection::default();
         let lines = build_repo_tree_lines(&repos, &sel, 80);
 
-        // alpha: name + spacer + header + branch = 4
-        // blank line = 1
-        // beta: name + spacer + header + branch = 4
-        assert_eq!(lines.len(), 9);
-
-        // Line 4 (index 4) should be the blank separator between repos
-        let blank = lines[4]
-            .spans
-            .iter()
-            .map(|s| s.content.as_ref())
-            .collect::<String>();
-        assert!(blank.trim().is_empty());
+        // alpha: name + header + branch = 3
+        // beta: name + header + branch = 3
+        assert_eq!(lines.len(), 6);
     }
 
     #[test]
@@ -1955,7 +1932,7 @@ mod tests {
             .iter()
             .find(|l| {
                 let text: String = l.spans.iter().map(|s| s.content.as_ref()).collect();
-                text.contains("BETA")
+                text.contains("beta")
             })
             .expect("should find beta line");
         let text: String = beta_line.spans.iter().map(|s| s.content.as_ref()).collect();
@@ -2185,7 +2162,7 @@ mod tests {
         // Only the repo header line should remain
         assert_eq!(lines.len(), 1);
         let text: String = lines[0].spans.iter().map(|s| s.content.as_ref()).collect();
-        assert!(text.contains("MYREPO"));
+        assert!(text.contains("myrepo"));
         assert!(
             text.contains("▸"),
             "collapsed repo should have right chevron"
@@ -2207,8 +2184,8 @@ mod tests {
         sel.toggle_collapse(); // collapse local category
 
         let lines = build_repo_tree_lines(&[repo], &sel, 80);
-        // repo header + spacer + category header (collapsed, no branches)
-        assert_eq!(lines.len(), 3);
+        // repo header + category header (collapsed, no branches)
+        assert_eq!(lines.len(), 2);
     }
 
     #[test]
