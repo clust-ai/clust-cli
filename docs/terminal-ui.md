@@ -42,7 +42,7 @@ The bar uses a distinct background color (e.g., muted gray/blue) to visually sep
 - Reserve the bottom row for the status bar
 - Agent PTY output is rendered in the remaining area
 - On terminal resize: recalculate layout, redraw bar
-- Use `ratatui` for the status bar rendering, agent output is passed through directly
+- The attached mode status bar is rendered with raw ANSI escape sequences (not ratatui); agent output is passed through directly
 
 ### Input Handling
 

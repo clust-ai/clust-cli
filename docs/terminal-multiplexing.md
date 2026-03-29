@@ -16,7 +16,7 @@ All PTY output passes through a `FilterChain` before reaching stdout. The chain 
 ### Rules
 
 - **Never write raw PTY output directly to stdout.** Always go through the filter chain.
-- **Never inject escape sequences between output chunks.** Status bar redraws, cursor saves, or any other escape sequences must not be interleaved with agent output. The DECSTBM scroll region protects the status bar row; it does not need per-chunk redraws.
+- **Re-apply the scroll region and status bar after every output write.** Agent output may contain escape sequences (e.g., `\x1b[r`) that reset the DECSTBM scroll region, causing the status bar to disappear. After writing each chunk, the CLI saves the cursor, re-applies the scroll region, redraws the status bar content, and restores the cursor. This uses the `write_status_bar_content` helper to avoid duplicating rendering logic.
 - **New filters implement the `OutputFilter` trait** and are added to the chain via `FilterChain::push()`.
 
 ### OutputFilter Trait
@@ -85,5 +85,5 @@ When entering scrollback mode, the current `total_lines` is recorded as an ancho
 ## Status Bar
 
 - Drawn on the bottom row, outside the DECSTBM scroll region.
-- Redrawn only on: initial attach, terminal resize (SIGWINCH), scrollback mode enter/exit.
-- Never redrawn inside the output processing loop.
+- Redrawn on: initial attach, terminal resize (SIGWINCH), scrollback mode enter/exit, and after every agent output write (to guard against agent escape sequences that reset the scroll region).
+- The `draw_status_bar` function handles standalone redraws (saves/restores cursor, flushes). The `write_status_bar_content` helper writes only the bar content to a provided writer, used by both `draw_status_bar` and the output processing loop to avoid duplicating rendering logic.

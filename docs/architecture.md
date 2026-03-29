@@ -161,7 +161,7 @@ clust "do something"
     - CLI draws bottom status bar
         │
         ▼
-  User detaches (Ctrl+D or shortcut)
+  User detaches (Ctrl+Q)
     - CLI disconnects, agent keeps running in pool
         │
         ▼
@@ -179,7 +179,7 @@ clust "do something"
 | `portable-pty` | Cross-platform PTY allocation |
 | `rusqlite` | SQLite access (with bundled feature) |
 | `rmp-serde` | MessagePack serialization (IPC framing) |
-| `ratatui` | Terminal UI rendering (TUI dashboard, status bar) |
+| `ratatui` | Terminal UI rendering (TUI dashboard) |
 | `crossterm` | Terminal manipulation (raw mode, input) |
 | `tao` | Native event loop (macOS tray icon support) |
 | `tray-icon` | System tray icon and menu |
