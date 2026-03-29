@@ -182,7 +182,7 @@ impl OverviewState {
         }
         let pw = panel_total_width(width);
         // Ceiling division so the partially-visible panel is included.
-        let max_fit = ((width + pw - 1) / pw).max(1) as usize;
+        let max_fit = width.div_ceil(pw).max(1) as usize;
         max_fit.min(self.panels.len() - self.scroll_offset)
     }
 
