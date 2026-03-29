@@ -628,6 +628,7 @@ pub fn run(pool_name: &str) -> io::Result<()> {
 
     disable_raw_mode()?;
     io::stdout().execute(LeaveAlternateScreen)?;
+    println!();
 
     if pool_stopped {
         let label = if pool_count > 1 { "pools" } else { "pool" };
