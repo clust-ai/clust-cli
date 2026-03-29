@@ -15,6 +15,7 @@ tokio = { version = "1", features = ["rt-multi-thread", "net", "io-util", "io-st
 ratatui = "0.29"
 crossterm = "0.28"
 which = "7"
+vte = "0.13"
 
 [dev-dependencies]
 assert_cmd = "2"
