@@ -10,7 +10,7 @@ use crossterm::{
 };
 use ratatui::{
     layout::{Alignment, Constraint, Flex, Layout, Rect},
-    style::{Color, Style},
+    style::{Color, Modifier, Style},
     text::{Line, Span},
     widgets::{Block, Borders, Clear, Padding, Paragraph},
     Frame, Terminal,
@@ -737,7 +737,7 @@ fn render_left_panel(
 ) {
     let block = Block::default()
         .style(Style::default().bg(theme::R_BG_SURFACE))
-        .padding(Padding::new(1, 1, 0, 0));
+        .padding(Padding::new(2, 2, 1, 0));
 
     let inner = block.inner(area);
     frame.render_widget(block, area);
@@ -804,8 +804,8 @@ fn build_repo_tree_lines(
             (theme::R_ACCENT, None)
         };
 
-        let text = format!(" {chevron} {}", repo.name);
-        let mut style = Style::default().fg(name_color);
+        let text = format!(" {chevron} {}", repo.name.to_uppercase());
+        let mut style = Style::default().fg(name_color).add_modifier(Modifier::BOLD);
         if let Some(bg_color) = bg {
             style = style.bg(bg_color);
         }
@@ -818,6 +818,9 @@ fn build_repo_tree_lines(
             }
             continue;
         }
+
+        // Spacer between repo header and category sections
+        lines.push(Line::from(""));
 
         let has_local = !repo.local_branches.is_empty();
         let has_remote = !repo.remote_branches.is_empty();
@@ -832,7 +835,7 @@ fn build_repo_tree_lines(
             let cat_open =
                 is_this_repo && selection.level == TreeLevel::Branch && selection.category_idx == 0;
 
-            let connector = if has_remote { "├─" } else { "└─" };
+            let connector = if has_remote { "├──" } else { "└──" };
             let cat_chevron = if local_cat_collapsed { "▸" } else { "▾" };
             let (cat_fg, cat_bg) = if cat_selected {
                 (theme::R_TEXT_PRIMARY, Some(theme::R_BG_HOVER))
@@ -857,7 +860,7 @@ fn build_repo_tree_lines(
                 let continuation = if has_remote { "│" } else { " " };
                 for (i, branch) in repo.local_branches.iter().enumerate() {
                     let is_last = i == repo.local_branches.len() - 1;
-                    let branch_connector = if is_last { "└─" } else { "├─" };
+                    let branch_connector = if is_last { "└──" } else { "├──" };
                     let branch_selected = is_this_repo
                         && selection.level == TreeLevel::Branch
                         && selection.category_idx == 0
@@ -871,6 +874,11 @@ fn build_repo_tree_lines(
                     ));
                 }
             }
+        }
+
+        // Spacer between Local and Remote sections
+        if has_local && has_remote {
+            lines.push(Line::from(""));
         }
 
         // Remote Branches section
@@ -890,7 +898,7 @@ fn build_repo_tree_lines(
                 (theme::R_TEXT_SECONDARY, None)
             };
 
-            let cat_text = format!("   └─ {cat_chevron} Remote Branches");
+            let cat_text = format!("   └── {cat_chevron} Remote Branches");
             let mut cat_style = Style::default().fg(cat_fg);
             if let Some(bg_color) = cat_bg {
                 cat_style = cat_style.bg(bg_color);
@@ -904,7 +912,7 @@ fn build_repo_tree_lines(
             if !remote_cat_collapsed {
                 for (i, branch) in repo.remote_branches.iter().enumerate() {
                     let is_last = i == repo.remote_branches.len() - 1;
-                    let branch_connector = if is_last { "└─" } else { "├─" };
+                    let branch_connector = if is_last { "└──" } else { "├──" };
                     let branch_selected = is_this_repo
                         && selection.level == TreeLevel::Branch
                         && selection.category_idx == 1
@@ -972,7 +980,7 @@ fn format_branch_line(
     } else {
         theme::R_TEXT_PRIMARY
     };
-    let mut name_style = Style::default().fg(name_color);
+    let mut name_style = Style::default().fg(name_color).add_modifier(Modifier::BOLD);
     if let Some(bg_color) = bg {
         name_style = name_style.bg(bg_color);
     }
@@ -1098,7 +1106,7 @@ fn render_agent_list(
     focused: bool,
     mode: AgentViewMode,
 ) {
-    let block = Block::default().padding(Padding::new(1, 1, 0, 0));
+    let block = Block::default().padding(Padding::new(2, 2, 0, 0));
 
     let inner = block.inner(area);
     frame.render_widget(block, area);
@@ -1147,16 +1155,23 @@ fn render_agent_list_by_pool(
     let mut pnames: Vec<&str> = sorted.iter().map(|a| a.pool.as_str()).collect();
     pnames.dedup();
 
-    // Build layout: mode label + spacer + pool headers + agent cards
+    // Build layout: mode label + spacer + pool headers + agent cards + gaps
     let mut constraints: Vec<Constraint> = vec![
         Constraint::Length(1), // mode label
         Constraint::Length(1), // spacer
     ];
-    for pool_name in &pnames {
+    for (pidx, pool_name) in pnames.iter().enumerate() {
+        if pidx > 0 {
+            constraints.push(Constraint::Length(1)); // gap before pool header
+        }
         constraints.push(Constraint::Length(1)); // pool header
+        constraints.push(Constraint::Length(1)); // spacer after header
         let count = sorted.iter().filter(|a| a.pool == *pool_name).count();
-        for _ in 0..count {
+        for i in 0..count {
             constraints.push(Constraint::Length(4)); // agent card
+            if i < count - 1 {
+                constraints.push(Constraint::Length(1)); // gap between cards
+            }
         }
     }
     constraints.push(Constraint::Min(0));
@@ -1176,17 +1191,30 @@ fn render_agent_list_by_pool(
 
     let mut area_idx = 2;
     for (pidx, pool_name) in pnames.iter().enumerate() {
+        if pidx > 0 {
+            area_idx += 1; // skip gap before pool header
+        }
         let pool_header = Paragraph::new(Line::from(vec![Span::styled(
             format!(" {pool_name}"),
             Style::default().fg(theme::R_ACCENT),
         )]));
         frame.render_widget(pool_header, areas[area_idx]);
         area_idx += 1;
+        area_idx += 1; // skip spacer after header
 
-        for (aidx, agent) in sorted.iter().filter(|a| a.pool == *pool_name).enumerate() {
+        let agents_in_pool: Vec<(usize, &&AgentInfo)> = sorted
+            .iter()
+            .filter(|a| a.pool == *pool_name)
+            .enumerate()
+            .collect();
+        let agent_count = agents_in_pool.len();
+        for (aidx, agent) in agents_in_pool {
             let is_selected = focused && pidx == agent_sel.group_idx && aidx == agent_sel.agent_idx;
             render_agent_card(frame, areas[area_idx], agent, is_selected);
             area_idx += 1;
+            if aidx < agent_count - 1 {
+                area_idx += 1; // skip gap between cards
+            }
         }
     }
 }
@@ -1211,14 +1239,16 @@ fn render_agent_list_by_repo(
 
     let gnames = group_names(agents, AgentViewMode::ByRepo);
 
-    // Build layout: mode label + spacer + repo/branch headers + agent cards
+    // Build layout: mode label + spacer + repo/branch headers + agent cards + gaps
     let mut constraints: Vec<Constraint> = vec![
         Constraint::Length(1), // mode label
         Constraint::Length(1), // spacer
     ];
-    for repo in &gnames {
+    for (ridx, repo) in gnames.iter().enumerate() {
+        if ridx > 0 {
+            constraints.push(Constraint::Length(1)); // gap before repo header
+        }
         constraints.push(Constraint::Length(1)); // repo header
-                                                 // Collect unique branch names within this repo
         let mut branches: Vec<&str> = sorted
             .iter()
             .filter(|a| agent_group_key(a, AgentViewMode::ByRepo) == *repo)
@@ -1234,8 +1264,11 @@ fn render_agent_list_by_repo(
                         && a.branch_name.as_deref().unwrap_or("no branch") == *branch
                 })
                 .count();
-            for _ in 0..count {
+            for i in 0..count {
                 constraints.push(Constraint::Length(4)); // agent card
+                if i < count - 1 {
+                    constraints.push(Constraint::Length(1)); // gap between cards
+                }
             }
         }
     }
@@ -1257,6 +1290,9 @@ fn render_agent_list_by_repo(
     let mut area_idx = 2;
     let mut flat_agent_idx = 0;
     for (gidx, repo) in gnames.iter().enumerate() {
+        if gidx > 0 {
+            area_idx += 1; // skip gap before repo header
+        }
         // Repo header — show just the repo name (last path component)
         let repo_display = std::path::Path::new(repo)
             .file_name()
@@ -1290,15 +1326,20 @@ fn render_agent_list_by_repo(
             frame.render_widget(branch_header, areas[area_idx]);
             area_idx += 1;
 
-            for agent in repo_agents
+            let branch_agents: Vec<&&AgentInfo> = repo_agents
                 .iter()
                 .filter(|a| a.branch_name.as_deref().unwrap_or("no branch") == *branch)
-            {
+                .collect();
+            let branch_agent_count = branch_agents.len();
+            for (bidx, agent) in branch_agents.into_iter().enumerate() {
                 let is_selected =
                     focused && gidx == agent_sel.group_idx && flat_agent_idx == agent_sel.agent_idx;
                 render_agent_card(frame, areas[area_idx], agent, is_selected);
                 area_idx += 1;
                 flat_agent_idx += 1;
+                if bidx < branch_agent_count - 1 {
+                    area_idx += 1; // skip gap between cards
+                }
             }
         }
         flat_agent_idx = 0; // reset for next repo group
@@ -1600,8 +1641,8 @@ mod tests {
         let sel = TreeSelection::default();
         let lines = build_repo_tree_lines(&[repo], &sel, 80);
 
-        // Should have: repo name + "Local Branches" header + 2 branch lines
-        assert_eq!(lines.len(), 4);
+        // Should have: repo name + spacer + "Local Branches" header + 2 branch lines
+        assert_eq!(lines.len(), 5);
 
         // First line is repo name
         let first = lines[0]
@@ -1609,15 +1650,15 @@ mod tests {
             .iter()
             .map(|s| s.content.as_ref())
             .collect::<String>();
-        assert!(first.contains("myrepo"));
+        assert!(first.contains("MYREPO"));
 
-        // Second line is section header
-        let second = lines[1]
+        // Third line is section header (after spacer)
+        let third = lines[2]
             .spans
             .iter()
             .map(|s| s.content.as_ref())
             .collect::<String>();
-        assert!(second.contains("Local Branches"));
+        assert!(third.contains("Local Branches"));
     }
 
     #[test]
@@ -1630,8 +1671,8 @@ mod tests {
         let sel = TreeSelection::default();
         let lines = build_repo_tree_lines(&[repo], &sel, 80);
 
-        // repo name + local header + 1 local branch + remote header + 1 remote branch
-        assert_eq!(lines.len(), 5);
+        // repo name + spacer + local header + 1 local branch + spacer + remote header + 1 remote branch
+        assert_eq!(lines.len(), 7);
 
         let texts: Vec<String> = lines
             .iter()
@@ -1643,11 +1684,11 @@ mod tests {
             })
             .collect();
 
-        assert!(texts[0].contains("myrepo"));
-        assert!(texts[1].contains("Local Branches"));
-        assert!(texts[2].contains("main"));
-        assert!(texts[3].contains("Remote Branches"));
-        assert!(texts[4].contains("origin/main"));
+        assert!(texts[0].contains("MYREPO"));
+        assert!(texts[2].contains("Local Branches"));
+        assert!(texts[3].contains("main"));
+        assert!(texts[5].contains("Remote Branches"));
+        assert!(texts[6].contains("origin/main"));
     }
 
     #[test]
@@ -1659,13 +1700,13 @@ mod tests {
         let sel = TreeSelection::default();
         let lines = build_repo_tree_lines(&repos, &sel, 80);
 
-        // alpha: name + header + branch = 3
+        // alpha: name + spacer + header + branch = 4
         // blank line = 1
-        // beta: name + header + branch = 3
-        assert_eq!(lines.len(), 7);
+        // beta: name + spacer + header + branch = 4
+        assert_eq!(lines.len(), 9);
 
-        // Line 3 (index 3) should be the blank separator
-        let blank = lines[3]
+        // Line 4 (index 4) should be the blank separator between repos
+        let blank = lines[4]
             .spans
             .iter()
             .map(|s| s.content.as_ref())
@@ -1913,7 +1954,7 @@ mod tests {
             .iter()
             .find(|l| {
                 let text: String = l.spans.iter().map(|s| s.content.as_ref()).collect();
-                text.contains("beta")
+                text.contains("BETA")
             })
             .expect("should find beta line");
         let text: String = beta_line.spans.iter().map(|s| s.content.as_ref()).collect();
@@ -2143,7 +2184,7 @@ mod tests {
         // Only the repo header line should remain
         assert_eq!(lines.len(), 1);
         let text: String = lines[0].spans.iter().map(|s| s.content.as_ref()).collect();
-        assert!(text.contains("myrepo"));
+        assert!(text.contains("MYREPO"));
         assert!(
             text.contains("▸"),
             "collapsed repo should have right chevron"
@@ -2165,8 +2206,8 @@ mod tests {
         sel.toggle_collapse(); // collapse local category
 
         let lines = build_repo_tree_lines(&[repo], &sel, 80);
-        // repo header + category header (collapsed, no branches)
-        assert_eq!(lines.len(), 2);
+        // repo header + spacer + category header (collapsed, no branches)
+        assert_eq!(lines.len(), 3);
     }
 
     #[test]
