@@ -184,15 +184,38 @@ These shortcuts are active when the CLI is attached to an agent session. They ar
 
 These shortcuts are active in the `clust ui` dashboard. They are displayed in the bottom status bar.
 
+**Global:**
+
 | Shortcut | Action |
 |----------|--------|
 | `q` / `Esc` | Quit the UI (pool keeps running) |
 | `Q` | Quit the UI and stop the pool |
+| `Tab` | Switch to next tab |
+| `Shift+Tab` | Switch to previous tab |
+| `?` (hold) | Show keyboard shortcut overlay |
+
+**Repositories tab:**
+
+| Shortcut | Action |
+|----------|--------|
 | `↑` / `↓` | Move selection within current level |
 | `→` | Descend into selected item, or expand if collapsed |
 | `←` | Collapse current item, or ascend to parent level |
 | `Enter` | Toggle collapse/expand on repos and categories |
 | `Shift+←` / `Shift+→` | Switch focus between left and right panels |
-| `Tab` | Switch to next tab |
-| `Shift+Tab` | Switch to previous tab |
 | `v` | Toggle agent grouping between by-pool and by-repo (right panel) |
+
+**Overview tab (Options Bar focused):**
+
+| Shortcut | Action |
+|----------|--------|
+| `Shift+↓` | Enter terminal focus |
+| `Shift+←` / `Shift+→` | Scroll viewport left/right |
+
+**Overview tab (Terminal focused):**
+
+| Shortcut | Action |
+|----------|--------|
+| `Shift+↑` | Exit terminal, return to options bar |
+| `Shift+←` / `Shift+→` | Switch to previous/next agent panel |
+| All other keys | Forwarded to the focused agent's PTY |

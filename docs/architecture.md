@@ -47,7 +47,7 @@
 - Render agent output to the terminal (raw byte forwarding with output filter chain)
 - Draw the bottom status bar (agent ID, shortcuts)
 - Handle attach/detach lifecycle
-- TUI dashboard (`clust ui`) with repo tree and agent cards via `ratatui`
+- TUI dashboard (`clust ui`) with repo tree, agent cards, and multi-agent overview via `ratatui`
 - Default agent picker with known agent detection
 - Version update check (via Git)
 
@@ -184,4 +184,5 @@ clust "do something"
 | `tao` | Native event loop (macOS tray icon support) |
 | `tray-icon` | System tray icon and menu |
 | `git2` | Git repository/branch/worktree detection |
+| `vte` | VTE terminal escape sequence parser (overview screen emulation) |
 | `which` | Locate agent binaries on PATH (default agent discovery) |

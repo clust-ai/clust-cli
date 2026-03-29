@@ -41,7 +41,7 @@ pub enum PanelCommand {
 /// Events received from background connection tasks.
 pub enum AgentOutputEvent {
     Output { id: String, data: Vec<u8> },
-    Exited { id: String, exit_code: i32 },
+    Exited { id: String, _exit_code: i32 },
     ConnectionLost { id: String },
 }
 
@@ -397,7 +397,7 @@ async fn agent_connection_task(
                         let _ = event_tx
                             .send(AgentOutputEvent::Exited {
                                 id: agent_id.clone(),
-                                exit_code,
+                                _exit_code: exit_code,
                             })
                             .await;
                         return;
