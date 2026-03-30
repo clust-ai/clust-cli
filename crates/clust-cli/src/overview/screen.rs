@@ -1,4 +1,5 @@
 use std::collections::VecDeque;
+use std::fmt::Write as _;
 
 use ratatui::{
     style::{Color, Modifier, Style},
@@ -50,6 +51,10 @@ pub struct Screen {
 
 impl Screen {
     pub fn new(cols: usize, rows: usize) -> Self {
+        Self::with_scrollback_capacity(cols, rows, SCROLLBACK_CAPACITY)
+    }
+
+    pub fn with_scrollback_capacity(cols: usize, rows: usize, scrollback_capacity: usize) -> Self {
         let cols = cols.max(1);
         let rows = rows.max(1);
         Self {
@@ -64,7 +69,7 @@ impl Screen {
             scroll_top: 0,
             scroll_bottom: rows.saturating_sub(1),
             scrollback: VecDeque::new(),
-            scrollback_capacity: SCROLLBACK_CAPACITY,
+            scrollback_capacity,
         }
     }
 
@@ -87,6 +92,26 @@ impl Screen {
         self.current_style = Style::default();
         self.wrap_pending = false;
         self.scrollback.clear();
+    }
+
+    /// Resize the screen but keep scrollback history intact.
+    /// Used by the attached terminal where scrollback must survive window resizes.
+    pub fn resize_keep_scrollback(&mut self, cols: usize, rows: usize) {
+        let cols = cols.max(1);
+        let rows = rows.max(1);
+        if cols == self.cols && rows == self.rows {
+            return;
+        }
+        self.grid.clear();
+        self.grid.resize_with(rows, || vec![Cell::default(); cols]);
+        self.cols = cols;
+        self.rows = rows;
+        self.cursor_row = 0;
+        self.cursor_col = 0;
+        self.scroll_top = 0;
+        self.scroll_bottom = rows - 1;
+        self.current_style = Style::default();
+        self.wrap_pending = false;
     }
 
     pub fn to_ratatui_lines(&self) -> Vec<Line<'static>> {
@@ -112,6 +137,29 @@ impl Screen {
                     Self::row_to_line(&self.scrollback[i])
                 } else {
                     Self::row_to_line(&self.grid[i - sb_len])
+                }
+            })
+            .collect()
+    }
+
+    /// Render lines from the combined scrollback + grid at the given offset,
+    /// returning each line as a string with embedded ANSI SGR escape codes.
+    /// Used by the attached terminal which renders via direct stdout writes.
+    pub fn to_ansi_lines_scrolled(&self, offset: usize) -> Vec<String> {
+        if offset == 0 {
+            return self.grid.iter().map(|row| Self::row_to_ansi_string(row)).collect();
+        }
+        let sb_len = self.scrollback.len();
+        let grid_len = self.grid.len();
+        let total = sb_len + grid_len;
+        let end = total.saturating_sub(offset);
+        let start = end.saturating_sub(self.rows);
+        (start..end)
+            .map(|i| {
+                if i < sb_len {
+                    Self::row_to_ansi_string(&self.scrollback[i])
+                } else {
+                    Self::row_to_ansi_string(&self.grid[i - sb_len])
                 }
             })
             .collect()
@@ -146,6 +194,78 @@ impl Screen {
     }
 
     // -- Private helpers -----------------------------------------------------
+
+    fn row_to_ansi_string(row: &[Cell]) -> String {
+        if row.is_empty() {
+            return String::new();
+        }
+        let mut out = String::with_capacity(row.len() * 2);
+        let mut cur_style = Style::default();
+
+        for cell in row {
+            if cell.style != cur_style {
+                out.push_str("\x1b[0");
+                Self::push_style_sgr(&mut out, &cell.style);
+                out.push('m');
+                cur_style = cell.style;
+            }
+            out.push(cell.ch);
+        }
+
+        if cur_style != Style::default() {
+            out.push_str("\x1b[0m");
+        }
+
+        out
+    }
+
+    fn push_style_sgr(out: &mut String, style: &Style) {
+        if let Some(fg) = style.fg {
+            Self::push_color_sgr(out, fg, true);
+        }
+        if let Some(bg) = style.bg {
+            Self::push_color_sgr(out, bg, false);
+        }
+        let m = style.add_modifier;
+        if m.contains(Modifier::BOLD) { out.push_str(";1"); }
+        if m.contains(Modifier::DIM) { out.push_str(";2"); }
+        if m.contains(Modifier::ITALIC) { out.push_str(";3"); }
+        if m.contains(Modifier::UNDERLINED) { out.push_str(";4"); }
+        if m.contains(Modifier::REVERSED) { out.push_str(";7"); }
+        if m.contains(Modifier::HIDDEN) { out.push_str(";8"); }
+        if m.contains(Modifier::CROSSED_OUT) { out.push_str(";9"); }
+    }
+
+    fn push_color_sgr(out: &mut String, color: Color, fg: bool) {
+        let base: u16 = if fg { 30 } else { 40 };
+        match color {
+            Color::Reset => { let _ = write!(out, ";{}", base + 9); }
+            Color::Black => { let _ = write!(out, ";{base}"); }
+            Color::Red => { let _ = write!(out, ";{}", base + 1); }
+            Color::Green => { let _ = write!(out, ";{}", base + 2); }
+            Color::Yellow => { let _ = write!(out, ";{}", base + 3); }
+            Color::Blue => { let _ = write!(out, ";{}", base + 4); }
+            Color::Magenta => { let _ = write!(out, ";{}", base + 5); }
+            Color::Cyan => { let _ = write!(out, ";{}", base + 6); }
+            Color::White => { let _ = write!(out, ";{}", base + 7); }
+            Color::DarkGray => { let _ = write!(out, ";{}", base + 60); }
+            Color::LightRed => { let _ = write!(out, ";{}", base + 61); }
+            Color::LightGreen => { let _ = write!(out, ";{}", base + 62); }
+            Color::LightYellow => { let _ = write!(out, ";{}", base + 63); }
+            Color::LightBlue => { let _ = write!(out, ";{}", base + 64); }
+            Color::LightMagenta => { let _ = write!(out, ";{}", base + 65); }
+            Color::LightCyan => { let _ = write!(out, ";{}", base + 66); }
+            Color::Gray => { let _ = write!(out, ";{}", base + 67); }
+            Color::Indexed(n) => {
+                let code = if fg { 38 } else { 48 };
+                let _ = write!(out, ";{code};5;{n}");
+            }
+            Color::Rgb(r, g, b) => {
+                let code = if fg { 38 } else { 48 };
+                let _ = write!(out, ";{code};2;{r};{g};{b}");
+            }
+        }
+    }
 
     fn scroll_up(&mut self) {
         if self.scroll_top < self.scroll_bottom && self.scroll_bottom < self.rows {
@@ -648,6 +768,13 @@ impl VirtualTerminal {
         }
     }
 
+    pub fn with_scrollback_capacity(cols: usize, rows: usize, scrollback_capacity: usize) -> Self {
+        Self {
+            parser: vte::Parser::new(),
+            screen: Screen::with_scrollback_capacity(cols, rows, scrollback_capacity),
+        }
+    }
+
     pub fn process(&mut self, data: &[u8]) {
         for &byte in data {
             self.parser.advance(&mut self.screen, byte);
@@ -656,6 +783,10 @@ impl VirtualTerminal {
 
     pub fn resize(&mut self, cols: usize, rows: usize) {
         self.screen.resize(cols, rows);
+    }
+
+    pub fn resize_keep_scrollback(&mut self, cols: usize, rows: usize) {
+        self.screen.resize_keep_scrollback(cols, rows);
     }
 }
 

@@ -653,10 +653,18 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                     }
                                 }
                             }
-                        } else if let Some(bytes) =
-                            overview::input::key_event_to_bytes(&key)
-                        {
-                            overview_state.send_input(bytes);
+                        } else {
+                            match key.code {
+                                KeyCode::PageUp => overview_state.panel_scroll_up(),
+                                KeyCode::PageDown => overview_state.panel_scroll_down(),
+                                _ => {
+                                    if let Some(bytes) =
+                                        overview::input::key_event_to_bytes(&key)
+                                    {
+                                        overview_state.send_input(bytes);
+                                    }
+                                }
+                            }
                         }
                     } else {
                         // Normal key handling (options bar, other tabs)
