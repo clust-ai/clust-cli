@@ -184,7 +184,7 @@ On startup, `clust ui` automatically connects to the pool daemon, starting it if
 | `Q` | Quit the UI and stop the pool |
 | `Tab` | Switch to next tab |
 | `Shift+Tab` | Switch to previous tab |
-| `?` (hold) | Show keyboard shortcut overlay |
+| `?` | Toggle keyboard shortcut overlay |
 
 **Repositories tab:**
 
