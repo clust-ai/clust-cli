@@ -50,43 +50,43 @@ fn invalid_flag_exits_nonzero() {
 }
 
 #[test]
-fn pool_flag_in_help_output() {
+fn hub_flag_in_help_output() {
     Command::cargo_bin("clust")
         .unwrap()
         .arg("--help")
         .assert()
         .success()
-        .stdout(predicate::str::contains("--pool"));
+        .stdout(predicate::str::contains("--hub"));
 }
 
 #[test]
-fn ls_pool_flag_in_help_output() {
+fn ls_hub_flag_in_help_output() {
     Command::cargo_bin("clust")
         .unwrap()
         .args(["ls", "--help"])
         .assert()
         .success()
-        .stdout(predicate::str::contains("--pool"));
+        .stdout(predicate::str::contains("--hub"));
 }
 
 #[test]
-fn invalid_pool_name_exits_nonzero() {
+fn invalid_hub_name_exits_nonzero() {
     Command::cargo_bin("clust")
         .unwrap()
-        .args(["-p", "INVALID"])
+        .args(["-H", "INVALID"])
         .assert()
         .failure()
-        .stderr(predicate::str::contains("invalid pool name"));
+        .stderr(predicate::str::contains("invalid hub name"));
 }
 
 #[test]
-fn invalid_pool_name_on_ls_exits_nonzero() {
+fn invalid_hub_name_on_ls_exits_nonzero() {
     Command::cargo_bin("clust")
         .unwrap()
-        .args(["ls", "-p", "BAD-name"])
+        .args(["ls", "-H", "BAD-name"])
         .assert()
         .failure()
-        .stderr(predicate::str::contains("invalid pool name"));
+        .stderr(predicate::str::contains("invalid hub name"));
 }
 
 #[test]

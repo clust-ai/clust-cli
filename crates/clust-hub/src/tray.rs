@@ -14,7 +14,7 @@ pub fn create_tray_icon() -> Result<(tray_icon::TrayIcon, MenuId), String> {
     #[allow(unused_mut)]
     let mut builder = TrayIconBuilder::new()
         .with_icon(icon)
-        .with_tooltip("clust pool")
+        .with_tooltip("clust hub")
         .with_menu(Box::new(menu));
 
     #[cfg(target_os = "macos")]

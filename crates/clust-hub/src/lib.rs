@@ -5,7 +5,7 @@ pub mod repo;
 pub mod tray;
 
 #[derive(Debug)]
-pub enum PoolEvent {
+pub enum HubEvent {
     Shutdown,
 }
 
@@ -15,20 +15,20 @@ pub trait ShutdownSignal: Send + Sync + 'static {
     fn signal_shutdown(&self);
 }
 
-/// GUI mode: wraps tao::event_loop::EventLoopProxy<PoolEvent>.
+/// GUI mode: wraps tao::event_loop::EventLoopProxy<HubEvent>.
 pub struct TaoShutdownSignal {
-    proxy: tao::event_loop::EventLoopProxy<PoolEvent>,
+    proxy: tao::event_loop::EventLoopProxy<HubEvent>,
 }
 
 impl TaoShutdownSignal {
-    pub fn new(proxy: tao::event_loop::EventLoopProxy<PoolEvent>) -> Self {
+    pub fn new(proxy: tao::event_loop::EventLoopProxy<HubEvent>) -> Self {
         Self { proxy }
     }
 }
 
 impl ShutdownSignal for TaoShutdownSignal {
     fn signal_shutdown(&self) {
-        let _ = self.proxy.send_event(PoolEvent::Shutdown);
+        let _ = self.proxy.send_event(HubEvent::Shutdown);
     }
 }
 

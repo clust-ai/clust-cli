@@ -1,24 +1,24 @@
-# Pool Daemon
+# Hub Daemon
 
 ## Overview
 
-`clust-pool` is a headless background daemon that owns all agent processes. It has no terminal UI. It communicates exclusively over IPC with `clust-cli` instances.
+`clust-hub` is a headless background daemon that owns all agent processes. It has no terminal UI. It communicates exclusively over IPC with `clust-cli` instances.
 
 ## Lifecycle
 
 ### Startup
 
-The pool starts automatically when any `clust` command is run and no pool is already active.
+The hub starts automatically when any `clust` command is run and no hub is already active.
 
 **Startup sequence:**
 
 1. CLI tries to connect to `~/.clust/clust.sock`
-2. Connection fails → no pool running
-3. CLI spawns `clust-pool` as a detached background process
+2. Connection fails → no hub running
+3. CLI spawns `clust-hub` as a detached background process
 4. CLI retries connection with short backoff (e.g., 50ms intervals, max 2s)
 5. Connection succeeds → CLI proceeds with its command
 
-**Pool startup:**
+**Hub startup:**
 
 1. Check for stale socket file at `~/.clust/clust.sock` → remove if exists
 2. Create and bind Unix domain socket
@@ -31,53 +31,53 @@ Triggered by `clust -s` / `clust --stop` (no argument).
 
 **Shutdown sequence:**
 
-1. Pool receives `StopPool` message over IPC
-2. Pool replies `Ok` to the requesting CLI
-3. Pool notifies all attached CLI clients via broadcast channels (`PoolShutdown` event)
-4. Pool sends SIGTERM to all agent processes, waits 3 seconds, then SIGKILL any survivors
-5. Pool removes the socket file (`~/.clust/clust.sock`)
-6. Pool signals the tao event loop to exit
+1. Hub receives `StopHub` message over IPC
+2. Hub replies `Ok` to the requesting CLI
+3. Hub notifies all attached CLI clients via broadcast channels (`HubShutdown` event)
+4. Hub sends SIGTERM to all agent processes, waits 3 seconds, then SIGKILL any survivors
+5. Hub removes the socket file (`~/.clust/clust.sock`)
+6. Hub signals the tao event loop to exit
 
 ### Crash Recovery
 
-Since the pool is ephemeral (no state survives restart):
+Since the hub is ephemeral (no state survives restart):
 
-- If the pool crashes, the socket file may be stale
-- On next startup, the pool removes any existing socket file before binding
-- Running agents are lost on pool crash (they were children of the pool process)
+- If the hub crashes, the socket file may be stale
+- On next startup, the hub removes any existing socket file before binding
+- Running agents are lost on hub crash (they were children of the hub process)
 
-## Pools
+## Hubs
 
-Pools are logical groupings of agents within the single `clust-pool` process. They are **not** separate daemon instances.
+Hubs are logical groupings of agents within the single `clust-hub` process. They are **not** separate daemon instances.
 
-- **Default pool:** `default_pool` — all agents spawn here unless `-p` is specified
+- **Default hub:** `default_hub` — all agents spawn here unless `-H` is specified
 - **Naming convention:** snake_case (`^[a-z][a-z0-9]*(_[a-z0-9]+)*$`) — must start with a lowercase letter, no trailing or consecutive underscores
-- **Lifecycle:** implicit — a pool exists as long as at least one agent references it; empty pools disappear from listings
-- **No creation command:** pools are created on first use when an agent is assigned to one
+- **Lifecycle:** implicit — a hub exists as long as at least one agent references it; empty hubs disappear from listings
+- **No creation command:** hubs are created on first use when an agent is assigned to one
 
 ### Usage
 
 ```bash
-# Start agent in default pool
+# Start agent in default hub
 clust "fix the bug"
 
-# Start agent in a named pool
-clust -p my_feature "fix the bug"
+# Start agent in a named hub
+clust -H my_feature "fix the bug"
 
-# List all agents grouped by pool
+# List all agents grouped by hub
 clust ls
 
-# List only agents in a specific pool
-clust ls -p my_feature
+# List only agents in a specific hub
+clust ls -H my_feature
 ```
 
-The TUI (`clust ui`) shows pool names in the left sidebar and groups agent cards by pool in the main panel.
+The TUI (`clust ui`) shows hub names in the left sidebar and groups agent cards by hub in the main panel.
 
 ## Agent Management
 
 ### Spawning an Agent
 
-When the pool receives a `StartAgent` message:
+When the hub receives a `StartAgent` message:
 
 1. Determine agent binary: use `agent_binary` from the message, or fall back to the stored default (from SQLite). If no default is configured, return an error — the CLI prompts the user to pick a default before calling `StartAgent`.
 2. Generate a 6-character hex ID (from random bytes, check for collision against running agents)
@@ -92,7 +92,7 @@ When the pool receives a `StartAgent` message:
 
 ### Agent Exit
 
-When the pool detects an agent process has exited:
+When the hub detects an agent process has exited:
 
 1. Capture exit code
 2. Notify all attached CLI clients with `AgentExited { id, exit_code }`
@@ -105,16 +105,16 @@ Each agent has:
 - A PTY master file descriptor
 - A list of attached CLI client connections
 
-The pool reads from the PTY master and fans out data to all attached clients. Each client connection is independent — one slow client does not block others.
+The hub reads from the PTY master and fans out data to all attached clients. Each client connection is independent — one slow client does not block others.
 
 ### Input Routing
 
-Any attached client can send input. The pool writes it directly to the agent's PTY master. Multiple clients sending input simultaneously is allowed (agent sees interleaved input).
+Any attached client can send input. The hub writes it directly to the agent's PTY master. Multiple clients sending input simultaneously is allowed (agent sees interleaved input).
 
 ## In-Memory State
 
 ```rust
-struct PoolState {
+struct HubState {
     agents: HashMap<String, AgentEntry>,
     default_agent: Option<String>,         // loaded from SQLite on startup; None if unset
     db: Option<rusqlite::Connection>,      // open SQLite connection; Some after init_db()
@@ -125,7 +125,7 @@ struct AgentEntry {
     agent_binary: String,                  // e.g., "claude"
     started_at: String,                    // RFC 3339 timestamp
     working_dir: String,
-    pool: String,                          // e.g., "default_pool"
+    hub: String,                           // e.g., "default_hub"
     pid: Option<u32>,                      // OS process ID (for SIGTERM/SIGKILL)
     pty_master: Box<dyn MasterPty + Send>,
     pty_writer: Box<dyn Write + Send>,
@@ -141,4 +141,4 @@ struct AgentEntry {
 }
 ```
 
-This state is entirely in-memory. Nothing here survives a pool restart.
+This state is entirely in-memory. Nothing here survives a hub restart.
