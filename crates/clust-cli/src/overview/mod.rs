@@ -11,7 +11,7 @@ use ratatui::{
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 
-use clust_ipc::{AgentInfo, CliMessage, PoolMessage};
+use clust_ipc::{AgentInfo, CliMessage, HubMessage};
 
 use crate::{ipc, theme};
 
@@ -381,8 +381,8 @@ async fn agent_connection_task(
     }
 
     // Read response
-    match clust_ipc::recv_message_read::<PoolMessage>(&mut reader).await {
-        Ok(PoolMessage::AgentAttached { .. }) => {}
+    match clust_ipc::recv_message_read::<HubMessage>(&mut reader).await {
+        Ok(HubMessage::AgentAttached { .. }) => {}
         _ => {
             let _ = event_tx
                 .send(AgentOutputEvent::ConnectionLost {
@@ -404,12 +404,12 @@ async fn agent_connection_task(
     )
     .await;
 
-    // Main loop: read output from pool + forward commands from UI
+    // Main loop: read output from hub + forward commands from UI
     loop {
         tokio::select! {
-            msg = clust_ipc::recv_message_read::<PoolMessage>(&mut reader) => {
+            msg = clust_ipc::recv_message_read::<HubMessage>(&mut reader) => {
                 match msg {
-                    Ok(PoolMessage::AgentOutput { data, .. }) => {
+                    Ok(HubMessage::AgentOutput { data, .. }) => {
                         if event_tx
                             .send(AgentOutputEvent::Output {
                                 id: agent_id.clone(),
@@ -421,7 +421,7 @@ async fn agent_connection_task(
                             return; // UI gone
                         }
                     }
-                    Ok(PoolMessage::AgentExited { exit_code, .. }) => {
+                    Ok(HubMessage::AgentExited { exit_code, .. }) => {
                         let _ = event_tx
                             .send(AgentOutputEvent::Exited {
                                 id: agent_id.clone(),
@@ -430,7 +430,7 @@ async fn agent_connection_task(
                             .await;
                         return;
                     }
-                    Ok(PoolMessage::PoolShutdown) => {
+                    Ok(HubMessage::HubShutdown) => {
                         let _ = event_tx
                             .send(AgentOutputEvent::ConnectionLost {
                                 id: agent_id.clone(),

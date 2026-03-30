@@ -2,13 +2,13 @@ use std::sync::Arc;
 
 use tokio::sync::Mutex;
 
-use clust_pool::agent::SharedPoolState;
-use clust_pool::ShutdownSignal;
+use clust_hub::agent::SharedHubState;
+use clust_hub::ShutdownSignal;
 
 fn main() {
-    let state = Arc::new(Mutex::new(clust_pool::agent::PoolState::new()));
+    let state = Arc::new(Mutex::new(clust_hub::agent::HubState::new()));
 
-    if clust_pool::has_display() {
+    if clust_hub::has_display() {
         run_gui_mode(state);
     } else {
         run_headless_mode(state);
@@ -16,18 +16,18 @@ fn main() {
 }
 
 /// Run with tao event loop and tray icon (macOS, Linux with display).
-fn run_gui_mode(state: SharedPoolState) {
+fn run_gui_mode(state: SharedHubState) {
     use tao::event::{Event, StartCause};
     use tao::event_loop::{ControlFlow, EventLoopBuilder};
     use tray_icon::menu::{MenuEvent, MenuId};
 
-    use clust_pool::PoolEvent;
+    use clust_hub::HubEvent;
 
-    let event_loop = EventLoopBuilder::<PoolEvent>::with_user_event().build();
+    let event_loop = EventLoopBuilder::<HubEvent>::with_user_event().build();
     let proxy = event_loop.create_proxy();
 
     let shutdown_signal: Arc<dyn ShutdownSignal> =
-        Arc::new(clust_pool::TaoShutdownSignal::new(proxy));
+        Arc::new(clust_hub::TaoShutdownSignal::new(proxy));
 
     // Channel for triggering async shutdown from the main thread (tray quit)
     let (shutdown_tx, mut shutdown_rx) = tokio::sync::mpsc::unbounded_channel::<()>();
@@ -48,13 +48,13 @@ fn run_gui_mode(state: SharedPoolState) {
             // Spawn handler for tray quit → async agent shutdown
             tokio::spawn(async move {
                 if shutdown_rx.recv().await.is_some() {
-                    clust_pool::agent::shutdown_agents(&tray_shutdown_state).await;
+                    clust_hub::agent::shutdown_agents(&tray_shutdown_state).await;
                     let _ = tokio::fs::remove_file(clust_ipc::socket_path()).await;
                     tray_shutdown_signal.signal_shutdown();
                 }
             });
 
-            clust_pool::ipc::run_ipc_server(ipc_signal, ipc_state).await;
+            clust_hub::ipc::run_ipc_server(ipc_signal, ipc_state).await;
         });
     });
 
@@ -70,7 +70,7 @@ fn run_gui_mode(state: SharedPoolState) {
         if let Some(ref qid) = quit_id {
             if let Ok(menu_event) = MenuEvent::receiver().try_recv() {
                 if menu_event.id == *qid {
-                    // Trigger async agent shutdown; PoolEvent::Shutdown arrives when done
+                    // Trigger async agent shutdown; HubEvent::Shutdown arrives when done
                     let _ = shutdown_tx.send(());
                 }
             }
@@ -84,7 +84,7 @@ fn run_gui_mode(state: SharedPoolState) {
                     use tao::platform::macos::{ActivationPolicy, EventLoopWindowTargetExtMacOS};
                     _event_loop.set_activation_policy_at_runtime(ActivationPolicy::Accessory);
                 }
-                match clust_pool::tray::create_tray_icon() {
+                match clust_hub::tray::create_tray_icon() {
                     Ok((icon, qid)) => {
                         tray_icon_holder = Some(icon);
                         quit_id = Some(qid);
@@ -94,7 +94,7 @@ fn run_gui_mode(state: SharedPoolState) {
                     }
                 }
             }
-            Event::UserEvent(PoolEvent::Shutdown) => {
+            Event::UserEvent(HubEvent::Shutdown) => {
                 shutdown_gui(&mut tray_icon_holder, control_flow);
             }
             _ => {}
@@ -103,14 +103,14 @@ fn run_gui_mode(state: SharedPoolState) {
 }
 
 /// Run as a pure daemon without GUI (headless Linux).
-fn run_headless_mode(state: SharedPoolState) {
+fn run_headless_mode(state: SharedHubState) {
     let rt = tokio::runtime::Runtime::new().expect("failed to create tokio runtime");
 
     rt.block_on(async move {
         let (shutdown_tx, mut shutdown_rx) = tokio::sync::mpsc::unbounded_channel::<()>();
 
         let shutdown_signal: Arc<dyn ShutdownSignal> =
-            Arc::new(clust_pool::TokioShutdownSignal::new(shutdown_tx));
+            Arc::new(clust_hub::TokioShutdownSignal::new(shutdown_tx));
 
         // Spawn signal handler
         let signal_signal = shutdown_signal.clone();
@@ -121,7 +121,7 @@ fn run_headless_mode(state: SharedPoolState) {
         let ipc_signal = shutdown_signal.clone();
         let ipc_state = state.clone();
         tokio::spawn(async move {
-            clust_pool::ipc::run_ipc_server(ipc_signal, ipc_state).await;
+            clust_hub::ipc::run_ipc_server(ipc_signal, ipc_state).await;
         });
 
         // Block until shutdown signal received
@@ -144,7 +144,7 @@ fn shutdown_gui(
 
 async fn handle_signals(
     shutdown_signal: Arc<dyn ShutdownSignal>,
-    state: SharedPoolState,
+    state: SharedHubState,
 ) {
     use tokio::signal::unix::{signal, SignalKind};
 
@@ -156,7 +156,7 @@ async fn handle_signals(
         _ = sigint.recv() => {}
     }
 
-    clust_pool::agent::shutdown_agents(&state).await;
+    clust_hub::agent::shutdown_agents(&state).await;
     let _ = tokio::fs::remove_file(clust_ipc::socket_path()).await;
     shutdown_signal.signal_shutdown();
 }

@@ -15,7 +15,7 @@
 │                      │  IPC (Unix Domain Socket)             │
 │                      │                                       │
 │              ┌───────┴────────┐                              │
-│              │   clust-pool   │  (single background daemon)  │
+│              │   clust-hub    │  (single background daemon)  │
 │              │                │                               │
 │              │  ┌──────────┐  │                               │
 │              │  │ Agent PTY │  │  ID: a3f8c1                  │
@@ -42,8 +42,8 @@
 ### clust-cli
 
 - Parse CLI arguments (via `clap`)
-- Ensure `clust-pool` is running (auto-start if not)
-- Send commands to pool over IPC
+- Ensure `clust-hub` is running (auto-start if not)
+- Send commands to hub over IPC
 - Render agent output to the terminal (raw byte forwarding with output filter chain)
 - Draw the bottom status bar (agent ID, shortcuts)
 - Handle attach/detach lifecycle
@@ -53,7 +53,7 @@
 
 The CLI is a thin client. It does NOT manage agent processes directly.
 
-### clust-pool
+### clust-hub
 
 - Run as a background daemon (no UI, no terminal)
 - Manage agent lifecycles: spawn, track, clean up on exit
@@ -70,7 +70,7 @@ The CLI is a thin client. It does NOT manage agent processes directly.
 
 ### clust-ipc
 
-- Define IPC message types (`CliMessage` and `PoolMessage` enums)
+- Define IPC message types (`CliMessage` and `HubMessage` enums)
 - Length-prefixed MessagePack framing (`send_message` / `recv_message`)
 - Split-stream variants for bidirectional sessions
 - Socket path and clust directory helpers
@@ -86,7 +86,7 @@ The CLI is a thin client. It does NOT manage agent processes directly.
 
 ### Message Format
 
-Messages between CLI and Pool use a length-prefixed binary format:
+Messages between CLI and Hub use a length-prefixed binary format:
 
 ```
 [4 bytes: message length (u32 big-endian)] [N bytes: MessagePack payload]
@@ -97,14 +97,14 @@ Serialization uses **MessagePack** via `rmp-serde` (compact, fast, schema-friend
 ### Message Types
 
 ```
-CLI -> Pool:
-  StartAgent { prompt: Option<String>, agent_binary: Option<String>, working_dir: String, cols: u16, rows: u16, accept_edits: bool, pool: String }
+CLI -> Hub:
+  StartAgent { prompt: Option<String>, agent_binary: Option<String>, working_dir: String, cols: u16, rows: u16, accept_edits: bool, hub: String }
   AttachAgent { id: String }
   DetachAgent { id: String }
   AgentInput { id: String, data: Vec<u8> }
   ResizeAgent { id: String, cols: u16, rows: u16 }
-  ListAgents { pool: Option<String> }
-  StopPool
+  ListAgents { hub: Option<String> }
+  StopHub
   StopAgent { id: String }
   SetDefault { agent_binary: String }
   GetDefault
@@ -113,7 +113,7 @@ CLI -> Pool:
   StopRepoAgents { path: String }
   ListRepos
 
-Pool -> CLI:
+Hub -> CLI:
   Ok
   AgentStarted { id: String, agent_binary: String }
   AgentAttached { id: String, agent_binary: String }
@@ -122,7 +122,7 @@ Pool -> CLI:
   AgentList { agents: Vec<AgentInfo> }
   AgentStopped { id: String }  // Sent when stop is initiated (agent may still be terminating)
   DefaultAgent { agent_binary: Option<String> }
-  PoolShutdown
+  HubShutdown
   Error { message: String }
   RepoRegistered { path: String, name: String }
   RepoUnregistered { path: String, name: String, stopped_agents: usize }
@@ -133,10 +133,10 @@ Pool -> CLI:
 ### Connection Lifecycle
 
 1. CLI opens connection to `~/.clust/clust.sock`
-2. If connection fails → CLI spawns `clust-pool` as a background process, retries
+2. If connection fails → CLI spawns `clust-hub` as a background process, retries
 3. CLI sends command message
 4. For attach: connection stays open, bidirectional streaming (output down, input up)
-5. For one-shot commands (ls, stop): pool responds, connection closes
+5. For one-shot commands (ls, stop): hub responds, connection closes
 
 ## Agent Lifecycle
 
@@ -144,30 +144,30 @@ Pool -> CLI:
 clust "do something"
         │
         ▼
-  CLI connects to Pool
+  CLI connects to Hub
         │
         ▼
-  Pool spawns agent PTY
+  Hub spawns agent PTY
   (e.g., `claude "do something"`)
         │
         ▼
-  Pool assigns ID (e.g., a3f8c1)
-  Pool sends AgentStarted { id }
+  Hub assigns ID (e.g., a3f8c1)
+  Hub sends AgentStarted { id }
         │
         ▼
   CLI enters attached mode:
-    - Pool streams PTY output → CLI renders in terminal
-    - CLI forwards keyboard input → Pool → agent PTY
+    - Hub streams PTY output → CLI renders in terminal
+    - CLI forwards keyboard input → Hub → agent PTY
     - CLI draws bottom status bar
         │
         ▼
   User detaches (Ctrl+Q)
-    - CLI disconnects, agent keeps running in pool
+    - CLI disconnects, agent keeps running in hub
         │
         ▼
   Agent process exits
-    - Pool removes agent from pool
-    - Pool notifies any attached CLIs → they exit gracefully
+    - Hub removes agent from hub
+    - Hub notifies any attached CLIs → they exit gracefully
 ```
 
 ## Key Dependencies
@@ -175,7 +175,7 @@ clust "do something"
 | Crate | Purpose |
 |-------|---------|
 | `clap` | CLI argument parsing |
-| `tokio` | Async runtime (pool daemon, IPC) |
+| `tokio` | Async runtime (hub daemon, IPC) |
 | `portable-pty` | Cross-platform PTY allocation |
 | `rusqlite` | SQLite access (with bundled feature) |
 | `rmp-serde` | MessagePack serialization (IPC framing) |

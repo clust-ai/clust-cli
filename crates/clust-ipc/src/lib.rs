@@ -8,10 +8,10 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::unix::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::net::UnixStream;
 
-/// Default pool name for agents not assigned to a specific pool.
-pub const DEFAULT_POOL: &str = "default_pool";
+/// Default hub name for agents not assigned to a specific hub.
+pub const DEFAULT_HUB: &str = "default_hub";
 
-/// Messages sent from CLI to Pool.
+/// Messages sent from CLI to Hub.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum CliMessage {
     StartAgent {
@@ -21,14 +21,14 @@ pub enum CliMessage {
         cols: u16,
         rows: u16,
         accept_edits: bool,
-        pool: String,
+        hub: String,
     },
     AttachAgent { id: String },
     DetachAgent { id: String },
     AgentInput { id: String, data: Vec<u8> },
     ResizeAgent { id: String, cols: u16, rows: u16 },
-    ListAgents { pool: Option<String> },
-    StopPool,
+    ListAgents { hub: Option<String> },
+    StopHub,
     StopAgent { id: String },
     SetDefault { agent_binary: String },
     GetDefault,
@@ -45,7 +45,7 @@ pub struct AgentInfo {
     pub agent_binary: String,
     pub started_at: String,
     pub attached_clients: usize,
-    pub pool: String,
+    pub hub: String,
     pub working_dir: String,
     pub repo_path: Option<String>,
     pub branch_name: Option<String>,
@@ -69,9 +69,9 @@ pub struct BranchInfo {
     pub is_worktree: bool,
 }
 
-/// Messages sent from Pool to CLI.
+/// Messages sent from Hub to CLI.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub enum PoolMessage {
+pub enum HubMessage {
     Ok,
     AgentStarted { id: String, agent_binary: String },
     AgentAttached { id: String, agent_binary: String },
@@ -80,7 +80,7 @@ pub enum PoolMessage {
     AgentList { agents: Vec<AgentInfo> },
     DefaultAgent { agent_binary: Option<String> },
     AgentStopped { id: String },
-    PoolShutdown,
+    HubShutdown,
     Error { message: String },
     RepoRegistered { path: String, name: String },
     RepoUnregistered { path: String, name: String, stopped_agents: usize },
@@ -100,9 +100,9 @@ pub fn socket_path() -> PathBuf {
     clust_dir().join("clust.sock")
 }
 
-/// Returns the pool log path: `~/.clust/pool.log`.
+/// Returns the hub log path: `~/.clust/hub.log`.
 pub fn log_path() -> PathBuf {
-    clust_dir().join("pool.log")
+    clust_dir().join("hub.log")
 }
 
 /// Send a length-prefixed MessagePack message over a Unix stream.
@@ -171,10 +171,10 @@ mod tests {
         assert_eq!(msg, received);
     }
 
-    async fn assert_pool_round_trip(msg: PoolMessage) {
+    async fn assert_hub_round_trip(msg: HubMessage) {
         let (mut a, mut b) = UnixStream::pair().unwrap();
         send_message(&mut a, &msg).await.unwrap();
-        let received: PoolMessage = recv_message(&mut b).await.unwrap();
+        let received: HubMessage = recv_message(&mut b).await.unwrap();
         assert_eq!(msg, received);
     }
 
@@ -189,7 +189,7 @@ mod tests {
             cols: 120,
             rows: 40,
             accept_edits: false,
-            pool: DEFAULT_POOL.into(),
+            hub: DEFAULT_HUB.into(),
         })
         .await;
     }
@@ -203,7 +203,7 @@ mod tests {
             cols: 80,
             rows: 24,
             accept_edits: false,
-            pool: DEFAULT_POOL.into(),
+            hub: DEFAULT_HUB.into(),
         })
         .await;
     }
@@ -217,13 +217,13 @@ mod tests {
             cols: 120,
             rows: 40,
             accept_edits: true,
-            pool: DEFAULT_POOL.into(),
+            hub: DEFAULT_HUB.into(),
         })
         .await;
     }
 
     #[tokio::test]
-    async fn cli_start_agent_custom_pool() {
+    async fn cli_start_agent_custom_hub() {
         assert_cli_round_trip(CliMessage::StartAgent {
             prompt: None,
             agent_binary: Some("claude".into()),
@@ -231,7 +231,7 @@ mod tests {
             cols: 80,
             rows: 24,
             accept_edits: false,
-            pool: "my_feature".into(),
+            hub: "my_feature".into(),
         })
         .await;
     }
@@ -254,20 +254,20 @@ mod tests {
 
     #[tokio::test]
     async fn cli_list_agents_no_filter() {
-        assert_cli_round_trip(CliMessage::ListAgents { pool: None }).await;
+        assert_cli_round_trip(CliMessage::ListAgents { hub: None }).await;
     }
 
     #[tokio::test]
-    async fn cli_list_agents_with_pool_filter() {
+    async fn cli_list_agents_with_hub_filter() {
         assert_cli_round_trip(CliMessage::ListAgents {
-            pool: Some("my_feature".into()),
+            hub: Some("my_feature".into()),
         })
         .await;
     }
 
     #[tokio::test]
-    async fn cli_stop_pool() {
-        assert_cli_round_trip(CliMessage::StopPool).await;
+    async fn cli_stop_hub() {
+        assert_cli_round_trip(CliMessage::StopHub).await;
     }
 
     #[tokio::test]
@@ -291,16 +291,16 @@ mod tests {
         assert_cli_round_trip(CliMessage::GetDefault).await;
     }
 
-    // ── PoolMessage round-trips ────────────────────────────────────
+    // ── HubMessage round-trips ─────────────────────────────────────
 
     #[tokio::test]
-    async fn pool_ok() {
-        assert_pool_round_trip(PoolMessage::Ok).await;
+    async fn hub_ok() {
+        assert_hub_round_trip(HubMessage::Ok).await;
     }
 
     #[tokio::test]
-    async fn pool_agent_started() {
-        assert_pool_round_trip(PoolMessage::AgentStarted {
+    async fn hub_agent_started() {
+        assert_hub_round_trip(HubMessage::AgentStarted {
             id: "a1b2c3".into(),
             agent_binary: "claude".into(),
         })
@@ -308,8 +308,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn pool_agent_attached() {
-        assert_pool_round_trip(PoolMessage::AgentAttached {
+    async fn hub_agent_attached() {
+        assert_hub_round_trip(HubMessage::AgentAttached {
             id: "a1b2c3".into(),
             agent_binary: "claude".into(),
         })
@@ -317,8 +317,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn pool_agent_output() {
-        assert_pool_round_trip(PoolMessage::AgentOutput {
+    async fn hub_agent_output() {
+        assert_hub_round_trip(HubMessage::AgentOutput {
             id: "a1b2c3".into(),
             data: vec![0x00, 0xFF, 0x42],
         })
@@ -326,8 +326,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn pool_agent_exited() {
-        assert_pool_round_trip(PoolMessage::AgentExited {
+    async fn hub_agent_exited() {
+        assert_hub_round_trip(HubMessage::AgentExited {
             id: "a1b2c3".into(),
             exit_code: 42,
         })
@@ -335,15 +335,15 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn pool_agent_list_populated() {
-        assert_pool_round_trip(PoolMessage::AgentList {
+    async fn hub_agent_list_populated() {
+        assert_hub_round_trip(HubMessage::AgentList {
             agents: vec![
                 AgentInfo {
                     id: "aaa111".into(),
                     agent_binary: "claude".into(),
                     started_at: "2026-03-25T10:00:00Z".into(),
                     attached_clients: 2,
-                    pool: DEFAULT_POOL.into(),
+                    hub: DEFAULT_HUB.into(),
                     working_dir: "/tmp/project".into(),
                     repo_path: Some("/tmp/project".into()),
                     branch_name: Some("main".into()),
@@ -353,7 +353,7 @@ mod tests {
                     agent_binary: "aider".into(),
                     started_at: "2026-03-25T11:00:00Z".into(),
                     attached_clients: 0,
-                    pool: "my_feature".into(),
+                    hub: "my_feature".into(),
                     working_dir: "/home/user/code".into(),
                     repo_path: None,
                     branch_name: None,
@@ -364,42 +364,42 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn pool_agent_list_empty() {
-        assert_pool_round_trip(PoolMessage::AgentList { agents: vec![] }).await;
+    async fn hub_agent_list_empty() {
+        assert_hub_round_trip(HubMessage::AgentList { agents: vec![] }).await;
     }
 
     #[tokio::test]
-    async fn pool_default_agent_some() {
-        assert_pool_round_trip(PoolMessage::DefaultAgent {
+    async fn hub_default_agent_some() {
+        assert_hub_round_trip(HubMessage::DefaultAgent {
             agent_binary: Some("claude".into()),
         })
         .await;
     }
 
     #[tokio::test]
-    async fn pool_default_agent_none() {
-        assert_pool_round_trip(PoolMessage::DefaultAgent {
+    async fn hub_default_agent_none() {
+        assert_hub_round_trip(HubMessage::DefaultAgent {
             agent_binary: None,
         })
         .await;
     }
 
     #[tokio::test]
-    async fn pool_agent_stopped() {
-        assert_pool_round_trip(PoolMessage::AgentStopped {
+    async fn hub_agent_stopped() {
+        assert_hub_round_trip(HubMessage::AgentStopped {
             id: "abc123".into(),
         })
         .await;
     }
 
     #[tokio::test]
-    async fn pool_shutdown() {
-        assert_pool_round_trip(PoolMessage::PoolShutdown).await;
+    async fn hub_shutdown() {
+        assert_hub_round_trip(HubMessage::HubShutdown).await;
     }
 
     #[tokio::test]
-    async fn pool_error() {
-        assert_pool_round_trip(PoolMessage::Error {
+    async fn hub_error() {
+        assert_hub_round_trip(HubMessage::Error {
             message: "something went wrong".into(),
         })
         .await;
@@ -412,8 +412,8 @@ mod tests {
         let (mut a, mut b) = UnixStream::pair().unwrap();
 
         let msgs = vec![
-            CliMessage::ListAgents { pool: None },
-            CliMessage::StopPool,
+            CliMessage::ListAgents { hub: None },
+            CliMessage::StopHub,
             CliMessage::SetDefault {
                 agent_binary: "claude".into(),
             },
@@ -433,21 +433,21 @@ mod tests {
     async fn large_payload() {
         let (mut a, mut b) = UnixStream::pair().unwrap();
         let data = vec![0xAB; 1_000_000]; // 1 MB
-        let msg = PoolMessage::AgentOutput {
+        let msg = HubMessage::AgentOutput {
             id: "big".into(),
             data,
         };
         let expected = msg.clone();
         // Must read concurrently — socket buffer is smaller than 1MB
         let writer = tokio::spawn(async move { send_message(&mut a, &msg).await.unwrap() });
-        let received: PoolMessage = recv_message(&mut b).await.unwrap();
+        let received: HubMessage = recv_message(&mut b).await.unwrap();
         writer.await.unwrap();
         assert_eq!(expected, received);
     }
 
     #[tokio::test]
     async fn empty_data_payload() {
-        assert_pool_round_trip(PoolMessage::AgentOutput {
+        assert_hub_round_trip(HubMessage::AgentOutput {
             id: "empty".into(),
             data: vec![],
         })
@@ -523,12 +523,12 @@ mod tests {
         let (_, mut a_write) = a.into_split();
         let (mut b_read, _) = b.into_split();
 
-        let msg = PoolMessage::AgentOutput {
+        let msg = HubMessage::AgentOutput {
             id: "split".into(),
             data: vec![1, 2, 3],
         };
         send_message_write(&mut a_write, &msg).await.unwrap();
-        let received: PoolMessage = recv_message_read(&mut b_read).await.unwrap();
+        let received: HubMessage = recv_message_read(&mut b_read).await.unwrap();
         assert_eq!(msg, received);
     }
 
@@ -593,8 +593,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn pool_repo_registered() {
-        assert_pool_round_trip(PoolMessage::RepoRegistered {
+    async fn hub_repo_registered() {
+        assert_hub_round_trip(HubMessage::RepoRegistered {
             path: "/home/user/project".into(),
             name: "project".into(),
         })
@@ -602,8 +602,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn pool_repo_unregistered() {
-        assert_pool_round_trip(PoolMessage::RepoUnregistered {
+    async fn hub_repo_unregistered() {
+        assert_hub_round_trip(HubMessage::RepoUnregistered {
             path: "/home/user/project".into(),
             name: "project".into(),
             stopped_agents: 2,
@@ -612,8 +612,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn pool_repo_unregistered_no_agents() {
-        assert_pool_round_trip(PoolMessage::RepoUnregistered {
+    async fn hub_repo_unregistered_no_agents() {
+        assert_hub_round_trip(HubMessage::RepoUnregistered {
             path: "/home/user/project".into(),
             name: "project".into(),
             stopped_agents: 0,
@@ -622,8 +622,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn pool_repo_agents_stopped() {
-        assert_pool_round_trip(PoolMessage::RepoAgentsStopped {
+    async fn hub_repo_agents_stopped() {
+        assert_hub_round_trip(HubMessage::RepoAgentsStopped {
             path: "/home/user/project".into(),
             stopped_count: 3,
         })
@@ -631,8 +631,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn pool_repo_agents_stopped_zero() {
-        assert_pool_round_trip(PoolMessage::RepoAgentsStopped {
+    async fn hub_repo_agents_stopped_zero() {
+        assert_hub_round_trip(HubMessage::RepoAgentsStopped {
             path: "/home/user/project".into(),
             stopped_count: 0,
         })
@@ -640,8 +640,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn pool_repo_list_populated() {
-        assert_pool_round_trip(PoolMessage::RepoList {
+    async fn hub_repo_list_populated() {
+        assert_hub_round_trip(HubMessage::RepoList {
             repos: vec![RepoInfo {
                 path: "/home/user/project".into(),
                 name: "project".into(),
@@ -671,8 +671,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn pool_repo_list_empty() {
-        assert_pool_round_trip(PoolMessage::RepoList { repos: vec![] }).await;
+    async fn hub_repo_list_empty() {
+        assert_hub_round_trip(HubMessage::RepoList { repos: vec![] }).await;
     }
 
     // ── Path helpers ───────────────────────────────────────────────
@@ -697,9 +697,9 @@ mod tests {
     }
 
     #[test]
-    fn log_path_ends_with_pool_log() {
+    fn log_path_ends_with_hub_log() {
         let p = log_path();
-        assert!(p.ends_with("pool.log"));
+        assert!(p.ends_with("hub.log"));
     }
 
     #[test]

@@ -5,16 +5,16 @@ use std::sync::Arc;
 use tokio::net::unix::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::net::UnixListener;
 
-use clust_ipc::{CliMessage, PoolMessage};
+use clust_ipc::{CliMessage, HubMessage};
 
-use crate::agent::{self, AgentEvent, SharedPoolState};
+use crate::agent::{self, AgentEvent, SharedHubState};
 use crate::ShutdownSignal;
 
 /// Run the IPC server, listening for CLI connections on the Unix domain socket.
 /// Runs inside a tokio runtime on a background thread.
 pub async fn run_ipc_server(
     shutdown_signal: Arc<dyn ShutdownSignal>,
-    state: SharedPoolState,
+    state: SharedHubState,
 ) {
     if let Err(e) = run(shutdown_signal, state).await {
         eprintln!("ipc server error: {e}");
@@ -23,22 +23,22 @@ pub async fn run_ipc_server(
 
 async fn run(
     shutdown_signal: Arc<dyn ShutdownSignal>,
-    state: SharedPoolState,
+    state: SharedHubState,
 ) -> io::Result<()> {
     let dir = clust_ipc::clust_dir();
     tokio::fs::create_dir_all(&dir).await?;
 
     // Initialize SQLite database (creates tables on first run)
     {
-        let mut pool = state.lock().await;
-        if let Err(e) = pool.init_db() {
+        let mut hub = state.lock().await;
+        if let Err(e) = hub.init_db() {
             eprintln!("database init failed: {e}");
         }
     }
 
     let sock_path = clust_ipc::socket_path();
 
-    // Remove stale socket file if it exists (crash recovery per docs/pool.md)
+    // Remove stale socket file if it exists (crash recovery per docs/hub.md)
     let _ = tokio::fs::remove_file(&sock_path).await;
 
     let listener = UnixListener::bind(&sock_path)?;
@@ -59,7 +59,7 @@ async fn run(
 async fn handle_connection(
     stream: tokio::net::UnixStream,
     shutdown_signal: Arc<dyn ShutdownSignal>,
-    state: SharedPoolState,
+    state: SharedHubState,
 ) -> io::Result<()> {
     // Split for bidirectional streaming; first message determines the mode.
     let (mut reader, mut writer) = stream.into_split();
@@ -73,7 +73,7 @@ async fn handle_connection(
             cols,
             rows,
             accept_edits,
-            pool,
+            hub,
         } => {
             // Detect git info BEFORE acquiring the lock (avoid holding lock during I/O)
             let working_dir_for_register = working_dir.clone();
@@ -87,9 +87,9 @@ async fn handle_connection(
                     None => (None, None, false),
                 };
             let result = {
-                let mut pool_state = state.lock().await;
+                let mut hub_state = state.lock().await;
                 agent::spawn_agent(
-                    &mut pool_state,
+                    &mut hub_state,
                     agent::SpawnAgentParams {
                         prompt,
                         agent_binary,
@@ -97,7 +97,7 @@ async fn handle_connection(
                         cols,
                         rows,
                         accept_edits,
-                        pool,
+                        hub,
                         repo_path,
                         branch_name,
                         is_worktree,
@@ -109,8 +109,8 @@ async fn handle_connection(
                 Ok((id, binary)) => {
                     // Auto-register repo from working_dir
                     {
-                        let pool_state = state.lock().await;
-                        if let Some(ref db) = pool_state.db {
+                        let hub_state = state.lock().await;
+                        if let Some(ref db) = hub_state.db {
                             if let Some(root) = crate::repo::detect_git_root(&working_dir_for_register) {
                                 let root_str = root.to_string_lossy().into_owned();
                                 let name = root
@@ -123,7 +123,7 @@ async fn handle_connection(
                     }
                     clust_ipc::send_message_write(
                         &mut writer,
-                        &PoolMessage::AgentStarted {
+                        &HubMessage::AgentStarted {
                             id: id.clone(),
                             agent_binary: binary,
                         },
@@ -134,7 +134,7 @@ async fn handle_connection(
                 Err(e) => {
                     clust_ipc::send_message_write(
                         &mut writer,
-                        &PoolMessage::Error { message: e },
+                        &HubMessage::Error { message: e },
                     )
                     .await?;
                 }
@@ -142,14 +142,14 @@ async fn handle_connection(
         }
         CliMessage::AttachAgent { id } => {
             let agent_info = {
-                let pool = state.lock().await;
-                pool.agents.get(&id).map(|e| e.agent_binary.clone())
+                let hub = state.lock().await;
+                hub.agents.get(&id).map(|e| e.agent_binary.clone())
             };
             match agent_info {
                 Some(binary) => {
                     clust_ipc::send_message_write(
                         &mut writer,
-                        &PoolMessage::AgentAttached {
+                        &HubMessage::AgentAttached {
                             id: id.clone(),
                             agent_binary: binary,
                         },
@@ -160,7 +160,7 @@ async fn handle_connection(
                 None => {
                     clust_ipc::send_message_write(
                         &mut writer,
-                        &PoolMessage::Error {
+                        &HubMessage::Error {
                             message: format!("agent {id} not found"),
                         },
                     )
@@ -168,13 +168,13 @@ async fn handle_connection(
                 }
             }
         }
-        CliMessage::ListAgents { pool: filter } => {
+        CliMessage::ListAgents { hub: filter } => {
             let agents = {
-                let pool_state = state.lock().await;
-                pool_state
+                let hub_state = state.lock().await;
+                hub_state
                     .agents
                     .values()
-                    .filter(|e| filter.as_ref().is_none_or(|f| &e.pool == f))
+                    .filter(|e| filter.as_ref().is_none_or(|f| &e.hub == f))
                     .map(|e| clust_ipc::AgentInfo {
                         id: e.id.clone(),
                         agent_binary: e.agent_binary.clone(),
@@ -182,18 +182,18 @@ async fn handle_connection(
                         attached_clients: e
                             .attached_count
                             .load(Ordering::Relaxed),
-                        pool: e.pool.clone(),
+                        hub: e.hub.clone(),
                         working_dir: e.working_dir.clone(),
                         repo_path: e.repo_path.clone(),
                         branch_name: e.branch_name.clone(),
                     })
                     .collect()
             };
-            clust_ipc::send_message_write(&mut writer, &PoolMessage::AgentList { agents })
+            clust_ipc::send_message_write(&mut writer, &HubMessage::AgentList { agents })
                 .await?;
         }
-        CliMessage::StopPool => {
-            clust_ipc::send_message_write(&mut writer, &PoolMessage::Ok).await?;
+        CliMessage::StopHub => {
+            clust_ipc::send_message_write(&mut writer, &HubMessage::Ok).await?;
 
             // Terminate all running agents (SIGTERM → 3s → SIGKILL)
             agent::shutdown_agents(&state).await;
@@ -205,13 +205,13 @@ async fn handle_connection(
         }
         CliMessage::StopAgent { id } => {
             let exists = {
-                let pool = state.lock().await;
-                pool.agents.contains_key(&id)
+                let hub = state.lock().await;
+                hub.agents.contains_key(&id)
             };
             if exists {
                 clust_ipc::send_message_write(
                     &mut writer,
-                    &PoolMessage::AgentStopped { id: id.clone() },
+                    &HubMessage::AgentStopped { id: id.clone() },
                 )
                 .await?;
                 // Spawn so the 3s grace period doesn't block the connection handler
@@ -222,7 +222,7 @@ async fn handle_connection(
             } else {
                 clust_ipc::send_message_write(
                     &mut writer,
-                    &PoolMessage::Error {
+                    &HubMessage::Error {
                         message: format!("agent {id} not found"),
                     },
                 )
@@ -231,8 +231,8 @@ async fn handle_connection(
         }
         CliMessage::SetDefault { agent_binary } => {
             let result = {
-                let pool = state.lock().await;
-                if let Some(ref db) = pool.db {
+                let hub = state.lock().await;
+                if let Some(ref db) = hub.db {
                     crate::db::set_default_agent(db, &agent_binary)
                 } else {
                     Err("database not initialized".into())
@@ -240,14 +240,14 @@ async fn handle_connection(
             };
             match result {
                 Ok(()) => {
-                    let mut pool = state.lock().await;
-                    pool.default_agent = Some(agent_binary);
-                    clust_ipc::send_message_write(&mut writer, &PoolMessage::Ok).await?;
+                    let mut hub = state.lock().await;
+                    hub.default_agent = Some(agent_binary);
+                    clust_ipc::send_message_write(&mut writer, &HubMessage::Ok).await?;
                 }
                 Err(e) => {
                     clust_ipc::send_message_write(
                         &mut writer,
-                        &PoolMessage::Error { message: e },
+                        &HubMessage::Error { message: e },
                     )
                     .await?;
                 }
@@ -255,12 +255,12 @@ async fn handle_connection(
         }
         CliMessage::GetDefault => {
             let default = {
-                let pool = state.lock().await;
-                pool.default_agent.clone()
+                let hub = state.lock().await;
+                hub.default_agent.clone()
             };
             clust_ipc::send_message_write(
                 &mut writer,
-                &PoolMessage::DefaultAgent {
+                &HubMessage::DefaultAgent {
                     agent_binary: default,
                 },
             )
@@ -270,8 +270,8 @@ async fn handle_connection(
             // Detect git root BEFORE acquiring the lock (avoid holding lock during I/O)
             let git_root = crate::repo::detect_git_root(&path);
             let result = {
-                let pool_state = state.lock().await;
-                if let Some(ref db) = pool_state.db {
+                let hub_state = state.lock().await;
+                if let Some(ref db) = hub_state.db {
                     match git_root {
                         Some(root) => {
                             let root_str = root.to_string_lossy().into_owned();
@@ -292,14 +292,14 @@ async fn handle_connection(
                 Ok((path, name)) => {
                     clust_ipc::send_message_write(
                         &mut writer,
-                        &PoolMessage::RepoRegistered { path, name },
+                        &HubMessage::RepoRegistered { path, name },
                     )
                     .await?;
                 }
                 Err(e) => {
                     clust_ipc::send_message_write(
                         &mut writer,
-                        &PoolMessage::Error { message: e },
+                        &HubMessage::Error { message: e },
                     )
                     .await?;
                 }
@@ -308,8 +308,8 @@ async fn handle_connection(
         CliMessage::ListRepos => {
             // Collect repo list and agent snapshot under lock, then release
             let (repo_list, agent_snapshots) = {
-                let pool_state = state.lock().await;
-                let list = if let Some(ref db) = pool_state.db {
+                let hub_state = state.lock().await;
+                let list = if let Some(ref db) = hub_state.db {
                     crate::db::list_repos(db).unwrap_or_default()
                 } else {
                     vec![]
@@ -317,7 +317,7 @@ async fn handle_connection(
                 let snapshots: std::collections::HashMap<
                     String,
                     crate::repo::AgentSnapshot,
-                > = pool_state
+                > = hub_state
                     .agents
                     .iter()
                     .map(|(k, v)| {
@@ -347,8 +347,8 @@ async fn handle_connection(
             }
             // Clean up stale repos under lock
             if !stale_paths.is_empty() {
-                let pool_state = state.lock().await;
-                if let Some(ref db) = pool_state.db {
+                let hub_state = state.lock().await;
+                if let Some(ref db) = hub_state.db {
                     for path in &stale_paths {
                         let _ = crate::db::unregister_repo(db, path);
                     }
@@ -356,7 +356,7 @@ async fn handle_connection(
             }
             clust_ipc::send_message_write(
                 &mut writer,
-                &PoolMessage::RepoList {
+                &HubMessage::RepoList {
                     repos: valid_repos,
                 },
             )
@@ -365,8 +365,8 @@ async fn handle_connection(
         CliMessage::UnregisterRepo { path } => {
             let git_root = crate::repo::detect_git_root(&path);
             let result = {
-                let pool_state = state.lock().await;
-                if let Some(ref db) = pool_state.db {
+                let hub_state = state.lock().await;
+                if let Some(ref db) = hub_state.db {
                     match git_root {
                         Some(root) => {
                             let root_str = root.to_string_lossy().into_owned();
@@ -378,7 +378,7 @@ async fn handle_connection(
                                     .map(|n| n.to_string_lossy().into_owned())
                                     .unwrap_or_else(|| root_str.clone());
                                 // Collect agent IDs matching this repo
-                                let agent_ids: Vec<String> = pool_state
+                                let agent_ids: Vec<String> = hub_state
                                     .agents
                                     .values()
                                     .filter(|e| e.repo_path.as_deref() == Some(root_str.as_str()))
@@ -406,7 +406,7 @@ async fn handle_connection(
                     }
                     clust_ipc::send_message_write(
                         &mut writer,
-                        &PoolMessage::RepoUnregistered {
+                        &HubMessage::RepoUnregistered {
                             path,
                             name,
                             stopped_agents: count,
@@ -417,7 +417,7 @@ async fn handle_connection(
                 Err(e) => {
                     clust_ipc::send_message_write(
                         &mut writer,
-                        &PoolMessage::Error { message: e },
+                        &HubMessage::Error { message: e },
                     )
                     .await?;
                 }
@@ -426,11 +426,11 @@ async fn handle_connection(
         CliMessage::StopRepoAgents { path } => {
             let git_root = crate::repo::detect_git_root(&path);
             let result = {
-                let pool_state = state.lock().await;
+                let hub_state = state.lock().await;
                 match git_root {
                     Some(root) => {
                         let root_str = root.to_string_lossy().into_owned();
-                        let agent_ids: Vec<String> = pool_state
+                        let agent_ids: Vec<String> = hub_state
                             .agents
                             .values()
                             .filter(|e| e.repo_path.as_deref() == Some(root_str.as_str()))
@@ -452,7 +452,7 @@ async fn handle_connection(
                     }
                     clust_ipc::send_message_write(
                         &mut writer,
-                        &PoolMessage::RepoAgentsStopped {
+                        &HubMessage::RepoAgentsStopped {
                             path,
                             stopped_count: count,
                         },
@@ -462,7 +462,7 @@ async fn handle_connection(
                 Err(e) => {
                     clust_ipc::send_message_write(
                         &mut writer,
-                        &PoolMessage::Error { message: e },
+                        &HubMessage::Error { message: e },
                     )
                     .await?;
                 }
@@ -471,7 +471,7 @@ async fn handle_connection(
         _ => {
             clust_ipc::send_message_write(
                 &mut writer,
-                &PoolMessage::Error {
+                &HubMessage::Error {
                     message: "unknown message".into(),
                 },
             )
@@ -493,12 +493,12 @@ async fn handle_attached_session(
     agent_id: &str,
     mut reader: OwnedReadHalf,
     mut writer: OwnedWriteHalf,
-    state: SharedPoolState,
+    state: SharedHubState,
 ) -> io::Result<()> {
     // Subscribe to agent output broadcast and assign a client ID
     let (mut output_rx, client_id) = {
-        let pool = state.lock().await;
-        let entry = pool.agents.get(agent_id).ok_or_else(|| {
+        let hub = state.lock().await;
+        let entry = hub.agents.get(agent_id).ok_or_else(|| {
             io::Error::new(io::ErrorKind::NotFound, "agent not found")
         })?;
         entry.attached_count.fetch_add(1, Ordering::Relaxed);
@@ -510,7 +510,7 @@ async fn handle_attached_session(
     let state_for_cleanup = state.clone();
     let agent_id_for_cleanup = agent_id_owned.clone();
 
-    // Task 1: Read from broadcast channel, send PoolMessages to CLI
+    // Task 1: Read from broadcast channel, send HubMessages to CLI
     let agent_id_for_output = agent_id_owned.clone();
     let output_task = tokio::spawn(async move {
         loop {
@@ -518,7 +518,7 @@ async fn handle_attached_session(
                 Ok(AgentEvent::Output(data)) => {
                     if clust_ipc::send_message_write(
                         &mut writer,
-                        &PoolMessage::AgentOutput {
+                        &HubMessage::AgentOutput {
                             id: agent_id_for_output.clone(),
                             data,
                         },
@@ -532,7 +532,7 @@ async fn handle_attached_session(
                 Ok(AgentEvent::Exited(code)) => {
                     let _ = clust_ipc::send_message_write(
                         &mut writer,
-                        &PoolMessage::AgentExited {
+                        &HubMessage::AgentExited {
                             id: agent_id_for_output.clone(),
                             exit_code: code,
                         },
@@ -540,10 +540,10 @@ async fn handle_attached_session(
                     .await;
                     break;
                 }
-                Ok(AgentEvent::PoolShutdown) => {
+                Ok(AgentEvent::HubShutdown) => {
                     let _ = clust_ipc::send_message_write(
                         &mut writer,
-                        &PoolMessage::PoolShutdown,
+                        &HubMessage::HubShutdown,
                     )
                     .await;
                     break;
@@ -556,7 +556,7 @@ async fn handle_attached_session(
                     // Agent removed from state (already exited)
                     let _ = clust_ipc::send_message_write(
                         &mut writer,
-                        &PoolMessage::AgentExited {
+                        &HubMessage::AgentExited {
                             id: agent_id_for_output.clone(),
                             exit_code: -1,
                         },
@@ -575,8 +575,8 @@ async fn handle_attached_session(
         loop {
             match clust_ipc::recv_message_read::<CliMessage>(&mut reader).await {
                 Ok(CliMessage::AgentInput { data, .. }) => {
-                    let mut pool = state_for_input.lock().await;
-                    if let Some(entry) = pool.agents.get_mut(&agent_id_for_input) {
+                    let mut hub = state_for_input.lock().await;
+                    if let Some(entry) = hub.agents.get_mut(&agent_id_for_input) {
                         // Input-fallback: if this client isn't active and we
                         // know its size, resize the PTY to match before
                         // forwarding input (handles terminals without focus
@@ -591,8 +591,8 @@ async fn handle_attached_session(
                     }
                 }
                 Ok(CliMessage::ResizeAgent { cols, rows, .. }) => {
-                    let mut pool = state_for_input.lock().await;
-                    if let Some(entry) = pool.agents.get_mut(&agent_id_for_input) {
+                    let mut hub = state_for_input.lock().await;
+                    if let Some(entry) = hub.agents.get_mut(&agent_id_for_input) {
                         entry.client_sizes.insert(client_id, (cols, rows));
                         entry.active_client_id = Some(client_id);
                         entry.resize_pty_if_needed(cols, rows);
@@ -618,8 +618,8 @@ async fn handle_attached_session(
     }
 
     // Decrement attached count and remove client from size tracking
-    let mut pool = state_for_cleanup.lock().await;
-    if let Some(entry) = pool.agents.get_mut(&agent_id_for_cleanup) {
+    let mut hub = state_for_cleanup.lock().await;
+    if let Some(entry) = hub.agents.get_mut(&agent_id_for_cleanup) {
         entry.attached_count.fetch_sub(1, Ordering::Relaxed);
         entry.client_sizes.remove(&client_id);
         if entry.active_client_id == Some(client_id) {

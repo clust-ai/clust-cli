@@ -11,7 +11,7 @@ pub struct Cli {
     #[arg(short = 'a', long = "attach")]
     pub attach: Option<String>,
 
-    /// Stop: without value stops the pool daemon; with a 6-char ID stops that agent
+    /// Stop: without value stops the hub daemon; with a 6-char ID stops that agent
     #[arg(short = 's', long = "stop", num_args = 0..=1, default_missing_value = "")]
     pub stop: Option<String>,
 
@@ -27,9 +27,9 @@ pub struct Cli {
     #[arg(short = 'u', long = "use")]
     pub use_agent: Option<String>,
 
-    /// Assign the agent to a named pool (snake_case; default: default_pool)
-    #[arg(short = 'p', long = "pool")]
-    pub pool: Option<String>,
+    /// Assign the agent to a named hub (snake_case; default: default_hub)
+    #[arg(short = 'H', long = "hub")]
+    pub hub: Option<String>,
 
     /// Initial prompt for the agent
     pub prompt: Option<String>,
@@ -40,15 +40,15 @@ pub struct Cli {
 
 #[derive(Subcommand)]
 pub enum Commands {
-    /// List all running agents in the pool
+    /// List all running agents in the hub
     Ls {
         /// Interactive selector: navigate with arrow keys, Enter to confirm
         #[arg(short = 'i', long = "select")]
         select: bool,
 
-        /// Filter agents by pool name
-        #[arg(short = 'p', long = "pool")]
-        pool: Option<String>,
+        /// Filter agents by hub name
+        #[arg(short = 'H', long = "hub")]
+        hub: Option<String>,
     },
     /// Open the Clust terminal UI
     Ui,
@@ -68,29 +68,29 @@ pub enum Commands {
     },
 }
 
-/// Validate a pool name follows snake_case: starts with a lowercase ASCII letter,
+/// Validate a hub name follows snake_case: starts with a lowercase ASCII letter,
 /// followed by zero or more lowercase ASCII letters, digits, or underscores.
-pub fn validate_pool_name(name: &str) -> Result<(), String> {
+pub fn validate_hub_name(name: &str) -> Result<(), String> {
     if name.is_empty() {
-        return Err("pool name cannot be empty".into());
+        return Err("hub name cannot be empty".into());
     }
     let mut chars = name.chars();
     let first = chars.next().unwrap();
     if !first.is_ascii_lowercase() {
         return Err(format!(
-            "pool name must start with a lowercase letter, got '{first}'"
+            "hub name must start with a lowercase letter, got '{first}'"
         ));
     }
     if name.ends_with('_') {
-        return Err("pool name must not end with an underscore".into());
+        return Err("hub name must not end with an underscore".into());
     }
     if name.contains("__") {
-        return Err("pool name must not contain consecutive underscores".into());
+        return Err("hub name must not contain consecutive underscores".into());
     }
     for c in chars {
         if !c.is_ascii_lowercase() && !c.is_ascii_digit() && c != '_' {
             return Err(format!(
-                "pool name must be snake_case (lowercase, digits, underscores), found '{c}'"
+                "hub name must be snake_case (lowercase, digits, underscores), found '{c}'"
             ));
         }
     }
@@ -127,7 +127,7 @@ mod tests {
     }
 
     #[test]
-    fn parse_stop_no_value_stops_pool() {
+    fn parse_stop_no_value_stops_hub() {
         let cli = Cli::try_parse_from(["clust", "-s"]).unwrap();
         assert_eq!(cli.stop.as_deref(), Some(""));
     }
@@ -187,7 +187,7 @@ mod tests {
             cli.command,
             Some(Commands::Ls {
                 select: false,
-                pool: None
+                hub: None
             })
         ));
     }
@@ -199,7 +199,7 @@ mod tests {
             cli.command,
             Some(Commands::Ls {
                 select: true,
-                pool: None
+                hub: None
             })
         ));
     }
@@ -211,7 +211,7 @@ mod tests {
             cli.command,
             Some(Commands::Ls {
                 select: true,
-                pool: None
+                hub: None
             })
         ));
     }
@@ -391,124 +391,124 @@ mod tests {
         assert!(Cli::try_parse_from(["clust", "--nonsense"]).is_err());
     }
 
-    // ── Pool flag tests ──────────────────────────────────────────────
+    // ── Hub flag tests ──────────────────────────────────────────────
 
     #[test]
-    fn parse_pool_short() {
-        let cli = Cli::try_parse_from(["clust", "-p", "my_feature"]).unwrap();
-        assert_eq!(cli.pool.as_deref(), Some("my_feature"));
+    fn parse_hub_short() {
+        let cli = Cli::try_parse_from(["clust", "-H", "my_feature"]).unwrap();
+        assert_eq!(cli.hub.as_deref(), Some("my_feature"));
     }
 
     #[test]
-    fn parse_pool_long() {
-        let cli = Cli::try_parse_from(["clust", "--pool", "my_feature"]).unwrap();
-        assert_eq!(cli.pool.as_deref(), Some("my_feature"));
+    fn parse_hub_long() {
+        let cli = Cli::try_parse_from(["clust", "--hub", "my_feature"]).unwrap();
+        assert_eq!(cli.hub.as_deref(), Some("my_feature"));
     }
 
     #[test]
-    fn parse_pool_with_prompt() {
-        let cli = Cli::try_parse_from(["clust", "-p", "my_feature", "fix bug"]).unwrap();
-        assert_eq!(cli.pool.as_deref(), Some("my_feature"));
+    fn parse_hub_with_prompt() {
+        let cli = Cli::try_parse_from(["clust", "-H", "my_feature", "fix bug"]).unwrap();
+        assert_eq!(cli.hub.as_deref(), Some("my_feature"));
         assert_eq!(cli.prompt.as_deref(), Some("fix bug"));
     }
 
     #[test]
-    fn parse_no_args_pool_is_none() {
+    fn parse_no_args_hub_is_none() {
         let cli = Cli::try_parse_from(["clust"]).unwrap();
-        assert!(cli.pool.is_none());
+        assert!(cli.hub.is_none());
     }
 
     #[test]
-    fn parse_ls_pool_short() {
-        let cli = Cli::try_parse_from(["clust", "ls", "-p", "my_feature"]).unwrap();
+    fn parse_ls_hub_short() {
+        let cli = Cli::try_parse_from(["clust", "ls", "-H", "my_feature"]).unwrap();
         match cli.command {
-            Some(Commands::Ls { select, pool }) => {
+            Some(Commands::Ls { select, hub }) => {
                 assert!(!select);
-                assert_eq!(pool.as_deref(), Some("my_feature"));
+                assert_eq!(hub.as_deref(), Some("my_feature"));
             }
             _ => panic!("expected Ls command"),
         }
     }
 
     #[test]
-    fn parse_ls_pool_long() {
-        let cli = Cli::try_parse_from(["clust", "ls", "--pool", "my_feature"]).unwrap();
+    fn parse_ls_hub_long() {
+        let cli = Cli::try_parse_from(["clust", "ls", "--hub", "my_feature"]).unwrap();
         match cli.command {
-            Some(Commands::Ls { select, pool }) => {
+            Some(Commands::Ls { select, hub }) => {
                 assert!(!select);
-                assert_eq!(pool.as_deref(), Some("my_feature"));
+                assert_eq!(hub.as_deref(), Some("my_feature"));
             }
             _ => panic!("expected Ls command"),
         }
     }
 
     #[test]
-    fn parse_ls_pool_with_select() {
-        let cli = Cli::try_parse_from(["clust", "ls", "-i", "-p", "my_feature"]).unwrap();
+    fn parse_ls_hub_with_select() {
+        let cli = Cli::try_parse_from(["clust", "ls", "-i", "-H", "my_feature"]).unwrap();
         match cli.command {
-            Some(Commands::Ls { select, pool }) => {
+            Some(Commands::Ls { select, hub }) => {
                 assert!(select);
-                assert_eq!(pool.as_deref(), Some("my_feature"));
+                assert_eq!(hub.as_deref(), Some("my_feature"));
             }
             _ => panic!("expected Ls command"),
         }
     }
 
-    // ── Pool name validation tests ───────────────────────────────────
+    // ── Hub name validation tests ───────────────────────────────────
 
     #[test]
-    fn validate_pool_name_valid() {
-        assert!(validate_pool_name("default_pool").is_ok());
-        assert!(validate_pool_name("my_feature").is_ok());
-        assert!(validate_pool_name("a").is_ok());
-        assert!(validate_pool_name("pool123").is_ok());
-        assert!(validate_pool_name("my_pool_2").is_ok());
+    fn validate_hub_name_valid() {
+        assert!(validate_hub_name("default_hub").is_ok());
+        assert!(validate_hub_name("my_feature").is_ok());
+        assert!(validate_hub_name("a").is_ok());
+        assert!(validate_hub_name("hub123").is_ok());
+        assert!(validate_hub_name("my_hub_2").is_ok());
     }
 
     #[test]
-    fn default_pool_constant_passes_validation() {
-        assert!(validate_pool_name(clust_ipc::DEFAULT_POOL).is_ok());
+    fn default_hub_constant_passes_validation() {
+        assert!(validate_hub_name(clust_ipc::DEFAULT_HUB).is_ok());
     }
 
     #[test]
-    fn validate_pool_name_empty() {
-        assert!(validate_pool_name("").is_err());
+    fn validate_hub_name_empty() {
+        assert!(validate_hub_name("").is_err());
     }
 
     #[test]
-    fn validate_pool_name_starts_with_uppercase() {
-        assert!(validate_pool_name("MyPool").is_err());
+    fn validate_hub_name_starts_with_uppercase() {
+        assert!(validate_hub_name("MyHub").is_err());
     }
 
     #[test]
-    fn validate_pool_name_starts_with_digit() {
-        assert!(validate_pool_name("123pool").is_err());
+    fn validate_hub_name_starts_with_digit() {
+        assert!(validate_hub_name("123hub").is_err());
     }
 
     #[test]
-    fn validate_pool_name_contains_uppercase() {
-        assert!(validate_pool_name("myPool").is_err());
+    fn validate_hub_name_contains_uppercase() {
+        assert!(validate_hub_name("myHub").is_err());
     }
 
     #[test]
-    fn validate_pool_name_contains_hyphen() {
-        assert!(validate_pool_name("my-pool").is_err());
+    fn validate_hub_name_contains_hyphen() {
+        assert!(validate_hub_name("my-hub").is_err());
     }
 
     #[test]
-    fn validate_pool_name_starts_with_underscore() {
-        assert!(validate_pool_name("_pool").is_err());
+    fn validate_hub_name_starts_with_underscore() {
+        assert!(validate_hub_name("_hub").is_err());
     }
 
     #[test]
-    fn validate_pool_name_trailing_underscore() {
-        assert!(validate_pool_name("pool_").is_err());
-        assert!(validate_pool_name("my_feature_").is_err());
+    fn validate_hub_name_trailing_underscore() {
+        assert!(validate_hub_name("hub_").is_err());
+        assert!(validate_hub_name("my_feature_").is_err());
     }
 
     #[test]
-    fn validate_pool_name_consecutive_underscores() {
-        assert!(validate_pool_name("my__pool").is_err());
-        assert!(validate_pool_name("a__b__c").is_err());
+    fn validate_hub_name_consecutive_underscores() {
+        assert!(validate_hub_name("my__hub").is_err());
+        assert!(validate_hub_name("a__b__c").is_err());
     }
 }

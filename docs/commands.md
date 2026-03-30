@@ -32,17 +32,17 @@ clust [OPTIONS] [PROMPT]
 |------|------|-------------|
 | `-b` | `--background` | Start agent without attaching. Returns the agent ID. |
 | `-a` | `--attach <ID>` | Attach to an existing agent by its 6-char ID. |
-| `-s` | `--stop [ID]` | Without a value: stop the pool daemon and all agents. With a 6-char ID: stop that specific agent. |
+| `-s` | `--stop [ID]` | Without a value: stop the hub daemon and all agents. With a 6-char ID: stop that specific agent. |
 | `-d` | `--default` | Interactive picker to set the global default agent binary. Persisted in SQLite. |
 | `-u` | `--use <AGENT>` | Use a specific agent binary for this session only (does not change the default). |
 | `-e` | `--accept-edits` | Auto-accept edits. Agent-specific: for Claude, passes `--permission-mode acceptEdits`. Ignored for agents that don't support it. |
-| `-p` | `--pool <NAME>` | Assign the agent to a named pool (snake_case; default: `default_pool`). Pools are logical groupings within the single pool process. |
+| `-H` | `--hub <NAME>` | Assign the agent to a named hub (snake_case; default: `default_hub`). Hubs are logical groupings within the single hub process. |
 | `-h` | `--help` | Show help with all available options. |
 | `-V` | `--version` | Show version. |
 
 ### `clust ls`
 
-List all running agents in the pool.
+List all running agents in the hub.
 
 ```
 clust ls [OPTIONS]
@@ -51,12 +51,12 @@ clust ls [OPTIONS]
 | Flag | Long | Description |
 |------|------|-------------|
 | `-i` | `--select` | Interactive selector: navigate with arrow keys, Enter to attach or start a new agent. |
-| `-p` | `--pool <NAME>` | Filter agents by pool name. Without this flag, agents are grouped by pool. |
+| `-H` | `--hub <NAME>` | Filter agents by hub name. Without this flag, agents are grouped by hub. |
 
-Output (no filter — grouped by pool):
+Output (no filter — grouped by hub):
 
 ```
-  default_pool
+  default_hub
   ID       AGENT        STATUS     STARTED        ATTACHED
   a3f8c1   claude       running    14:32          1 terminal
   b7e2d9   claude       running    14:17          0 terminals
@@ -66,7 +66,7 @@ Output (no filter — grouped by pool):
   c4d5e6   aider        running    15:01          1 terminal
 ```
 
-Output (with `-p` filter — flat list):
+Output (with `-H` filter — flat list):
 
 ```
   ID       AGENT        STATUS     STARTED        ATTACHED
@@ -120,14 +120,14 @@ clust -e "refactor the auth module"
 # Background agent with accept-edits
 clust -e -b "run the test suite and fix failures"
 
-# Start an agent in a named pool
-clust -p my_feature "refactor auth"
+# Start an agent in a named hub
+clust -H my_feature "refactor auth"
 
-# List agents grouped by pool
+# List agents grouped by hub
 clust ls
 
-# List only agents in a specific pool
-clust ls -p my_feature
+# List only agents in a specific hub
+clust ls -H my_feature
 
 # Use a specific agent for this session only
 clust -u opencode "refactor auth"
@@ -147,7 +147,7 @@ clust ls -i
 # Stop a specific agent
 clust -s a3f8c1
 
-# Stop the pool and all agents
+# Stop the hub and all agents
 clust -s
 
 # Register the current repo for TUI tracking
@@ -178,7 +178,7 @@ These shortcuts are active when the CLI is attached to an agent session. They ar
 
 | Shortcut | Action |
 |----------|--------|
-| `Ctrl+Q` | Detach from agent (agent keeps running in pool) |
+| `Ctrl+Q` | Detach from agent (agent keeps running in hub) |
 
 ## Keyboard Shortcuts (Terminal UI)
 
@@ -188,8 +188,8 @@ These shortcuts are active in the `clust ui` dashboard. They are displayed in th
 
 | Shortcut | Action |
 |----------|--------|
-| `q` / `Esc` | Quit the UI (pool keeps running) |
-| `Q` | Quit the UI and stop the pool |
+| `q` / `Esc` | Quit the UI (hub keeps running) |
+| `Q` | Quit the UI and stop the hub |
 | `Tab` | Switch to next tab |
 | `Shift+Tab` | Switch to previous tab |
 | `?` | Toggle keyboard shortcut overlay |
@@ -203,7 +203,7 @@ These shortcuts are active in the `clust ui` dashboard. They are displayed in th
 | `←` | Collapse current item, or ascend to parent level |
 | `Enter` | Toggle collapse/expand on repos and categories |
 | `Shift+←` / `Shift+→` | Switch focus between left and right panels |
-| `v` | Toggle agent grouping between by-pool and by-repo (right panel) |
+| `v` | Toggle agent grouping between by-hub and by-repo (right panel) |
 
 **Overview tab (Options Bar focused):**
 

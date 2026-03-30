@@ -6,26 +6,26 @@ use tokio::sync::Mutex;
 // Integration tests for the agent module.
 // These tests spawn real PTY processes to verify the full lifecycle.
 
-/// Helper to create shared pool state for tests.
-fn new_shared_state() -> clust_pool::agent::SharedPoolState {
-    Arc::new(Mutex::new(clust_pool::agent::PoolState::new()))
+/// Helper to create shared hub state for tests.
+fn new_shared_state() -> clust_hub::agent::SharedHubState {
+    Arc::new(Mutex::new(clust_hub::agent::HubState::new()))
 }
 
 #[tokio::test]
 async fn spawn_agent_echo_produces_output() {
     let state = new_shared_state();
     let (id, binary) = {
-        let mut pool = state.lock().await;
-        clust_pool::agent::spawn_agent(
-            &mut pool,
-            clust_pool::agent::SpawnAgentParams {
+        let mut hub = state.lock().await;
+        clust_hub::agent::spawn_agent(
+            &mut hub,
+            clust_hub::agent::SpawnAgentParams {
                 prompt: None,
                 agent_binary: Some("echo".into()),
                 working_dir: "/tmp".into(),
                 cols: 80,
                 rows: 24,
                 accept_edits: false,
-                pool: clust_ipc::DEFAULT_POOL.into(),
+                hub: clust_ipc::DEFAULT_HUB.into(),
                 repo_path: None,
                 branch_name: None,
                 is_worktree: false,
@@ -41,8 +41,8 @@ async fn spawn_agent_echo_produces_output() {
 
     // Subscribe to output and wait for data
     let mut rx = {
-        let pool = state.lock().await;
-        let entry = pool.agents.get(&id).expect("agent should be in state");
+        let hub = state.lock().await;
+        let entry = hub.agents.get(&id).expect("agent should be in state");
         entry.output_tx.subscribe()
     };
 
@@ -53,16 +53,16 @@ async fn spawn_agent_echo_produces_output() {
     let timeout = tokio::time::timeout(std::time::Duration::from_secs(5), async {
         loop {
             match rx.recv().await {
-                Ok(clust_pool::agent::AgentEvent::Output(data)) => {
+                Ok(clust_hub::agent::AgentEvent::Output(data)) => {
                     assert!(!data.is_empty());
                     got_output = true;
                 }
-                Ok(clust_pool::agent::AgentEvent::Exited(code)) => {
+                Ok(clust_hub::agent::AgentEvent::Exited(code)) => {
                     assert_eq!(code, 0);
                     got_exit = true;
                     break;
                 }
-                Ok(clust_pool::agent::AgentEvent::PoolShutdown) => break,
+                Ok(clust_hub::agent::AgentEvent::HubShutdown) => break,
                 Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
                 Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
             }
@@ -76,9 +76,9 @@ async fn spawn_agent_echo_produces_output() {
 
     // Agent should be cleaned up from state after exit
     tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-    let pool = state.lock().await;
+    let hub = state.lock().await;
     assert!(
-        !pool.agents.contains_key(&id),
+        !hub.agents.contains_key(&id),
         "agent should be removed from state after exit"
     );
 }
@@ -87,17 +87,17 @@ async fn spawn_agent_echo_produces_output() {
 async fn spawn_agent_cat_receives_input_and_echoes() {
     let state = new_shared_state();
     let (id, _) = {
-        let mut pool = state.lock().await;
-        clust_pool::agent::spawn_agent(
-            &mut pool,
-            clust_pool::agent::SpawnAgentParams {
+        let mut hub = state.lock().await;
+        clust_hub::agent::spawn_agent(
+            &mut hub,
+            clust_hub::agent::SpawnAgentParams {
                 prompt: None,
                 agent_binary: Some("cat".into()),
                 working_dir: "/tmp".into(),
                 cols: 80,
                 rows: 24,
                 accept_edits: false,
-                pool: clust_ipc::DEFAULT_POOL.into(),
+                hub: clust_ipc::DEFAULT_HUB.into(),
                 repo_path: None,
                 branch_name: None,
                 is_worktree: false,
@@ -109,15 +109,15 @@ async fn spawn_agent_cat_receives_input_and_echoes() {
 
     // Subscribe to output
     let mut rx = {
-        let pool = state.lock().await;
-        let entry = pool.agents.get(&id).unwrap();
+        let hub = state.lock().await;
+        let entry = hub.agents.get(&id).unwrap();
         entry.output_tx.subscribe()
     };
 
     // Write input to the agent
     {
-        let mut pool = state.lock().await;
-        let entry = pool.agents.get_mut(&id).unwrap();
+        let mut hub = state.lock().await;
+        let entry = hub.agents.get_mut(&id).unwrap();
         use std::io::Write;
         entry.pty_writer.write_all(b"hello\n").unwrap();
     }
@@ -127,17 +127,17 @@ async fn spawn_agent_cat_receives_input_and_echoes() {
         let mut collected = Vec::new();
         loop {
             match rx.recv().await {
-                Ok(clust_pool::agent::AgentEvent::Output(data)) => {
+                Ok(clust_hub::agent::AgentEvent::Output(data)) => {
                     collected.extend_from_slice(&data);
                     let s = String::from_utf8_lossy(&collected);
                     if s.contains("hello") {
                         return collected;
                     }
                 }
-                Ok(clust_pool::agent::AgentEvent::Exited(_)) => {
+                Ok(clust_hub::agent::AgentEvent::Exited(_)) => {
                     return collected;
                 }
-                Ok(clust_pool::agent::AgentEvent::PoolShutdown) => return collected,
+                Ok(clust_hub::agent::AgentEvent::HubShutdown) => return collected,
                 Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
                 Err(tokio::sync::broadcast::error::RecvError::Closed) => return collected,
             }
@@ -152,8 +152,8 @@ async fn spawn_agent_cat_receives_input_and_echoes() {
 
     // Send EOF to cat (Ctrl+D) to make it exit
     {
-        let mut pool = state.lock().await;
-        if let Some(entry) = pool.agents.get_mut(&id) {
+        let mut hub = state.lock().await;
+        if let Some(entry) = hub.agents.get_mut(&id) {
             use std::io::Write;
             entry.pty_writer.write_all(&[0x04]).unwrap();
         }
@@ -167,17 +167,17 @@ async fn spawn_agent_cat_receives_input_and_echoes() {
 async fn multiple_subscribers_receive_same_output() {
     let state = new_shared_state();
     let (id, _) = {
-        let mut pool = state.lock().await;
-        clust_pool::agent::spawn_agent(
-            &mut pool,
-            clust_pool::agent::SpawnAgentParams {
+        let mut hub = state.lock().await;
+        clust_hub::agent::spawn_agent(
+            &mut hub,
+            clust_hub::agent::SpawnAgentParams {
                 prompt: None,
                 agent_binary: Some("cat".into()),
                 working_dir: "/tmp".into(),
                 cols: 80,
                 rows: 24,
                 accept_edits: false,
-                pool: clust_ipc::DEFAULT_POOL.into(),
+                hub: clust_ipc::DEFAULT_HUB.into(),
                 repo_path: None,
                 branch_name: None,
                 is_worktree: false,
@@ -189,15 +189,15 @@ async fn multiple_subscribers_receive_same_output() {
 
     // Subscribe BEFORE writing input to avoid race with fast-exiting commands
     let (mut rx1, mut rx2) = {
-        let pool = state.lock().await;
-        let entry = pool.agents.get(&id).unwrap();
+        let hub = state.lock().await;
+        let entry = hub.agents.get(&id).unwrap();
         (entry.output_tx.subscribe(), entry.output_tx.subscribe())
     };
 
     // Now send input; cat will echo it back to both subscribers
     {
-        let mut pool = state.lock().await;
-        if let Some(entry) = pool.agents.get_mut(&id) {
+        let mut hub = state.lock().await;
+        if let Some(entry) = hub.agents.get_mut(&id) {
             use std::io::Write;
             entry
                 .pty_writer
@@ -210,16 +210,16 @@ async fn multiple_subscribers_receive_same_output() {
 
     // Both should receive the same output
     async fn collect(
-        rx: &mut tokio::sync::broadcast::Receiver<clust_pool::agent::AgentEvent>,
+        rx: &mut tokio::sync::broadcast::Receiver<clust_hub::agent::AgentEvent>,
     ) -> Vec<u8> {
         let mut collected = Vec::new();
         loop {
             match rx.recv().await {
-                Ok(clust_pool::agent::AgentEvent::Output(data)) => {
+                Ok(clust_hub::agent::AgentEvent::Output(data)) => {
                     collected.extend_from_slice(&data);
                 }
-                Ok(clust_pool::agent::AgentEvent::Exited(_)) => break,
-                Ok(clust_pool::agent::AgentEvent::PoolShutdown) => break,
+                Ok(clust_hub::agent::AgentEvent::Exited(_)) => break,
+                Ok(clust_hub::agent::AgentEvent::HubShutdown) => break,
                 Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
                 Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
             }
@@ -252,17 +252,17 @@ async fn multiple_subscribers_receive_same_output() {
 async fn attached_count_tracks_subscribers() {
     let state = new_shared_state();
     let (id, _) = {
-        let mut pool = state.lock().await;
-        clust_pool::agent::spawn_agent(
-            &mut pool,
-            clust_pool::agent::SpawnAgentParams {
+        let mut hub = state.lock().await;
+        clust_hub::agent::spawn_agent(
+            &mut hub,
+            clust_hub::agent::SpawnAgentParams {
                 prompt: None,
                 agent_binary: Some("cat".into()),
                 working_dir: "/tmp".into(),
                 cols: 80,
                 rows: 24,
                 accept_edits: false,
-                pool: clust_ipc::DEFAULT_POOL.into(),
+                hub: clust_ipc::DEFAULT_HUB.into(),
                 repo_path: None,
                 branch_name: None,
                 is_worktree: false,
@@ -273,8 +273,8 @@ async fn attached_count_tracks_subscribers() {
     };
 
     {
-        let pool = state.lock().await;
-        let entry = pool.agents.get(&id).unwrap();
+        let hub = state.lock().await;
+        let entry = hub.agents.get(&id).unwrap();
         assert_eq!(entry.attached_count.load(Ordering::Relaxed), 0);
 
         // Simulate attaching
@@ -289,8 +289,8 @@ async fn attached_count_tracks_subscribers() {
 
     // Clean up: send EOF to cat
     {
-        let mut pool = state.lock().await;
-        if let Some(entry) = pool.agents.get_mut(&id) {
+        let mut hub = state.lock().await;
+        if let Some(entry) = hub.agents.get_mut(&id) {
             use std::io::Write;
             entry.pty_writer.write_all(&[0x04]).unwrap();
         }
@@ -302,17 +302,17 @@ async fn attached_count_tracks_subscribers() {
 async fn stop_agent_terminates_running_process() {
     let state = new_shared_state();
     let (id, _) = {
-        let mut pool = state.lock().await;
-        clust_pool::agent::spawn_agent(
-            &mut pool,
-            clust_pool::agent::SpawnAgentParams {
+        let mut hub = state.lock().await;
+        clust_hub::agent::spawn_agent(
+            &mut hub,
+            clust_hub::agent::SpawnAgentParams {
                 prompt: None,
                 agent_binary: Some("sleep".into()),
                 working_dir: "/tmp".into(),
                 cols: 80,
                 rows: 24,
                 accept_edits: false,
-                pool: clust_ipc::DEFAULT_POOL.into(),
+                hub: clust_ipc::DEFAULT_HUB.into(),
                 repo_path: None,
                 branch_name: None,
                 is_worktree: false,
@@ -324,26 +324,26 @@ async fn stop_agent_terminates_running_process() {
 
     // Verify agent exists
     {
-        let pool = state.lock().await;
-        assert!(pool.agents.contains_key(&id));
+        let hub = state.lock().await;
+        assert!(hub.agents.contains_key(&id));
     }
 
     // Stop the agent
-    let result = clust_pool::agent::stop_agent(&state, &id).await;
+    let result = clust_hub::agent::stop_agent(&state, &id).await;
     assert!(result.is_ok(), "stop_agent should succeed");
 
     // The PTY reader task should clean up the agent from state after process exits
     tokio::time::sleep(std::time::Duration::from_secs(1)).await;
-    let pool = state.lock().await;
+    let hub = state.lock().await;
     assert!(
-        !pool.agents.contains_key(&id),
+        !hub.agents.contains_key(&id),
         "agent should be removed from state after stop"
     );
 }
 
 #[tokio::test]
-async fn set_and_get_default_agent_via_pool_state() {
-    let mut state = clust_pool::agent::PoolState::new();
+async fn set_and_get_default_agent_via_hub_state() {
+    let mut state = clust_hub::agent::HubState::new();
 
     // Fresh state has no default
     assert_eq!(state.default_agent, None);
@@ -359,13 +359,13 @@ async fn set_and_get_default_agent_via_pool_state() {
     state.db = Some(conn);
 
     // Set default via DB
-    clust_pool::db::set_default_agent(state.db.as_ref().unwrap(), "claude").unwrap();
-    state.default_agent = clust_pool::db::get_default_agent(state.db.as_ref().unwrap());
+    clust_hub::db::set_default_agent(state.db.as_ref().unwrap(), "claude").unwrap();
+    state.default_agent = clust_hub::db::get_default_agent(state.db.as_ref().unwrap());
     assert_eq!(state.default_agent, Some("claude".to_string()));
 
     // Overwrite
-    clust_pool::db::set_default_agent(state.db.as_ref().unwrap(), "aider").unwrap();
-    state.default_agent = clust_pool::db::get_default_agent(state.db.as_ref().unwrap());
+    clust_hub::db::set_default_agent(state.db.as_ref().unwrap(), "aider").unwrap();
+    state.default_agent = clust_hub::db::get_default_agent(state.db.as_ref().unwrap());
     assert_eq!(state.default_agent, Some("aider".to_string()));
 }
 
@@ -373,17 +373,17 @@ async fn set_and_get_default_agent_via_pool_state() {
 async fn resize_agent_pty() {
     let state = new_shared_state();
     let (id, _) = {
-        let mut pool = state.lock().await;
-        clust_pool::agent::spawn_agent(
-            &mut pool,
-            clust_pool::agent::SpawnAgentParams {
+        let mut hub = state.lock().await;
+        clust_hub::agent::spawn_agent(
+            &mut hub,
+            clust_hub::agent::SpawnAgentParams {
                 prompt: None,
                 agent_binary: Some("cat".into()),
                 working_dir: "/tmp".into(),
                 cols: 80,
                 rows: 24,
                 accept_edits: false,
-                pool: clust_ipc::DEFAULT_POOL.into(),
+                hub: clust_ipc::DEFAULT_HUB.into(),
                 repo_path: None,
                 branch_name: None,
                 is_worktree: false,
@@ -395,8 +395,8 @@ async fn resize_agent_pty() {
 
     // Resize should not error
     {
-        let pool = state.lock().await;
-        let entry = pool.agents.get(&id).unwrap();
+        let hub = state.lock().await;
+        let entry = hub.agents.get(&id).unwrap();
         let result = entry.pty_master.resize(portable_pty::PtySize {
             rows: 40,
             cols: 120,
@@ -408,8 +408,8 @@ async fn resize_agent_pty() {
 
     // Clean up
     {
-        let mut pool = state.lock().await;
-        if let Some(entry) = pool.agents.get_mut(&id) {
+        let mut hub = state.lock().await;
+        if let Some(entry) = hub.agents.get_mut(&id) {
             use std::io::Write;
             entry.pty_writer.write_all(&[0x04]).unwrap();
         }
@@ -418,20 +418,20 @@ async fn resize_agent_pty() {
 }
 
 #[tokio::test]
-async fn spawn_agent_stores_custom_pool_name() {
+async fn spawn_agent_stores_custom_hub_name() {
     let state = new_shared_state();
     let (id, _) = {
-        let mut pool = state.lock().await;
-        clust_pool::agent::spawn_agent(
-            &mut pool,
-            clust_pool::agent::SpawnAgentParams {
+        let mut hub = state.lock().await;
+        clust_hub::agent::spawn_agent(
+            &mut hub,
+            clust_hub::agent::SpawnAgentParams {
                 prompt: None,
                 agent_binary: Some("cat".into()),
                 working_dir: "/tmp".into(),
                 cols: 80,
                 rows: 24,
                 accept_edits: false,
-                pool: "my_feature".into(),
+                hub: "my_feature".into(),
                 repo_path: None,
                 branch_name: None,
                 is_worktree: false,
@@ -441,17 +441,17 @@ async fn spawn_agent_stores_custom_pool_name() {
         .expect("spawn_agent should succeed")
     };
 
-    // Verify the pool name is stored on the entry
+    // Verify the hub name is stored on the entry
     {
-        let pool = state.lock().await;
-        let entry = pool.agents.get(&id).expect("agent should exist");
-        assert_eq!(entry.pool, "my_feature");
+        let hub = state.lock().await;
+        let entry = hub.agents.get(&id).expect("agent should exist");
+        assert_eq!(entry.hub, "my_feature");
     }
 
     // Clean up
     {
-        let mut pool = state.lock().await;
-        if let Some(entry) = pool.agents.get_mut(&id) {
+        let mut hub = state.lock().await;
+        if let Some(entry) = hub.agents.get_mut(&id) {
             use std::io::Write;
             entry.pty_writer.write_all(&[0x04]).unwrap();
         }
@@ -460,43 +460,43 @@ async fn spawn_agent_stores_custom_pool_name() {
 }
 
 #[tokio::test]
-async fn agents_in_different_pools_are_separated() {
+async fn agents_in_different_hubs_are_separated() {
     let state = new_shared_state();
 
-    // Spawn two agents in different pools
+    // Spawn two agents in different hubs
     let (id_a, _) = {
-        let mut pool = state.lock().await;
-        clust_pool::agent::spawn_agent(
-            &mut pool,
-            clust_pool::agent::SpawnAgentParams {
+        let mut hub = state.lock().await;
+        clust_hub::agent::spawn_agent(
+            &mut hub,
+            clust_hub::agent::SpawnAgentParams {
                 prompt: None,
                 agent_binary: Some("cat".into()),
                 working_dir: "/tmp".into(),
                 cols: 80,
                 rows: 24,
                 accept_edits: false,
-                pool: clust_ipc::DEFAULT_POOL.into(),
+                hub: clust_ipc::DEFAULT_HUB.into(),
                 repo_path: None,
                 branch_name: None,
                 is_worktree: false,
             },
             state.clone(),
         )
-        .expect("spawn default_pool agent")
+        .expect("spawn default_hub agent")
     };
 
     let (id_b, _) = {
-        let mut pool = state.lock().await;
-        clust_pool::agent::spawn_agent(
-            &mut pool,
-            clust_pool::agent::SpawnAgentParams {
+        let mut hub = state.lock().await;
+        clust_hub::agent::spawn_agent(
+            &mut hub,
+            clust_hub::agent::SpawnAgentParams {
                 prompt: None,
                 agent_binary: Some("cat".into()),
                 working_dir: "/tmp".into(),
                 cols: 80,
                 rows: 24,
                 accept_edits: false,
-                pool: "my_feature".into(),
+                hub: "my_feature".into(),
                 repo_path: None,
                 branch_name: None,
                 is_worktree: false,
@@ -506,48 +506,48 @@ async fn agents_in_different_pools_are_separated() {
         .expect("spawn my_feature agent")
     };
 
-    // Verify both agents exist with correct pools
+    // Verify both agents exist with correct hubs
     {
-        let pool = state.lock().await;
-        assert_eq!(pool.agents.len(), 2);
-        assert_eq!(pool.agents.get(&id_a).unwrap().pool, clust_ipc::DEFAULT_POOL);
-        assert_eq!(pool.agents.get(&id_b).unwrap().pool, "my_feature");
+        let hub = state.lock().await;
+        assert_eq!(hub.agents.len(), 2);
+        assert_eq!(hub.agents.get(&id_a).unwrap().hub, clust_ipc::DEFAULT_HUB);
+        assert_eq!(hub.agents.get(&id_b).unwrap().hub, "my_feature");
 
         // Simulate ListAgents filter: no filter returns all
-        let all: Vec<_> = pool.agents.values().collect();
+        let all: Vec<_> = hub.agents.values().collect();
         assert_eq!(all.len(), 2);
 
-        // Filter by default_pool returns only id_a
-        let default_only: Vec<_> = pool
+        // Filter by default_hub returns only id_a
+        let default_only: Vec<_> = hub
             .agents
             .values()
-            .filter(|e| e.pool == clust_ipc::DEFAULT_POOL)
+            .filter(|e| e.hub == clust_ipc::DEFAULT_HUB)
             .collect();
         assert_eq!(default_only.len(), 1);
         assert_eq!(default_only[0].id, id_a);
 
         // Filter by my_feature returns only id_b
-        let feature_only: Vec<_> = pool
+        let feature_only: Vec<_> = hub
             .agents
             .values()
-            .filter(|e| e.pool == "my_feature")
+            .filter(|e| e.hub == "my_feature")
             .collect();
         assert_eq!(feature_only.len(), 1);
         assert_eq!(feature_only[0].id, id_b);
 
-        // Filter by nonexistent pool returns empty
-        let none: Vec<_> = pool
+        // Filter by nonexistent hub returns empty
+        let none: Vec<_> = hub
             .agents
             .values()
-            .filter(|e| e.pool == "nonexistent")
+            .filter(|e| e.hub == "nonexistent")
             .collect();
         assert!(none.is_empty());
     }
 
     // Clean up both agents
     for id in [&id_a, &id_b] {
-        let mut pool = state.lock().await;
-        if let Some(entry) = pool.agents.get_mut(id as &str) {
+        let mut hub = state.lock().await;
+        if let Some(entry) = hub.agents.get_mut(id as &str) {
             use std::io::Write;
             entry.pty_writer.write_all(&[0x04]).unwrap();
         }

@@ -4,13 +4,13 @@ use std::time::Duration;
 use tokio::net::UnixStream;
 use tokio::time::sleep;
 
-use clust_ipc::{CliMessage, PoolMessage};
+use clust_ipc::{CliMessage, HubMessage};
 
-use crate::pool_launcher;
+use crate::hub_launcher;
 
-/// Connect to the pool, auto-spawning it if not running.
+/// Connect to the hub, auto-spawning it if not running.
 /// Retries every 50ms for up to 2 seconds after spawning.
-pub async fn connect_to_pool() -> io::Result<UnixStream> {
+pub async fn connect_to_hub() -> io::Result<UnixStream> {
     let sock = clust_ipc::socket_path();
 
     // Try connecting first without spawning
@@ -18,8 +18,8 @@ pub async fn connect_to_pool() -> io::Result<UnixStream> {
         return Ok(stream);
     }
 
-    // Pool not running — spawn it
-    pool_launcher::spawn_pool()?;
+    // Hub not running — spawn it
+    hub_launcher::spawn_hub()?;
 
     // Retry with backoff
     let max_wait = Duration::from_secs(2);
@@ -38,31 +38,31 @@ pub async fn connect_to_pool() -> io::Result<UnixStream> {
     Err(io::Error::new(
         io::ErrorKind::TimedOut,
         format!(
-            "timed out waiting for pool to start (check {} for errors)",
+            "timed out waiting for hub to start (check {} for errors)",
             clust_ipc::log_path().display()
         ),
     ))
 }
 
-/// Try to connect to an existing pool without spawning one.
+/// Try to connect to an existing hub without spawning one.
 pub async fn try_connect() -> io::Result<UnixStream> {
     UnixStream::connect(clust_ipc::socket_path()).await
 }
 
-/// Count unique pools by querying the agent list. Returns 1 on failure.
-pub async fn count_pools() -> usize {
+/// Count unique hubs by querying the agent list. Returns 1 on failure.
+pub async fn count_hubs() -> usize {
     let Ok(mut stream) = try_connect().await else {
         return 1;
     };
-    if clust_ipc::send_message(&mut stream, &CliMessage::ListAgents { pool: None })
+    if clust_ipc::send_message(&mut stream, &CliMessage::ListAgents { hub: None })
         .await
         .is_err()
     {
         return 1;
     }
-    match clust_ipc::recv_message::<PoolMessage>(&mut stream).await {
-        Ok(PoolMessage::AgentList { agents }) => {
-            let mut names: Vec<&str> = agents.iter().map(|a| a.pool.as_str()).collect();
+    match clust_ipc::recv_message::<HubMessage>(&mut stream).await {
+        Ok(HubMessage::AgentList { agents }) => {
+            let mut names: Vec<&str> = agents.iter().map(|a| a.hub.as_str()).collect();
             names.sort();
             names.dedup();
             names.len().max(1)
@@ -71,14 +71,14 @@ pub async fn count_pools() -> usize {
     }
 }
 
-/// Send a StopPool message and print the result.
+/// Send a StopHub message and print the result.
 pub async fn send_stop(stream: &mut UnixStream) -> io::Result<()> {
-    clust_ipc::send_message(stream, &CliMessage::StopPool).await?;
-    let response: PoolMessage = clust_ipc::recv_message(stream).await?;
+    clust_ipc::send_message(stream, &CliMessage::StopHub).await?;
+    let response: HubMessage = clust_ipc::recv_message(stream).await?;
 
     match response {
-        PoolMessage::Ok => {}
-        PoolMessage::Error { message } => eprintln!("error stopping pool: {message}"),
+        HubMessage::Ok => {}
+        HubMessage::Error { message } => eprintln!("error stopping hub: {message}"),
         _ => {}
     }
 
@@ -88,11 +88,11 @@ pub async fn send_stop(stream: &mut UnixStream) -> io::Result<()> {
 /// Send a StopAgent message and return the result.
 pub async fn send_stop_agent(stream: &mut UnixStream, id: &str) -> io::Result<()> {
     clust_ipc::send_message(stream, &CliMessage::StopAgent { id: id.to_string() }).await?;
-    let response: PoolMessage = clust_ipc::recv_message(stream).await?;
+    let response: HubMessage = clust_ipc::recv_message(stream).await?;
 
     match response {
-        PoolMessage::AgentStopped { .. } => Ok(()),
-        PoolMessage::Error { message } => {
+        HubMessage::AgentStopped { .. } => Ok(()),
+        HubMessage::Error { message } => {
             Err(io::Error::other(message))
         }
         _ => Ok(()),
@@ -109,11 +109,11 @@ pub async fn send_unregister_repo(
         &CliMessage::UnregisterRepo { path: path.to_string() },
     )
     .await?;
-    let response: PoolMessage = clust_ipc::recv_message(stream).await?;
+    let response: HubMessage = clust_ipc::recv_message(stream).await?;
 
     match response {
-        PoolMessage::RepoUnregistered { name, stopped_agents, .. } => Ok((name, stopped_agents)),
-        PoolMessage::Error { message } => {
+        HubMessage::RepoUnregistered { name, stopped_agents, .. } => Ok((name, stopped_agents)),
+        HubMessage::Error { message } => {
             Err(io::Error::other(message))
         }
         _ => Err(io::Error::other("unexpected response")),
@@ -130,11 +130,11 @@ pub async fn send_stop_repo_agents(
         &CliMessage::StopRepoAgents { path: path.to_string() },
     )
     .await?;
-    let response: PoolMessage = clust_ipc::recv_message(stream).await?;
+    let response: HubMessage = clust_ipc::recv_message(stream).await?;
 
     match response {
-        PoolMessage::RepoAgentsStopped { stopped_count, .. } => Ok(stopped_count),
-        PoolMessage::Error { message } => {
+        HubMessage::RepoAgentsStopped { stopped_count, .. } => Ok(stopped_count),
+        HubMessage::Error { message } => {
             Err(io::Error::other(message))
         }
         _ => Err(io::Error::other("unexpected response")),

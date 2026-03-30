@@ -9,7 +9,7 @@ use tokio::io::AsyncReadExt;
 use tokio::net::unix::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::sync::mpsc;
 
-use clust_ipc::{CliMessage, PoolMessage};
+use clust_ipc::{CliMessage, HubMessage};
 
 use crate::output_filter::{EscapeSequenceAssembler, FilterChain};
 use crate::scroll_break::{ScrollBreak, ScrollMode};
@@ -46,7 +46,7 @@ enum ScrollCommand {
     ExitScrollback,
 }
 
-/// An active terminal session attached to an agent in the pool.
+/// An active terminal session attached to an agent in the hub.
 pub struct AttachedSession {
     agent_id: String,
     agent_binary: String,
@@ -146,7 +146,7 @@ impl AttachedSession {
         let scrollback = Arc::new(Mutex::new(ScrollbackBuffer::new()));
         let (scroll_cmd_tx, mut scroll_cmd_rx) = mpsc::channel::<ScrollCommand>(16);
 
-        // Task 1: Read PoolMessages (output/exit) and render to terminal.
+        // Task 1: Read HubMessages (output/exit) and render to terminal.
         // Output passes through the filter chain to prevent split escape sequences.
         // All output is stored in the scrollback buffer for scroll-back viewing.
         let scroll_state_out = Arc::clone(&scroll_state);
@@ -159,9 +159,9 @@ impl AttachedSession {
 
             let end = loop {
                 tokio::select! {
-                    msg = clust_ipc::recv_message_read::<PoolMessage>(&mut reader) => {
+                    msg = clust_ipc::recv_message_read::<HubMessage>(&mut reader) => {
                         match msg {
-                            Ok(PoolMessage::AgentOutput { data, .. }) => {
+                            Ok(HubMessage::AgentOutput { data, .. }) => {
                                 let filtered = filter_chain.filter(&data);
                                 if !filtered.is_empty() {
                                     // Store in scrollback and adjust offset if scrolled
@@ -207,11 +207,11 @@ impl AttachedSession {
                                     }
                                 }
                             }
-                            Ok(PoolMessage::AgentExited { exit_code, .. }) => {
+                            Ok(HubMessage::AgentExited { exit_code, .. }) => {
                                 break SessionEnd::AgentExited(exit_code);
                             }
-                            Ok(PoolMessage::PoolShutdown) => {
-                                break SessionEnd::PoolShutdown;
+                            Ok(HubMessage::HubShutdown) => {
+                                break SessionEnd::HubShutdown;
                             }
                             Err(_) => {
                                 break SessionEnd::ConnectionLost;
@@ -264,7 +264,7 @@ impl AttachedSession {
             end
         });
 
-        // Task 2: Read raw stdin bytes and forward to pool.
+        // Task 2: Read raw stdin bytes and forward to hub.
         // In live mode, mouse scroll-up enters scrollback; other input forwarded to agent.
         // PageUp also enters scrollback; in scrollback mode, mouse scroll and
         // PageUp/PageDown navigate the buffer. Any other keypress exits scrollback.
@@ -537,7 +537,7 @@ impl AttachedSession {
 enum SessionEnd {
     Detached,
     AgentExited(i32),
-    PoolShutdown,
+    HubShutdown,
     ConnectionLost,
 }
 

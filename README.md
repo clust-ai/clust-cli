@@ -1,8 +1,8 @@
 # clust
 
-A CLI tool for managing AI agents with session multiplexing, background execution, and a persistent agent pool.
+A CLI tool for managing AI agents with session multiplexing, background execution, and a persistent agent hub.
 
-Run multiple AI agents (Claude Code, etc.) concurrently in a background daemon. Attach, detach, and reattach to sessions from any terminal.
+Run multiple AI agents (Claude Code, etc.) concurrently in a background hub daemon. Attach, detach, and reattach to sessions from any terminal.
 
 ## Install
 
@@ -16,7 +16,7 @@ Or build from source:
 git clone https://github.com/clust-ai/clust-cli.git
 cd clust-cli
 cargo build --release
-cp target/release/clust target/release/clust-pool ~/.clust/bin/
+cp target/release/clust target/release/clust-hub ~/.clust/bin/
 ```
 
 ## How It Works
@@ -29,7 +29,7 @@ cp target/release/clust target/release/clust-pool ~/.clust/bin/
                          │  Unix Domain Socket
                          │
                  ┌───────┴────────┐
-                 │   clust-pool   │  (background daemon)
+                 │   clust-hub    │  (background daemon)
                  │                │
                  │  ┌──────────┐  │
                  │  │ Agent PTY │  │  a3f8c1
@@ -43,7 +43,7 @@ cp target/release/clust target/release/clust-pool ~/.clust/bin/
                  └────────────────┘
 ```
 
-The CLI is a thin client. All agent processes live in `clust-pool`, a single background daemon that starts automatically on first use. Multiple terminals can attach to the same agent simultaneously.
+The CLI is a thin client. All agent processes live in `clust-hub`, a single background daemon that starts automatically on first use. Multiple terminals can attach to the same agent simultaneously.
 
 ## Usage
 
@@ -66,7 +66,7 @@ clust -a a3f8c1
 # Set default agent binary
 clust -d aider
 
-# Stop the pool and all agents
+# Stop the hub and all agents
 clust -s
 ```
 
@@ -76,7 +76,7 @@ clust -s
 |------|------|-------------|
 | `-b` | `--background` | Start agent without attaching. Returns the agent ID. |
 | `-a` | `--attach <ID>` | Attach to an existing agent by its 6-char ID. |
-| `-s` | `--stop` | Stop the pool daemon and all running agents. |
+| `-s` | `--stop` | Stop the hub daemon and all running agents. |
 | `-d` | `--default <AGENT>` | Set the default agent binary (e.g., `claude`, `aider`). |
 | `-h` | `--help` | Show help. |
 | `-V` | `--version` | Show version. |
@@ -94,10 +94,10 @@ Three crates in a Cargo workspace:
 | Crate | Description |
 |-------|-------------|
 | `clust-cli` | CLI binary users interact with. Installed as `clust`. |
-| `clust-pool` | Background daemon. Manages agent lifecycles, PTYs, and IPC. |
+| `clust-hub` | Background daemon. Manages agent lifecycles, PTYs, and IPC. |
 | `clust-ipc` | Shared IPC message types and serialization. |
 
-See [`docs/`](docs/) for detailed design docs covering [architecture](docs/architecture.md), [commands](docs/commands.md), [pool design](docs/pool.md), [storage schema](docs/storage.md), and [terminal UI](docs/terminal-ui.md).
+See [`docs/`](docs/) for detailed design docs covering [architecture](docs/architecture.md), [commands](docs/commands.md), [hub design](docs/hub.md), [storage schema](docs/storage.md), and [terminal UI](docs/terminal-ui.md).
 
 ## License
 

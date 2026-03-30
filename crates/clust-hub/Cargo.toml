@@ -1,14 +1,14 @@
 [package]
-name = "clust-pool"
+name = "clust-hub"
 version = "0.0.7"
 edition = "2021"
 
 [lib]
-name = "clust_pool"
+name = "clust_hub"
 path = "src/lib.rs"
 
 [[bin]]
-name = "clust-pool"
+name = "clust-hub"
 path = "src/main.rs"
 
 [dependencies]

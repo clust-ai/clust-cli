@@ -5,7 +5,7 @@ How clust forwards terminal I/O between child processes and the user's terminal.
 ## Architecture
 
 ```
-Child process ─► PTY ─► Pool (broadcast) ─► IPC ─► CLI ─► FilterChain ─► stdout
+Child process ─► PTY ─► Hub (broadcast) ─► IPC ─► CLI ─► FilterChain ─► stdout
                                                     CLI ◄── raw stdin (bytes)
 ```
 
