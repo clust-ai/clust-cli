@@ -65,9 +65,9 @@ If `<target-branch>` is a version branch (vX.X.X), ensure that version numbers t
 
 If `<target-branch>` is `main`, ensure version numbers in the codebase match the `<current-branch>` version.
 
-## STEP 8: Commit All Changes as Chore
+## STEP 8: Amend Changes into Previous Commit
 
-Run `git add -A` and commit with message: `chore: finalize for PR to <target-branch>`. If there are no new changes, note that and proceed.
+Run `git add -A` and amend the previous commit with `git commit --amend --no-edit`. This folds any finalization changes (docs updates, version bumps, lint fixes) into the preceding commit instead of creating a separate "chore" commit. If there are no new changes, note that and proceed.
 
 ## STEP 9: Rebase with Target Branch
 
