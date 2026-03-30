@@ -239,6 +239,13 @@ impl Default for TreeSelection {
 }
 
 impl TreeSelection {
+    /// Returns true if the selected repo is the synthetic "No Repository" entry.
+    fn is_unlinked_repo(&self, repos: &[RepoInfo]) -> bool {
+        repos
+            .get(self.repo_idx)
+            .is_some_and(|r| r.path.is_empty())
+    }
+
     /// Returns valid category indices (0=local, 1=remote) for the selected repo.
     fn visible_categories(&self, repos: &[RepoInfo]) -> Vec<usize> {
         let Some(repo) = repos.get(self.repo_idx) else {
@@ -273,6 +280,20 @@ impl TreeSelection {
             return;
         }
         self.repo_idx = self.repo_idx.min(repos.len() - 1);
+
+        // "No Repository" has no categories — snap Category level to Repo
+        if self.is_unlinked_repo(repos) {
+            if self.level == TreeLevel::Category {
+                self.level = TreeLevel::Repo;
+            }
+            let bc = repos[self.repo_idx].local_branches.len();
+            if bc == 0 && self.level == TreeLevel::Branch {
+                self.level = TreeLevel::Repo;
+            } else if bc > 0 && self.level == TreeLevel::Branch {
+                self.branch_idx = self.branch_idx.min(bc - 1);
+            }
+            return;
+        }
 
         let cats = self.visible_categories(repos);
         if cats.is_empty() {
@@ -352,11 +373,23 @@ impl TreeSelection {
             TreeLevel::Repo => {
                 // Only descend if expanded; collapsed repos require Enter to open
                 if !self.is_repo_collapsed(self.repo_idx) {
-                    let cats = self.visible_categories(repos);
-                    if !cats.is_empty() {
-                        self.level = TreeLevel::Category;
-                        self.category_idx = cats[0];
-                        self.branch_idx = 0;
+                    if self.is_unlinked_repo(repos) {
+                        // Skip category level for "No Repository"
+                        let bc = repos
+                            .get(self.repo_idx)
+                            .map_or(0, |r| r.local_branches.len());
+                        if bc > 0 {
+                            self.level = TreeLevel::Branch;
+                            self.category_idx = 0;
+                            self.branch_idx = 0;
+                        }
+                    } else {
+                        let cats = self.visible_categories(repos);
+                        if !cats.is_empty() {
+                            self.level = TreeLevel::Category;
+                            self.category_idx = cats[0];
+                            self.branch_idx = 0;
+                        }
                     }
                 }
             }
@@ -374,11 +407,18 @@ impl TreeSelection {
     }
 
     /// Left arrow: navigate up one level (never collapses — use Enter to toggle).
-    fn ascend(&mut self) {
+    fn ascend(&mut self, repos: &[RepoInfo]) {
         match self.level {
             TreeLevel::Repo => {} // already at top
             TreeLevel::Category => self.level = TreeLevel::Repo,
-            TreeLevel::Branch => self.level = TreeLevel::Category,
+            TreeLevel::Branch => {
+                if self.is_unlinked_repo(repos) {
+                    // Skip category level for "No Repository"
+                    self.level = TreeLevel::Repo;
+                } else {
+                    self.level = TreeLevel::Category;
+                }
+            }
         }
     }
 
@@ -450,7 +490,6 @@ pub fn run(hub_name: &str) -> io::Result<()> {
     let mut hub_stopped = false;
     let mut hub_count: usize = 1;
     let mut show_help = false;
-    let mut last_help_press = Instant::now();
     let mut overview_state = OverviewState::new();
     let mut last_content_area = Rect::default();
 
@@ -468,17 +507,43 @@ pub fn run(hub_name: &str) -> io::Result<()> {
         }
         if hub_running && last_repo_fetch.elapsed() >= AGENT_FETCH_INTERVAL {
             repos = fetch_repos();
-            selection.clamp(&repos);
             last_repo_fetch = Instant::now();
         }
+
+        // Build display_repos: real repos + synthetic "No Repository" for unlinked agents
+        let display_repos = {
+            let mut dr = repos.clone();
+            let unlinked: Vec<&AgentInfo> =
+                agents.iter().filter(|a| a.repo_path.is_none()).collect();
+            if !unlinked.is_empty() {
+                dr.push(RepoInfo {
+                    path: String::new(),
+                    name: "No Repository".to_string(),
+                    local_branches: unlinked
+                        .iter()
+                        .map(|a| {
+                            let dir_name = std::path::Path::new(&a.working_dir)
+                                .file_name()
+                                .map(|n| n.to_string_lossy().into_owned())
+                                .unwrap_or_else(|| a.working_dir.clone());
+                            clust_ipc::BranchInfo {
+                                name: format!("{} — {}", a.agent_binary, dir_name),
+                                is_head: false,
+                                active_agent_count: 1,
+                                is_worktree: false,
+                            }
+                        })
+                        .collect(),
+                    remote_branches: vec![],
+                });
+            }
+            dr
+        };
+        selection.clamp(&display_repos);
 
         // Sync overview agent connections when agents are refreshed
         if agents_refreshed && active_tab == ActiveTab::Overview {
             overview_state.sync_agents(&agents, last_content_area);
-        }
-
-        if show_help && last_help_press.elapsed() > Duration::from_millis(250) {
-            show_help = false;
         }
 
         let hub_status = hub_running;
@@ -516,7 +581,7 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                     render_left_panel(
                         frame,
                         left_area,
-                        &repos,
+                        &display_repos,
                         &selection,
                         cur_focus == FocusPanel::Left,
                     );
@@ -630,7 +695,6 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                             }
                             KeyCode::Char('?') => {
                                 show_help = !show_help;
-                                last_help_press = Instant::now();
                             }
                             // Overview OptionsBar navigation
                             _ if active_tab == ActiveTab::Overview => {
@@ -688,7 +752,7 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                     }
                                     KeyCode::Up => match focus {
                                         FocusPanel::Left => {
-                                            selection.move_up(&repos)
+                                            selection.move_up(&display_repos)
                                         }
                                         FocusPanel::Right => {
                                             agent_selection
@@ -697,7 +761,7 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                     },
                                     KeyCode::Down => match focus {
                                         FocusPanel::Left => {
-                                            selection.move_down(&repos)
+                                            selection.move_down(&display_repos)
                                         }
                                         FocusPanel::Right => {
                                             agent_selection
@@ -706,7 +770,7 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                     },
                                     KeyCode::Right => match focus {
                                         FocusPanel::Left => {
-                                            selection.descend(&repos)
+                                            selection.descend(&display_repos)
                                         }
                                         FocusPanel::Right => {
                                             agent_selection
@@ -714,7 +778,7 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                         }
                                     },
                                     KeyCode::Left => match focus {
-                                        FocusPanel::Left => selection.ascend(),
+                                        FocusPanel::Left => selection.ascend(&display_repos),
                                         FocusPanel::Right => {
                                             agent_selection
                                                 .prev_group(&agents, agent_view_mode)
@@ -941,6 +1005,51 @@ fn build_repo_tree_lines(
 
         // Skip children if repo is collapsed
         if repo_collapsed {
+            continue;
+        }
+
+        // Synthetic "No Repository" entry: show agents directly, no categories
+        if repo.path.is_empty() {
+            for (i, agent) in repo.local_branches.iter().enumerate() {
+                let is_last = i == repo.local_branches.len() - 1;
+                let connector = if is_last { "└──" } else { "├──" };
+                let branch_selected = is_this_repo
+                    && selection.level == TreeLevel::Branch
+                    && i == selection.branch_idx;
+                let bg = if branch_selected {
+                    Some(theme::R_BG_HOVER)
+                } else {
+                    None
+                };
+                let indicator = if branch_selected { "▸ " } else { "  " };
+                let mut prefix_style = Style::default().fg(theme::R_TEXT_TERTIARY);
+                if let Some(bg_color) = bg {
+                    prefix_style = prefix_style.bg(bg_color);
+                }
+                let mut spans = vec![Span::styled(
+                    format!("   {connector} {indicator}"),
+                    prefix_style,
+                )];
+                // Active indicator
+                let mut dot_style = Style::default().fg(theme::R_SUCCESS);
+                if let Some(bg_color) = bg {
+                    dot_style = dot_style.bg(bg_color);
+                }
+                spans.push(Span::styled("● ", dot_style));
+                // Agent name
+                let name_color = if branch_selected {
+                    theme::R_ACCENT_BRIGHT
+                } else {
+                    theme::R_TEXT_PRIMARY
+                };
+                let mut name_style =
+                    Style::default().fg(name_color).add_modifier(Modifier::BOLD);
+                if let Some(bg_color) = bg {
+                    name_style = name_style.bg(bg_color);
+                }
+                spans.push(Span::styled(agent.name.clone(), name_style));
+                lines.push(pad_line(spans, width, bg));
+            }
             continue;
         }
 
@@ -1556,11 +1665,11 @@ fn render_status_bar(
                 "Shift+\u{2191} options  Shift+\u{2190}/\u{2192} switch agent"
             }
             OverviewFocus::OptionsBar => {
-                "Shift+\u{2193} enter terminal  Shift+\u{2190}/\u{2192} scroll  q quit  Hold ? for keys"
+                "Shift+\u{2193} enter terminal  Shift+\u{2190}/\u{2192} scroll  q quit  Press ? for keys"
             }
         }
     } else {
-        "q quit  Q stop+quit  Hold ? for keys"
+        "q quit  Q stop+quit  Press ? for keys"
     };
 
     left_spans.extend([
@@ -1943,11 +2052,11 @@ mod tests {
         let mut sel = TreeSelection::default();
         sel.descend(&repos); // -> Category
         sel.descend(&repos); // -> Branch
-        sel.ascend(); // -> Category
+        sel.ascend(&repos); // -> Category
         assert_eq!(sel.level, TreeLevel::Category);
-        sel.ascend(); // -> Repo (ascend always goes up, never collapses)
+        sel.ascend(&repos); // -> Repo (ascend always goes up, never collapses)
         assert_eq!(sel.level, TreeLevel::Repo);
-        sel.ascend(); // no-op, already at top
+        sel.ascend(&repos); // no-op, already at top
         assert_eq!(sel.level, TreeLevel::Repo);
     }
 
@@ -2343,9 +2452,10 @@ mod tests {
 
     #[test]
     fn ascend_from_repo_is_noop() {
+        let repos = sample_repos();
         let mut sel = TreeSelection::default();
         assert!(!sel.is_repo_collapsed(0));
-        sel.ascend(); // already at top — no-op, does NOT collapse
+        sel.ascend(&repos); // already at top — no-op, does NOT collapse
         assert!(!sel.is_repo_collapsed(0));
         assert_eq!(sel.level, TreeLevel::Repo);
     }
@@ -2381,7 +2491,7 @@ mod tests {
         let mut sel = TreeSelection::default();
         sel.descend(&repos); // -> Category
         assert_eq!(sel.level, TreeLevel::Category);
-        sel.ascend(); // always goes to Repo level
+        sel.ascend(&repos); // always goes to Repo level
         assert_eq!(sel.level, TreeLevel::Repo);
     }
 }
