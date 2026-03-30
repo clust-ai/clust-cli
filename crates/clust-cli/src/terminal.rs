@@ -157,6 +157,11 @@ impl AttachedSession {
             let mut filter_chain = FilterChain::new();
             filter_chain.push(Box::new(EscapeSequenceAssembler::new()));
 
+            // During replay, output is stored in scrollback but not written to
+            // stdout. This prevents a flash of historical content before the
+            // agent's SIGWINCH redraw provides a clean screen.
+            let mut replaying = true;
+
             let end = loop {
                 tokio::select! {
                     msg = clust_ipc::recv_message_read::<HubMessage>(&mut reader) => {
@@ -164,8 +169,7 @@ impl AttachedSession {
                             Ok(HubMessage::AgentOutput { data, .. }) => {
                                 let filtered = filter_chain.filter(&data);
                                 if !filtered.is_empty() {
-                                    // Store in scrollback and adjust offset if scrolled
-                                    let should_write;
+                                    // Always store in scrollback
                                     {
                                         let mut sb = scrollback_out.lock().unwrap();
                                         let lines_before = sb.total_lines();
@@ -184,8 +188,11 @@ impl AttachedSession {
                                             let max = state.anchored_total.saturating_sub(vp);
                                             state.offset = state.offset.min(max);
                                         }
-                                        should_write = state.offset == 0;
                                     }
+
+                                    // Only write to stdout after replay is complete
+                                    let should_write = !replaying
+                                        && scroll_state_out.lock().unwrap().offset == 0;
 
                                     if should_write {
                                         let (_, total_rows) = terminal::size().unwrap_or((80, 24));
@@ -206,6 +213,9 @@ impl AttachedSession {
                                         let _ = stdout.flush();
                                     }
                                 }
+                            }
+                            Ok(HubMessage::AgentReplayComplete { .. }) => {
+                                replaying = false;
                             }
                             Ok(HubMessage::AgentExited { exit_code, .. }) => {
                                 break SessionEnd::AgentExited(exit_code);

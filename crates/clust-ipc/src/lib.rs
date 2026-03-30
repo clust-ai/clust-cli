@@ -86,6 +86,7 @@ pub enum HubMessage {
     RepoUnregistered { path: String, name: String, stopped_agents: usize },
     RepoAgentsStopped { path: String, stopped_count: usize },
     RepoList { repos: Vec<RepoInfo> },
+    AgentReplayComplete { id: String },
 }
 
 /// Returns the clust data directory: `~/.clust/`.
