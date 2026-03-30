@@ -410,6 +410,9 @@ async fn handle_start(
                 );
                 std::process::exit(1);
             }
+            // Exit immediately to avoid tokio runtime shutdown blocking on
+            // the orphaned stdin blocking-read thread.
+            std::process::exit(0);
         }
         PoolMessage::Error { message } => {
             if let Some(s) = spinner {
@@ -485,6 +488,9 @@ async fn handle_attach(id: String) {
                 );
                 std::process::exit(1);
             }
+            // Exit immediately to avoid tokio runtime shutdown blocking on
+            // the orphaned stdin blocking-read thread.
+            std::process::exit(0);
         }
         PoolMessage::Error { message } => {
             eprintln!(
