@@ -201,7 +201,7 @@ These shortcuts are active in the `clust ui` dashboard. They are displayed in th
 | `↑` / `↓` | Move selection within current level |
 | `→` | Descend into selected item, or expand if collapsed |
 | `←` | Collapse current item, or ascend to parent level |
-| `Enter` | Toggle collapse/expand on repos and categories |
+| `Enter` | Toggle collapse/expand (left panel); enter focus mode for selected agent (right panel) |
 | `Shift+←` / `Shift+→` | Switch focus between left and right panels |
 | `v` | Toggle agent grouping between by-hub and by-repo (right panel) |
 
@@ -217,5 +217,16 @@ These shortcuts are active in the `clust ui` dashboard. They are displayed in th
 | Shortcut | Action |
 |----------|--------|
 | `Shift+↑` | Exit terminal, return to options bar |
+| `Shift+↓` | Enter focus mode for the focused agent |
 | `Shift+←` / `Shift+→` | Switch to previous/next agent panel |
+| All other keys | Forwarded to the focused agent's PTY |
+
+**Focus tab:**
+
+| Shortcut | Action |
+|----------|--------|
+| `Esc` | Exit focus mode, return to previous tab |
+| `Shift+↑` | Exit focus mode, return to previous tab |
+| `Shift+PageUp` | Scroll up through scrollback history |
+| `Shift+PageDown` | Scroll down through scrollback history |
 | All other keys | Forwarded to the focused agent's PTY |

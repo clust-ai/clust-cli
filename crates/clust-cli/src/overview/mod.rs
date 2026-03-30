@@ -781,3 +781,138 @@ fn render_empty_state(frame: &mut Frame, area: Rect) {
         area,
     );
 }
+
+// ---------------------------------------------------------------------------
+// Focus mode
+// ---------------------------------------------------------------------------
+
+/// State for the single-agent focus mode view.
+pub struct FocusModeState {
+    pub panel: Option<AgentPanel>,
+    output_rx: mpsc::Receiver<AgentOutputEvent>,
+    output_tx: mpsc::Sender<AgentOutputEvent>,
+    panel_cols: u16,
+    panel_rows: u16,
+}
+
+impl FocusModeState {
+    pub fn new() -> Self {
+        let (output_tx, output_rx) = mpsc::channel(512);
+        Self {
+            panel: None,
+            output_rx,
+            output_tx,
+            panel_cols: 80,
+            panel_rows: 24,
+        }
+    }
+
+    /// Open an agent in focus mode, replacing any existing panel.
+    pub fn open_agent(&mut self, agent_id: &str, agent_binary: &str, cols: u16, rows: u16) {
+        self.close_panel();
+
+        self.panel_cols = cols;
+        self.panel_rows = rows;
+
+        let id = agent_id.to_string();
+        let binary = agent_binary.to_string();
+        let event_tx = self.output_tx.clone();
+        let (command_tx, command_rx) = mpsc::channel::<PanelCommand>(64);
+
+        let task_agent_id = id.clone();
+        let handle = tokio::task::spawn(async move {
+            agent_connection_task(task_agent_id, cols, rows, event_tx, command_rx).await;
+        });
+
+        self.panel = Some(AgentPanel {
+            id,
+            agent_binary: binary,
+            vterm: VirtualTerminal::new(cols as usize, rows as usize),
+            command_tx,
+            exited: false,
+            panel_scroll_offset: 0,
+            task_handle: handle,
+        });
+    }
+
+    /// Drain all pending output events from the background task.
+    pub fn drain_output_events(&mut self) {
+        while let Ok(event) = self.output_rx.try_recv() {
+            match event {
+                AgentOutputEvent::Output { id, data } => {
+                    if let Some(panel) = self.panel.as_mut().filter(|p| p.id == id) {
+                        panel.vterm.process(&data);
+                    }
+                }
+                AgentOutputEvent::Exited { id, .. }
+                | AgentOutputEvent::ConnectionLost { id } => {
+                    if let Some(panel) = self.panel.as_mut().filter(|p| p.id == id) {
+                        panel.exited = true;
+                    }
+                }
+            }
+        }
+    }
+
+    /// Send input bytes to the focused agent.
+    pub fn send_input(&self, data: Vec<u8>) {
+        if let Some(panel) = &self.panel {
+            let _ = panel.command_tx.try_send(PanelCommand::Input(data));
+        }
+    }
+
+    /// Handle terminal resize.
+    pub fn handle_resize(&mut self, cols: u16, rows: u16) {
+        if cols == self.panel_cols && rows == self.panel_rows {
+            return;
+        }
+        self.panel_cols = cols;
+        self.panel_rows = rows;
+        if let Some(panel) = &mut self.panel {
+            if panel
+                .command_tx
+                .try_send(PanelCommand::Resize { cols, rows })
+                .is_ok()
+            {
+                panel.vterm.resize(cols as usize, rows as usize);
+            }
+        }
+    }
+
+    /// Shut down the current panel and clean up.
+    pub fn shutdown(&mut self) {
+        self.close_panel();
+    }
+
+    pub fn is_active(&self) -> bool {
+        self.panel.is_some()
+    }
+
+    fn close_panel(&mut self) {
+        if let Some(panel) = self.panel.take() {
+            let _ = panel.command_tx.try_send(PanelCommand::Detach);
+            panel.task_handle.abort();
+        }
+    }
+}
+
+/// Render the focus mode view: 60% empty left, 40% agent panel right.
+pub fn render_focus_mode(frame: &mut Frame, area: Rect, state: &FocusModeState) {
+    let [left_area, right_area] = Layout::horizontal([
+        Constraint::Percentage(60),
+        Constraint::Percentage(40),
+    ])
+    .areas(area);
+
+    // Left side: empty
+    frame.render_widget(
+        Block::default().style(Style::default().bg(theme::R_BG_BASE)),
+        left_area,
+    );
+
+    // Right side: agent panel or empty state
+    match &state.panel {
+        Some(panel) => render_agent_panel(frame, right_area, panel, true),
+        None => render_empty_state(frame, right_area),
+    }
+}
