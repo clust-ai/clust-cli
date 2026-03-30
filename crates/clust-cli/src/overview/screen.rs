@@ -61,14 +61,17 @@ impl Screen {
     pub fn resize(&mut self, cols: usize, rows: usize) {
         let cols = cols.max(1);
         let rows = rows.max(1);
-        self.grid.resize_with(rows, || vec![Cell::default(); cols]);
-        for row in &mut self.grid {
-            row.resize_with(cols, Cell::default);
+        if cols == self.cols && rows == self.rows {
+            return;
         }
+        // Clear grid to prevent stale content artifacts after resize.
+        // The agent will send a full redraw after receiving SIGWINCH.
+        self.grid.clear();
+        self.grid.resize_with(rows, || vec![Cell::default(); cols]);
         self.cols = cols;
         self.rows = rows;
-        self.cursor_row = self.cursor_row.min(rows - 1);
-        self.cursor_col = self.cursor_col.min(cols - 1);
+        self.cursor_row = 0;
+        self.cursor_col = 0;
         self.scroll_top = 0;
         self.scroll_bottom = rows - 1;
     }
@@ -785,8 +788,18 @@ mod tests {
         vt.resize(10, 5);
         assert_eq!(vt.screen.cols, 10);
         assert_eq!(vt.screen.rows, 5);
+        // Grid is cleared on resize to prevent stale content artifacts
         let lines = screen_text(&vt.screen);
-        assert_eq!(&lines[0], "Hello     ");
+        assert_eq!(&lines[0], "          ");
+    }
+
+    #[test]
+    fn test_resize_noop_preserves_content() {
+        let mut vt = VirtualTerminal::new(5, 3);
+        vt.process(b"Hello");
+        vt.resize(5, 3); // same dimensions — no-op
+        let lines = screen_text(&vt.screen);
+        assert_eq!(&lines[0], "Hello");
     }
 
     #[test]
