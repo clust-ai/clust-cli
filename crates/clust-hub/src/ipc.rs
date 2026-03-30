@@ -495,23 +495,51 @@ async fn handle_attached_session(
     mut writer: OwnedWriteHalf,
     state: SharedHubState,
 ) -> io::Result<()> {
-    // Subscribe to agent output broadcast and assign a client ID
-    let (mut output_rx, client_id) = {
+    // Subscribe to agent output broadcast and assign a client ID.
+    // Also grab a handle to the replay buffer for replay-on-attach and lag recovery.
+    let (mut output_rx, client_id, replay_buf) = {
         let hub = state.lock().await;
         let entry = hub.agents.get(agent_id).ok_or_else(|| {
             io::Error::new(io::ErrorKind::NotFound, "agent not found")
         })?;
         entry.attached_count.fetch_add(1, Ordering::Relaxed);
         let cid = entry.next_client_id();
-        (entry.output_tx.subscribe(), cid)
+        (entry.output_tx.subscribe(), cid, entry.replay_buffer.clone())
     };
 
     let agent_id_owned = agent_id.to_string();
+
+    // Replay buffered output before starting the live stream.
+    // Sent as regular AgentOutput chunks so both terminal and overview
+    // consumers process them through their existing pipelines.
+    {
+        let replay_data = replay_buf.lock().unwrap().snapshot();
+        const REPLAY_CHUNK_SIZE: usize = 32 * 1024;
+        for chunk in replay_data.chunks(REPLAY_CHUNK_SIZE) {
+            clust_ipc::send_message_write(
+                &mut writer,
+                &HubMessage::AgentOutput {
+                    id: agent_id_owned.clone(),
+                    data: chunk.to_vec(),
+                },
+            )
+            .await?;
+        }
+        clust_ipc::send_message_write(
+            &mut writer,
+            &HubMessage::AgentReplayComplete {
+                id: agent_id_owned.clone(),
+            },
+        )
+        .await?;
+    }
+
     let state_for_cleanup = state.clone();
     let agent_id_for_cleanup = agent_id_owned.clone();
 
     // Task 1: Read from broadcast channel, send HubMessages to CLI
     let agent_id_for_output = agent_id_owned.clone();
+    let replay_buf_for_output = replay_buf.clone();
     let output_task = tokio::spawn(async move {
         loop {
             match output_rx.recv().await {
@@ -549,7 +577,23 @@ async fn handle_attached_session(
                     break;
                 }
                 Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
-                    // Dropped frames — OK for terminal output, client catches up
+                    // Lag recovery: resend replay buffer to resync the client
+                    let replay_data = replay_buf_for_output.lock().unwrap().snapshot();
+                    const REPLAY_CHUNK_SIZE: usize = 32 * 1024;
+                    for chunk in replay_data.chunks(REPLAY_CHUNK_SIZE) {
+                        if clust_ipc::send_message_write(
+                            &mut writer,
+                            &HubMessage::AgentOutput {
+                                id: agent_id_for_output.clone(),
+                                data: chunk.to_vec(),
+                            },
+                        )
+                        .await
+                        .is_err()
+                        {
+                            return;
+                        }
+                    }
                     continue;
                 }
                 Err(tokio::sync::broadcast::error::RecvError::Closed) => {

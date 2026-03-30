@@ -1,10 +1,49 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::io::Read;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
 
 use portable_pty::{CommandBuilder, MasterPty, PtySize};
 use tokio::sync::{broadcast, Mutex};
+
+// ---------------------------------------------------------------------------
+// ReplayBuffer — per-agent ring buffer of raw PTY output
+// ---------------------------------------------------------------------------
+
+/// Default replay buffer capacity: 512 KB per agent.
+const REPLAY_BUFFER_CAPACITY: usize = 512 * 1024;
+
+/// Ring buffer that stores recent PTY output bytes for replay on late attach.
+///
+/// Uses `std::sync::Mutex` (not tokio) because it is accessed from the
+/// blocking PTY reader thread. The critical section is just a memcpy.
+pub struct ReplayBuffer {
+    data: VecDeque<u8>,
+    capacity: usize,
+}
+
+impl ReplayBuffer {
+    pub fn new() -> Self {
+        Self {
+            data: VecDeque::with_capacity(REPLAY_BUFFER_CAPACITY),
+            capacity: REPLAY_BUFFER_CAPACITY,
+        }
+    }
+
+    /// Append bytes, evicting the oldest if over capacity.
+    pub fn push(&mut self, bytes: &[u8]) {
+        self.data.extend(bytes);
+        if self.data.len() > self.capacity {
+            let excess = self.data.len() - self.capacity;
+            self.data.drain(..excess);
+        }
+    }
+
+    /// Return a copy of all buffered bytes.
+    pub fn snapshot(&self) -> Vec<u8> {
+        self.data.iter().copied().collect()
+    }
+}
 
 /// Shared hub state, accessible from all IPC handler tasks.
 pub type SharedHubState = Arc<Mutex<HubState>>;
@@ -42,6 +81,8 @@ pub struct AgentEntry {
     pub pty_master: Box<dyn MasterPty + Send>,
     pub pty_writer: Box<dyn std::io::Write + Send>,
     pub output_tx: broadcast::Sender<AgentEvent>,
+    /// Ring buffer of recent PTY output for replay on late attach.
+    pub replay_buffer: Arc<std::sync::Mutex<ReplayBuffer>>,
     pub attached_count: Arc<AtomicUsize>,
     /// Per-client terminal sizes: client_id → (cols, rows).
     pub client_sizes: HashMap<u64, (u16, u16)>,
@@ -190,10 +231,18 @@ pub fn spawn_agent(
         .try_clone_reader()
         .map_err(|e| format!("clone reader failed: {e}"))?;
 
-    let (output_tx, _) = broadcast::channel::<AgentEvent>(256);
+    let (output_tx, _) = broadcast::channel::<AgentEvent>(1024);
+    let replay_buffer = Arc::new(std::sync::Mutex::new(ReplayBuffer::new()));
 
     // Start background task to read PTY output and broadcast to subscribers
-    spawn_pty_reader(reader, child, output_tx.clone(), id.clone(), shared_state);
+    spawn_pty_reader(
+        reader,
+        child,
+        output_tx.clone(),
+        replay_buffer.clone(),
+        id.clone(),
+        shared_state,
+    );
 
     let started_at = chrono::Utc::now().to_rfc3339();
     let binary_name = binary.clone();
@@ -208,6 +257,7 @@ pub fn spawn_agent(
         pty_master: pair.master,
         pty_writer: writer,
         output_tx,
+        replay_buffer,
         attached_count: Arc::new(AtomicUsize::new(0)),
         client_sizes: HashMap::new(),
         current_pty_size: (params.cols, params.rows),
@@ -231,6 +281,7 @@ fn spawn_pty_reader(
     mut reader: Box<dyn Read + Send>,
     mut child: Box<dyn portable_pty::Child + Send>,
     output_tx: broadcast::Sender<AgentEvent>,
+    replay_buf: Arc<std::sync::Mutex<ReplayBuffer>>,
     agent_id: String,
     state: SharedHubState,
 ) {
@@ -240,7 +291,9 @@ fn spawn_pty_reader(
             match reader.read(&mut buf) {
                 Ok(0) => break,
                 Ok(n) => {
-                    let _ = output_tx.send(AgentEvent::Output(buf[..n].to_vec()));
+                    let chunk = buf[..n].to_vec();
+                    replay_buf.lock().unwrap().push(&chunk);
+                    let _ = output_tx.send(AgentEvent::Output(chunk));
                 }
                 Err(_) => break,
             }
@@ -376,6 +429,7 @@ mod tests {
                     pty_master: create_dummy_pty_master(),
                     pty_writer: Box::new(std::io::sink()),
                     output_tx: broadcast::channel(1).0,
+                    replay_buffer: Arc::new(std::sync::Mutex::new(ReplayBuffer::new())),
                     attached_count: Arc::new(AtomicUsize::new(0)),
                     client_sizes: HashMap::new(),
                     current_pty_size: (80, 24),
@@ -454,6 +508,7 @@ mod tests {
                     pty_master: create_dummy_pty_master(),
                     pty_writer: Box::new(std::io::sink()),
                     output_tx: broadcast::channel(1).0,
+                    replay_buffer: Arc::new(std::sync::Mutex::new(ReplayBuffer::new())),
                     attached_count: Arc::new(AtomicUsize::new(0)),
                     client_sizes: HashMap::new(),
                     current_pty_size: (80, 24),

@@ -491,7 +491,13 @@ pub fn run(hub_name: &str) -> io::Result<()> {
     let mut hub_count: usize = 1;
     let mut show_help = false;
     let mut overview_state = OverviewState::new();
-    let mut last_content_area = Rect::default();
+    let (init_cols, init_rows) = crossterm::terminal::size().unwrap_or((80, 24));
+    let mut last_content_area = Rect {
+        x: 0,
+        y: 1, // tab bar
+        width: init_cols,
+        height: init_rows.saturating_sub(2), // tab bar + status bar
+    };
 
     loop {
         // Drain overview output events (non-blocking, runs regardless of tab)
@@ -632,6 +638,12 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                 KeyCode::Up => overview_state.exit_terminal(),
                                 KeyCode::Left => overview_state.focus_prev(),
                                 KeyCode::Right => overview_state.focus_next(),
+                                KeyCode::PageUp => {
+                                    overview_state.panel_scroll_up();
+                                }
+                                KeyCode::PageDown => {
+                                    overview_state.panel_scroll_down();
+                                }
                                 _ => {
                                     // Shift+other key — forward to agent
                                     if let Some(bytes) =

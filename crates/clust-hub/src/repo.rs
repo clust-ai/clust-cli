@@ -207,6 +207,7 @@ mod tests {
             pty_master: create_dummy_pty_master(),
             pty_writer: Box::new(io::sink()),
             output_tx: broadcast::channel(1).0,
+            replay_buffer: Arc::new(std::sync::Mutex::new(crate::agent::ReplayBuffer::new())),
             attached_count: Arc::new(AtomicUsize::new(0)),
             client_sizes: HashMap::new(),
             current_pty_size: (80, 24),

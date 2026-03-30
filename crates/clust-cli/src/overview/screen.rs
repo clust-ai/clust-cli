@@ -1,8 +1,13 @@
+use std::collections::VecDeque;
+
 use ratatui::{
     style::{Color, Modifier, Style},
     text::{Line, Span},
 };
 use vte::{Params, Perform};
+
+/// Maximum number of scrollback lines retained per overview panel.
+const SCROLLBACK_CAPACITY: usize = 500;
 
 // ---------------------------------------------------------------------------
 // Cell
@@ -38,6 +43,9 @@ pub struct Screen {
     current_style: Style,
     scroll_top: usize,
     scroll_bottom: usize, // inclusive
+    /// Lines scrolled off the top of the screen, oldest first.
+    scrollback: VecDeque<Vec<Cell>>,
+    scrollback_capacity: usize,
 }
 
 impl Screen {
@@ -55,6 +63,8 @@ impl Screen {
             current_style: Style::default(),
             scroll_top: 0,
             scroll_bottom: rows.saturating_sub(1),
+            scrollback: VecDeque::new(),
+            scrollback_capacity: SCROLLBACK_CAPACITY,
         }
     }
 
@@ -74,41 +84,76 @@ impl Screen {
         self.cursor_col = 0;
         self.scroll_top = 0;
         self.scroll_bottom = rows - 1;
+        self.current_style = Style::default();
+        self.wrap_pending = false;
+        self.scrollback.clear();
     }
 
     pub fn to_ratatui_lines(&self) -> Vec<Line<'static>> {
-        self.grid
-            .iter()
-            .map(|row| {
-                if row.is_empty() {
-                    return Line::from("");
-                }
-                let mut spans: Vec<Span<'static>> = Vec::new();
-                let mut text = String::new();
-                let mut cur_style = row[0].style;
+        self.grid.iter().map(|row| Self::row_to_line(row)).collect()
+    }
 
-                for cell in row {
-                    if cell.style != cur_style {
-                        if !text.is_empty() {
-                            spans.push(Span::styled(std::mem::take(&mut text), cur_style));
-                        }
-                        cur_style = cell.style;
-                    }
-                    text.push(cell.ch);
+    /// Render lines from the combined scrollback + grid at the given offset.
+    /// `offset` is measured in lines from the bottom (0 = live screen).
+    pub fn to_ratatui_lines_scrolled(&self, offset: usize) -> Vec<Line<'static>> {
+        if offset == 0 {
+            return self.to_ratatui_lines();
+        }
+        // Build a combined view: scrollback (oldest first) then grid
+        let sb_len = self.scrollback.len();
+        let grid_len = self.grid.len();
+        let total = sb_len + grid_len;
+        // end is where the viewport's bottom row sits in the combined buffer
+        let end = total.saturating_sub(offset);
+        let start = end.saturating_sub(self.rows);
+        (start..end)
+            .map(|i| {
+                if i < sb_len {
+                    Self::row_to_line(&self.scrollback[i])
+                } else {
+                    Self::row_to_line(&self.grid[i - sb_len])
                 }
-                if !text.is_empty() {
-                    spans.push(Span::styled(text, cur_style));
-                }
-                Line::from(spans)
             })
             .collect()
+    }
+
+    /// Number of scrollback lines available.
+    pub fn scrollback_len(&self) -> usize {
+        self.scrollback.len()
+    }
+
+    fn row_to_line(row: &[Cell]) -> Line<'static> {
+        if row.is_empty() {
+            return Line::from("");
+        }
+        let mut spans: Vec<Span<'static>> = Vec::new();
+        let mut text = String::new();
+        let mut cur_style = row[0].style;
+
+        for cell in row {
+            if cell.style != cur_style {
+                if !text.is_empty() {
+                    spans.push(Span::styled(std::mem::take(&mut text), cur_style));
+                }
+                cur_style = cell.style;
+            }
+            text.push(cell.ch);
+        }
+        if !text.is_empty() {
+            spans.push(Span::styled(text, cur_style));
+        }
+        Line::from(spans)
     }
 
     // -- Private helpers -----------------------------------------------------
 
     fn scroll_up(&mut self) {
         if self.scroll_top < self.scroll_bottom && self.scroll_bottom < self.rows {
-            self.grid.remove(self.scroll_top);
+            let scrolled_line = self.grid.remove(self.scroll_top);
+            self.scrollback.push_back(scrolled_line);
+            if self.scrollback.len() > self.scrollback_capacity {
+                self.scrollback.pop_front();
+            }
             self.grid
                 .insert(self.scroll_bottom, vec![Cell::default(); self.cols]);
         }

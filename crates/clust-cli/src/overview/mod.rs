@@ -58,6 +58,8 @@ pub struct AgentPanel {
     pub vterm: VirtualTerminal,
     pub command_tx: mpsc::Sender<PanelCommand>,
     pub exited: bool,
+    /// Vertical scroll offset for scrollback (0 = live, >0 = scrolled back).
+    pub panel_scroll_offset: usize,
     task_handle: JoinHandle<()>,
 }
 
@@ -116,17 +118,22 @@ impl OverviewState {
             }
         }
 
-        // Resize existing panels if dimensions changed
+        // Resize existing panels if dimensions changed.
+        // Send the resize command before clearing the local screen so that
+        // if the send fails the grid is not left empty without a SIGWINCH.
         for panel in &mut self.panels {
             let (pw, ph) = (self.panel_cols as usize, self.panel_rows as usize);
             if panel.vterm.screen.cols != pw || panel.vterm.screen.rows != ph {
-                panel.vterm.resize(pw, ph);
-                let _ = panel
+                if panel
                     .command_tx
                     .try_send(PanelCommand::Resize {
                         cols: self.panel_cols,
                         rows: self.panel_rows,
-                    });
+                    })
+                    .is_ok()
+                {
+                    panel.vterm.resize(pw, ph);
+                }
             }
         }
 
@@ -162,15 +169,18 @@ impl OverviewState {
             return;
         }
         for panel in &mut self.panels {
-            panel
-                .vterm
-                .resize(self.panel_cols as usize, self.panel_rows as usize);
-            let _ = panel
+            if panel
                 .command_tx
                 .try_send(PanelCommand::Resize {
                     cols: self.panel_cols,
                     rows: self.panel_rows,
-                });
+                })
+                .is_ok()
+            {
+                panel
+                    .vterm
+                    .resize(self.panel_cols as usize, self.panel_rows as usize);
+            }
         }
     }
 
@@ -243,6 +253,27 @@ impl OverviewState {
         if let OverviewFocus::Terminal(idx) = self.focus {
             if let Some(panel) = self.panels.get(idx) {
                 let _ = panel.command_tx.try_send(PanelCommand::Input(data));
+            }
+        }
+    }
+
+    /// Scroll the focused panel's scrollback up by one page.
+    pub fn panel_scroll_up(&mut self) {
+        if let OverviewFocus::Terminal(idx) = self.focus {
+            if let Some(panel) = self.panels.get_mut(idx) {
+                let page = panel.vterm.screen.rows;
+                let max = panel.vterm.screen.scrollback_len();
+                panel.panel_scroll_offset = (panel.panel_scroll_offset + page).min(max);
+            }
+        }
+    }
+
+    /// Scroll the focused panel's scrollback down by one page.
+    pub fn panel_scroll_down(&mut self) {
+        if let OverviewFocus::Terminal(idx) = self.focus {
+            if let Some(panel) = self.panels.get_mut(idx) {
+                let page = panel.vterm.screen.rows;
+                panel.panel_scroll_offset = panel.panel_scroll_offset.saturating_sub(page);
             }
         }
     }
@@ -332,6 +363,7 @@ impl OverviewState {
             vterm: VirtualTerminal::new(cols as usize, rows as usize),
             command_tx,
             exited: false,
+            panel_scroll_offset: 0,
             task_handle: handle,
         });
     }
@@ -393,7 +425,41 @@ async fn agent_connection_task(
         }
     }
 
-    // Send initial resize
+    // Consume replay data — the hub sends buffered output followed by
+    // AgentReplayComplete before live streaming begins.
+    loop {
+        match clust_ipc::recv_message_read::<HubMessage>(&mut reader).await {
+            Ok(HubMessage::AgentOutput { data, .. }) => {
+                let _ = event_tx
+                    .send(AgentOutputEvent::Output {
+                        id: agent_id.clone(),
+                        data,
+                    })
+                    .await;
+            }
+            Ok(HubMessage::AgentReplayComplete { .. }) => break,
+            Ok(HubMessage::AgentExited { exit_code, .. }) => {
+                let _ = event_tx
+                    .send(AgentOutputEvent::Exited {
+                        id: agent_id.clone(),
+                        _exit_code: exit_code,
+                    })
+                    .await;
+                return;
+            }
+            _ => {
+                let _ = event_tx
+                    .send(AgentOutputEvent::ConnectionLost {
+                        id: agent_id,
+                    })
+                    .await;
+                return;
+            }
+        }
+    }
+
+    // Send initial resize — triggers SIGWINCH for a fresh redraw on top of
+    // the replayed state.
     let _ = clust_ipc::send_message_write(
         &mut writer,
         &CliMessage::ResizeAgent {
@@ -668,6 +734,15 @@ fn render_agent_panel(frame: &mut Frame, area: Rect, panel: &AgentPanel, focused
         header_spans.push(Span::styled(" ", Style::default().bg(header_bg)));
     }
 
+    // Scroll indicator
+    if panel.panel_scroll_offset > 0 {
+        let indicator = format!("↑{} ", panel.panel_scroll_offset);
+        header_spans.push(Span::styled(
+            indicator,
+            Style::default().fg(theme::R_WARNING).bg(header_bg),
+        ));
+    }
+
     // Fill remaining header width
     let content_width: usize = header_spans.iter().map(|s| s.content.chars().count()).sum();
     let remaining = (header_area.width as usize).saturating_sub(content_width);
@@ -684,7 +759,14 @@ fn render_agent_panel(frame: &mut Frame, area: Rect, panel: &AgentPanel, focused
     );
 
     // Terminal content
-    let lines = panel.vterm.screen.to_ratatui_lines();
+    let lines = if panel.panel_scroll_offset > 0 {
+        panel
+            .vterm
+            .screen
+            .to_ratatui_lines_scrolled(panel.panel_scroll_offset)
+    } else {
+        panel.vterm.screen.to_ratatui_lines()
+    };
     let paragraph = Paragraph::new(lines).style(Style::default().bg(theme::R_BG_BASE));
     frame.render_widget(paragraph, content_area);
 }
