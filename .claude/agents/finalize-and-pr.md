@@ -79,11 +79,11 @@ Run `git push --force-with-lease origin <current-branch>`.
 
 ## STEP 11: Create Pull Request
 
-Create a pull request from `<current-branch>` into `<target-branch>` using `gh pr create`. The PR must be:
+Create a pull request from `<current-branch>` into `<target-branch>` using `gh pr create`. The PR must contain:
 - **Title**: Short, descriptive, conventional (e.g., "feat: add user authentication" or "fix: resolve memory leak in parser")
-- **Description**: 2-4 sentences maximum. State what changed and why. No fluff, no bullet-point essays.
+- **Body**: A clear bullet-point list of all features and changes implemented on this branch. Nothing else — no prose, no summaries, no extra content.
 
-Use: `gh pr create --base <target-branch> --head <current-branch> --title "<title>" --body "<description>"`
+Use: `gh pr create --base <target-branch> --head <current-branch> --title "<title>" --body "<body>"`
 
 ---
 
@@ -93,7 +93,7 @@ Use: `gh pr create --base <target-branch> --head <current-branch> --title "<titl
 - **Always print what step you are on** before executing it (e.g., "STEP 4: Committing remaining changes...").
 - **If a step fails and cannot be resolved after 3 attempts**, stop and report the failure clearly with full error output.
 - **Do not ask the user for input.** This pipeline is fully autonomous once started.
-- **Keep PR descriptions ruthlessly short.** No bullet lists, no changelogs, no verbose explanations.
+- **PR body must be a bullet-point list of features/changes only.** No prose, no summaries, no extra content.
 
 **Update your agent memory** as you discover branch naming conventions, test commands that differ from defaults, documentation structure patterns, and common build/clippy issues in this codebase. This builds institutional knowledge across conversations. Write concise notes about what you found and where.
 
