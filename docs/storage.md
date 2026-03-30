@@ -4,7 +4,7 @@
 
 ```
 ~/.clust/
-├── bin/            # Installed binaries (clust, clust-pool)
+├── bin/            # Installed binaries (clust, clust-hub)
 ├── clust.db        # SQLite database (config, defaults)
 ├── clust.sock      # Unix domain socket (IPC, runtime only)
 └── logs/           # Optional: daemon logs (future)
@@ -16,7 +16,7 @@ The `~/.clust/` directory is created on first run if it doesn't exist.
 
 **Path**: `~/.clust/clust.db`
 
-Both `clust-cli` and `clust-pool` can read from this database. Only `clust-pool` writes to it (the CLI sends commands to the pool, which performs the writes).
+Both `clust-cli` and `clust-hub` can read from this database. Only `clust-hub` writes to it (the CLI sends commands to the hub, which performs the writes).
 
 ### Schema
 
@@ -77,7 +77,7 @@ CREATE TABLE schema_version (
 );
 ```
 
-On startup, the pool checks `schema_version` and applies any pending migrations sequentially. This keeps the database forward-compatible as features are added.
+On startup, the hub checks `schema_version` and applies any pending migrations sequentially. This keeps the database forward-compatible as features are added.
 
 ## What Goes Where
 
@@ -86,6 +86,6 @@ On startup, the pool checks `schema_version` and applies any pending migrations 
 | Default agent binary | SQLite `config` table | Persistent (survives restarts) |
 | Registered repositories | SQLite `repos` table | Persistent (auto-cleaned if path deleted) |
 | Agent session history | SQLite `agent_history` table | Persistent *(not yet implemented)* |
-| Running agent state | Pool in-memory | Ephemeral (dies with pool) |
+| Running agent state | Hub in-memory | Ephemeral (dies with hub) |
 | Repository branch/worktree data | Fetched from git on demand | Ephemeral (never persisted) |
 | IPC socket | `~/.clust/clust.sock` | Runtime only |

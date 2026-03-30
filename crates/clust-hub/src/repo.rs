@@ -6,7 +6,7 @@ use clust_ipc::{BranchInfo, RepoInfo};
 use crate::agent::AgentEntry;
 
 /// Trait for accessing agent matching fields without requiring the full AgentEntry.
-/// This allows repo queries to use a lightweight snapshot taken outside the pool lock.
+/// This allows repo queries to use a lightweight snapshot taken outside the hub lock.
 pub trait AgentMatcher {
     fn repo_path(&self) -> Option<&str>;
     fn branch_name(&self) -> Option<&str>;
@@ -202,7 +202,7 @@ mod tests {
             agent_binary: "test".into(),
             started_at: "2026-01-01T00:00:00Z".into(),
             working_dir: "/tmp".into(),
-            pool: clust_ipc::DEFAULT_POOL.into(),
+            hub: clust_ipc::DEFAULT_HUB.into(),
             pid: None,
             pty_master: create_dummy_pty_master(),
             pty_writer: Box::new(io::sink()),

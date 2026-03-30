@@ -3,7 +3,7 @@ use tokio::net::{UnixListener, UnixStream};
 
 use clust_ipc::{
     recv_message, recv_message_read, send_message, send_message_write, AgentInfo, CliMessage,
-    PoolMessage,
+    HubMessage,
 };
 
 #[tokio::test]
@@ -18,10 +18,10 @@ async fn request_response_over_real_socket() {
         let sock_path = sock_path.clone();
         async move {
             let mut stream = UnixStream::connect(&sock_path).await.unwrap();
-            send_message(&mut stream, &CliMessage::ListAgents { pool: None })
+            send_message(&mut stream, &CliMessage::ListAgents { hub: None })
                 .await
                 .unwrap();
-            let resp: PoolMessage = recv_message(&mut stream).await.unwrap();
+            let resp: HubMessage = recv_message(&mut stream).await.unwrap();
             resp
         }
     });
@@ -29,15 +29,15 @@ async fn request_response_over_real_socket() {
     // Server receives the message and responds
     let (mut server_stream, _) = listener.accept().await.unwrap();
     let msg: CliMessage = recv_message(&mut server_stream).await.unwrap();
-    assert_eq!(msg, CliMessage::ListAgents { pool: None });
+    assert_eq!(msg, CliMessage::ListAgents { hub: None });
 
-    let response = PoolMessage::AgentList {
+    let response = HubMessage::AgentList {
         agents: vec![AgentInfo {
             id: "abc123".into(),
             agent_binary: "claude".into(),
             started_at: "2026-03-25T10:00:00Z".into(),
             attached_clients: 1,
-            pool: clust_ipc::DEFAULT_POOL.into(),
+            hub: clust_ipc::DEFAULT_HUB.into(),
             working_dir: "/tmp".into(),
             repo_path: None,
             branch_name: None,
@@ -60,18 +60,18 @@ async fn multiple_clients_sequential() {
         for _ in 0..3 {
             let (mut stream, _) = listener.accept().await.unwrap();
             let msg: CliMessage = recv_message(&mut stream).await.unwrap();
-            assert_eq!(msg, CliMessage::StopPool);
-            send_message(&mut stream, &PoolMessage::Ok).await.unwrap();
+            assert_eq!(msg, CliMessage::StopHub);
+            send_message(&mut stream, &HubMessage::Ok).await.unwrap();
         }
     });
 
     for _ in 0..3 {
         let mut stream = UnixStream::connect(&sock_path).await.unwrap();
-        send_message(&mut stream, &CliMessage::StopPool)
+        send_message(&mut stream, &CliMessage::StopHub)
             .await
             .unwrap();
-        let resp: PoolMessage = recv_message(&mut stream).await.unwrap();
-        assert_eq!(resp, PoolMessage::Ok);
+        let resp: HubMessage = recv_message(&mut stream).await.unwrap();
+        assert_eq!(resp, HubMessage::Ok);
     }
 
     server.await.unwrap();
@@ -95,7 +95,7 @@ async fn bidirectional_streaming_over_split_socket() {
             assert!(matches!(msg, CliMessage::StartAgent { .. }));
             send_message_write(
                 &mut writer,
-                &PoolMessage::AgentStarted {
+                &HubMessage::AgentStarted {
                     id: "abc123".into(),
                     agent_binary: "claude".into(),
                 },
@@ -106,7 +106,7 @@ async fn bidirectional_streaming_over_split_socket() {
             // Send some output
             send_message_write(
                 &mut writer,
-                &PoolMessage::AgentOutput {
+                &HubMessage::AgentOutput {
                     id: "abc123".into(),
                     data: b"hello world".to_vec(),
                 },
@@ -139,16 +139,16 @@ async fn bidirectional_streaming_over_split_socket() {
             cols: 80,
             rows: 24,
             accept_edits: false,
-            pool: clust_ipc::DEFAULT_POOL.into(),
+            hub: clust_ipc::DEFAULT_HUB.into(),
         },
     )
     .await
     .unwrap();
 
-    let response: PoolMessage = recv_message(&mut stream).await.unwrap();
+    let response: HubMessage = recv_message(&mut stream).await.unwrap();
     assert_eq!(
         response,
-        PoolMessage::AgentStarted {
+        HubMessage::AgentStarted {
             id: "abc123".into(),
             agent_binary: "claude".into(),
         }
@@ -158,10 +158,10 @@ async fn bidirectional_streaming_over_split_socket() {
     let (mut reader, mut writer) = stream.into_split();
 
     // Read output from server
-    let output: PoolMessage = recv_message_read(&mut reader).await.unwrap();
+    let output: HubMessage = recv_message_read(&mut reader).await.unwrap();
     assert_eq!(
         output,
-        PoolMessage::AgentOutput {
+        HubMessage::AgentOutput {
             id: "abc123".into(),
             data: b"hello world".to_vec(),
         }

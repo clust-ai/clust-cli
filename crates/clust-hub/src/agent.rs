@@ -6,18 +6,18 @@ use std::sync::Arc;
 use portable_pty::{CommandBuilder, MasterPty, PtySize};
 use tokio::sync::{broadcast, Mutex};
 
-/// Shared pool state, accessible from all IPC handler tasks.
-pub type SharedPoolState = Arc<Mutex<PoolState>>;
+/// Shared hub state, accessible from all IPC handler tasks.
+pub type SharedHubState = Arc<Mutex<HubState>>;
 
-/// Top-level pool state holding all running agents.
+/// Top-level hub state holding all running agents.
 #[derive(Default)]
-pub struct PoolState {
+pub struct HubState {
     pub agents: HashMap<String, AgentEntry>,
     pub default_agent: Option<String>,
     pub db: Option<rusqlite::Connection>,
 }
 
-impl PoolState {
+impl HubState {
     pub fn new() -> Self {
         Self::default()
     }
@@ -31,13 +31,13 @@ impl PoolState {
     }
 }
 
-/// A running agent managed by the pool.
+/// A running agent managed by the hub.
 pub struct AgentEntry {
     pub id: String,
     pub agent_binary: String,
     pub started_at: String,
     pub working_dir: String,
-    pub pool: String,
+    pub hub: String,
     pub pid: Option<u32>,
     pub pty_master: Box<dyn MasterPty + Send>,
     pub pty_writer: Box<dyn std::io::Write + Send>,
@@ -90,7 +90,7 @@ impl AgentEntry {
 pub enum AgentEvent {
     Output(Vec<u8>),
     Exited(i32),
-    PoolShutdown,
+    HubShutdown,
 }
 
 /// Generate a unique 6-character hex agent ID.
@@ -107,7 +107,7 @@ pub fn generate_agent_id(existing: &HashMap<String, AgentEntry>) -> String {
 }
 
 /// Resolve which agent binary to use: explicit override takes precedence,
-/// then the pool's configured default, otherwise error.
+/// then the hub's configured default, otherwise error.
 pub fn resolve_agent_binary(
     agent_binary: Option<String>,
     default_agent: &Option<String>,
@@ -129,7 +129,7 @@ pub struct SpawnAgentParams {
     pub cols: u16,
     pub rows: u16,
     pub accept_edits: bool,
-    pub pool: String,
+    pub hub: String,
     pub repo_path: Option<String>,
     pub branch_name: Option<String>,
     pub is_worktree: bool,
@@ -140,9 +140,9 @@ pub struct SpawnAgentParams {
 /// Returns the agent ID on success. The agent is added to `state.agents` and
 /// a background task is started to read PTY output and broadcast it.
 pub fn spawn_agent(
-    state: &mut PoolState,
+    state: &mut HubState,
     params: SpawnAgentParams,
-    shared_state: SharedPoolState,
+    shared_state: SharedHubState,
 ) -> Result<(String, String), String> {
     let binary = resolve_agent_binary(params.agent_binary, &state.default_agent)?;
     let id = generate_agent_id(&state.agents);
@@ -203,7 +203,7 @@ pub fn spawn_agent(
         agent_binary: binary,
         started_at,
         working_dir: params.working_dir,
-        pool: params.pool,
+        hub: params.hub,
         pid,
         pty_master: pair.master,
         pty_writer: writer,
@@ -232,7 +232,7 @@ fn spawn_pty_reader(
     mut child: Box<dyn portable_pty::Child + Send>,
     output_tx: broadcast::Sender<AgentEvent>,
     agent_id: String,
-    state: SharedPoolState,
+    state: SharedHubState,
 ) {
     tokio::task::spawn_blocking(move || {
         let mut buf = [0u8; 4096];
@@ -263,8 +263,8 @@ fn spawn_pty_reader(
         // Remove agent from shared state
         let handle = tokio::runtime::Handle::current();
         handle.block_on(async {
-            let mut pool = state.lock().await;
-            pool.agents.remove(&agent_id);
+            let mut hub = state.lock().await;
+            hub.agents.remove(&agent_id);
         });
     });
 }
@@ -273,10 +273,10 @@ fn spawn_pty_reader(
 ///
 /// Sends SIGTERM, waits 3 seconds, then SIGKILL if still alive.
 /// The existing PTY reader handles cleanup when the process exits.
-pub async fn stop_agent(state: &SharedPoolState, id: &str) -> Result<(), String> {
+pub async fn stop_agent(state: &SharedHubState, id: &str) -> Result<(), String> {
     let pid = {
-        let pool = state.lock().await;
-        let entry = pool
+        let hub = state.lock().await;
+        let entry = hub
             .agents
             .get(id)
             .ok_or_else(|| format!("agent {id} not found"))?;
@@ -303,21 +303,21 @@ pub async fn stop_agent(state: &SharedPoolState, id: &str) -> Result<(), String>
     Ok(())
 }
 
-/// Terminate all running agents during pool shutdown.
+/// Terminate all running agents during hub shutdown.
 ///
 /// 1. Notify all attached CLI clients via broadcast channels
 /// 2. SIGTERM all agent processes
 /// 3. Wait 3 seconds for graceful exit
 /// 4. SIGKILL any remaining agents
-pub async fn shutdown_agents(state: &SharedPoolState) {
+pub async fn shutdown_agents(state: &SharedHubState) {
     let pids: Vec<u32>;
     {
-        let pool = state.lock().await;
-        pids = pool.agents.values().filter_map(|e| e.pid).collect();
+        let hub = state.lock().await;
+        pids = hub.agents.values().filter_map(|e| e.pid).collect();
 
-        // Notify all attached clients that the pool is shutting down
-        for entry in pool.agents.values() {
-            let _ = entry.output_tx.send(AgentEvent::PoolShutdown);
+        // Notify all attached clients that the hub is shutting down
+        for entry in hub.agents.values() {
+            let _ = entry.output_tx.send(AgentEvent::HubShutdown);
         }
     }
 
@@ -371,7 +371,7 @@ mod tests {
                     agent_binary: "test".into(),
                     started_at: "2026-01-01T00:00:00Z".into(),
                     working_dir: "/tmp".into(),
-                    pool: clust_ipc::DEFAULT_POOL.into(),
+                    hub: clust_ipc::DEFAULT_HUB.into(),
                     pid: None,
                     pty_master: create_dummy_pty_master(),
                     pty_writer: Box::new(std::io::sink()),
@@ -393,8 +393,8 @@ mod tests {
     }
 
     #[test]
-    fn pool_state_new_defaults() {
-        let state = PoolState::new();
+    fn hub_state_new_defaults() {
+        let state = HubState::new();
         assert!(state.agents.is_empty());
         assert_eq!(state.default_agent, None);
         assert!(state.db.is_none());
@@ -431,7 +431,7 @@ mod tests {
 
     #[tokio::test]
     async fn stop_agent_not_found_returns_error() {
-        let state: SharedPoolState = Arc::new(Mutex::new(PoolState::new()));
+        let state: SharedHubState = Arc::new(Mutex::new(HubState::new()));
         let result = stop_agent(&state, "nonexistent").await;
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("not found"));
@@ -439,17 +439,17 @@ mod tests {
 
     #[tokio::test]
     async fn stop_agent_no_pid_returns_error() {
-        let state: SharedPoolState = Arc::new(Mutex::new(PoolState::new()));
+        let state: SharedHubState = Arc::new(Mutex::new(HubState::new()));
         {
-            let mut pool = state.lock().await;
-            pool.agents.insert(
+            let mut hub = state.lock().await;
+            hub.agents.insert(
                 "abc123".to_string(),
                 AgentEntry {
                     id: "abc123".to_string(),
                     agent_binary: "test".into(),
                     started_at: "2026-01-01T00:00:00Z".into(),
                     working_dir: "/tmp".into(),
-                    pool: clust_ipc::DEFAULT_POOL.into(),
+                    hub: clust_ipc::DEFAULT_HUB.into(),
                     pid: None,
                     pty_master: create_dummy_pty_master(),
                     pty_writer: Box::new(std::io::sink()),

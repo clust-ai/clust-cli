@@ -3,7 +3,7 @@ mod format;
 mod ipc;
 mod output_filter;
 mod overview;
-mod pool_launcher;
+mod hub_launcher;
 mod scroll_break;
 mod scrollback;
 mod terminal;
@@ -14,7 +14,7 @@ mod version;
 use clap::Parser;
 use std::io::{self, Write};
 
-use clust_ipc::{CliMessage, PoolMessage};
+use clust_ipc::{CliMessage, HubMessage};
 use format::{format_attached, format_started};
 
 const SPINNER: &[char] = &['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
@@ -41,11 +41,11 @@ fn print_logo() {
 async fn main() {
     let args = cli::Cli::parse();
 
-    // Validate pool name if provided on top-level flag
-    if let Some(ref p) = args.pool {
-        if let Err(e) = cli::validate_pool_name(p) {
+    // Validate hub name if provided on top-level flag
+    if let Some(ref p) = args.hub {
+        if let Err(e) = cli::validate_hub_name(p) {
             eprintln!(
-                "\n  {}✘{} {}invalid pool name: {e}{}\n",
+                "\n  {}✘{} {}invalid hub name: {e}{}\n",
                 theme::ERROR,
                 theme::RESET,
                 theme::TEXT_PRIMARY,
@@ -54,14 +54,14 @@ async fn main() {
             std::process::exit(1);
         }
     }
-    let pool_name = args
-        .pool
+    let hub_name = args
+        .hub
         .clone()
-        .unwrap_or_else(|| clust_ipc::DEFAULT_POOL.into());
+        .unwrap_or_else(|| clust_ipc::DEFAULT_HUB.into());
 
     // Subcommand: ui (also triggered by `clust .`)
     if matches!(args.command, Some(cli::Commands::Ui)) || args.prompt.as_deref() == Some(".") {
-        if let Err(e) = ui::run(&pool_name) {
+        if let Err(e) = ui::run(&hub_name) {
             eprintln!("  {}ui error: {e}{}", theme::ERROR, theme::RESET);
             std::process::exit(1);
         }
@@ -69,12 +69,12 @@ async fn main() {
     }
 
     // Subcommand: ls
-    if let Some(cli::Commands::Ls { select, pool }) = args.command {
-        // Validate pool filter if provided
-        if let Some(ref p) = pool {
-            if let Err(e) = cli::validate_pool_name(p) {
+    if let Some(cli::Commands::Ls { select, hub }) = args.command {
+        // Validate hub filter if provided
+        if let Some(ref p) = hub {
+            if let Err(e) = cli::validate_hub_name(p) {
                 eprintln!(
-                    "\n  {}✘{} {}invalid pool name: {e}{}\n",
+                    "\n  {}✘{} {}invalid hub name: {e}{}\n",
                     theme::ERROR,
                     theme::RESET,
                     theme::TEXT_PRIMARY,
@@ -83,7 +83,7 @@ async fn main() {
                 std::process::exit(1);
             }
         }
-        handle_ls(select, pool).await;
+        handle_ls(select, hub).await;
         return;
     }
 
@@ -104,31 +104,31 @@ async fn main() {
         return;
     }
 
-    // Flag: -s / --stop (no value = stop pool, with value = stop agent)
+    // Flag: -s / --stop (no value = stop hub, with value = stop agent)
     if let Some(ref id_or_empty) = args.stop {
         println!();
         if id_or_empty.is_empty() {
-            // No ID → stop the pool
-            let spinner = spin("stopping clust pool");
-            // Count unique pools for pluralization
-            let pool_count = ipc::count_pools().await;
+            // No ID → stop the hub
+            let spinner = spin("stopping clust hub");
+            // Count unique hubs for pluralization
+            let hub_count = ipc::count_hubs().await;
             match ipc::try_connect().await {
                 Ok(mut stream) => match ipc::send_stop(&mut stream).await {
                     Ok(()) => {
-                        let label = if pool_count > 1 {
-                            "clust pools stopped"
+                        let label = if hub_count > 1 {
+                            "clust hubs stopped"
                         } else {
-                            "clust pool stopped"
+                            "clust hub stopped"
                         };
                         stop_spin(spinner, label);
                     }
                     Err(e) => {
-                        stop_spin_err(spinner, &format!("failed to stop clust pool: {e}"));
+                        stop_spin_err(spinner, &format!("failed to stop clust hub: {e}"));
                         std::process::exit(1);
                     }
                 },
                 Err(_) => {
-                    stop_spin(spinner, "clust pool is not running");
+                    stop_spin(spinner, "clust hub is not running");
                 }
             }
         } else {
@@ -143,7 +143,7 @@ async fn main() {
                     }
                 },
                 Err(_) => {
-                    stop_spin(spinner, "clust pool is not running");
+                    stop_spin(spinner, "clust hub is not running");
                 }
             }
         }
@@ -168,7 +168,7 @@ async fn main() {
         args.background,
         args.accept_edits,
         args.use_agent,
-        pool_name,
+        hub_name,
     )
     .await;
 }
@@ -176,12 +176,12 @@ async fn main() {
 /// Check if a default agent is configured. If not, show the first-run picker.
 ///
 /// Returns `Some(Some(binary))` if a default exists or the user selected one,
-/// `Some(None)` if the pool is unreachable (let handle_start report the error),
+/// `Some(None)` if the hub is unreachable (let handle_start report the error),
 /// or `None` if the user cancelled.
 async fn check_default_and_prompt() -> Option<Option<String>> {
-    let mut stream = match ipc::connect_to_pool().await {
+    let mut stream = match ipc::connect_to_hub().await {
         Ok(s) => s,
-        Err(_) => return Some(None), // Can't reach pool, let handle_start report the error
+        Err(_) => return Some(None), // Can't reach hub, let handle_start report the error
     };
 
     if clust_ipc::send_message(&mut stream, &CliMessage::GetDefault)
@@ -191,9 +191,9 @@ async fn check_default_and_prompt() -> Option<Option<String>> {
         return Some(None);
     }
 
-    let current = match clust_ipc::recv_message::<PoolMessage>(&mut stream).await {
-        Ok(PoolMessage::DefaultAgent { agent_binary }) => agent_binary,
-        _ => return Some(None), // Unexpected response, proceed with pool's default
+    let current = match clust_ipc::recv_message::<HubMessage>(&mut stream).await {
+        Ok(HubMessage::DefaultAgent { agent_binary }) => agent_binary,
+        _ => return Some(None), // Unexpected response, proceed with hub's default
     };
 
     if current.is_some() {
@@ -207,7 +207,7 @@ async fn check_default_and_prompt() -> Option<Option<String>> {
     if installed.len() == 1 {
         let binary = installed[0].binary.to_string();
         let mut set_ok = false;
-        if let Ok(mut s) = ipc::connect_to_pool().await {
+        if let Ok(mut s) = ipc::connect_to_hub().await {
             if clust_ipc::send_message(
                 &mut s,
                 &CliMessage::SetDefault {
@@ -217,9 +217,9 @@ async fn check_default_and_prompt() -> Option<Option<String>> {
             .await
             .is_ok()
             {
-                match clust_ipc::recv_message::<PoolMessage>(&mut s).await {
-                    Ok(PoolMessage::Ok) => set_ok = true,
-                    Ok(PoolMessage::Error { message }) => {
+                match clust_ipc::recv_message::<HubMessage>(&mut s).await {
+                    Ok(HubMessage::Ok) => set_ok = true,
+                    Ok(HubMessage::Error { message }) => {
                         eprintln!(
                             "  {}✘{} {}failed to set default: {message}{}",
                             theme::ERROR,
@@ -252,7 +252,7 @@ async fn check_default_and_prompt() -> Option<Option<String>> {
         DefaultPickerResult::Selected(binary) => {
             // Persist the choice (new connection)
             let mut set_ok = false;
-            if let Ok(mut s) = ipc::connect_to_pool().await {
+            if let Ok(mut s) = ipc::connect_to_hub().await {
                 if clust_ipc::send_message(
                     &mut s,
                     &CliMessage::SetDefault {
@@ -262,9 +262,9 @@ async fn check_default_and_prompt() -> Option<Option<String>> {
                 .await
                 .is_ok()
                 {
-                    match clust_ipc::recv_message::<PoolMessage>(&mut s).await {
-                        Ok(PoolMessage::Ok) => set_ok = true,
-                        Ok(PoolMessage::Error { message }) => {
+                    match clust_ipc::recv_message::<HubMessage>(&mut s).await {
+                        Ok(HubMessage::Ok) => set_ok = true,
+                        Ok(HubMessage::Error { message }) => {
                             eprintln!(
                                 "  {}✘{} {}failed to set default: {message}{}",
                                 theme::ERROR,
@@ -299,7 +299,7 @@ async fn handle_start(
     background: bool,
     accept_edits: bool,
     use_agent: Option<String>,
-    pool: String,
+    hub: String,
 ) {
     // If --use was provided, use that agent directly; otherwise check/prompt for default
     let agent_binary = if let Some(agent) = use_agent {
@@ -326,14 +326,14 @@ async fn handle_start(
         None
     };
 
-    let mut stream = match ipc::connect_to_pool().await {
+    let mut stream = match ipc::connect_to_hub().await {
         Ok(s) => s,
         Err(e) => {
             if let Some(s) = spinner {
-                stop_spin_err(s, &format!("failed to connect to pool: {e}"));
+                stop_spin_err(s, &format!("failed to connect to hub: {e}"));
             } else {
                 eprintln!(
-                    "\n  {}✘{} {}failed to connect to pool: {e}{}\n",
+                    "\n  {}✘{} {}failed to connect to hub: {e}{}\n",
                     theme::ERROR,
                     theme::RESET,
                     theme::TEXT_PRIMARY,
@@ -361,7 +361,7 @@ async fn handle_start(
             cols: term_cols,
             rows: agent_rows,
             accept_edits,
-            pool,
+            hub,
         },
     )
     .await
@@ -376,7 +376,7 @@ async fn handle_start(
         std::process::exit(1);
     });
 
-    let response: PoolMessage = clust_ipc::recv_message(&mut stream)
+    let response: HubMessage = clust_ipc::recv_message(&mut stream)
         .await
         .unwrap_or_else(|e| {
             eprintln!(
@@ -390,7 +390,7 @@ async fn handle_start(
         });
 
     match response {
-        PoolMessage::AgentStarted { id, agent_binary } => {
+        HubMessage::AgentStarted { id, agent_binary } => {
             if background {
                 if let Some(s) = spinner {
                     stop_spin(s, &format!("agent {id} started"));
@@ -414,7 +414,7 @@ async fn handle_start(
             // the orphaned stdin blocking-read thread.
             std::process::exit(0);
         }
-        PoolMessage::Error { message } => {
+        HubMessage::Error { message } => {
             if let Some(s) = spinner {
                 stop_spin_err(s, &message);
             } else {
@@ -434,11 +434,11 @@ async fn handle_start(
 
 /// Attach to an existing agent by ID.
 async fn handle_attach(id: String) {
-    let mut stream = match ipc::connect_to_pool().await {
+    let mut stream = match ipc::connect_to_hub().await {
         Ok(s) => s,
         Err(e) => {
             eprintln!(
-                "\n  {}✘{} {}failed to connect to pool: {e}{}\n",
+                "\n  {}✘{} {}failed to connect to hub: {e}{}\n",
                 theme::ERROR,
                 theme::RESET,
                 theme::TEXT_PRIMARY,
@@ -461,7 +461,7 @@ async fn handle_attach(id: String) {
             std::process::exit(1);
         });
 
-    let response: PoolMessage = clust_ipc::recv_message(&mut stream)
+    let response: HubMessage = clust_ipc::recv_message(&mut stream)
         .await
         .unwrap_or_else(|e| {
             eprintln!(
@@ -475,7 +475,7 @@ async fn handle_attach(id: String) {
         });
 
     match response {
-        PoolMessage::AgentAttached { id, agent_binary } => {
+        HubMessage::AgentAttached { id, agent_binary } => {
             let (reader, writer) = stream.into_split();
             let session = terminal::AttachedSession::new(id, agent_binary, reader, writer);
             if let Err(e) = session.run().await {
@@ -492,7 +492,7 @@ async fn handle_attach(id: String) {
             // the orphaned stdin blocking-read thread.
             std::process::exit(0);
         }
-        PoolMessage::Error { message } => {
+        HubMessage::Error { message } => {
             eprintln!(
                 "\n  {}✘{} {}{message}{}\n",
                 theme::ERROR,
@@ -507,9 +507,9 @@ async fn handle_attach(id: String) {
 }
 
 /// List all running agents, or open interactive selector with `--select`.
-async fn handle_ls(select: bool, pool: Option<String>) {
+async fn handle_ls(select: bool, hub: Option<String>) {
     if select {
-        handle_select(pool).await;
+        handle_select(hub).await;
         return;
     }
 
@@ -518,7 +518,7 @@ async fn handle_ls(select: bool, pool: Option<String>) {
         Ok(s) => s,
         Err(_) => {
             println!(
-                "\n  {}✘{} {}pool not running{}\n",
+                "\n  {}✘{} {}hub not running{}\n",
                 theme::ERROR,
                 theme::RESET,
                 theme::TEXT_PRIMARY,
@@ -528,7 +528,7 @@ async fn handle_ls(select: bool, pool: Option<String>) {
         }
     };
 
-    clust_ipc::send_message(&mut stream, &CliMessage::ListAgents { pool: pool.clone() })
+    clust_ipc::send_message(&mut stream, &CliMessage::ListAgents { hub: hub.clone() })
         .await
         .unwrap_or_else(|e| {
             eprintln!(
@@ -541,7 +541,7 @@ async fn handle_ls(select: bool, pool: Option<String>) {
             std::process::exit(1);
         });
 
-    let response: PoolMessage = clust_ipc::recv_message(&mut stream)
+    let response: HubMessage = clust_ipc::recv_message(&mut stream)
         .await
         .unwrap_or_else(|e| {
             eprintln!(
@@ -555,7 +555,7 @@ async fn handle_ls(select: bool, pool: Option<String>) {
         });
 
     match response {
-        PoolMessage::AgentList { mut agents } => {
+        HubMessage::AgentList { mut agents } => {
             println!();
             if agents.is_empty() {
                 println!(
@@ -563,28 +563,28 @@ async fn handle_ls(select: bool, pool: Option<String>) {
                     theme::TEXT_SECONDARY,
                     theme::RESET,
                 );
-            } else if pool.is_some() {
-                // Filtered to a single pool — flat display, no header
+            } else if hub.is_some() {
+                // Filtered to a single hub — flat display, no header
                 print_agent_table(&agents);
             } else {
-                // All pools — group by pool name
-                agents.sort_by(|a, b| a.pool.cmp(&b.pool).then(a.started_at.cmp(&b.started_at)));
-                let mut current_pool: Option<&str> = None;
+                // All hubs — group by hub name
+                agents.sort_by(|a, b| a.hub.cmp(&b.hub).then(a.started_at.cmp(&b.started_at)));
+                let mut current_hub: Option<&str> = None;
                 for agent in &agents {
-                    if current_pool != Some(&agent.pool) {
-                        if current_pool.is_some() {
-                            println!(); // blank line between pools
+                    if current_hub != Some(&agent.hub) {
+                        if current_hub.is_some() {
+                            println!(); // blank line between hubs
                         }
-                        println!("  {}{}{}", theme::ACCENT, agent.pool, theme::RESET,);
+                        println!("  {}{}{}", theme::ACCENT, agent.hub, theme::RESET,);
                         print_agent_header();
-                        current_pool = Some(&agent.pool);
+                        current_hub = Some(&agent.hub);
                     }
                     print_agent_row(agent);
                 }
             }
             println!();
         }
-        PoolMessage::Error { message } => {
+        HubMessage::Error { message } => {
             eprintln!(
                 "\n  {}✘{} {}{message}{}\n",
                 theme::ERROR,
@@ -670,18 +670,18 @@ impl Drop for RawModeGuard {
 }
 
 /// Interactive agent selector.
-async fn handle_select(pool: Option<String>) {
-    // Fetch agent list (pool might not be running)
+async fn handle_select(hub: Option<String>) {
+    // Fetch agent list (hub might not be running)
     let agents = match ipc::try_connect().await {
         Ok(mut stream) => {
-            if clust_ipc::send_message(&mut stream, &CliMessage::ListAgents { pool: pool.clone() })
+            if clust_ipc::send_message(&mut stream, &CliMessage::ListAgents { hub: hub.clone() })
                 .await
                 .is_err()
             {
                 vec![]
             } else {
-                match clust_ipc::recv_message::<PoolMessage>(&mut stream).await {
-                    Ok(PoolMessage::AgentList { agents }) => agents,
+                match clust_ipc::recv_message::<HubMessage>(&mut stream).await {
+                    Ok(HubMessage::AgentList { agents }) => agents,
                     _ => vec![],
                 }
             }
@@ -695,8 +695,8 @@ async fn handle_select(pool: Option<String>) {
         SelectAction::Cancel => {}
         SelectAction::Attach(id) => handle_attach(id).await,
         SelectAction::NewAgent => {
-            let pool_name = pool.unwrap_or_else(|| clust_ipc::DEFAULT_POOL.into());
-            handle_start(None, false, false, None, pool_name).await;
+            let hub_name = hub.unwrap_or_else(|| clust_ipc::DEFAULT_HUB.into());
+            handle_start(None, false, false, None, hub_name).await;
         }
     }
 }
@@ -851,15 +851,15 @@ fn installed_agents() -> Vec<&'static clust_ipc::agents::KnownAgent> {
 /// Handle `clust -d`: show interactive picker to set the default agent.
 async fn handle_default_picker() {
     println!();
-    let spinner = spin("connecting to pool");
+    let spinner = spin("connecting to hub");
 
-    let mut stream = match ipc::connect_to_pool().await {
+    let mut stream = match ipc::connect_to_hub().await {
         Ok(s) => {
             stop_spin(spinner, "connected");
             s
         }
         Err(e) => {
-            stop_spin_err(spinner, &format!("failed to connect to pool: {e}"));
+            stop_spin_err(spinner, &format!("failed to connect to hub: {e}"));
             std::process::exit(1);
         }
     };
@@ -878,8 +878,8 @@ async fn handle_default_picker() {
             std::process::exit(1);
         });
 
-    let current = match clust_ipc::recv_message::<PoolMessage>(&mut stream).await {
-        Ok(PoolMessage::DefaultAgent { agent_binary }) => agent_binary,
+    let current = match clust_ipc::recv_message::<HubMessage>(&mut stream).await {
+        Ok(HubMessage::DefaultAgent { agent_binary }) => agent_binary,
         _ => None,
     };
 
@@ -891,7 +891,7 @@ async fn handle_default_picker() {
         DefaultPickerResult::Selected(binary) => {
             // Persist the choice (new connection since the previous one is consumed)
             let mut set_ok = false;
-            if let Ok(mut s) = ipc::connect_to_pool().await {
+            if let Ok(mut s) = ipc::connect_to_hub().await {
                 if clust_ipc::send_message(
                     &mut s,
                     &CliMessage::SetDefault {
@@ -901,9 +901,9 @@ async fn handle_default_picker() {
                 .await
                 .is_ok()
                 {
-                    match clust_ipc::recv_message::<PoolMessage>(&mut s).await {
-                        Ok(PoolMessage::Ok) => set_ok = true,
-                        Ok(PoolMessage::Error { message }) => {
+                    match clust_ipc::recv_message::<HubMessage>(&mut s).await {
+                        Ok(HubMessage::Ok) => set_ok = true,
+                        Ok(HubMessage::Error { message }) => {
                             eprintln!(
                                 "  {}✘{} {}failed to set default: {message}{}\n",
                                 theme::ERROR,
@@ -944,10 +944,10 @@ async fn handle_register() {
         .unwrap_or_else(|_| ".".into());
 
     let spinner = spin("registering repository");
-    let mut stream = match ipc::connect_to_pool().await {
+    let mut stream = match ipc::connect_to_hub().await {
         Ok(s) => s,
         Err(e) => {
-            stop_spin_err(spinner, &format!("failed to connect to pool: {e}"));
+            stop_spin_err(spinner, &format!("failed to connect to hub: {e}"));
             std::process::exit(1);
         }
     };
@@ -959,16 +959,16 @@ async fn handle_register() {
         std::process::exit(1);
     }
 
-    match clust_ipc::recv_message::<PoolMessage>(&mut stream).await {
-        Ok(PoolMessage::RepoRegistered { name, .. }) => {
+    match clust_ipc::recv_message::<HubMessage>(&mut stream).await {
+        Ok(HubMessage::RepoRegistered { name, .. }) => {
             stop_spin(spinner, &format!("repository '{name}' registered"));
         }
-        Ok(PoolMessage::Error { message }) => {
+        Ok(HubMessage::Error { message }) => {
             stop_spin_err(spinner, &message);
             std::process::exit(1);
         }
         _ => {
-            stop_spin_err(spinner, "unexpected response from pool");
+            stop_spin_err(spinner, "unexpected response from hub");
             std::process::exit(1);
         }
     }
@@ -1004,10 +1004,10 @@ async fn handle_repo_remove() {
     println!();
 
     let spinner = spin("removing repository");
-    let mut stream = match ipc::connect_to_pool().await {
+    let mut stream = match ipc::connect_to_hub().await {
         Ok(s) => s,
         Err(e) => {
-            stop_spin_err(spinner, &format!("failed to connect to pool: {e}"));
+            stop_spin_err(spinner, &format!("failed to connect to hub: {e}"));
             std::process::exit(1);
         }
     };
@@ -1041,10 +1041,10 @@ async fn handle_repo_stop() {
         .unwrap_or_else(|_| ".".into());
 
     let spinner = spin("stopping repo agents");
-    let mut stream = match ipc::connect_to_pool().await {
+    let mut stream = match ipc::connect_to_hub().await {
         Ok(s) => s,
         Err(e) => {
-            stop_spin_err(spinner, &format!("failed to connect to pool: {e}"));
+            stop_spin_err(spinner, &format!("failed to connect to hub: {e}"));
             std::process::exit(1);
         }
     };

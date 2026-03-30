@@ -341,18 +341,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "clust-ipc"
-version = "0.0.7"
-dependencies = [
- "dirs",
- "rmp-serde",
- "serde",
- "tempfile",
- "tokio",
-]
-
-[[package]]
-name = "clust-pool"
+name = "clust-hub"
 version = "0.0.7"
 dependencies = [
  "chrono",
@@ -366,6 +355,17 @@ dependencies = [
  "tempfile",
  "tokio",
  "tray-icon",
+]
+
+[[package]]
+name = "clust-ipc"
+version = "0.0.7"
+dependencies = [
+ "dirs",
+ "rmp-serde",
+ "serde",
+ "tempfile",
+ "tokio",
 ]
 
 [[package]]

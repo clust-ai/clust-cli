@@ -16,7 +16,7 @@ use ratatui::{
     Frame, Terminal,
 };
 
-use clust_ipc::{AgentInfo, CliMessage, PoolMessage, RepoInfo};
+use clust_ipc::{AgentInfo, CliMessage, HubMessage, RepoInfo};
 
 use crate::{
     format::{format_attached, format_started},
@@ -96,8 +96,8 @@ impl ActiveTab {
 /// Controls how agents are grouped in the right panel.
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum AgentViewMode {
-    /// Group agents by their pool name (default).
-    ByPool,
+    /// Group agents by their hub name (default).
+    ByHub,
     /// Group agents by their git repository path.
     ByRepo,
 }
@@ -111,7 +111,7 @@ fn group_names(agents: &[AgentInfo], mode: AgentViewMode) -> Vec<String> {
     let mut names: Vec<String> = agents
         .iter()
         .map(|a| match mode {
-            AgentViewMode::ByPool => a.pool.clone(),
+            AgentViewMode::ByHub => a.hub.clone(),
             AgentViewMode::ByRepo => a
                 .repo_path
                 .clone()
@@ -126,7 +126,7 @@ fn group_names(agents: &[AgentInfo], mode: AgentViewMode) -> Vec<String> {
 /// Returns the group key for an agent based on view mode.
 fn agent_group_key(agent: &AgentInfo, mode: AgentViewMode) -> String {
     match mode {
-        AgentViewMode::ByPool => agent.pool.clone(),
+        AgentViewMode::ByHub => agent.hub.clone(),
         AgentViewMode::ByRepo => agent
             .repo_path
             .clone()
@@ -412,7 +412,7 @@ impl TreeSelection {
     }
 }
 
-pub fn run(pool_name: &str) -> io::Result<()> {
+pub fn run(hub_name: &str) -> io::Result<()> {
     io::stdout().execute(EnterAlternateScreen)?;
     enable_raw_mode()?;
 
@@ -427,7 +427,7 @@ pub fn run(pool_name: &str) -> io::Result<()> {
     let mut terminal = Terminal::new(backend)?;
     terminal.clear()?;
 
-    let pool_running = block_on_async(async { ipc::connect_to_pool().await.is_ok() });
+    let hub_running = block_on_async(async { ipc::connect_to_hub().await.is_ok() });
 
     let update_notice: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
     let notice_clone = update_notice.clone();
@@ -442,14 +442,15 @@ pub fn run(pool_name: &str) -> io::Result<()> {
     let mut selection = TreeSelection::default();
     let mut focus = FocusPanel::Left;
     let mut agent_selection = AgentSelection::default();
-    let mut agent_view_mode = AgentViewMode::ByPool;
+    let mut agent_view_mode = AgentViewMode::ByHub;
     let mut active_tab = ActiveTab::Repositories;
     let mut last_agent_fetch = Instant::now() - Duration::from_secs(10);
     let mut last_repo_fetch = Instant::now() - Duration::from_secs(10);
 
-    let mut pool_stopped = false;
-    let mut pool_count: usize = 1;
+    let mut hub_stopped = false;
+    let mut hub_count: usize = 1;
     let mut show_help = false;
+    let mut last_help_press = Instant::now();
     let mut overview_state = OverviewState::new();
     let mut last_content_area = Rect::default();
 
@@ -457,15 +458,15 @@ pub fn run(pool_name: &str) -> io::Result<()> {
         // Drain overview output events (non-blocking, runs regardless of tab)
         overview_state.drain_output_events();
 
-        // Periodically fetch agent list and repo state from pool
+        // Periodically fetch agent list and repo state from hub
         let mut agents_refreshed = false;
-        if pool_running && last_agent_fetch.elapsed() >= AGENT_FETCH_INTERVAL {
+        if hub_running && last_agent_fetch.elapsed() >= AGENT_FETCH_INTERVAL {
             agents = fetch_agents();
             agent_selection.clamp(&agents, agent_view_mode);
             last_agent_fetch = Instant::now();
             agents_refreshed = true;
         }
-        if pool_running && last_repo_fetch.elapsed() >= AGENT_FETCH_INTERVAL {
+        if hub_running && last_repo_fetch.elapsed() >= AGENT_FETCH_INTERVAL {
             repos = fetch_repos();
             selection.clamp(&repos);
             last_repo_fetch = Instant::now();
@@ -476,7 +477,11 @@ pub fn run(pool_name: &str) -> io::Result<()> {
             overview_state.sync_agents(&agents, last_content_area);
         }
 
-        let pool_status = pool_running;
+        if show_help && last_help_press.elapsed() > Duration::from_millis(250) {
+            show_help = false;
+        }
+
+        let hub_status = hub_running;
         let notice = update_notice.lock().unwrap().clone();
         let cur_focus = focus;
         let cur_tab = active_tab;
@@ -536,9 +541,9 @@ pub fn run(pool_name: &str) -> io::Result<()> {
             render_status_bar(
                 frame,
                 status_area,
-                pool_status,
+                hub_status,
                 &notice,
-                pool_name,
+                hub_name,
                 cur_tab,
                 overview_focus,
             );
@@ -587,16 +592,16 @@ pub fn run(pool_name: &str) -> io::Result<()> {
                             }
                             KeyCode::Char('Q') => {
                                 let mut names: Vec<&str> =
-                                    agents.iter().map(|a| a.pool.as_str()).collect();
+                                    agents.iter().map(|a| a.hub.as_str()).collect();
                                 names.sort();
                                 names.dedup();
-                                pool_count = names.len().max(1);
+                                hub_count = names.len().max(1);
                                 block_on_async(async {
                                     if let Ok(mut stream) = ipc::try_connect().await {
                                         let _ = ipc::send_stop(&mut stream).await;
                                     }
                                 });
-                                pool_stopped = true;
+                                hub_stopped = true;
                                 break;
                             }
                             // Tab switching
@@ -625,6 +630,7 @@ pub fn run(pool_name: &str) -> io::Result<()> {
                             }
                             KeyCode::Char('?') => {
                                 show_help = !show_help;
+                                last_help_press = Instant::now();
                             }
                             // Overview OptionsBar navigation
                             _ if active_tab == ActiveTab::Overview => {
@@ -671,11 +677,11 @@ pub fn run(pool_name: &str) -> io::Result<()> {
                                         if focus == FocusPanel::Right =>
                                     {
                                         agent_view_mode = match agent_view_mode {
-                                            AgentViewMode::ByPool => {
+                                            AgentViewMode::ByHub => {
                                                 AgentViewMode::ByRepo
                                             }
                                             AgentViewMode::ByRepo => {
-                                                AgentViewMode::ByPool
+                                                AgentViewMode::ByHub
                                             }
                                         };
                                         agent_selection = AgentSelection::default();
@@ -751,8 +757,8 @@ pub fn run(pool_name: &str) -> io::Result<()> {
     io::stdout().execute(LeaveAlternateScreen)?;
     println!();
 
-    if pool_stopped {
-        let label = if pool_count > 1 { "pools" } else { "pool" };
+    if hub_stopped {
+        let label = if hub_count > 1 { "hubs" } else { "hub" };
         println!(
             "\n  {}{label} stopped{}\n",
             theme::TEXT_SECONDARY,
@@ -1220,7 +1226,7 @@ fn render_agent_list(
 
     // Mode label + spacer
     let mode_label = match mode {
-        AgentViewMode::ByPool => "by pool",
+        AgentViewMode::ByHub => "by hub",
         AgentViewMode::ByRepo => "by repo",
     };
     let mode_line = Paragraph::new(Line::from(Span::styled(
@@ -1238,7 +1244,7 @@ fn render_agent_list(
         .alignment(Alignment::Right);
 
     match mode {
-        AgentViewMode::ByPool => render_agent_list_by_pool(
+        AgentViewMode::ByHub => render_agent_list_by_hub(
             frame, inner, agents, agent_sel, focused, &mode_line, &indicator,
         ),
         AgentViewMode::ByRepo => render_agent_list_by_repo(
@@ -1247,7 +1253,7 @@ fn render_agent_list(
     }
 }
 
-fn render_agent_list_by_pool(
+fn render_agent_list_by_hub(
     frame: &mut Frame,
     inner: Rect,
     agents: &[AgentInfo],
@@ -1257,23 +1263,23 @@ fn render_agent_list_by_pool(
     indicator: &Paragraph<'_>,
 ) {
     let mut sorted: Vec<&AgentInfo> = agents.iter().collect();
-    sorted.sort_by(|a, b| a.pool.cmp(&b.pool).then(a.started_at.cmp(&b.started_at)));
+    sorted.sort_by(|a, b| a.hub.cmp(&b.hub).then(a.started_at.cmp(&b.started_at)));
 
-    let mut pnames: Vec<&str> = sorted.iter().map(|a| a.pool.as_str()).collect();
+    let mut pnames: Vec<&str> = sorted.iter().map(|a| a.hub.as_str()).collect();
     pnames.dedup();
 
-    // Build layout: mode label + spacer + pool headers + agent cards + gaps
+    // Build layout: mode label + spacer + hub headers + agent cards + gaps
     let mut constraints: Vec<Constraint> = vec![
         Constraint::Length(1), // mode label
         Constraint::Length(1), // spacer
     ];
-    for (pidx, pool_name) in pnames.iter().enumerate() {
+    for (pidx, hub_name) in pnames.iter().enumerate() {
         if pidx > 0 {
-            constraints.push(Constraint::Length(1)); // gap before pool header
+            constraints.push(Constraint::Length(1)); // gap before hub header
         }
-        constraints.push(Constraint::Length(1)); // pool header
+        constraints.push(Constraint::Length(1)); // hub header
         constraints.push(Constraint::Length(1)); // spacer after header
-        let count = sorted.iter().filter(|a| a.pool == *pool_name).count();
+        let count = sorted.iter().filter(|a| a.hub == *hub_name).count();
         for i in 0..count {
             constraints.push(Constraint::Length(4)); // agent card
             if i < count - 1 {
@@ -1297,25 +1303,25 @@ fn render_agent_list_by_pool(
     );
 
     let mut area_idx = 2;
-    for (pidx, pool_name) in pnames.iter().enumerate() {
+    for (pidx, hub_name) in pnames.iter().enumerate() {
         if pidx > 0 {
-            area_idx += 1; // skip gap before pool header
+            area_idx += 1; // skip gap before hub header
         }
-        let pool_header = Paragraph::new(Line::from(vec![Span::styled(
-            format!(" {pool_name}"),
+        let hub_header = Paragraph::new(Line::from(vec![Span::styled(
+            format!(" {hub_name}"),
             Style::default().fg(theme::R_ACCENT),
         )]));
-        frame.render_widget(pool_header, areas[area_idx]);
+        frame.render_widget(hub_header, areas[area_idx]);
         area_idx += 1;
         area_idx += 1; // skip spacer after header
 
-        let agents_in_pool: Vec<(usize, &&AgentInfo)> = sorted
+        let agents_in_hub: Vec<(usize, &&AgentInfo)> = sorted
             .iter()
-            .filter(|a| a.pool == *pool_name)
+            .filter(|a| a.hub == *hub_name)
             .enumerate()
             .collect();
-        let agent_count = agents_in_pool.len();
-        for (aidx, agent) in agents_in_pool {
+        let agent_count = agents_in_hub.len();
+        for (aidx, agent) in agents_in_hub {
             let is_selected = focused && pidx == agent_sel.group_idx && aidx == agent_sel.agent_idx;
             render_agent_card(frame, areas[area_idx], agent, is_selected);
             area_idx += 1;
@@ -1511,16 +1517,16 @@ fn render_agent_card(frame: &mut Frame, area: Rect, agent: &AgentInfo, is_select
 fn render_status_bar(
     frame: &mut Frame,
     area: Rect,
-    pool_running: bool,
+    hub_running: bool,
     update_notice: &Option<String>,
-    pool_name: &str,
+    hub_name: &str,
     active_tab: ActiveTab,
     overview_focus: OverviewFocus,
 ) {
     let bg = Style::default().bg(theme::R_BG_RAISED);
 
     // Build left spans
-    let (dot_color, status_label) = if pool_running {
+    let (dot_color, status_label) = if hub_running {
         (theme::R_SUCCESS, "connected")
     } else {
         (theme::R_TEXT_TERTIARY, "disconnected")
@@ -1536,10 +1542,10 @@ fn render_status_bar(
         ),
     ];
 
-    if pool_name != clust_ipc::DEFAULT_POOL {
+    if hub_name != clust_ipc::DEFAULT_HUB {
         left_spans.push(Span::styled("  ", Style::default().bg(theme::R_BG_RAISED)));
         left_spans.push(Span::styled(
-            pool_name.to_string(),
+            hub_name.to_string(),
             Style::default().fg(theme::R_ACCENT).bg(theme::R_BG_RAISED),
         ));
     }
@@ -1605,7 +1611,7 @@ fn render_status_bar(
 fn render_help_overlay(frame: &mut Frame, area: Rect, active_tab: ActiveTab) {
     let mut bindings: Vec<(&str, &str)> = vec![
         ("q / Esc", "Quit"),
-        ("Q", "Quit and stop pool"),
+        ("Q", "Quit and stop hub"),
         ("Ctrl+C", "Quit"),
         ("Tab", "Next tab"),
         ("Shift+Tab", "Previous tab"),
@@ -1673,14 +1679,14 @@ fn fetch_agents() -> Vec<AgentInfo> {
         let Ok(mut stream) = ipc::try_connect().await else {
             return vec![];
         };
-        if clust_ipc::send_message(&mut stream, &CliMessage::ListAgents { pool: None })
+        if clust_ipc::send_message(&mut stream, &CliMessage::ListAgents { hub: None })
             .await
             .is_err()
         {
             return vec![];
         }
-        match clust_ipc::recv_message::<PoolMessage>(&mut stream).await {
-            Ok(PoolMessage::AgentList { agents }) => agents,
+        match clust_ipc::recv_message::<HubMessage>(&mut stream).await {
+            Ok(HubMessage::AgentList { agents }) => agents,
             _ => vec![],
         }
     })
@@ -1697,8 +1703,8 @@ fn fetch_repos() -> Vec<RepoInfo> {
         {
             return vec![];
         }
-        match clust_ipc::recv_message::<PoolMessage>(&mut stream).await {
-            Ok(PoolMessage::RepoList { repos }) => repos,
+        match clust_ipc::recv_message::<HubMessage>(&mut stream).await {
+            Ok(HubMessage::RepoList { repos }) => repos,
             _ => vec![],
         }
     })
@@ -2100,13 +2106,13 @@ mod tests {
 
     // ── Agent selection state tests ──────────────────────────────
 
-    fn make_agent(id: &str, pool: &str) -> AgentInfo {
+    fn make_agent(id: &str, hub: &str) -> AgentInfo {
         AgentInfo {
             id: id.to_string(),
             agent_binary: "claude".to_string(),
             started_at: "2026-03-26T10:00:00Z".to_string(),
             attached_clients: 0,
-            pool: pool.to_string(),
+            hub: hub.to_string(),
             working_dir: "/tmp".to_string(),
             repo_path: None,
             branch_name: None,
@@ -2134,7 +2140,7 @@ mod tests {
             group_idx: 5,
             agent_idx: 3,
         };
-        sel.clamp(&[], AgentViewMode::ByPool);
+        sel.clamp(&[], AgentViewMode::ByHub);
         assert_eq!(sel.group_idx, 0);
         assert_eq!(sel.agent_idx, 0);
     }
@@ -2146,31 +2152,31 @@ mod tests {
             group_idx: 10,
             agent_idx: 10,
         };
-        sel.clamp(&agents, AgentViewMode::ByPool);
-        assert_eq!(sel.group_idx, 1); // 2 pools: alpha, beta
+        sel.clamp(&agents, AgentViewMode::ByHub);
+        assert_eq!(sel.group_idx, 1); // 2 hubs: alpha, beta
         assert_eq!(sel.agent_idx, 0); // beta has 1 agent
     }
 
     #[test]
-    fn agent_selection_move_down_within_pool() {
+    fn agent_selection_move_down_within_hub() {
         let agents = sample_agents();
-        let mut sel = AgentSelection::default(); // pool 0 (alpha), agent 0
-        sel.move_down(&agents, AgentViewMode::ByPool);
+        let mut sel = AgentSelection::default(); // hub 0 (alpha), agent 0
+        sel.move_down(&agents, AgentViewMode::ByHub);
         assert_eq!(sel.agent_idx, 1); // alpha has 2 agents
-        sel.move_down(&agents, AgentViewMode::ByPool);
+        sel.move_down(&agents, AgentViewMode::ByHub);
         assert_eq!(sel.agent_idx, 1); // saturates
     }
 
     #[test]
-    fn agent_selection_move_up_within_pool() {
+    fn agent_selection_move_up_within_hub() {
         let agents = sample_agents();
         let mut sel = AgentSelection {
             group_idx: 0,
             agent_idx: 1,
         };
-        sel.move_up(&agents, AgentViewMode::ByPool);
+        sel.move_up(&agents, AgentViewMode::ByHub);
         assert_eq!(sel.agent_idx, 0);
-        sel.move_up(&agents, AgentViewMode::ByPool);
+        sel.move_up(&agents, AgentViewMode::ByHub);
         assert_eq!(sel.agent_idx, 0); // saturates
     }
 
@@ -2178,10 +2184,10 @@ mod tests {
     fn agent_selection_next_group() {
         let agents = sample_agents();
         let mut sel = AgentSelection::default();
-        sel.next_group(&agents, AgentViewMode::ByPool);
+        sel.next_group(&agents, AgentViewMode::ByHub);
         assert_eq!(sel.group_idx, 1);
         assert_eq!(sel.agent_idx, 0); // reset on group switch
-        sel.next_group(&agents, AgentViewMode::ByPool);
+        sel.next_group(&agents, AgentViewMode::ByHub);
         assert_eq!(sel.group_idx, 1); // saturates
     }
 
@@ -2192,10 +2198,10 @@ mod tests {
             group_idx: 1,
             agent_idx: 0,
         };
-        sel.prev_group(&agents, AgentViewMode::ByPool);
+        sel.prev_group(&agents, AgentViewMode::ByHub);
         assert_eq!(sel.group_idx, 0);
         assert_eq!(sel.agent_idx, 0);
-        sel.prev_group(&agents, AgentViewMode::ByPool);
+        sel.prev_group(&agents, AgentViewMode::ByHub);
         assert_eq!(sel.group_idx, 0); // saturates
     }
 
@@ -2206,15 +2212,15 @@ mod tests {
             group_idx: 0,
             agent_idx: 1,
         };
-        sel.next_group(&agents, AgentViewMode::ByPool);
+        sel.next_group(&agents, AgentViewMode::ByHub);
         assert_eq!(sel.group_idx, 1);
         assert_eq!(sel.agent_idx, 0);
     }
 
     #[test]
-    fn group_names_by_pool_sorted_deduped() {
+    fn group_names_by_hub_sorted_deduped() {
         let agents = sample_agents();
-        let names = group_names(&agents, AgentViewMode::ByPool);
+        let names = group_names(&agents, AgentViewMode::ByHub);
         assert_eq!(names, vec!["alpha", "beta"]);
     }
 

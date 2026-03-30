@@ -30,7 +30,7 @@ jobs:
       - name: Validate version consistency
         run: |
           VERSION="${{ steps.check.outputs.version }}"
-          for toml in crates/clust-cli/Cargo.toml crates/clust-pool/Cargo.toml crates/clust-ipc/Cargo.toml; do
+          for toml in crates/clust-cli/Cargo.toml crates/clust-hub/Cargo.toml crates/clust-ipc/Cargo.toml; do
             CRATE_VERSION=$(grep '^version' "$toml" | head -1 | sed 's/.*"\(.*\)"/\1/')
             if [ "$CRATE_VERSION" != "$VERSION" ]; then
               echo "::error::Version mismatch: $toml has $CRATE_VERSION but expected $VERSION"
@@ -75,7 +75,7 @@ jobs:
         run: |
           tar -czf ${{ matrix.archive_name }} \
             -C target/${{ matrix.target }}/release \
-            clust clust-pool
+            clust clust-hub
 
       - uses: actions/upload-artifact@v4
         with:
@@ -166,7 +166,7 @@ jobs:
 
             def install
               bin.install "clust"
-              bin.install "clust-pool"
+              bin.install "clust-hub"
             end
 
             test do
