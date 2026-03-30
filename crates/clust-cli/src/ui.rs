@@ -450,7 +450,6 @@ pub fn run(pool_name: &str) -> io::Result<()> {
     let mut pool_stopped = false;
     let mut pool_count: usize = 1;
     let mut show_help = false;
-    let mut last_help_press = Instant::now();
     let mut overview_state = OverviewState::new();
     let mut last_content_area = Rect::default();
 
@@ -475,10 +474,6 @@ pub fn run(pool_name: &str) -> io::Result<()> {
         // Sync overview agent connections when agents are refreshed
         if agents_refreshed && active_tab == ActiveTab::Overview {
             overview_state.sync_agents(&agents, last_content_area);
-        }
-
-        if show_help && last_help_press.elapsed() > Duration::from_millis(250) {
-            show_help = false;
         }
 
         let pool_status = pool_running;
@@ -629,8 +624,7 @@ pub fn run(pool_name: &str) -> io::Result<()> {
                                 _ = prev_tab;
                             }
                             KeyCode::Char('?') => {
-                                show_help = true;
-                                last_help_press = Instant::now();
+                                show_help = !show_help;
                             }
                             // Overview OptionsBar navigation
                             _ if active_tab == ActiveTab::Overview => {
