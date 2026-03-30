@@ -5,7 +5,6 @@ mod output_filter;
 mod overview;
 mod hub_launcher;
 mod scroll_break;
-mod scrollback;
 mod terminal;
 mod theme;
 mod ui;

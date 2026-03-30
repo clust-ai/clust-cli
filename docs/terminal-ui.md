@@ -149,13 +149,14 @@ A multi-agent terminal overview that displays all active agents side-by-side wit
 | Options Bar | `Shift+←` / `Shift+→` | Scroll viewport left/right |
 | Terminal | `Shift+↑` | Return to options bar |
 | Terminal | `Shift+←` / `Shift+→` | Switch focus to previous/next agent panel (wraps around) |
+| Terminal | `PageUp` / `PageDown` | Scroll focused panel through scrollback history |
 | Terminal | Any other key | Forwarded to the focused agent's PTY |
 
 **Implementation:**
 
 - Each agent panel runs a **background tokio task** that maintains its own IPC streaming connection to the hub (attach, receive output, forward input).
 - Output events are sent to the UI thread via an `mpsc` channel and drained each frame.
-- `VirtualTerminal` wraps a `vte` parser (`vte = 0.13`) and a `Screen` grid that implements `vte::Perform` for full ANSI escape sequence handling. The `Screen` maintains a scrollback ring buffer (500 lines) of rows that have scrolled off the top of the grid.
+- `VirtualTerminal` wraps a `vte` parser (`vte = 0.13`) and a `Screen` grid that implements `vte::Perform` for full ANSI escape sequence handling. The `Screen` maintains a scrollback ring buffer (default 500 lines, configurable via `with_scrollback_capacity()`) of rows that have scrolled off the top of the grid. The VirtualTerminal is also used as a shadow terminal in the attached session for scrollback (with 5,000-line capacity), where `resize_keep_scrollback()` preserves scrollback on window resize and `to_ansi_lines_scrolled()` renders scrollback content as ANSI-escaped strings for direct stdout output.
 - `key_event_to_bytes()` converts `crossterm::KeyEvent` to raw terminal byte sequences for agent input forwarding.
 - Lazy initialization: overview connections are only established on first switch to the Overview tab.
 - On connect, each panel's background task consumes the hub's replay buffer before entering the main output loop, so panels show recent history immediately.
@@ -217,7 +218,8 @@ On startup, `clust ui` automatically connects to the hub daemon, starting it if 
 | `Shift+↑` | Exit terminal, return to options bar |
 | `Shift+↓` | Enter focus mode for the focused agent |
 | `Shift+←` / `Shift+→` | Switch to previous/next agent panel |
-| `Shift+PageUp` / `Shift+PageDown` | Scroll focused panel through scrollback history |
+| `PageUp` / `PageDown` | Scroll focused panel through scrollback history |
+| `Shift+PageUp` / `Shift+PageDown` | Scroll focused panel through scrollback history (same as above) |
 | All other keys | Forwarded to the focused agent's PTY |
 
 #### Focus Tab

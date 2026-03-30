@@ -12,8 +12,8 @@ use tokio::sync::mpsc;
 use clust_ipc::{CliMessage, HubMessage};
 
 use crate::output_filter::{EscapeSequenceAssembler, FilterChain};
+use crate::overview::screen::VirtualTerminal;
 use crate::scroll_break::{ScrollBreak, ScrollMode};
-use crate::scrollback::ScrollbackBuffer;
 use crate::theme;
 use crate::version;
 
@@ -138,12 +138,20 @@ impl AttachedSession {
         let agent_binary = self.agent_binary;
         let mut reader = self.reader;
 
-        // Shared state for scrollback
+        // Shared state for scrollback — a shadow VirtualTerminal processes all
+        // output (including replay) so its VTE scrollback captures properly
+        // rendered lines instead of raw newline-split text.
         let scroll_state = Arc::new(Mutex::new(ScrollState {
             offset: 0,
             anchored_total: 0,
         }));
-        let scrollback = Arc::new(Mutex::new(ScrollbackBuffer::new()));
+        let scrollback = Arc::new(Mutex::new(
+            VirtualTerminal::with_scrollback_capacity(
+                cols as usize,
+                (rows - 1) as usize,
+                5000,
+            ),
+        ));
         let (scroll_cmd_tx, mut scroll_cmd_rx) = mpsc::channel::<ScrollCommand>(16);
 
         // Task 1: Read HubMessages (output/exit) and render to terminal.
@@ -169,23 +177,21 @@ impl AttachedSession {
                             Ok(HubMessage::AgentOutput { data, .. }) => {
                                 let filtered = filter_chain.filter(&data);
                                 if !filtered.is_empty() {
-                                    // Always store in scrollback
+                                    // Always feed through the shadow VT
                                     {
-                                        let mut sb = scrollback_out.lock().unwrap();
-                                        let lines_before = sb.total_lines();
-                                        sb.push(&filtered);
-                                        let new_lines = sb.total_lines().saturating_sub(lines_before);
-                                        drop(sb);
+                                        let mut vt = scrollback_out.lock().unwrap();
+                                        let sb_before = vt.screen.scrollback_len();
+                                        vt.process(&filtered);
+                                        let new_lines = vt.screen.scrollback_len().saturating_sub(sb_before);
+                                        drop(vt);
 
                                         let mut state = scroll_state_out.lock().unwrap();
                                         if state.offset > 0 && new_lines > 0 {
                                             // Adjust offset to keep viewport stable
                                             state.offset += new_lines;
                                             state.anchored_total += new_lines;
-                                            // Cap at max
-                                            let (_, total_rows) = terminal::size().unwrap_or((80, 24));
-                                            let vp = total_rows.saturating_sub(1).max(1) as usize;
-                                            let max = state.anchored_total.saturating_sub(vp);
+                                            // Cap at max scrollback
+                                            let max = scrollback_out.lock().unwrap().screen.scrollback_len();
                                             state.offset = state.offset.min(max);
                                         }
                                     }
@@ -263,7 +269,7 @@ impl AttachedSession {
             // Flush any remaining buffered bytes
             let remaining = filter_chain.flush();
             if !remaining.is_empty() {
-                scrollback_out.lock().unwrap().push(&remaining);
+                scrollback_out.lock().unwrap().process(&remaining);
                 if scroll_state_out.lock().unwrap().offset == 0 {
                     let mut stdout = io::stdout().lock();
                     let _ = stdout.write_all(&remaining);
@@ -341,9 +347,12 @@ impl AttachedSession {
                                     if let Some(pos) = find_sequence(data, PAGE_UP) {
                                         let (_, total_rows) = terminal::size().unwrap_or((80, 24));
                                         let viewport_height = total_rows.saturating_sub(1).max(1) as usize;
-                                        let total_lines = scrollback_in.lock().unwrap().total_lines();
+                                        let (sb_len, total_lines) = {
+                                            let vt = scrollback_in.lock().unwrap();
+                                            (vt.screen.scrollback_len(), vt.screen.scrollback_len() + vt.screen.rows)
+                                        };
 
-                                        if total_lines > viewport_height {
+                                        if sb_len > 0 {
                                             // Enter scrollback mode
                                             {
                                                 let mut state = scroll_state_in.lock().unwrap();
@@ -390,15 +399,15 @@ impl AttachedSession {
                                         let result = scroll_break.filter_scroll_only(data);
 
                                         if result.scroll_up > 0 {
-                                            let (_, total_rows) = terminal::size().unwrap_or((80, 24));
-                                            let viewport_height = total_rows.saturating_sub(1).max(1) as usize;
-                                            let total_lines = scrollback_in.lock().unwrap().total_lines();
+                                            let (sb_len, total_lines) = {
+                                                let vt = scrollback_in.lock().unwrap();
+                                                (vt.screen.scrollback_len(), vt.screen.scrollback_len() + vt.screen.rows)
+                                            };
 
-                                            if total_lines > viewport_height {
+                                            if sb_len > 0 {
                                                 {
                                                     let mut state = scroll_state_in.lock().unwrap();
-                                                    let max = total_lines.saturating_sub(viewport_height);
-                                                    state.offset = (result.scroll_up as usize * SCROLL_STEP).min(max);
+                                                    state.offset = (result.scroll_up as usize * SCROLL_STEP).min(sb_len);
                                                     state.anchored_total = total_lines;
                                                 }
                                                 let _ = scroll_cmd_tx.send(ScrollCommand::Redraw).await;
@@ -425,7 +434,7 @@ impl AttachedSession {
                                     if find_sequence(data, PAGE_UP).is_some() {
                                         {
                                             let mut state = scroll_state_in.lock().unwrap();
-                                            let max = state.anchored_total.saturating_sub(viewport_height);
+                                            let max = scrollback_in.lock().unwrap().screen.scrollback_len();
                                             state.offset = state.offset.saturating_add(viewport_height).min(max);
                                         }
                                         let _ = scroll_cmd_tx.send(ScrollCommand::Redraw).await;
@@ -457,7 +466,7 @@ impl AttachedSession {
                                     if result.scroll_up > 0 || result.scroll_down > 0 {
                                         let (changed, reached_live) = {
                                             let mut state = scroll_state_in.lock().unwrap();
-                                            let max = state.anchored_total.saturating_sub(viewport_height);
+                                            let max = scrollback_in.lock().unwrap().screen.scrollback_len();
                                             let prev = state.offset;
                                             state.offset = state.offset
                                                 .saturating_add(result.scroll_up as usize * SCROLL_STEP)
@@ -514,6 +523,11 @@ impl AttachedSession {
                         }
 
                         let (cols, rows) = terminal::size().unwrap_or((80, 24));
+                        // Resize shadow VT to match new dimensions (preserves scrollback)
+                        scrollback_in.lock().unwrap().resize_keep_scrollback(
+                            cols as usize,
+                            rows.saturating_sub(1).max(1) as usize,
+                        );
                         set_scroll_region(rows.saturating_sub(1).max(1));
                         draw_status_bar(
                             &agent_id_for_input,
@@ -638,14 +652,14 @@ fn draw_status_bar(agent_id: &str, agent_binary: &str, total_rows: u16) {
 
 /// Render the scrollback buffer view into the scroll region.
 fn render_scrollback(
-    scrollback: &Arc<Mutex<ScrollbackBuffer>>,
+    scrollback: &Arc<Mutex<VirtualTerminal>>,
     offset: usize,
     viewport_height: usize,
     total_rows: u16,
 ) {
-    let sb = scrollback.lock().unwrap();
-    let lines = sb.visible_lines(offset, viewport_height);
-    let total_lines = sb.total_lines();
+    let vt = scrollback.lock().unwrap();
+    let lines = vt.screen.to_ansi_lines_scrolled(offset);
+    let total_lines = vt.screen.scrollback_len() + vt.screen.rows;
     let mut stdout = io::stdout().lock();
 
     // Save cursor, hide during redraw
