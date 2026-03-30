@@ -171,8 +171,8 @@ async fn multiple_subscribers_receive_same_output() {
         clust_pool::agent::spawn_agent(
             &mut pool,
             clust_pool::agent::SpawnAgentParams {
-                prompt: Some("hello from test".into()),
-                agent_binary: Some("echo".into()),
+                prompt: None,
+                agent_binary: Some("cat".into()),
                 working_dir: "/tmp".into(),
                 cols: 80,
                 rows: 24,
@@ -187,12 +187,26 @@ async fn multiple_subscribers_receive_same_output() {
         .expect("spawn_agent should succeed")
     };
 
-    // Create two subscribers
+    // Subscribe BEFORE writing input to avoid race with fast-exiting commands
     let (mut rx1, mut rx2) = {
         let pool = state.lock().await;
         let entry = pool.agents.get(&id).unwrap();
         (entry.output_tx.subscribe(), entry.output_tx.subscribe())
     };
+
+    // Now send input; cat will echo it back to both subscribers
+    {
+        let mut pool = state.lock().await;
+        if let Some(entry) = pool.agents.get_mut(&id) {
+            use std::io::Write;
+            entry
+                .pty_writer
+                .write_all(b"hello from test\n")
+                .unwrap();
+            // Send EOF so cat exits
+            entry.pty_writer.write_all(&[0x04]).unwrap();
+        }
+    }
 
     // Both should receive the same output
     async fn collect(
