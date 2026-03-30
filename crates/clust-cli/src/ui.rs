@@ -209,6 +209,44 @@ impl AgentSelection {
     }
 }
 
+/// Resolve the currently selected agent from the selection state.
+///
+/// Replicates the sorting/grouping logic used by the render functions to map
+/// `(group_idx, agent_idx)` back to an actual `AgentInfo`.
+fn resolve_selected_agent<'a>(
+    agents: &'a [AgentInfo],
+    sel: &AgentSelection,
+    mode: AgentViewMode,
+) -> Option<&'a AgentInfo> {
+    let names = group_names(agents, mode);
+    let group_name = names.get(sel.group_idx)?;
+
+    match mode {
+        AgentViewMode::ByHub => {
+            let mut sorted: Vec<&AgentInfo> = agents.iter().collect();
+            sorted.sort_by(|a, b| a.hub.cmp(&b.hub).then(a.started_at.cmp(&b.started_at)));
+            sorted
+                .into_iter()
+                .filter(|a| a.hub == *group_name)
+                .nth(sel.agent_idx)
+        }
+        AgentViewMode::ByRepo => {
+            let mut sorted: Vec<&AgentInfo> = agents.iter().collect();
+            sorted.sort_by(|a, b| {
+                let ak = agent_group_key(a, AgentViewMode::ByRepo);
+                let bk = agent_group_key(b, AgentViewMode::ByRepo);
+                ak.cmp(&bk)
+                    .then(a.branch_name.cmp(&b.branch_name))
+                    .then(a.started_at.cmp(&b.started_at))
+            });
+            sorted
+                .into_iter()
+                .filter(|a| agent_group_key(a, AgentViewMode::ByRepo) == *group_name)
+                .nth(sel.agent_idx)
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Tree selection state (left panel)
 // ---------------------------------------------------------------------------
@@ -491,6 +529,8 @@ pub fn run(hub_name: &str) -> io::Result<()> {
     let mut hub_count: usize = 1;
     let mut show_help = false;
     let mut overview_state = OverviewState::new();
+    let mut focus_mode_state = overview::FocusModeState::new();
+    let mut previous_tab: Option<ActiveTab> = None;
     let (init_cols, init_rows) = crossterm::terminal::size().unwrap_or((80, 24));
     let mut last_content_area = Rect {
         x: 0,
@@ -500,8 +540,9 @@ pub fn run(hub_name: &str) -> io::Result<()> {
     };
 
     loop {
-        // Drain overview output events (non-blocking, runs regardless of tab)
+        // Drain output events (non-blocking, runs regardless of tab)
         overview_state.drain_output_events();
+        focus_mode_state.drain_output_events();
 
         // Periodically fetch agent list and repo state from hub
         let mut agents_refreshed = false;
@@ -605,7 +646,7 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                     overview::render_overview(frame, content_area, &overview_state);
                 }
                 ActiveTab::FocusMode => {
-                    render_placeholder(frame, content_area, "Focus mode - coming soon");
+                    overview::render_focus_mode(frame, content_area, &focus_mode_state);
                 }
             }
 
@@ -627,15 +668,93 @@ pub fn run(hub_name: &str) -> io::Result<()> {
         if event::poll(Duration::from_millis(100))? {
             match event::read()? {
                 Event::Key(key) if key.kind == KeyEventKind::Press => {
+                    // Focus mode: all keys go to agent except Shift+navigation
+                    if active_tab == ActiveTab::FocusMode
+                        && focus_mode_state.is_active()
+                    {
+                        let shift = key.modifiers.contains(KeyModifiers::SHIFT);
+                        if shift {
+                            match key.code {
+                                KeyCode::Up => {
+                                    focus_mode_state.shutdown();
+                                    active_tab = previous_tab
+                                        .take()
+                                        .unwrap_or(ActiveTab::Repositories);
+                                }
+                                KeyCode::PageUp => {
+                                    if let Some(panel) = &mut focus_mode_state.panel {
+                                        let page = panel.vterm.screen.rows;
+                                        let max = panel.vterm.screen.scrollback_len();
+                                        panel.panel_scroll_offset =
+                                            (panel.panel_scroll_offset + page).min(max);
+                                    }
+                                }
+                                KeyCode::PageDown => {
+                                    if let Some(panel) = &mut focus_mode_state.panel {
+                                        let page = panel.vterm.screen.rows;
+                                        panel.panel_scroll_offset =
+                                            panel.panel_scroll_offset.saturating_sub(page);
+                                    }
+                                }
+                                _ => {
+                                    if let Some(bytes) =
+                                        overview::input::key_event_to_bytes(&key)
+                                    {
+                                        focus_mode_state.send_input(bytes);
+                                    }
+                                }
+                            }
+                        } else if key.code == KeyCode::Esc {
+                            focus_mode_state.shutdown();
+                            active_tab = previous_tab
+                                .take()
+                                .unwrap_or(ActiveTab::Repositories);
+                        } else if let Some(bytes) =
+                            overview::input::key_event_to_bytes(&key)
+                        {
+                            focus_mode_state.send_input(bytes);
+                        }
+                    }
                     // When overview terminal is focused, intercept all keys
                     // except Shift+arrows — everything else goes to the agent.
-                    if active_tab == ActiveTab::Overview
+                    else if active_tab == ActiveTab::Overview
                         && matches!(overview_state.focus, OverviewFocus::Terminal(_))
                     {
                         let shift = key.modifiers.contains(KeyModifiers::SHIFT);
                         if shift {
                             match key.code {
                                 KeyCode::Up => overview_state.exit_terminal(),
+                                KeyCode::Down => {
+                                    // Enter focus mode with the focused agent
+                                    if let OverviewFocus::Terminal(idx) =
+                                        overview_state.focus
+                                    {
+                                        if let Some(panel) =
+                                            overview_state.panels.get(idx)
+                                        {
+                                            let agent_id = panel.id.clone();
+                                            let agent_binary =
+                                                panel.agent_binary.clone();
+                                            let fm_cols = (last_content_area.width
+                                                * 40
+                                                / 100)
+                                                .saturating_sub(2)
+                                                .max(1);
+                                            let fm_rows = last_content_area
+                                                .height
+                                                .saturating_sub(3)
+                                                .max(1);
+                                            focus_mode_state.open_agent(
+                                                &agent_id,
+                                                &agent_binary,
+                                                fm_cols,
+                                                fm_rows,
+                                            );
+                                            previous_tab = Some(active_tab);
+                                            active_tab = ActiveTab::FocusMode;
+                                        }
+                                    }
+                                }
                                 KeyCode::Left => overview_state.focus_prev(),
                                 KeyCode::Right => overview_state.focus_next(),
                                 KeyCode::PageUp => {
@@ -681,10 +800,13 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                 hub_stopped = true;
                                 break;
                             }
-                            // Tab switching
+                            // Tab switching (skip FocusMode — entered explicitly)
                             KeyCode::Tab => {
-                                let prev_tab = active_tab;
-                                active_tab = active_tab.next();
+                                let mut next = active_tab.next();
+                                if next == ActiveTab::FocusMode {
+                                    next = next.next();
+                                }
+                                active_tab = next;
                                 // Initialize overview on first switch
                                 if active_tab == ActiveTab::Overview
                                     && !overview_state.initialized
@@ -692,18 +814,19 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                     overview_state
                                         .sync_agents(&agents, last_content_area);
                                 }
-                                _ = prev_tab;
                             }
                             KeyCode::BackTab => {
-                                let prev_tab = active_tab;
-                                active_tab = active_tab.prev();
+                                let mut prev = active_tab.prev();
+                                if prev == ActiveTab::FocusMode {
+                                    prev = prev.prev();
+                                }
+                                active_tab = prev;
                                 if active_tab == ActiveTab::Overview
                                     && !overview_state.initialized
                                 {
                                     overview_state
                                         .sync_agents(&agents, last_content_area);
                                 }
-                                _ = prev_tab;
                             }
                             KeyCode::Char('?') => {
                                 show_help = !show_help;
@@ -747,6 +870,33 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                     KeyCode::Enter => {
                                         if focus == FocusPanel::Left {
                                             selection.toggle_collapse();
+                                        } else if focus == FocusPanel::Right {
+                                            if let Some(agent) = resolve_selected_agent(
+                                                &agents,
+                                                &agent_selection,
+                                                agent_view_mode,
+                                            ) {
+                                                let agent_id = agent.id.clone();
+                                                let agent_binary =
+                                                    agent.agent_binary.clone();
+                                                let fm_cols = (last_content_area.width
+                                                    * 40
+                                                    / 100)
+                                                    .saturating_sub(2)
+                                                    .max(1);
+                                                let fm_rows = last_content_area
+                                                    .height
+                                                    .saturating_sub(3)
+                                                    .max(1);
+                                                focus_mode_state.open_agent(
+                                                    &agent_id,
+                                                    &agent_binary,
+                                                    fm_cols,
+                                                    fm_rows,
+                                                );
+                                                previous_tab = Some(active_tab);
+                                                active_tab = ActiveTab::FocusMode;
+                                            }
                                         }
                                     }
                                     KeyCode::Char('v')
@@ -810,15 +960,23 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                 Event::Resize(cols, rows) => {
                     // Compute content area from the new dimensions directly
                     // to avoid using stale last_content_area.
+                    let new_content_area = Rect {
+                        x: 0,
+                        y: 1, // tab bar
+                        width: cols,
+                        height: rows.saturating_sub(2), // tab bar + status bar
+                    };
                     if active_tab == ActiveTab::Overview {
-                        let new_content_area = Rect {
-                            x: 0,
-                            y: 1, // tab bar
-                            width: cols,
-                            height: rows.saturating_sub(2), // tab bar + status bar
-                        };
                         overview_state
                             .handle_resize(agents.len(), new_content_area);
+                    }
+                    if active_tab == ActiveTab::FocusMode {
+                        let fm_cols = (new_content_area.width * 40 / 100)
+                            .saturating_sub(2)
+                            .max(1);
+                        let fm_rows =
+                            new_content_area.height.saturating_sub(3).max(1);
+                        focus_mode_state.handle_resize(fm_cols, fm_rows);
                     }
                 }
                 _ => {}
@@ -826,8 +984,9 @@ pub fn run(hub_name: &str) -> io::Result<()> {
         }
     }
 
-    // Clean up overview connections before exiting
+    // Clean up connections before exiting
     overview_state.shutdown();
+    focus_mode_state.shutdown();
 
     disable_raw_mode()?;
     io::stdout().execute(LeaveAlternateScreen)?;
@@ -904,25 +1063,6 @@ fn render_tab_bar(frame: &mut Frame, area: Rect, active_tab: ActiveTab) {
     }
 
     frame.render_widget(Paragraph::new(Line::from(spans)), area);
-}
-
-fn render_placeholder(frame: &mut Frame, area: Rect, message: &str) {
-    frame.render_widget(
-        Block::default().style(Style::default().bg(theme::R_BG_BASE)),
-        area,
-    );
-
-    let text = Paragraph::new(Line::from(Span::styled(
-        message.to_string(),
-        Style::default().fg(theme::R_TEXT_TERTIARY),
-    )))
-    .alignment(Alignment::Center);
-
-    let [centered] = Layout::vertical([Constraint::Length(1)])
-        .flex(Flex::Center)
-        .areas(area);
-
-    frame.render_widget(text, centered);
 }
 
 fn render_divider(frame: &mut Frame, area: Rect) {
@@ -1671,10 +1811,12 @@ fn render_status_bar(
         ));
     }
 
-    let hint_text = if active_tab == ActiveTab::Overview {
+    let hint_text = if active_tab == ActiveTab::FocusMode {
+        "Esc exit  Shift+\u{2191} exit  Shift+PgUp/PgDn scroll"
+    } else if active_tab == ActiveTab::Overview {
         match overview_focus {
             OverviewFocus::Terminal(_) => {
-                "Shift+\u{2191} options  Shift+\u{2190}/\u{2192} switch agent"
+                "Shift+\u{2191} options  Shift+\u{2193} focus  Shift+\u{2190}/\u{2192} switch agent"
             }
             OverviewFocus::OptionsBar => {
                 "Shift+\u{2193} enter terminal  Shift+\u{2190}/\u{2192} scroll  q quit  Press ? for keys"
@@ -1743,8 +1885,17 @@ fn render_help_overlay(frame: &mut Frame, area: Rect, active_tab: ActiveTab) {
             ("↑ / ↓", "Navigate items"),
             ("← / →", "Collapse / expand"),
             ("Shift+←/→", "Switch panel"),
-            ("Enter", "Toggle collapse"),
+            ("Enter", "Toggle collapse / focus"),
             ("v", "Toggle agent grouping"),
+        ]);
+    }
+
+    if active_tab == ActiveTab::FocusMode {
+        bindings.extend([
+            ("Esc", "Exit focus mode"),
+            ("Shift+↑", "Exit focus mode"),
+            ("Shift+PgUp", "Scroll up"),
+            ("Shift+PgDn", "Scroll down"),
         ]);
     }
 
