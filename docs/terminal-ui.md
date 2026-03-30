@@ -92,7 +92,7 @@ A 1-row bar at the top of the terminal with three tabs:
 |-----|-------------|
 | `Repositories` | Two-panel view with repo tree and agent cards (default) |
 | `Overview` | Multi-agent terminal overview with horizontal panels |
-| `Focus` | Placeholder for future focus mode |
+| `Focus` | Single-agent focus view with a 40%-width terminal panel on the right |
 
 The active tab is highlighted with the accent color. A `Tab/Shift+Tab` hint is shown to the right of the tabs.
 
@@ -122,7 +122,7 @@ A multi-agent terminal overview that displays all active agents side-by-side wit
 ││                    │││                │││         ││
 │└────────────────────┘│└────────────────┘│└─────────┘│
 ├──────────────────────┴──────────────────┴───────────┤
-│ ● connected  Shift+↓ enter terminal  ...    v0.0.7 │
+│ ● connected  Shift+↓ enter terminal  ...    v0.0.8 │
 └─────────────────────────────────────────────────────┘
 ```
 
@@ -170,7 +170,7 @@ On startup, `clust ui` automatically connects to the hub daemon, starting it if 
 ### Bottom Status Bar
 
 ```
-● connected  q to quit  Q to quit and stop hub  ↑↓←→ navigate  Shift+←→ panels  v toggle agents          v0.0.7
+● connected  q to quit  Q to quit and stop hub  ↑↓←→ navigate  Shift+←→ panels  v toggle agents          v0.0.8
 ```
 
 | Section | Description |
@@ -178,7 +178,7 @@ On startup, `clust ui` automatically connects to the hub daemon, starting it if 
 | Status dot | Green `●` when connected, dim when disconnected |
 | Status label | `connected` or `disconnected` |
 | Shortcuts | Context-aware hints: on Repositories tab shows `q quit`, `Q stop+quit`, navigation hints; on Overview tab shows focus-dependent hints (e.g., `Shift+↓ enter terminal` or `Shift+↑ options`) |
-| Version | Right-aligned, e.g. `v0.0.7` |
+| Version | Right-aligned, e.g. `v0.0.8` |
 
 ### Keyboard Shortcuts
 
@@ -199,7 +199,7 @@ On startup, `clust ui` automatically connects to the hub daemon, starting it if 
 | `↑` / `↓` | Move selection within current level |
 | `→` | Descend into selected item, or expand if collapsed |
 | `←` | Collapse current item, or ascend to parent level |
-| `Enter` | Toggle collapse/expand on repos and categories |
+| `Enter` | Toggle collapse/expand (left panel); enter focus mode for selected agent (right panel) |
 | `Shift+←` / `Shift+→` | Switch focus between left and right panels |
 | `v` | Toggle agent grouping between by-hub and by-repo (right panel) |
 
@@ -215,6 +215,51 @@ On startup, `clust ui` automatically connects to the hub daemon, starting it if 
 | Shortcut | Action |
 |----------|--------|
 | `Shift+↑` | Exit terminal, return to options bar |
+| `Shift+↓` | Enter focus mode for the focused agent |
 | `Shift+←` / `Shift+→` | Switch to previous/next agent panel |
 | `Shift+PageUp` / `Shift+PageDown` | Scroll focused panel through scrollback history |
+| All other keys | Forwarded to the focused agent's PTY |
+
+#### Focus Tab
+
+A single-agent focus view that displays one agent's terminal in a 40%-width panel on the right side of the screen. The left 60% is empty (base background).
+
+```
+┌─────────────────────────────────────────────────────┐
+│                          │┌────────────────────────┐│
+│                          ││ a3f8c1 · claude ●      ││
+│                          ││                        ││
+│          (empty)         ││ Agent PTY output       ││
+│                          ││ (VTE emulated)         ││
+│                          ││                        ││
+│                          │└────────────────────────┘│
+├─────────────────────────────────────────────────────┤
+│ ● connected  Esc exit  Shift+↑ exit  ...    v0.0.8 │
+└─────────────────────────────────────────────────────┘
+```
+
+**Entry points:**
+
+- **From Overview tab:** While in terminal focus, press `Shift+↓` to open the focused agent in focus mode.
+- **From Repositories tab:** While the right panel is focused, press `Enter` on a selected agent to open it in focus mode.
+
+**Exit:** Press `Esc` or `Shift+↑` to return to the previous tab.
+
+**Implementation:**
+
+- `FocusModeState` manages a single `AgentPanel` with its own IPC background task, output channel, and VTE terminal emulator.
+- The panel dimensions are calculated as 40% of the content area width (minus borders) by the content area height (minus header).
+- All keyboard input is forwarded to the agent except `Esc` (exit), `Shift+↑` (exit), `Shift+PageUp` (scroll up), and `Shift+PageDown` (scroll down).
+- On terminal resize, the focus mode panel is resized and the hub is notified via `ResizeAgent`.
+- Tab cycling (`Tab` / `Shift+Tab`) skips the Focus tab; it is only entered explicitly via the entry points above.
+- On exit, the panel's connection is detached and its background task is aborted.
+
+**Keyboard shortcuts (Focus tab):**
+
+| Shortcut | Action |
+|----------|--------|
+| `Esc` | Exit focus mode, return to previous tab |
+| `Shift+↑` | Exit focus mode, return to previous tab |
+| `Shift+PageUp` | Scroll up through scrollback history |
+| `Shift+PageDown` | Scroll down through scrollback history |
 | All other keys | Forwarded to the focused agent's PTY |
