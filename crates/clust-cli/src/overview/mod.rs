@@ -72,6 +72,7 @@ pub struct OverviewState {
     output_tx: mpsc::Sender<AgentOutputEvent>,
     panel_cols: u16,
     panel_rows: u16,
+    viewport_width: u16,
     pub initialized: bool,
 }
 
@@ -87,6 +88,7 @@ impl OverviewState {
             output_tx,
             panel_cols: 80,
             panel_rows: 24,
+            viewport_width: 0,
             initialized: false,
         }
     }
@@ -194,22 +196,28 @@ impl OverviewState {
     /// Move focus to the previous agent terminal.
     pub fn focus_prev(&mut self) {
         if let OverviewFocus::Terminal(idx) = self.focus {
-            if idx > 0 {
-                self.focus = OverviewFocus::Terminal(idx - 1);
-                self.last_terminal_idx = idx - 1;
-                self.ensure_visible(idx - 1);
-            }
+            let new_idx = if idx > 0 {
+                idx - 1
+            } else {
+                self.panels.len() - 1
+            };
+            self.focus = OverviewFocus::Terminal(new_idx);
+            self.last_terminal_idx = new_idx;
+            self.ensure_visible(new_idx);
         }
     }
 
     /// Move focus to the next agent terminal.
     pub fn focus_next(&mut self) {
         if let OverviewFocus::Terminal(idx) = self.focus {
-            if idx + 1 < self.panels.len() {
-                self.focus = OverviewFocus::Terminal(idx + 1);
-                self.last_terminal_idx = idx + 1;
-                self.ensure_visible(idx + 1);
-            }
+            let new_idx = if idx + 1 < self.panels.len() {
+                idx + 1
+            } else {
+                0
+            };
+            self.focus = OverviewFocus::Terminal(new_idx);
+            self.last_terminal_idx = new_idx;
+            self.ensure_visible(new_idx);
         }
     }
 
@@ -260,8 +268,13 @@ impl OverviewState {
         if idx < self.scroll_offset {
             self.scroll_offset = idx;
         }
-        // We don't know the width here, so we can't fully clamp the right side.
-        // The render function will handle clamping.
+        if self.viewport_width > 0 {
+            let pw = panel_total_width(self.viewport_width);
+            let fully_visible = (self.viewport_width / pw).max(1) as usize;
+            if idx >= self.scroll_offset + fully_visible {
+                self.scroll_offset = idx + 1 - fully_visible;
+            }
+        }
     }
 
     fn clamp_focus(&mut self) {
@@ -287,6 +300,7 @@ impl OverviewState {
         if agent_count == 0 {
             return;
         }
+        self.viewport_width = content_area.width;
         // Content area already excludes the tab bar and status bar.
         // We subtract 1 row for the options bar.
         let available_height = content_area.height.saturating_sub(1);
