@@ -120,6 +120,7 @@ Hub -> CLI:
   AgentOutput { id: String, data: Vec<u8> }
   AgentExited { id: String, exit_code: i32 }
   AgentList { agents: Vec<AgentInfo> }
+  AgentReplayComplete { id: String }  // Marks end of replay buffer data on attach
   AgentStopped { id: String }  // Sent when stop is initiated (agent may still be terminating)
   DefaultAgent { agent_binary: Option<String> }
   HubShutdown

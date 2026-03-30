@@ -104,8 +104,11 @@ When the hub detects an agent process has exited:
 Each agent has:
 - A PTY master file descriptor
 - A list of attached CLI client connections
+- A replay buffer (512 KB ring buffer of recent PTY output)
 
-The hub reads from the PTY master and fans out data to all attached clients. Each client connection is independent — one slow client does not block others.
+The hub reads from the PTY master and fans out data to all attached clients via a broadcast channel (capacity 1024). Each client connection is independent — one slow client does not block others.
+
+All PTY output is recorded in the agent's replay buffer as it arrives. When a client attaches, the hub sends the entire replay buffer contents before starting live streaming, followed by an `AgentReplayComplete` sentinel message. This ensures the client sees recent history without missing output that occurred before attachment. If a broadcast channel receiver lags (slow client), the hub re-sends the replay buffer to resync that client instead of silently dropping frames.
 
 ### Input Routing
 
@@ -130,6 +133,7 @@ struct AgentEntry {
     pty_master: Box<dyn MasterPty + Send>,
     pty_writer: Box<dyn Write + Send>,
     output_tx: broadcast::Sender<AgentEvent>,
+    replay_buffer: Arc<Mutex<ReplayBuffer>>, // 512 KB ring buffer of recent PTY output
     attached_count: Arc<AtomicUsize>,
     client_sizes: HashMap<u64, (u16, u16)>,// per-client terminal sizes
     current_pty_size: (u16, u16),          // current PTY dimensions (skip redundant resizes)

@@ -52,9 +52,13 @@ The bar uses a distinct background color (e.g., muted gray/blue) to visually sep
 ### Attach Flow
 
 1. CLI sends `AttachAgent { id }` to hub
-2. Hub starts streaming `AgentOutput` messages
-3. CLI enters raw mode, draws status bar
-4. CLI streams output to terminal, forwards input to hub
+2. Hub sends the agent's replay buffer contents as `AgentOutput` messages
+3. Hub sends `AgentReplayComplete { id }` sentinel
+4. Hub begins live-streaming new `AgentOutput` messages
+5. CLI enters raw mode, draws status bar
+6. During replay (before `AgentReplayComplete`), output is stored in scrollback but suppressed from stdout to prevent a flash of historical content
+7. After `AgentReplayComplete`, normal stdout rendering resumes — the agent's own redraw provides a clean screen
+8. CLI streams output to terminal, forwards input to hub
 
 ### Detach Flow
 
@@ -151,10 +155,12 @@ A multi-agent terminal overview that displays all active agents side-by-side wit
 
 - Each agent panel runs a **background tokio task** that maintains its own IPC streaming connection to the hub (attach, receive output, forward input).
 - Output events are sent to the UI thread via an `mpsc` channel and drained each frame.
-- `VirtualTerminal` wraps a `vte` parser (`vte = 0.13`) and a `Screen` grid that implements `vte::Perform` for full ANSI escape sequence handling.
+- `VirtualTerminal` wraps a `vte` parser (`vte = 0.13`) and a `Screen` grid that implements `vte::Perform` for full ANSI escape sequence handling. The `Screen` maintains a scrollback ring buffer (500 lines) of rows that have scrolled off the top of the grid.
 - `key_event_to_bytes()` converts `crossterm::KeyEvent` to raw terminal byte sequences for agent input forwarding.
 - Lazy initialization: overview connections are only established on first switch to the Overview tab.
-- On terminal resize, all panels are resized and the hub is notified via `ResizeAgent`. The VTE grid is cleared on resize (the agent sends a full redraw after receiving SIGWINCH); same-size resizes are skipped as a no-op to preserve content. The viewport is scrolled automatically to keep the focused panel visible.
+- On connect, each panel's background task consumes the hub's replay buffer before entering the main output loop, so panels show recent history immediately.
+- On terminal resize, all panels are resized and the hub is notified via `ResizeAgent`. The resize command is sent before clearing the local VTE grid so that a failed send does not leave the grid empty. The VTE grid is cleared on resize (the agent sends a full redraw after receiving SIGWINCH); same-size resizes are skipped as a no-op to preserve content. Resize also resets `current_style` and `wrap_pending` to prevent style bleed. The viewport is scrolled automatically to keep the focused panel visible.
+- Each panel has a `panel_scroll_offset` for scrolling through the combined scrollback + live grid. When scrolled, a `↑N` indicator appears in the panel header.
 - On exit, all connections are detached and background tasks are aborted.
 
 ### Auto-connect
@@ -210,4 +216,5 @@ On startup, `clust ui` automatically connects to the hub daemon, starting it if 
 |----------|--------|
 | `Shift+↑` | Exit terminal, return to options bar |
 | `Shift+←` / `Shift+→` | Switch to previous/next agent panel |
+| `Shift+PageUp` / `Shift+PageDown` | Scroll focused panel through scrollback history |
 | All other keys | Forwarded to the focused agent's PTY |
