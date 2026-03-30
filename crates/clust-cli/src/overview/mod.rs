@@ -123,17 +123,16 @@ impl OverviewState {
         // if the send fails the grid is not left empty without a SIGWINCH.
         for panel in &mut self.panels {
             let (pw, ph) = (self.panel_cols as usize, self.panel_rows as usize);
-            if panel.vterm.screen.cols != pw || panel.vterm.screen.rows != ph {
-                if panel
+            if (panel.vterm.screen.cols != pw || panel.vterm.screen.rows != ph)
+                && panel
                     .command_tx
                     .try_send(PanelCommand::Resize {
                         cols: self.panel_cols,
                         rows: self.panel_rows,
                     })
                     .is_ok()
-                {
-                    panel.vterm.resize(pw, ph);
-                }
+            {
+                panel.vterm.resize(pw, ph);
             }
         }
 
