@@ -153,7 +153,12 @@ impl OverviewState {
 
     /// Handle terminal resize.
     pub fn handle_resize(&mut self, agent_count: usize, content_area: Rect) {
+        let old_cols = self.panel_cols;
+        let old_rows = self.panel_rows;
         self.recalculate_panel_size(agent_count, content_area);
+        if self.panel_cols == old_cols && self.panel_rows == old_rows {
+            return;
+        }
         for panel in &mut self.panels {
             panel
                 .vterm

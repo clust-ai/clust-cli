@@ -731,11 +731,18 @@ pub fn run(pool_name: &str) -> io::Result<()> {
                         }
                     }
                 }
-                Event::Resize(_, _) => {
-                    // Handle overview resize
+                Event::Resize(cols, rows) => {
+                    // Compute content area from the new dimensions directly
+                    // to avoid using stale last_content_area.
                     if active_tab == ActiveTab::Overview {
+                        let new_content_area = Rect {
+                            x: 0,
+                            y: 1, // tab bar
+                            width: cols,
+                            height: rows.saturating_sub(2), // tab bar + status bar
+                        };
                         overview_state
-                            .handle_resize(agents.len(), last_content_area);
+                            .handle_resize(agents.len(), new_content_area);
                     }
                 }
                 _ => {}
