@@ -22,6 +22,12 @@ pub struct ReplayBuffer {
     capacity: usize,
 }
 
+impl Default for ReplayBuffer {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl ReplayBuffer {
     pub fn new() -> Self {
         Self {
