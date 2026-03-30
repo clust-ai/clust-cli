@@ -144,7 +144,7 @@ A multi-agent terminal overview that displays all active agents side-by-side wit
 | Options Bar | `Shift+↓` | Enter terminal focus (returns to last focused panel) |
 | Options Bar | `Shift+←` / `Shift+→` | Scroll viewport left/right |
 | Terminal | `Shift+↑` | Return to options bar |
-| Terminal | `Shift+←` / `Shift+→` | Switch focus to previous/next agent panel |
+| Terminal | `Shift+←` / `Shift+→` | Switch focus to previous/next agent panel (wraps around) |
 | Terminal | Any other key | Forwarded to the focused agent's PTY |
 
 **Implementation:**
@@ -154,7 +154,7 @@ A multi-agent terminal overview that displays all active agents side-by-side wit
 - `VirtualTerminal` wraps a `vte` parser (`vte = 0.13`) and a `Screen` grid that implements `vte::Perform` for full ANSI escape sequence handling.
 - `key_event_to_bytes()` converts `crossterm::KeyEvent` to raw terminal byte sequences for agent input forwarding.
 - Lazy initialization: overview connections are only established on first switch to the Overview tab.
-- On terminal resize, all panels are resized and the pool is notified via `ResizeAgent`.
+- On terminal resize, all panels are resized and the pool is notified via `ResizeAgent`. The VTE grid is cleared on resize (the agent sends a full redraw after receiving SIGWINCH); same-size resizes are skipped as a no-op to preserve content. The viewport is scrolled automatically to keep the focused panel visible.
 - On exit, all connections are detached and background tasks are aborted.
 
 ### Auto-connect
