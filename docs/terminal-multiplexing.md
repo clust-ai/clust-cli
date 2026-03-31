@@ -70,7 +70,7 @@ Input uses **raw stdin byte forwarding** (not crossterm event conversion). This 
 
 ## Scrollback
 
-The attached session maintains scrollback using a **shadow `VirtualTerminal`** — the same VTE-based terminal emulator used by overview mode panels. All output (including hub replay buffer data) is fed through this shadow VT, which properly captures lines as they scroll off the screen. This approach correctly handles TUI agents that use cursor positioning (`\x1b[row;colH`) instead of newlines, which a line-oriented buffer would fail to render. The shadow VT has a scrollback capacity of 5,000 lines.
+The attached session maintains scrollback using a **shadow `TerminalEmulator`** — the same `vt100`-backed terminal emulator used by overview mode panels. All output (including hub replay buffer data) is fed through this shadow terminal, which properly captures lines as they scroll off the screen. This approach correctly handles TUI agents that use cursor positioning (`\x1b[row;colH`) instead of newlines, which a line-oriented buffer would fail to render. The shadow terminal has a scrollback capacity of 5,000 lines.
 
 Both PageUp and mouse scroll-up can enter scrollback mode from live mode. In live mode, `ScrollBreak::filter_scroll_only()` intercepts only scroll events while passing all other input through. In scrollback mode, `ScrollBreak::filter_intercept()` strips all mouse events.
 
@@ -82,9 +82,9 @@ When entering scrollback mode, the current `total_lines` is recorded as an ancho
 - **PageDown** (scrollback mode): scrolls down by one page. When offset reaches 0, exits scrollback mode.
 - **Mouse scroll up/down** (scrollback mode): navigates by `SCROLL_STEP` lines. Scrolling down to offset 0 exits scrollback mode.
 - **Any other keypress** while in scrollback: exits scrollback mode, triggers agent redraw via `ResizeAgent`, and forwards the keypress.
-- **Terminal resize** while in scrollback: exits scrollback mode. The shadow VT is resized via `resize_keep_scrollback()` which preserves scrollback history while clearing the live grid.
+- **Terminal resize** while in scrollback: exits scrollback mode. The shadow terminal is resized via `resize()` which preserves scrollback history.
 - Output arriving while in scrollback mode is stored in the shadow VT and the scroll offset is adjusted, but not rendered to stdout until the user returns to live mode.
-- Scrollback rendering uses `to_ansi_lines_scrolled()` which converts the shadow VT's cell grid to strings with embedded ANSI SGR escape codes for direct stdout output.
+- Scrollback rendering uses `to_ansi_lines_scrolled()` which converts the shadow terminal's cell grid to strings with embedded ANSI SGR escape codes for direct stdout output.
 
 ## Status Bar
 

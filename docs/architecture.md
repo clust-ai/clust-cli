@@ -185,5 +185,5 @@ clust "do something"
 | `tao` | Native event loop (macOS tray icon support) |
 | `tray-icon` | System tray icon and menu |
 | `git2` | Git repository/branch/worktree detection |
-| `vte` | VTE terminal escape sequence parser (overview screen emulation) |
+| `vt100` | Terminal emulator (overview panels, focus mode, attached scrollback) |
 | `which` | Locate agent binaries on PATH (default agent discovery) |

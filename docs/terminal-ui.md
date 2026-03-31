@@ -108,7 +108,7 @@ Repositories are registered via `clust repo -R` or auto-registered when an agent
 
 #### Overview Tab
 
-A multi-agent terminal overview that displays all active agents side-by-side with live terminal output. Each agent gets its own panel with a full VTE terminal emulator.
+A multi-agent terminal overview that displays all active agents side-by-side with live terminal output. Each agent gets its own panel with a full terminal emulator backed by the `vt100` crate.
 
 ```
 ┌─────────────────────────────────────────────────────┐
@@ -132,7 +132,7 @@ A multi-agent terminal overview that displays all active agents side-by-side wit
 - **Agent panels (horizontal):** Fixed-width columns sized so exactly 2.5 panels fit across the screen (showing 2 full panels + half of a third), with a minimum width of 40 columns. When more agents exist than fit on screen, horizontal scrolling is enabled with `◀ N` / `N ▶` indicators.
 - Each panel has **box-drawing borders** (top, bottom, left, right). The border color is accent blue when the panel is focused, and subtle gray when unfocused.
 - Inside the border, a **header row** shows agent ID (accent-colored), separator, agent binary name, and status indicator (`●` green for running, `[exited]` red for exited).
-- The **terminal area** below the header renders the agent's PTY output using a VTE-based virtual terminal emulator with full ANSI support (cursor movement, SGR colors/styles, erase operations, scroll regions, line wrapping). The VTE terminal gets the inner width (total panel width minus 2 border columns).
+- The **terminal area** below the header renders the agent's PTY output using a `vt100`-backed terminal emulator (`TerminalEmulator`) with full ANSI support (cursor movement, SGR colors/styles, erase operations, scroll regions, line wrapping, alternate screen buffer). The terminal emulator gets the inner width (total panel width minus 2 border columns).
 
 **Focus modes:**
 
@@ -156,11 +156,11 @@ A multi-agent terminal overview that displays all active agents side-by-side wit
 
 - Each agent panel runs a **background tokio task** that maintains its own IPC streaming connection to the hub (attach, receive output, forward input).
 - Output events are sent to the UI thread via an `mpsc` channel and drained each frame.
-- `VirtualTerminal` wraps a `vte` parser (`vte = 0.13`) and a `Screen` grid that implements `vte::Perform` for full ANSI escape sequence handling. The `Screen` maintains a scrollback ring buffer (default 2,000 lines, configurable via `with_scrollback_capacity()`) of rows that have scrolled off the top of the grid. Scrollback is populated both by natural line scrolling and by `erase_in_display()`, which saves non-blank screen content to scrollback before clearing (for ED modes 2/3, and mode 0 when the cursor is at the home position). This ensures that TUI-style agents that clear the screen with `\x1b[2J` or `\x1b[H\x1b[J` before each redraw accumulate scrollback history. The VirtualTerminal is also used as a shadow terminal in the attached session for scrollback (with 5,000-line capacity), where `resize_keep_scrollback()` preserves scrollback on window resize and `to_ansi_lines_scrolled()` renders scrollback content as ANSI-escaped strings for direct stdout output.
+- `TerminalEmulator` wraps a `vt100::Parser` (`vt100 = 0.15`) for full ANSI escape sequence handling, including alternate screen buffer support (private mode sequences like `?1049h`/`?1049l`), cursor visibility, scroll regions, and all standard SGR attributes. The `vt100` crate maintains scrollback internally (default 2,000 lines, configurable via `with_scrollback_capacity()`). The `TerminalEmulator` provides conversion to ratatui `Line`/`Span` types for TUI rendering (`to_ratatui_lines()`, `to_ratatui_lines_scrolled()`) and to ANSI-escaped strings for direct stdout output (`to_ansi_lines_scrolled()`). It is also used as a shadow terminal in the attached session for scrollback (with 5,000-line capacity).
 - `key_event_to_bytes()` converts `crossterm::KeyEvent` to raw terminal byte sequences for agent input forwarding.
 - Lazy initialization: overview connections are only established on first switch to the Overview tab.
 - On connect, each panel's background task consumes the hub's replay buffer before entering the main output loop, so panels show recent history immediately.
-- On terminal resize, all panels are resized via `resize_keep_scrollback()` (which preserves accumulated scrollback history) and the hub is notified via `ResizeAgent`. The resize command is sent before clearing the local VTE grid so that a failed send does not leave the grid empty. The VTE grid is cleared on resize (the agent sends a full redraw after receiving SIGWINCH); same-size resizes are skipped as a no-op to preserve content. Resize also resets `current_style` and `wrap_pending` to prevent style bleed. The viewport is scrolled automatically to keep the focused panel visible.
+- On terminal resize, all panels are resized via `TerminalEmulator::resize()` (which preserves accumulated scrollback history) and the hub is notified via `ResizeAgent`. Same-size resizes are skipped as a no-op to preserve content. The viewport is scrolled automatically to keep the focused panel visible.
 - Each panel has a `panel_scroll_offset` for scrolling through the combined scrollback + live grid. When scrolled, a `↑N` indicator appears in the panel header.
 - On exit, all connections are detached and background tasks are aborted.
 
@@ -270,7 +270,7 @@ The agent's `working_dir` is passed to `open_agent()` to determine the git repos
 
 **Implementation:**
 
-- `FocusModeState` manages a single `AgentPanel` with its own IPC background task, output channel, and VTE terminal emulator.
+- `FocusModeState` manages a single `AgentPanel` with its own IPC background task, output channel, and `TerminalEmulator`.
 - The panel dimensions are calculated as 40% of the content area width (minus borders) by the content area height (minus header).
 - `FocusSide` enum tracks which panel has keyboard focus (`Left` or `Right`).
 - `LeftPanelTab` enum tracks the active tab in the left panel (`Changes`, `Panel2`, `Panel3`) with `next()` for cycling.
@@ -278,7 +278,7 @@ The agent's `working_dir` is passed to `open_agent()` to determine the git repos
 - A background diff refresh task (`spawn_diff_task`) runs every 2 seconds and sends `DiffEvent::Updated` or `DiffEvent::Error` via an `mpsc` channel. A `watch` channel signals the task to stop.
 - `drain_diff_events()` is called each frame in the main event loop alongside `drain_output_events()`.
 - `parse_unified_diff()` parses raw `git diff HEAD` output into structured `DiffLine` entries with kind, content, line numbers, and file index.
-- On terminal resize, the focus mode panel is resized via `resize_keep_scrollback()` (preserving scrollback history) and the hub is notified via `ResizeAgent`.
+- On terminal resize, the focus mode panel is resized via `TerminalEmulator::resize()` (preserving scrollback history) and the hub is notified via `ResizeAgent`.
 - Tab cycling (`Tab` / `Shift+Tab`) skips the Focus tab; it is only entered explicitly via the entry points above.
 - On exit (via `close_panel()`), the diff task is stopped via the watch channel and aborted, diff state is cleared, and the panel's connection is detached.
 
