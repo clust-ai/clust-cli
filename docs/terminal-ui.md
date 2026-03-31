@@ -92,7 +92,7 @@ A 1-row bar at the top of the terminal with three tabs:
 |-----|-------------|
 | `Repositories` | Two-panel view with repo tree and agent cards (default) |
 | `Overview` | Multi-agent terminal overview with horizontal panels |
-| `Focus` | Single-agent focus view with a 40%-width terminal panel on the right |
+| `Focus` | Single-agent focus view with a 60%-width left panel (tabbed, with diff viewer) and 40%-width terminal panel on the right |
 
 The active tab is highlighted with the accent color. A `Tab/Shift+Tab` hint is shown to the right of the tabs.
 
@@ -178,7 +178,7 @@ On startup, `clust ui` automatically connects to the hub daemon, starting it if 
 |---------|-------------|
 | Status dot | Green `●` when connected, dim when disconnected |
 | Status label | `connected` or `disconnected` |
-| Shortcuts | Context-aware hints: on Repositories tab shows `q quit`, `Q stop+quit`, navigation hints; on Overview tab shows focus-dependent hints (e.g., `Shift+↓ enter terminal` or `Shift+↑ options`) |
+| Shortcuts | Context-aware hints: on Repositories tab shows `q quit`, `Q stop+quit`, navigation hints; on Overview tab shows focus-dependent hints (e.g., `Shift+↓ enter terminal` or `Shift+↑ options`); on Focus tab shows `Shift+←/→ switch panel`, `Shift+↑/↓ jump file`, `Esc exit` |
 | Version | Right-aligned, e.g. `v0.0.8` |
 
 ### Keyboard Shortcuts
@@ -224,44 +224,82 @@ On startup, `clust ui` automatically connects to the hub daemon, starting it if 
 
 #### Focus Tab
 
-A single-agent focus view that displays one agent's terminal in a 40%-width panel on the right side of the screen. The left 60% is empty (base background).
+A single-agent focus view with a two-panel split: a 60%-width left panel with tabbed content (including a git diff viewer) and a 40%-width right panel displaying the agent's terminal.
 
 ```
 ┌─────────────────────────────────────────────────────┐
-│                          │┌────────────────────────┐│
-│                          ││ a3f8c1 · claude ●      ││
-│                          ││                        ││
-│          (empty)         ││ Agent PTY output       ││
-│                          ││ (VTE emulated)         ││
-│                          ││                        ││
-│                          │└────────────────────────┘│
+│ Changes │ Panel 2 │ Panel 3 │┌────────────────────┐│
+│                               ││ a3f8c1 · claude ●  ││
+│      1      1│fn main() {     ││                    ││
+│      2       │-  old_code();  ││ Agent PTY output   ││
+│         2│+  new_code();  ││ (VTE emulated)     ││
+│      3      3│  let x = 1;   ││                    ││
+│                               │└────────────────────┘│
 ├─────────────────────────────────────────────────────┤
-│ ● connected  Esc exit  Shift+↑ exit  ...    v0.0.8 │
+│ ● connected  Shift+←/→ switch panel  ...     v0.0.8│
 └─────────────────────────────────────────────────────┘
 ```
+
+**Left panel:**
+
+The left panel has a tab bar at the top with three tabs: `Changes`, `Panel 2`, `Panel 3`. The `Changes` tab shows a unified inline diff viewer. `Panel 2` and `Panel 3` are placeholders for future content.
+
+**Diff viewer (Changes tab):**
+
+- Displays the output of `git diff HEAD` for the agent's working directory
+- Unified inline format with dual-column line numbers (old and new)
+- Line-by-line color coding: additions use a green-tinted background (`R_DIFF_ADD_BG`), deletions use a red-tinted background (`R_DIFF_DEL_BG`), file headers use `R_BG_RAISED`, hunk headers use the accent color, context lines use the base background
+- A gutter column (9 chars wide) shows old/new line numbers separated by a `│` divider; file headers and hunk headers suppress line numbers
+- The diff is refreshed every 2 seconds via a background tokio task that runs `git diff HEAD` in a `spawn_blocking` call
+- Scrolling is supported with `↑` / `↓` keys when the left panel is focused
+- File jumping with `Shift+↑` / `Shift+↓` navigates directly to the previous/next file header
+- Empty state shows "No uncommitted changes"; loading state shows "Loading diff..."
+
+**Panel focus:**
+
+The focus view has a concept of which side (left or right) has keyboard focus. The focused side is indicated by visual cues (tab bar highlight, panel border accent). `Shift+←` and `Shift+→` switch focus between the left and right panels. `Esc` from the left panel returns focus to the right panel; `Esc` from the right panel exits focus mode.
 
 **Entry points:**
 
 - **From Overview tab:** While in terminal focus, press `Shift+↓` to open the focused agent in focus mode.
 - **From Repositories tab:** While the right panel is focused, press `Enter` on a selected agent to open it in focus mode.
 
-**Exit:** Press `Esc` or `Shift+↑` to return to the previous tab.
+The agent's `working_dir` is passed to `open_agent()` to determine the git repository for the diff viewer.
+
+**Exit:** Press `Esc` (when right panel is focused) or `Shift+↑` (when right panel is focused) to return to the previous tab.
 
 **Implementation:**
 
 - `FocusModeState` manages a single `AgentPanel` with its own IPC background task, output channel, and VTE terminal emulator.
 - The panel dimensions are calculated as 40% of the content area width (minus borders) by the content area height (minus header).
-- All keyboard input is forwarded to the agent except `Esc` (exit), `Shift+↑` (exit), `Shift+PageUp` (scroll up), and `Shift+PageDown` (scroll down).
+- `FocusSide` enum tracks which panel has keyboard focus (`Left` or `Right`).
+- `LeftPanelTab` enum tracks the active tab in the left panel (`Changes`, `Panel2`, `Panel3`) with `next()` for cycling.
+- Diff state is managed via `ParsedDiff` (lines, file start indices, file names), `diff_scroll` (current scroll position), and `diff_error` (error message if `git diff` failed).
+- A background diff refresh task (`spawn_diff_task`) runs every 2 seconds and sends `DiffEvent::Updated` or `DiffEvent::Error` via an `mpsc` channel. A `watch` channel signals the task to stop.
+- `drain_diff_events()` is called each frame in the main event loop alongside `drain_output_events()`.
+- `parse_unified_diff()` parses raw `git diff HEAD` output into structured `DiffLine` entries with kind, content, line numbers, and file index.
 - On terminal resize, the focus mode panel is resized via `resize_keep_scrollback()` (preserving scrollback history) and the hub is notified via `ResizeAgent`.
 - Tab cycling (`Tab` / `Shift+Tab`) skips the Focus tab; it is only entered explicitly via the entry points above.
-- On exit, the panel's connection is detached and its background task is aborted.
+- On exit (via `close_panel()`), the diff task is stopped via the watch channel and aborted, diff state is cleared, and the panel's connection is detached.
 
-**Keyboard shortcuts (Focus tab):**
+**Keyboard shortcuts (Focus tab, right panel focused):**
 
 | Shortcut | Action |
 |----------|--------|
 | `Esc` | Exit focus mode, return to previous tab |
 | `Shift+↑` | Exit focus mode, return to previous tab |
+| `Shift+←` | Switch focus to left panel |
 | `Shift+PageUp` | Scroll up through scrollback history |
 | `Shift+PageDown` | Scroll down through scrollback history |
 | All other keys | Forwarded to the focused agent's PTY |
+
+**Keyboard shortcuts (Focus tab, left panel focused):**
+
+| Shortcut | Action |
+|----------|--------|
+| `↑` / `↓` | Scroll diff up/down |
+| `Shift+↑` | Jump to previous file header |
+| `Shift+↓` | Jump to next file header |
+| `Shift+→` | Switch focus to right panel |
+| `Tab` | Cycle to next left panel tab |
+| `Esc` | Switch focus to right panel |

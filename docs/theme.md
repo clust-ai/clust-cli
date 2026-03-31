@@ -78,6 +78,13 @@ Color palette used across all clust UIs (CLI and TUI).
 | yellow-bg   | `rgba(200,168,50,0.12)`    |
 | yellow-text | `#d4bc50`                  |
 
+## Diff
+
+| Token      | Value              |
+|------------|--------------------|
+| diffAddBg  | `rgb(30, 50, 30)`  |
+| diffDelBg  | `rgb(55, 25, 25)`  |
+
 ## Misc
 
 | Token          | Value                      |

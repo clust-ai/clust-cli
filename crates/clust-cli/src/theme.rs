@@ -54,3 +54,7 @@ pub const R_BG_OVERLAY: Color = Color::Rgb(49, 52, 58); // #31343a
 pub const R_BG_INPUT: Color = Color::Rgb(57, 60, 66);   // #393c42
 pub const R_BG_HOVER: Color = Color::Rgb(64, 67, 74);   // #40434a
 pub const R_BG_ACTIVE: Color = Color::Rgb(72, 75, 82);  // #484b52
+
+// Diff backgrounds
+pub const R_DIFF_ADD_BG: Color = Color::Rgb(30, 50, 30);
+pub const R_DIFF_DEL_BG: Color = Color::Rgb(55, 25, 25);
