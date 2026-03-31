@@ -16,7 +16,7 @@ use ratatui::{
     Frame, Terminal,
 };
 
-use clust_ipc::{AgentInfo, CliMessage, HubMessage, RepoInfo};
+use clust_ipc::{AgentInfo, CliMessage, HubMessage, RepoInfo, DEFAULT_HUB};
 
 use crate::{
     format::{format_attached, format_started},
@@ -89,6 +89,9 @@ impl ActiveTab {
     }
 }
 
+/// Label for agents that have no linked repository.
+const NO_REPOSITORY: &str = "No repository";
+
 // ---------------------------------------------------------------------------
 // Agent view mode
 // ---------------------------------------------------------------------------
@@ -96,9 +99,9 @@ impl ActiveTab {
 /// Controls how agents are grouped in the right panel.
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum AgentViewMode {
-    /// Group agents by their hub name (default).
+    /// Group agents by their hub name.
     ByHub,
-    /// Group agents by their git repository path.
+    /// Group agents by their git repository path (default).
     ByRepo,
 }
 
@@ -115,7 +118,7 @@ fn group_names(agents: &[AgentInfo], mode: AgentViewMode) -> Vec<String> {
             AgentViewMode::ByRepo => a
                 .repo_path
                 .clone()
-                .unwrap_or_else(|| "No repository".to_string()),
+                .unwrap_or_else(|| NO_REPOSITORY.to_string()),
         })
         .collect();
     names.sort();
@@ -130,7 +133,7 @@ fn agent_group_key(agent: &AgentInfo, mode: AgentViewMode) -> String {
         AgentViewMode::ByRepo => agent
             .repo_path
             .clone()
-            .unwrap_or_else(|| "No repository".to_string()),
+            .unwrap_or_else(|| NO_REPOSITORY.to_string()),
     }
 }
 
@@ -520,7 +523,7 @@ pub fn run(hub_name: &str) -> io::Result<()> {
     let mut selection = TreeSelection::default();
     let mut focus = FocusPanel::Left;
     let mut agent_selection = AgentSelection::default();
-    let mut agent_view_mode = AgentViewMode::ByHub;
+    let mut agent_view_mode = AgentViewMode::ByRepo;
     let mut active_tab = ActiveTab::Repositories;
     let mut last_agent_fetch = Instant::now() - Duration::from_secs(10);
     let mut last_repo_fetch = Instant::now() - Duration::from_secs(10);
@@ -1488,20 +1491,20 @@ fn render_agent_list(
     focused: bool,
     mode: AgentViewMode,
 ) {
-    let block = Block::default().padding(Padding::new(2, 2, 0, 0));
+    let block = Block::default().padding(Padding::new(2, 2, 1, 0));
 
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
-    // Mode label + spacer
+    // Mode label + hint
     let mode_label = match mode {
         AgentViewMode::ByHub => "by hub",
         AgentViewMode::ByRepo => "by repo",
     };
-    let mode_line = Paragraph::new(Line::from(Span::styled(
-        mode_label,
-        Style::default().fg(theme::R_TEXT_TERTIARY),
-    )));
+    let mode_line = Paragraph::new(Line::from(vec![
+        Span::styled(mode_label, Style::default().fg(theme::R_TEXT_TERTIARY)),
+        Span::styled("  v to switch", Style::default().fg(theme::R_TEXT_TERTIARY)),
+    ]));
 
     // Focus indicator in top-right corner (overlaid on mode label line)
     let indicator_color = if focused {
@@ -1537,17 +1540,21 @@ fn render_agent_list_by_hub(
     let mut pnames: Vec<&str> = sorted.iter().map(|a| a.hub.as_str()).collect();
     pnames.dedup();
 
+    let hide_headers = pnames.len() == 1 && pnames[0] == DEFAULT_HUB;
+
     // Build layout: mode label + spacer + hub headers + agent cards + gaps
     let mut constraints: Vec<Constraint> = vec![
         Constraint::Length(1), // mode label
         Constraint::Length(1), // spacer
     ];
     for (pidx, hub_name) in pnames.iter().enumerate() {
-        if pidx > 0 {
-            constraints.push(Constraint::Length(1)); // gap before hub header
+        if !hide_headers {
+            if pidx > 0 {
+                constraints.push(Constraint::Length(1)); // gap before hub header
+            }
+            constraints.push(Constraint::Length(1)); // hub header
+            constraints.push(Constraint::Length(1)); // spacer after header
         }
-        constraints.push(Constraint::Length(1)); // hub header
-        constraints.push(Constraint::Length(1)); // spacer after header
         let count = sorted.iter().filter(|a| a.hub == *hub_name).count();
         for i in 0..count {
             constraints.push(Constraint::Length(4)); // agent card
@@ -1573,16 +1580,18 @@ fn render_agent_list_by_hub(
 
     let mut area_idx = 2;
     for (pidx, hub_name) in pnames.iter().enumerate() {
-        if pidx > 0 {
-            area_idx += 1; // skip gap before hub header
+        if !hide_headers {
+            if pidx > 0 {
+                area_idx += 1; // skip gap before hub header
+            }
+            let hub_header = Paragraph::new(Line::from(vec![Span::styled(
+                format!(" {hub_name}"),
+                Style::default().fg(theme::R_ACCENT),
+            )]));
+            frame.render_widget(hub_header, areas[area_idx]);
+            area_idx += 1;
+            area_idx += 1; // skip spacer after header
         }
-        let hub_header = Paragraph::new(Line::from(vec![Span::styled(
-            format!(" {hub_name}"),
-            Style::default().fg(theme::R_ACCENT),
-        )]));
-        frame.render_widget(hub_header, areas[area_idx]);
-        area_idx += 1;
-        area_idx += 1; // skip spacer after header
 
         let agents_in_hub: Vec<(usize, &&AgentInfo)> = sorted
             .iter()
@@ -1592,7 +1601,7 @@ fn render_agent_list_by_hub(
         let agent_count = agents_in_hub.len();
         for (aidx, agent) in agents_in_hub {
             let is_selected = focused && pidx == agent_sel.group_idx && aidx == agent_sel.agent_idx;
-            render_agent_card(frame, areas[area_idx], agent, is_selected);
+            render_agent_card(frame, areas[area_idx], agent, is_selected, false);
             area_idx += 1;
             if aidx < agent_count - 1 {
                 area_idx += 1; // skip gap between cards
@@ -1621,16 +1630,21 @@ fn render_agent_list_by_repo(
 
     let gnames = group_names(agents, AgentViewMode::ByRepo);
 
+    let hide_headers = gnames.len() == 1 && gnames[0] == NO_REPOSITORY;
+
     // Build layout: mode label + spacer + repo/branch headers + agent cards + gaps
     let mut constraints: Vec<Constraint> = vec![
         Constraint::Length(1), // mode label
         Constraint::Length(1), // spacer
     ];
     for (ridx, repo) in gnames.iter().enumerate() {
-        if ridx > 0 {
-            constraints.push(Constraint::Length(1)); // gap before repo header
+        let is_no_repo = repo == NO_REPOSITORY;
+        if !hide_headers {
+            if ridx > 0 {
+                constraints.push(Constraint::Length(1)); // gap before repo header
+            }
+            constraints.push(Constraint::Length(1)); // repo header
         }
-        constraints.push(Constraint::Length(1)); // repo header
         let mut branches: Vec<&str> = sorted
             .iter()
             .filter(|a| agent_group_key(a, AgentViewMode::ByRepo) == *repo)
@@ -1638,7 +1652,9 @@ fn render_agent_list_by_repo(
             .collect();
         branches.dedup();
         for branch in &branches {
-            constraints.push(Constraint::Length(1)); // branch sub-header
+            if !is_no_repo {
+                constraints.push(Constraint::Length(1)); // branch sub-header
+            }
             let count = sorted
                 .iter()
                 .filter(|a| {
@@ -1672,20 +1688,23 @@ fn render_agent_list_by_repo(
     let mut area_idx = 2;
     let mut flat_agent_idx = 0;
     for (gidx, repo) in gnames.iter().enumerate() {
-        if gidx > 0 {
-            area_idx += 1; // skip gap before repo header
+        let is_no_repo = repo == NO_REPOSITORY;
+        if !hide_headers {
+            if gidx > 0 {
+                area_idx += 1; // skip gap before repo header
+            }
+            // Repo header — show just the repo name (last path component)
+            let repo_display = std::path::Path::new(repo)
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_else(|| repo.clone());
+            let repo_header = Paragraph::new(Line::from(vec![Span::styled(
+                format!(" {repo_display}"),
+                Style::default().fg(theme::R_ACCENT),
+            )]));
+            frame.render_widget(repo_header, areas[area_idx]);
+            area_idx += 1;
         }
-        // Repo header — show just the repo name (last path component)
-        let repo_display = std::path::Path::new(repo)
-            .file_name()
-            .map(|n| n.to_string_lossy().into_owned())
-            .unwrap_or_else(|| repo.clone());
-        let repo_header = Paragraph::new(Line::from(vec![Span::styled(
-            format!(" {repo_display}"),
-            Style::default().fg(theme::R_ACCENT),
-        )]));
-        frame.render_widget(repo_header, areas[area_idx]);
-        area_idx += 1;
 
         // Branch sub-groups
         let repo_agents: Vec<&AgentInfo> = sorted
@@ -1700,13 +1719,15 @@ fn render_agent_list_by_repo(
         branches.dedup();
 
         for branch in &branches {
-            // Branch sub-header
-            let branch_header = Paragraph::new(Line::from(vec![Span::styled(
-                format!("   {branch}"),
-                Style::default().fg(theme::R_TEXT_SECONDARY),
-            )]));
-            frame.render_widget(branch_header, areas[area_idx]);
-            area_idx += 1;
+            if !is_no_repo {
+                // Branch sub-header
+                let branch_header = Paragraph::new(Line::from(vec![Span::styled(
+                    format!("   {branch}"),
+                    Style::default().fg(theme::R_TEXT_SECONDARY),
+                )]));
+                frame.render_widget(branch_header, areas[area_idx]);
+                area_idx += 1;
+            }
 
             let branch_agents: Vec<&&AgentInfo> = repo_agents
                 .iter()
@@ -1716,7 +1737,13 @@ fn render_agent_list_by_repo(
             for (bidx, agent) in branch_agents.into_iter().enumerate() {
                 let is_selected =
                     focused && gidx == agent_sel.group_idx && flat_agent_idx == agent_sel.agent_idx;
-                render_agent_card(frame, areas[area_idx], agent, is_selected);
+                render_agent_card(
+                    frame,
+                    areas[area_idx],
+                    agent,
+                    is_selected,
+                    agent.repo_path.is_none(),
+                );
                 area_idx += 1;
                 flat_agent_idx += 1;
                 if bidx < branch_agent_count - 1 {
@@ -1728,7 +1755,13 @@ fn render_agent_list_by_repo(
     }
 }
 
-fn render_agent_card(frame: &mut Frame, area: Rect, agent: &AgentInfo, is_selected: bool) {
+fn render_agent_card(
+    frame: &mut Frame,
+    area: Rect,
+    agent: &AgentInfo,
+    is_selected: bool,
+    show_working_dir: bool,
+) {
     let bg = if is_selected {
         theme::R_BG_HOVER
     } else {
@@ -1744,7 +1777,7 @@ fn render_agent_card(frame: &mut Frame, area: Rect, agent: &AgentInfo, is_select
     let started = format_started(&agent.started_at);
     let attached = format_attached(agent.attached_clients);
 
-    let lines = vec![
+    let mut lines = vec![
         Line::from(Span::styled(
             &agent.id,
             Style::default().fg(theme::R_ACCENT),
@@ -1779,6 +1812,13 @@ fn render_agent_card(frame: &mut Frame, area: Rect, agent: &AgentInfo, is_select
             ),
         ]),
     ];
+
+    if show_working_dir {
+        lines.push(Line::from(Span::styled(
+            agent.working_dir.clone(),
+            Style::default().fg(theme::R_TEXT_TERTIARY),
+        )));
+    }
 
     frame.render_widget(Paragraph::new(lines), inner);
 }
@@ -2529,7 +2569,7 @@ mod tests {
             vec![
                 "/home/user/project-a",
                 "/home/user/project-b",
-                "No repository"
+                NO_REPOSITORY
             ]
         );
     }
