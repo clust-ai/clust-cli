@@ -8,7 +8,7 @@ use ratatui::{
 use vte::{Params, Perform};
 
 /// Maximum number of scrollback lines retained per overview panel.
-const SCROLLBACK_CAPACITY: usize = 500;
+const SCROLLBACK_CAPACITY: usize = 2000;
 
 // ---------------------------------------------------------------------------
 // Cell
@@ -73,6 +73,7 @@ impl Screen {
         }
     }
 
+    #[cfg(test)]
     pub fn resize(&mut self, cols: usize, rows: usize) {
         let cols = cols.max(1);
         let rows = rows.max(1);
@@ -267,6 +268,24 @@ impl Screen {
         }
     }
 
+    /// Save non-blank grid rows to scrollback before a full-screen clear.
+    fn save_grid_to_scrollback(&mut self) {
+        let last_non_blank = self.grid.iter().rposition(|row| {
+            row.iter()
+                .any(|cell| cell.ch != ' ' || cell.style != Style::default())
+        });
+        let end = match last_non_blank {
+            Some(idx) => idx + 1,
+            None => return,
+        };
+        for row in &self.grid[..end] {
+            self.scrollback.push_back(row.clone());
+        }
+        while self.scrollback.len() > self.scrollback_capacity {
+            self.scrollback.pop_front();
+        }
+    }
+
     fn scroll_up(&mut self) {
         if self.scroll_top < self.scroll_bottom && self.scroll_bottom < self.rows {
             let scrolled_line = self.grid.remove(self.scroll_top);
@@ -313,6 +332,10 @@ impl Screen {
         match mode {
             // From cursor to end of screen
             0 => {
+                // \x1b[H\x1b[J is a common full-clear pattern — save screen first.
+                if self.cursor_row == 0 && self.cursor_col == 0 {
+                    self.save_grid_to_scrollback();
+                }
                 self.erase_in_line(0);
                 for r in (self.cursor_row + 1)..self.rows {
                     self.clear_row(r);
@@ -327,6 +350,7 @@ impl Screen {
             }
             // Entire screen
             2 | 3 => {
+                self.save_grid_to_scrollback();
                 for r in 0..self.rows {
                     self.clear_row(r);
                 }
@@ -781,6 +805,7 @@ impl VirtualTerminal {
         }
     }
 
+    #[cfg(test)]
     pub fn resize(&mut self, cols: usize, rows: usize) {
         self.screen.resize(cols, rows);
     }
@@ -984,5 +1009,58 @@ mod tests {
         vt.process(b"Hello");
         let lines = vt.screen.to_ratatui_lines();
         assert_eq!(lines.len(), 2);
+    }
+
+    #[test]
+    fn test_erase_display_saves_scrollback() {
+        let mut vt = VirtualTerminal::new(5, 3);
+        vt.process(b"AAAAA\r\nBBBBB\r\nCCCCC");
+        assert_eq!(vt.screen.scrollback_len(), 0);
+        vt.process(b"\x1b[2J");
+        assert_eq!(vt.screen.scrollback_len(), 3);
+    }
+
+    #[test]
+    fn test_erase_display_skips_blank_screen() {
+        let mut vt = VirtualTerminal::new(5, 3);
+        vt.process(b"\x1b[2J");
+        assert_eq!(vt.screen.scrollback_len(), 0);
+    }
+
+    #[test]
+    fn test_erase_display_mode0_at_home_saves_scrollback() {
+        let mut vt = VirtualTerminal::new(5, 3);
+        vt.process(b"AAAAA\r\nBBBBB\r\nCCCCC");
+        // Cursor home + ED mode 0
+        vt.process(b"\x1b[H\x1b[J");
+        assert_eq!(vt.screen.scrollback_len(), 3);
+    }
+
+    #[test]
+    fn test_erase_display_mode0_not_at_home_no_save() {
+        let mut vt = VirtualTerminal::new(5, 3);
+        vt.process(b"AAAAA\r\nBBBBB\r\nCCCCC");
+        // Cursor to row 2, then ED mode 0 — partial clear
+        vt.process(b"\x1b[2;1H\x1b[J");
+        assert_eq!(vt.screen.scrollback_len(), 0);
+    }
+
+    #[test]
+    fn test_resize_keep_scrollback_preserves() {
+        let mut vt = VirtualTerminal::new(5, 3);
+        vt.process(b"AAAAA\r\nBBBBB\r\nCCCCC");
+        vt.process(b"\x1b[2J");
+        assert_eq!(vt.screen.scrollback_len(), 3);
+        vt.resize_keep_scrollback(10, 5);
+        assert_eq!(vt.screen.scrollback_len(), 3);
+    }
+
+    #[test]
+    fn test_scrollback_trims_trailing_blank_rows() {
+        let mut vt = VirtualTerminal::new(5, 5);
+        vt.process(b"AAAAA\r\nBBBBB");
+        vt.process(b"\x1b[2J");
+        // Only 2 rows had content
+        assert_eq!(vt.screen.scrollback_len(), 2);
     }
 }
