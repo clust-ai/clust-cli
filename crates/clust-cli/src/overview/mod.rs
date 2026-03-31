@@ -132,7 +132,7 @@ impl OverviewState {
                     })
                     .is_ok()
             {
-                panel.vterm.resize(pw, ph);
+                panel.vterm.resize_keep_scrollback(pw, ph);
             }
         }
 
@@ -178,7 +178,7 @@ impl OverviewState {
             {
                 panel
                     .vterm
-                    .resize(self.panel_cols as usize, self.panel_rows as usize);
+                    .resize_keep_scrollback(self.panel_cols as usize, self.panel_rows as usize);
             }
         }
     }
@@ -874,7 +874,7 @@ impl FocusModeState {
                 .try_send(PanelCommand::Resize { cols, rows })
                 .is_ok()
             {
-                panel.vterm.resize(cols as usize, rows as usize);
+                panel.vterm.resize_keep_scrollback(cols as usize, rows as usize);
             }
         }
     }
