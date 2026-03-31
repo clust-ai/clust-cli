@@ -1,6 +1,5 @@
 pub mod gitdiff;
 pub mod input;
-pub mod screen;
 
 use ratatui::{
     layout::{Constraint, Layout, Rect},
@@ -14,9 +13,7 @@ use tokio::task::JoinHandle;
 
 use clust_ipc::{AgentInfo, CliMessage, HubMessage};
 
-use crate::{ipc, theme};
-
-use self::screen::VirtualTerminal;
+use crate::{ipc, terminal_emulator::TerminalEmulator, theme};
 
 /// Minimum width in columns for a single agent panel.
 const MIN_PANEL_WIDTH: u16 = 40;
@@ -56,7 +53,7 @@ pub enum AgentOutputEvent {
 pub struct AgentPanel {
     pub id: String,
     pub agent_binary: String,
-    pub vterm: VirtualTerminal,
+    pub vterm: TerminalEmulator,
     pub command_tx: mpsc::Sender<PanelCommand>,
     pub exited: bool,
     /// Vertical scroll offset for scrollback (0 = live, >0 = scrolled back).
@@ -124,7 +121,7 @@ impl OverviewState {
         // if the send fails the grid is not left empty without a SIGWINCH.
         for panel in &mut self.panels {
             let (pw, ph) = (self.panel_cols as usize, self.panel_rows as usize);
-            if (panel.vterm.screen.cols != pw || panel.vterm.screen.rows != ph)
+            if (panel.vterm.cols() != pw || panel.vterm.rows() != ph)
                 && panel
                     .command_tx
                     .try_send(PanelCommand::Resize {
@@ -133,7 +130,7 @@ impl OverviewState {
                     })
                     .is_ok()
             {
-                panel.vterm.resize_keep_scrollback(pw, ph);
+                panel.vterm.resize(pw, ph);
             }
         }
 
@@ -179,7 +176,7 @@ impl OverviewState {
             {
                 panel
                     .vterm
-                    .resize_keep_scrollback(self.panel_cols as usize, self.panel_rows as usize);
+                    .resize(self.panel_cols as usize, self.panel_rows as usize);
             }
         }
     }
@@ -261,8 +258,8 @@ impl OverviewState {
     pub fn panel_scroll_up(&mut self) {
         if let OverviewFocus::Terminal(idx) = self.focus {
             if let Some(panel) = self.panels.get_mut(idx) {
-                let page = panel.vterm.screen.rows;
-                let max = panel.vterm.screen.scrollback_len();
+                let page = panel.vterm.rows();
+                let max = panel.vterm.scrollback_len();
                 panel.panel_scroll_offset = (panel.panel_scroll_offset + page).min(max);
             }
         }
@@ -272,8 +269,27 @@ impl OverviewState {
     pub fn panel_scroll_down(&mut self) {
         if let OverviewFocus::Terminal(idx) = self.focus {
             if let Some(panel) = self.panels.get_mut(idx) {
-                let page = panel.vterm.screen.rows;
+                let page = panel.vterm.rows();
                 panel.panel_scroll_offset = panel.panel_scroll_offset.saturating_sub(page);
+            }
+        }
+    }
+
+    /// Scroll the focused panel's scrollback up by N lines (for mouse wheel).
+    pub fn panel_scroll_up_lines(&mut self, n: usize) {
+        if let OverviewFocus::Terminal(idx) = self.focus {
+            if let Some(panel) = self.panels.get_mut(idx) {
+                let max = panel.vterm.scrollback_len();
+                panel.panel_scroll_offset = (panel.panel_scroll_offset + n).min(max);
+            }
+        }
+    }
+
+    /// Scroll the focused panel's scrollback down by N lines (for mouse wheel).
+    pub fn panel_scroll_down_lines(&mut self, n: usize) {
+        if let OverviewFocus::Terminal(idx) = self.focus {
+            if let Some(panel) = self.panels.get_mut(idx) {
+                panel.panel_scroll_offset = panel.panel_scroll_offset.saturating_sub(n);
             }
         }
     }
@@ -360,7 +376,7 @@ impl OverviewState {
         self.panels.push(AgentPanel {
             id,
             agent_binary: binary,
-            vterm: VirtualTerminal::new(cols as usize, rows as usize),
+            vterm: TerminalEmulator::new(cols as usize, rows as usize),
             command_tx,
             exited: false,
             panel_scroll_offset: 0,
@@ -558,7 +574,7 @@ async fn agent_connection_task(
 // Rendering
 // ---------------------------------------------------------------------------
 
-pub fn render_overview(frame: &mut Frame, area: Rect, state: &OverviewState) {
+pub fn render_overview(frame: &mut Frame, area: Rect, state: &mut OverviewState) {
     // Split into options bar (1 row) + panels area
     let [options_area, panels_area] = Layout::vertical([
         Constraint::Length(1),
@@ -584,8 +600,7 @@ pub fn render_overview(frame: &mut Frame, area: Rect, state: &OverviewState) {
     }
 
     let end = (state.scroll_offset + visible_count).min(state.panels.len());
-    let visible_panels = &state.panels[state.scroll_offset..end];
-    let actual_visible = visible_panels.len();
+    let actual_visible = end - state.scroll_offset;
 
     // Fixed-width columns so 2.5 panels fit on screen
     let pw = panel_total_width(panels_area.width);
@@ -594,10 +609,12 @@ pub fn render_overview(frame: &mut Frame, area: Rect, state: &OverviewState) {
         .collect();
     let panel_areas = Layout::horizontal(constraints).split(panels_area);
 
-    for (i, (panel, &panel_area)) in visible_panels.iter().zip(panel_areas.iter()).enumerate() {
-        let global_idx = state.scroll_offset + i;
-        let is_focused = matches!(state.focus, OverviewFocus::Terminal(idx) if idx == global_idx);
-        render_agent_panel(frame, panel_area, panel, is_focused);
+    let scroll_offset = state.scroll_offset;
+    let focus = state.focus;
+    for (i, panel) in state.panels[scroll_offset..end].iter_mut().enumerate() {
+        let global_idx = scroll_offset + i;
+        let is_focused = matches!(focus, OverviewFocus::Terminal(idx) if idx == global_idx);
+        render_agent_panel(frame, panel_areas[i], panel, is_focused);
     }
 
     // Scroll indicators
@@ -656,7 +673,7 @@ fn render_options_bar(frame: &mut Frame, area: Rect, focused: bool) {
     );
 }
 
-fn render_agent_panel(frame: &mut Frame, area: Rect, panel: &AgentPanel, focused: bool) {
+fn render_agent_panel(frame: &mut Frame, area: Rect, panel: &mut AgentPanel, focused: bool) {
     if area.height < 3 {
         return;
     }
@@ -762,10 +779,9 @@ fn render_agent_panel(frame: &mut Frame, area: Rect, panel: &AgentPanel, focused
     let lines = if panel.panel_scroll_offset > 0 {
         panel
             .vterm
-            .screen
             .to_ratatui_lines_scrolled(panel.panel_scroll_offset)
     } else {
-        panel.vterm.screen.to_ratatui_lines()
+        panel.vterm.to_ratatui_lines()
     };
     let paragraph = Paragraph::new(lines).style(Style::default().bg(theme::R_BG_BASE));
     frame.render_widget(paragraph, content_area);
@@ -900,7 +916,7 @@ impl FocusModeState {
         self.panel = Some(AgentPanel {
             id,
             agent_binary: binary,
-            vterm: VirtualTerminal::new(cols as usize, rows as usize),
+            vterm: TerminalEmulator::new(cols as usize, rows as usize),
             command_tx,
             exited: false,
             panel_scroll_offset: 0,
@@ -973,7 +989,7 @@ impl FocusModeState {
                 .try_send(PanelCommand::Resize { cols, rows })
                 .is_ok()
             {
-                panel.vterm.resize_keep_scrollback(cols as usize, rows as usize);
+                panel.vterm.resize(cols as usize, rows as usize);
             }
         }
     }
@@ -1052,7 +1068,7 @@ impl FocusModeState {
 }
 
 /// Render the focus mode view: 60% left panel with tabs, 40% agent panel right.
-pub fn render_focus_mode(frame: &mut Frame, area: Rect, state: &FocusModeState) {
+pub fn render_focus_mode(frame: &mut Frame, area: Rect, state: &mut FocusModeState) {
     let [left_area, right_area] = Layout::horizontal([
         Constraint::Percentage(60),
         Constraint::Percentage(40),
@@ -1064,7 +1080,7 @@ pub fn render_focus_mode(frame: &mut Frame, area: Rect, state: &FocusModeState) 
 
     // Right side: agent panel or empty state
     let right_focused = state.focus_side == FocusSide::Right;
-    match &state.panel {
+    match &mut state.panel {
         Some(panel) => render_agent_panel(frame, right_area, panel, right_focused),
         None => render_empty_state(frame, right_area),
     }
