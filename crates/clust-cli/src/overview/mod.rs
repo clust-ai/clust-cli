@@ -1,14 +1,15 @@
+pub mod gitdiff;
 pub mod input;
 pub mod screen;
 
 use ratatui::{
     layout::{Constraint, Layout, Rect},
-    style::Style,
+    style::{Modifier, Style},
     text::{Line, Span},
     widgets::{Block, Borders, Paragraph},
     Frame,
 };
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, watch};
 use tokio::task::JoinHandle;
 
 use clust_ipc::{AgentInfo, CliMessage, HubMessage};
@@ -786,6 +787,43 @@ fn render_empty_state(frame: &mut Frame, area: Rect) {
 // Focus mode
 // ---------------------------------------------------------------------------
 
+/// Which side of the focus view has keyboard focus.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum FocusSide {
+    Left,
+    Right,
+}
+
+/// Tabs available in the left panel.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum LeftPanelTab {
+    Changes,
+    Panel2,
+    Panel3,
+}
+
+impl LeftPanelTab {
+    pub fn next(self) -> Self {
+        match self {
+            Self::Changes => Self::Panel2,
+            Self::Panel2 => Self::Panel3,
+            Self::Panel3 => Self::Changes,
+        }
+    }
+
+    pub fn label(&self) -> &'static str {
+        match self {
+            Self::Changes => "Changes",
+            Self::Panel2 => "Panel 2",
+            Self::Panel3 => "Panel 3",
+        }
+    }
+
+    fn all() -> &'static [LeftPanelTab] {
+        &[Self::Changes, Self::Panel2, Self::Panel3]
+    }
+}
+
 /// State for the single-agent focus mode view.
 pub struct FocusModeState {
     pub panel: Option<AgentPanel>,
@@ -793,26 +831,61 @@ pub struct FocusModeState {
     output_tx: mpsc::Sender<AgentOutputEvent>,
     panel_cols: u16,
     panel_rows: u16,
+    // Left panel state
+    pub focus_side: FocusSide,
+    pub left_tab: LeftPanelTab,
+    pub diff: Option<gitdiff::ParsedDiff>,
+    pub diff_scroll: usize,
+    pub diff_error: Option<String>,
+    diff_rx: mpsc::Receiver<gitdiff::DiffEvent>,
+    diff_tx: mpsc::Sender<gitdiff::DiffEvent>,
+    diff_stop_tx: Option<watch::Sender<bool>>,
+    diff_task: Option<JoinHandle<()>>,
+    pub working_dir: Option<String>,
 }
 
 impl FocusModeState {
     pub fn new() -> Self {
         let (output_tx, output_rx) = mpsc::channel(512);
+        let (diff_tx, diff_rx) = mpsc::channel(16);
         Self {
             panel: None,
             output_rx,
             output_tx,
             panel_cols: 80,
             panel_rows: 24,
+            focus_side: FocusSide::Right,
+            left_tab: LeftPanelTab::Changes,
+            diff: None,
+            diff_scroll: 0,
+            diff_error: None,
+            diff_rx,
+            diff_tx,
+            diff_stop_tx: None,
+            diff_task: None,
+            working_dir: None,
         }
     }
 
     /// Open an agent in focus mode, replacing any existing panel.
-    pub fn open_agent(&mut self, agent_id: &str, agent_binary: &str, cols: u16, rows: u16) {
+    pub fn open_agent(
+        &mut self,
+        agent_id: &str,
+        agent_binary: &str,
+        cols: u16,
+        rows: u16,
+        working_dir: &str,
+    ) {
         self.close_panel();
 
         self.panel_cols = cols;
         self.panel_rows = rows;
+        self.focus_side = FocusSide::Right;
+        self.left_tab = LeftPanelTab::Changes;
+        self.diff = None;
+        self.diff_scroll = 0;
+        self.diff_error = None;
+        self.working_dir = Some(working_dir.to_string());
 
         let id = agent_id.to_string();
         let binary = agent_binary.to_string();
@@ -833,6 +906,14 @@ impl FocusModeState {
             panel_scroll_offset: 0,
             task_handle: handle,
         });
+
+        // Spawn diff refresh task
+        let (stop_tx, stop_rx) = watch::channel(false);
+        let diff_tx = self.diff_tx.clone();
+        let diff_handle =
+            gitdiff::spawn_diff_task(working_dir.to_string(), diff_tx, stop_rx);
+        self.diff_stop_tx = Some(stop_tx);
+        self.diff_task = Some(diff_handle);
     }
 
     /// Drain all pending output events from the background task.
@@ -849,6 +930,24 @@ impl FocusModeState {
                     if let Some(panel) = self.panel.as_mut().filter(|p| p.id == id) {
                         panel.exited = true;
                     }
+                }
+            }
+        }
+    }
+
+    /// Drain diff refresh events.
+    pub fn drain_diff_events(&mut self) {
+        while let Ok(event) = self.diff_rx.try_recv() {
+            match event {
+                gitdiff::DiffEvent::Updated(parsed) => {
+                    // Clamp scroll to new diff length
+                    let max = parsed.lines.len().saturating_sub(1);
+                    self.diff_scroll = self.diff_scroll.min(max);
+                    self.diff = Some(parsed);
+                    self.diff_error = None;
+                }
+                gitdiff::DiffEvent::Error(msg) => {
+                    self.diff_error = Some(msg);
                 }
             }
         }
@@ -879,6 +978,51 @@ impl FocusModeState {
         }
     }
 
+    /// Scroll diff view up by one line.
+    pub fn diff_scroll_up(&mut self) {
+        self.diff_scroll = self.diff_scroll.saturating_sub(1);
+    }
+
+    /// Scroll diff view down by one line.
+    pub fn diff_scroll_down(&mut self) {
+        if let Some(diff) = &self.diff {
+            let max = diff.lines.len().saturating_sub(1);
+            if self.diff_scroll < max {
+                self.diff_scroll += 1;
+            }
+        }
+    }
+
+    /// Jump to the previous file header in the diff.
+    pub fn diff_jump_prev_file(&mut self) {
+        if let Some(diff) = &self.diff {
+            // Find the last file_start_index that is strictly before current scroll
+            let target = diff
+                .file_start_indices
+                .iter()
+                .rev()
+                .find(|&&idx| idx < self.diff_scroll);
+            if let Some(&idx) = target {
+                self.diff_scroll = idx;
+            } else {
+                self.diff_scroll = 0;
+            }
+        }
+    }
+
+    /// Jump to the next file header in the diff.
+    pub fn diff_jump_next_file(&mut self) {
+        if let Some(diff) = &self.diff {
+            let target = diff
+                .file_start_indices
+                .iter()
+                .find(|&&idx| idx > self.diff_scroll);
+            if let Some(&idx) = target {
+                self.diff_scroll = idx;
+            }
+        }
+    }
+
     /// Shut down the current panel and clean up.
     pub fn shutdown(&mut self) {
         self.close_panel();
@@ -893,10 +1037,21 @@ impl FocusModeState {
             let _ = panel.command_tx.try_send(PanelCommand::Detach);
             panel.task_handle.abort();
         }
+        // Stop diff task
+        if let Some(stop_tx) = self.diff_stop_tx.take() {
+            let _ = stop_tx.send(true);
+        }
+        if let Some(handle) = self.diff_task.take() {
+            handle.abort();
+        }
+        self.diff = None;
+        self.diff_scroll = 0;
+        self.diff_error = None;
+        self.working_dir = None;
     }
 }
 
-/// Render the focus mode view: 60% empty left, 40% agent panel right.
+/// Render the focus mode view: 60% left panel with tabs, 40% agent panel right.
 pub fn render_focus_mode(frame: &mut Frame, area: Rect, state: &FocusModeState) {
     let [left_area, right_area] = Layout::horizontal([
         Constraint::Percentage(60),
@@ -904,15 +1059,218 @@ pub fn render_focus_mode(frame: &mut Frame, area: Rect, state: &FocusModeState) 
     ])
     .areas(area);
 
-    // Left side: empty
-    frame.render_widget(
-        Block::default().style(Style::default().bg(theme::R_BG_BASE)),
-        left_area,
-    );
+    // Left side: tab bar + content
+    render_left_panel(frame, left_area, state);
 
     // Right side: agent panel or empty state
+    let right_focused = state.focus_side == FocusSide::Right;
     match &state.panel {
-        Some(panel) => render_agent_panel(frame, right_area, panel, true),
+        Some(panel) => render_agent_panel(frame, right_area, panel, right_focused),
         None => render_empty_state(frame, right_area),
     }
+}
+
+fn render_left_panel(frame: &mut Frame, area: Rect, state: &FocusModeState) {
+    if area.height < 2 {
+        frame.render_widget(
+            Block::default().style(Style::default().bg(theme::R_BG_BASE)),
+            area,
+        );
+        return;
+    }
+
+    let [tab_area, content_area] = Layout::vertical([
+        Constraint::Length(1),
+        Constraint::Min(0),
+    ])
+    .areas(area);
+
+    // Render tab bar
+    let left_focused = state.focus_side == FocusSide::Left;
+    render_left_tab_bar(frame, tab_area, state.left_tab, left_focused);
+
+    // Render active tab content
+    match state.left_tab {
+        LeftPanelTab::Changes => render_diff_viewer(frame, content_area, state),
+        _ => {
+            // Empty placeholder for Panel 2 / Panel 3
+            frame.render_widget(
+                Paragraph::new(Line::from(Span::styled(
+                    format!("{} (coming soon)", state.left_tab.label()),
+                    Style::default().fg(theme::R_TEXT_TERTIARY),
+                )))
+                .alignment(ratatui::layout::Alignment::Center)
+                .style(Style::default().bg(theme::R_BG_BASE)),
+                content_area,
+            );
+        }
+    }
+}
+
+fn render_left_tab_bar(
+    frame: &mut Frame,
+    area: Rect,
+    active: LeftPanelTab,
+    panel_focused: bool,
+) {
+    let mut spans = Vec::new();
+
+    for (i, tab) in LeftPanelTab::all().iter().enumerate() {
+        if i > 0 {
+            spans.push(Span::styled(
+                "│",
+                Style::default()
+                    .fg(theme::R_TEXT_TERTIARY)
+                    .bg(theme::R_BG_SURFACE),
+            ));
+        }
+
+        let is_active = *tab == active;
+        let (fg, bg) = if is_active && panel_focused {
+            (theme::R_TEXT_PRIMARY, theme::R_BG_OVERLAY)
+        } else if is_active {
+            (theme::R_TEXT_SECONDARY, theme::R_BG_RAISED)
+        } else {
+            (theme::R_TEXT_TERTIARY, theme::R_BG_SURFACE)
+        };
+
+        let style = if is_active {
+            Style::default()
+                .fg(fg)
+                .bg(bg)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(fg).bg(bg)
+        };
+
+        spans.push(Span::styled(format!(" {} ", tab.label()), style));
+    }
+
+    // Fill rest with background
+    let content_width: usize = spans.iter().map(|s| s.content.chars().count()).sum();
+    let remaining = (area.width as usize).saturating_sub(content_width);
+    if remaining > 0 {
+        spans.push(Span::styled(
+            " ".repeat(remaining),
+            Style::default().bg(theme::R_BG_SURFACE),
+        ));
+    }
+
+    frame.render_widget(Paragraph::new(Line::from(spans)), area);
+}
+
+fn render_diff_viewer(frame: &mut Frame, area: Rect, state: &FocusModeState) {
+    let bg_style = Style::default().bg(theme::R_BG_BASE);
+
+    // Error state
+    if let Some(ref err) = state.diff_error {
+        frame.render_widget(
+            Paragraph::new(Line::from(Span::styled(
+                err.as_str(),
+                Style::default().fg(theme::R_ERROR),
+            )))
+            .style(bg_style),
+            area,
+        );
+        return;
+    }
+
+    // No diff data yet
+    let diff = match &state.diff {
+        Some(d) if !d.lines.is_empty() => d,
+        Some(_) => {
+            frame.render_widget(
+                Paragraph::new(Line::from(Span::styled(
+                    "No uncommitted changes",
+                    Style::default().fg(theme::R_TEXT_TERTIARY),
+                )))
+                .alignment(ratatui::layout::Alignment::Center)
+                .style(bg_style),
+                area,
+            );
+            return;
+        }
+        None => {
+            frame.render_widget(
+                Paragraph::new(Line::from(Span::styled(
+                    "Loading diff...",
+                    Style::default().fg(theme::R_TEXT_TERTIARY),
+                )))
+                .alignment(ratatui::layout::Alignment::Center)
+                .style(bg_style),
+                area,
+            );
+            return;
+        }
+    };
+
+    let visible_height = area.height as usize;
+    let start = state.diff_scroll;
+    let end = (start + visible_height).min(diff.lines.len());
+
+    // Gutter width: "  old | new │" = 4+4+1 = 9 chars
+    let gutter_width: u16 = 9;
+    let content_width = area.width.saturating_sub(gutter_width);
+
+    let mut lines = Vec::with_capacity(visible_height);
+
+    for diff_line in &diff.lines[start..end] {
+        let (line_bg, content_fg) = match diff_line.kind {
+            gitdiff::DiffLineKind::FileHeader => (theme::R_BG_RAISED, theme::R_TEXT_PRIMARY),
+            gitdiff::DiffLineKind::FileMetadata => (theme::R_BG_SURFACE, theme::R_TEXT_TERTIARY),
+            gitdiff::DiffLineKind::HunkHeader => (theme::R_BG_SURFACE, theme::R_ACCENT),
+            gitdiff::DiffLineKind::Add => (theme::R_DIFF_ADD_BG, theme::R_TEXT_PRIMARY),
+            gitdiff::DiffLineKind::Delete => (theme::R_DIFF_DEL_BG, theme::R_TEXT_PRIMARY),
+            gitdiff::DiffLineKind::Context => (theme::R_BG_BASE, theme::R_TEXT_SECONDARY),
+        };
+
+        let gutter_style = Style::default().fg(theme::R_TEXT_TERTIARY).bg(line_bg);
+        let sep_style = Style::default().fg(theme::R_TEXT_DISABLED).bg(line_bg);
+        let content_style = Style::default().fg(content_fg).bg(line_bg);
+
+        // Build gutter: " old  new│"
+        let old_str = match diff_line.old_lineno {
+            Some(n) => format!("{:>4}", n),
+            None => "    ".to_string(),
+        };
+        let new_str = match diff_line.new_lineno {
+            Some(n) => format!("{:>4}", n),
+            None => "    ".to_string(),
+        };
+
+        // For file headers and hunk headers, show no line numbers
+        let (gutter_text, separator) = match diff_line.kind {
+            gitdiff::DiffLineKind::FileHeader
+            | gitdiff::DiffLineKind::FileMetadata
+            | gitdiff::DiffLineKind::HunkHeader => ("        ".to_string(), " "),
+            _ => (format!("{}{}", old_str, new_str), "│"),
+        };
+
+        // Pad content to fill the full width
+        let display_content = &diff_line.content;
+        let content_chars = display_content.chars().count();
+        let pad = (content_width as usize).saturating_sub(content_chars);
+
+        let mut spans = vec![
+            Span::styled(gutter_text, gutter_style),
+            Span::styled(separator, sep_style),
+            Span::styled(display_content.to_string(), content_style),
+        ];
+
+        if pad > 0 {
+            spans.push(Span::styled(" ".repeat(pad), content_style));
+        }
+
+        lines.push(Line::from(spans));
+    }
+
+    // Fill remaining visible area with empty lines
+    for _ in end.saturating_sub(start)..visible_height {
+        lines.push(Line::from(Span::styled(
+            " ".repeat(area.width as usize),
+            bg_style,
+        )));
+    }
+
+    frame.render_widget(Paragraph::new(lines), area);
 }
