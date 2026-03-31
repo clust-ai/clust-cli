@@ -4,7 +4,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use crossterm::{
-    event::{self, Event, KeyCode, KeyEventKind, KeyModifiers},
+    event::{self, Event, KeyCode, KeyEventKind, KeyModifiers, MouseEvent, MouseEventKind, EnableMouseCapture, DisableMouseCapture},
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
     ExecutableCommand,
 };
@@ -496,9 +496,11 @@ impl TreeSelection {
 pub fn run(hub_name: &str) -> io::Result<()> {
     io::stdout().execute(EnterAlternateScreen)?;
     enable_raw_mode()?;
+    io::stdout().execute(EnableMouseCapture)?;
 
     let hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
+        let _ = io::stdout().execute(DisableMouseCapture);
         let _ = disable_raw_mode();
         let _ = io::stdout().execute(LeaveAlternateScreen);
         hook(info);
@@ -647,10 +649,10 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                     );
                 }
                 ActiveTab::Overview => {
-                    overview::render_overview(frame, content_area, &overview_state);
+                    overview::render_overview(frame, content_area, &mut overview_state);
                 }
                 ActiveTab::FocusMode => {
-                    overview::render_focus_mode(frame, content_area, &focus_mode_state);
+                    overview::render_focus_mode(frame, content_area, &mut focus_mode_state);
                 }
             }
 
@@ -732,9 +734,9 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                         if let Some(panel) =
                                             &mut focus_mode_state.panel
                                         {
-                                            let page = panel.vterm.screen.rows;
+                                            let page = panel.vterm.rows();
                                             let max =
-                                                panel.vterm.screen.scrollback_len();
+                                                panel.vterm.scrollback_len();
                                             panel.panel_scroll_offset =
                                                 (panel.panel_scroll_offset + page)
                                                     .min(max);
@@ -744,7 +746,7 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                         if let Some(panel) =
                                             &mut focus_mode_state.panel
                                         {
-                                            let page = panel.vterm.screen.rows;
+                                            let page = panel.vterm.rows();
                                             panel.panel_scroll_offset = panel
                                                 .panel_scroll_offset
                                                 .saturating_sub(page);
@@ -1053,6 +1055,39 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                         focus_mode_state.handle_resize(fm_cols, fm_rows);
                     }
                 }
+                Event::Mouse(MouseEvent { kind: MouseEventKind::ScrollUp, .. }) => {
+                    if active_tab == ActiveTab::Overview {
+                        overview_state.panel_scroll_up_lines(3);
+                    } else if active_tab == ActiveTab::FocusMode
+                        && focus_mode_state.is_active()
+                    {
+                        if focus_mode_state.focus_side == overview::FocusSide::Right {
+                            if let Some(panel) = &mut focus_mode_state.panel {
+                                let max = panel.vterm.scrollback_len();
+                                panel.panel_scroll_offset =
+                                    (panel.panel_scroll_offset + 3).min(max);
+                            }
+                        } else {
+                            focus_mode_state.diff_scroll_up();
+                        }
+                    }
+                }
+                Event::Mouse(MouseEvent { kind: MouseEventKind::ScrollDown, .. }) => {
+                    if active_tab == ActiveTab::Overview {
+                        overview_state.panel_scroll_down_lines(3);
+                    } else if active_tab == ActiveTab::FocusMode
+                        && focus_mode_state.is_active()
+                    {
+                        if focus_mode_state.focus_side == overview::FocusSide::Right {
+                            if let Some(panel) = &mut focus_mode_state.panel {
+                                panel.panel_scroll_offset =
+                                    panel.panel_scroll_offset.saturating_sub(3);
+                            }
+                        } else {
+                            focus_mode_state.diff_scroll_down();
+                        }
+                    }
+                }
                 _ => {}
             }
         }
@@ -1062,6 +1097,7 @@ pub fn run(hub_name: &str) -> io::Result<()> {
     overview_state.shutdown();
     focus_mode_state.shutdown();
 
+    io::stdout().execute(DisableMouseCapture)?;
     disable_raw_mode()?;
     io::stdout().execute(LeaveAlternateScreen)?;
     println!();

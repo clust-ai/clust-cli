@@ -6,6 +6,7 @@ mod overview;
 mod hub_launcher;
 mod scroll_break;
 mod terminal;
+pub mod terminal_emulator;
 mod theme;
 mod ui;
 mod version;
