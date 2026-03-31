@@ -181,6 +181,30 @@ impl OverviewState {
         }
     }
 
+    /// Re-send current panel dimensions to the hub for all panels.
+    /// Unlike `handle_resize`, this does not skip when dimensions are unchanged,
+    /// because the hub's PTY may have been resized by another client.
+    pub fn force_resize_all(&self) {
+        for panel in &self.panels {
+            let _ = panel.command_tx.try_send(PanelCommand::Resize {
+                cols: self.panel_cols,
+                rows: self.panel_rows,
+            });
+        }
+    }
+
+    /// Re-send current panel dimensions to the hub for the focused panel only.
+    pub fn force_resize_focused(&self) {
+        if let OverviewFocus::Terminal(idx) = self.focus {
+            if let Some(panel) = self.panels.get(idx) {
+                let _ = panel.command_tx.try_send(PanelCommand::Resize {
+                    cols: self.panel_cols,
+                    rows: self.panel_rows,
+                });
+            }
+        }
+    }
+
     /// Send detach to all connections and abort tasks.
     pub fn shutdown(&mut self) {
         for panel in self.panels.drain(..) {
@@ -991,6 +1015,16 @@ impl FocusModeState {
             {
                 panel.vterm.resize(cols as usize, rows as usize);
             }
+        }
+    }
+
+    /// Re-send current panel dimensions to the hub unconditionally.
+    pub fn force_resize(&self) {
+        if let Some(panel) = &self.panel {
+            let _ = panel.command_tx.try_send(PanelCommand::Resize {
+                cols: self.panel_cols,
+                rows: self.panel_rows,
+            });
         }
     }
 
