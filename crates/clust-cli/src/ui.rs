@@ -4,7 +4,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use crossterm::{
-    event::{self, Event, KeyCode, KeyEventKind, KeyModifiers, MouseEvent, MouseEventKind, EnableMouseCapture, DisableMouseCapture},
+    event::{self, Event, KeyCode, KeyEventKind, KeyModifiers, MouseEvent, MouseEventKind, EnableMouseCapture, DisableMouseCapture, EnableFocusChange, DisableFocusChange},
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
     ExecutableCommand,
 };
@@ -497,9 +497,11 @@ pub fn run(hub_name: &str) -> io::Result<()> {
     io::stdout().execute(EnterAlternateScreen)?;
     enable_raw_mode()?;
     io::stdout().execute(EnableMouseCapture)?;
+    io::stdout().execute(EnableFocusChange)?;
 
     let hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
+        let _ = io::stdout().execute(DisableFocusChange);
         let _ = io::stdout().execute(DisableMouseCapture);
         let _ = disable_raw_mode();
         let _ = io::stdout().execute(LeaveAlternateScreen);
@@ -725,6 +727,11 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                         active_tab = previous_tab
                                             .take()
                                             .unwrap_or(ActiveTab::Repositories);
+                                        if active_tab == ActiveTab::Overview
+                                            && overview_state.initialized
+                                        {
+                                            overview_state.force_resize_all();
+                                        }
                                     }
                                     KeyCode::Left => {
                                         focus_mode_state.focus_side =
@@ -767,6 +774,11 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                 active_tab = previous_tab
                                     .take()
                                     .unwrap_or(ActiveTab::Repositories);
+                                if active_tab == ActiveTab::Overview
+                                    && overview_state.initialized
+                                {
+                                    overview_state.force_resize_all();
+                                }
                             } else if let Some(bytes) =
                                 overview::input::key_event_to_bytes(&key)
                             {
@@ -820,8 +832,14 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                         }
                                     }
                                 }
-                                KeyCode::Left => overview_state.focus_prev(),
-                                KeyCode::Right => overview_state.focus_next(),
+                                KeyCode::Left => {
+                                    overview_state.focus_prev();
+                                    overview_state.force_resize_focused();
+                                }
+                                KeyCode::Right => {
+                                    overview_state.focus_next();
+                                    overview_state.force_resize_focused();
+                                }
                                 KeyCode::PageUp => {
                                     overview_state.panel_scroll_up();
                                 }
@@ -880,12 +898,13 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                     next = next.next();
                                 }
                                 active_tab = next;
-                                // Initialize overview on first switch
-                                if active_tab == ActiveTab::Overview
-                                    && !overview_state.initialized
-                                {
-                                    overview_state
-                                        .sync_agents(&agents, last_content_area);
+                                if active_tab == ActiveTab::Overview {
+                                    if !overview_state.initialized {
+                                        overview_state
+                                            .sync_agents(&agents, last_content_area);
+                                    } else {
+                                        overview_state.force_resize_all();
+                                    }
                                 }
                             }
                             KeyCode::BackTab => {
@@ -894,11 +913,13 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                     prev = prev.prev();
                                 }
                                 active_tab = prev;
-                                if active_tab == ActiveTab::Overview
-                                    && !overview_state.initialized
-                                {
-                                    overview_state
-                                        .sync_agents(&agents, last_content_area);
+                                if active_tab == ActiveTab::Overview {
+                                    if !overview_state.initialized {
+                                        overview_state
+                                            .sync_agents(&agents, last_content_area);
+                                    } else {
+                                        overview_state.force_resize_all();
+                                    }
                                 }
                             }
                             KeyCode::Char('?') => {
@@ -911,6 +932,7 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                 match key.code {
                                     KeyCode::Down if shift => {
                                         overview_state.enter_terminal();
+                                        overview_state.force_resize_focused();
                                     }
                                     KeyCode::Left if shift => {
                                         overview_state
@@ -1055,6 +1077,35 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                         focus_mode_state.handle_resize(fm_cols, fm_rows);
                     }
                 }
+                Event::FocusGained => {
+                    // Re-assert panel sizes to the hub. The PTY may have been
+                    // resized by another client while the window was unfocused.
+                    if let Ok((cols, rows)) = crossterm::terminal::size() {
+                        let new_content_area = Rect {
+                            x: 0,
+                            y: 1,
+                            width: cols,
+                            height: rows.saturating_sub(2),
+                        };
+                        last_content_area = new_content_area;
+                        if active_tab == ActiveTab::Overview {
+                            overview_state
+                                .handle_resize(agents.len(), new_content_area);
+                            overview_state.force_resize_all();
+                        }
+                        if active_tab == ActiveTab::FocusMode
+                            && focus_mode_state.is_active()
+                        {
+                            let fm_cols = (new_content_area.width * 40 / 100)
+                                .saturating_sub(2)
+                                .max(1);
+                            let fm_rows =
+                                new_content_area.height.saturating_sub(3).max(1);
+                            focus_mode_state.handle_resize(fm_cols, fm_rows);
+                            focus_mode_state.force_resize();
+                        }
+                    }
+                }
                 Event::Mouse(MouseEvent { kind: MouseEventKind::ScrollUp, .. }) => {
                     if active_tab == ActiveTab::Overview {
                         overview_state.panel_scroll_up_lines(3);
@@ -1097,6 +1148,7 @@ pub fn run(hub_name: &str) -> io::Result<()> {
     overview_state.shutdown();
     focus_mode_state.shutdown();
 
+    io::stdout().execute(DisableFocusChange)?;
     io::stdout().execute(DisableMouseCapture)?;
     disable_raw_mode()?;
     io::stdout().execute(LeaveAlternateScreen)?;
