@@ -207,6 +207,8 @@ On startup, `clust ui` automatically connects to the hub daemon, starting it if 
 | `Esc` | Dismiss context menu (when open) |
 | `1`-`9`, `0` | Select context menu item by number (when context menu is open) |
 
+**Inline key hints:** When an item is selected in the tree or right panel, a dim `Enter` hint is displayed inline next to the item name to indicate that pressing Enter will perform an action. This appears on: selected repository lines (for repos with a path), selected branch lines, selected "No Repository" agent entries, and selected agent cards in the right panel. The hint uses `R_TEXT_TERTIARY` color for subtlety.
+
 **Context Menus:**
 
 Context menus appear as centered modal overlays. They support arrow key navigation, Enter to confirm, Esc to dismiss, and number keys 1-9/0 for direct item selection. Two context menus are available in the Repositories tab:
@@ -319,6 +321,17 @@ The agent's `working_dir` is passed to `open_agent()` to determine the git repos
 | `Shift+→` | Switch focus to right panel |
 | `Tab` | Cycle to next left panel tab |
 | `Esc` | Exit focus mode, return to originating tab |
+
+### Help Overlay (`?`)
+
+The `?` key toggles a keyboard shortcut overlay rendered as a centered modal (44 columns wide) anchored to the bottom of the content area. The modal is organized into sections with bold secondary-colored headers and context-aware visibility:
+
+- **Global section (always shown):** `q / Esc`, `Q`, `Ctrl+C`, `Tab`, `Shift+Tab`, `?`.
+- **Repositories section (shown when Repositories tab is active):** `↑/↓` navigate, `←/→` collapse/expand, `Shift+←/→` switch panel, `Enter` open menu/focus agent, `v` toggle grouping.
+- **Overview section (shown when Overview tab is active):** `Shift+←/→` scroll panels, `Shift+↓` enter terminal, plus an "In terminal:" sub-context label followed by `Shift+↑` back to options bar, `Shift+↓` enter focus mode, `Shift+←/→` switch agent, `PgUp/PgDn` scroll terminal.
+- **Focus Mode section (shown when in focus mode):** `Esc` exit, `Shift+←/→` switch panel, `Shift+PgUp/PgDn` scroll terminal, plus a "Left panel:" sub-context label followed by `Tab` cycle tabs, `↑/↓` scroll diff, `Shift+↑/↓` jump file.
+
+Key names are displayed in accent color (left-aligned, 16 chars wide); descriptions use primary text color. Section headers use secondary text color with bold modifier. Sub-context labels use tertiary text color and are indented.
 
 ### Mouse Support
 
