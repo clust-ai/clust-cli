@@ -193,6 +193,7 @@ On startup, `clust ui` automatically connects to the hub daemon, starting it if 
 | `Tab` | Switch to next tab |
 | `Shift+Tab` | Switch to previous tab |
 | `?` | Toggle keyboard shortcut overlay |
+| `Alt+E` | Open the create-agent modal |
 
 **Repositories tab:**
 
@@ -332,6 +333,29 @@ The `?` key toggles a keyboard shortcut overlay rendered as a centered modal (44
 - **Focus Mode section (shown when in focus mode):** `Esc` exit, `Shift+←/→` switch panel, `Shift+PgUp/PgDn` scroll terminal, plus a "Left panel:" sub-context label followed by `Tab` cycle tabs, `↑/↓` scroll diff, `Shift+↑/↓` jump file.
 
 Key names are displayed in accent color (left-aligned, 16 chars wide); descriptions use primary text color. Section headers use secondary text color with bold modifier. Sub-context labels use tertiary text color and are indented.
+
+### Create Agent Modal
+
+A multi-step modal for creating new agents on git worktrees, opened globally with `Alt+E`. The modal guides the user through 4 sequential steps:
+
+| Step | Title | Description |
+|------|-------|-------------|
+| 1/4 | Select repository | Choose from registered repos. Fuzzy search filters by name and path. |
+| 2/4 | Select target branch | Choose a local branch from the selected repo. Fuzzy search filters by name. Shows HEAD, worktree, and active agent indicators. Skipped if the repo has no local branches. |
+| 3/4 | New branch | Enter a branch name for the new worktree. Required if no branches exist; optional otherwise (press Enter to use the target branch directly). |
+| 4/4 | Enter prompt | Type an initial prompt for the agent. Optional -- press Enter to start with no prompt. |
+
+**Navigation:**
+- `Up` / `Down` -- move selection in list steps
+- `Enter` -- confirm selection / advance to next step
+- `Esc` -- go back to previous step, or cancel from step 1
+- Type to filter -- fuzzy matching via `fuzzy-matcher` (SkimV2 algorithm)
+
+**Completion:** On completing step 4, the modal sends a `CreateWorktreeAgent` IPC message to the hub. The hub creates the worktree (via the existing `add_worktree()` logic), spawns an agent in it, and returns `WorktreeAgentStarted`. The TUI then opens the new agent in focus mode.
+
+**Rendering:** The modal is rendered as a centered overlay (60 columns wide, 60% of terminal height) with a titled border, input field with visible cursor, and a scrollable list with fuzzy-matched results. The selected item is indicated with a `>` prefix and bold text.
+
+The `Alt+E` hint is shown in the status bar.
 
 ### Mouse Support
 

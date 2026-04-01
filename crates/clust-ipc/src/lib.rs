@@ -60,6 +60,17 @@ pub enum CliMessage {
         repo_name: Option<String>,
         branch_name: String,
     },
+    CreateWorktreeAgent {
+        repo_path: String,
+        target_branch: Option<String>,
+        new_branch: Option<String>,
+        prompt: Option<String>,
+        agent_binary: Option<String>,
+        cols: u16,
+        rows: u16,
+        accept_edits: bool,
+        hub: String,
+    },
 }
 
 /// Info about a running agent, returned in AgentList.
@@ -138,6 +149,11 @@ pub enum HubMessage {
     },
     WorktreeInfoResult {
         info: WorktreeEntry,
+    },
+    WorktreeAgentStarted {
+        id: String,
+        agent_binary: String,
+        working_dir: String,
     },
 }
 
@@ -906,6 +922,50 @@ mod tests {
                 is_dirty: false,
                 active_agents: vec![],
             },
+        })
+        .await;
+    }
+
+    // ── Create worktree agent round-trips ──────────────────────
+
+    #[tokio::test]
+    async fn cli_create_worktree_agent_all_fields() {
+        assert_cli_round_trip(CliMessage::CreateWorktreeAgent {
+            repo_path: "/home/user/project".into(),
+            target_branch: Some("main".into()),
+            new_branch: Some("feature/foo".into()),
+            prompt: Some("fix the tests".into()),
+            agent_binary: Some("claude".into()),
+            cols: 120,
+            rows: 40,
+            accept_edits: true,
+            hub: DEFAULT_HUB.into(),
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn cli_create_worktree_agent_minimal() {
+        assert_cli_round_trip(CliMessage::CreateWorktreeAgent {
+            repo_path: "/tmp/repo".into(),
+            target_branch: None,
+            new_branch: Some("first-branch".into()),
+            prompt: None,
+            agent_binary: None,
+            cols: 80,
+            rows: 24,
+            accept_edits: false,
+            hub: DEFAULT_HUB.into(),
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn hub_worktree_agent_started() {
+        assert_hub_round_trip(HubMessage::WorktreeAgentStarted {
+            id: "abc123".into(),
+            agent_binary: "claude".into(),
+            working_dir: "/home/user/project/.clust/worktrees/feature__foo".into(),
         })
         .await;
     }
