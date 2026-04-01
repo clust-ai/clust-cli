@@ -122,7 +122,7 @@ A multi-agent terminal overview that displays all active agents side-by-side wit
 ││                    │││                │││         ││
 │└────────────────────┘│└────────────────┘│└─────────┘│
 ├──────────────────────┴──────────────────┴───────────┤
-│ ● connected  Shift+↓ enter terminal  ...    v0.0.8 │
+│ ● connected  Shift+↓ enter terminal  ...    v0.0.9 │
 └─────────────────────────────────────────────────────┘
 ```
 
@@ -172,7 +172,7 @@ On startup, `clust ui` automatically connects to the hub daemon, starting it if 
 ### Bottom Status Bar
 
 ```
-● connected  q to quit  Q to quit and stop hub  ↑↓←→ navigate  Shift+←→ panels  v toggle agents          v0.0.8
+● connected  q to quit  Q to quit and stop hub  ↑↓←→ navigate  Shift+←→ panels  v toggle agents          v0.0.9
 ```
 
 | Section | Description |
@@ -180,7 +180,7 @@ On startup, `clust ui` automatically connects to the hub daemon, starting it if 
 | Status dot | Green `●` when connected, dim when disconnected |
 | Status label | `connected` or `disconnected` |
 | Shortcuts | Context-aware hints: on Repositories tab shows `q quit`, `Q stop+quit`, navigation hints; on Overview tab shows focus-dependent hints (e.g., `Shift+↓ enter terminal` or `Shift+↑ options`); on Focus tab shows `Shift+←/→ switch panel`, `Shift+↑/↓ jump file`, `Esc exit` |
-| Version | Right-aligned, e.g. `v0.0.8` |
+| Version | Right-aligned, e.g. `v0.0.9` |
 
 ### Keyboard Shortcuts
 
@@ -237,7 +237,7 @@ A single-agent focus view with a two-panel split: a 60%-width left panel with ta
 │      3      3│  let x = 1;   ││                    ││
 │                               │└────────────────────┘│
 ├─────────────────────────────────────────────────────┤
-│ ● connected  Shift+←/→ switch panel  ...     v0.0.8│
+│ ● connected  Shift+←/→ switch panel  ...     v0.0.9│
 └─────────────────────────────────────────────────────┘
 ```
 
@@ -304,3 +304,74 @@ The agent's `working_dir` is passed to `open_agent()` to determine the git repos
 | `Shift+→` | Switch focus to right panel |
 | `Tab` | Cycle to next left panel tab |
 | `Esc` | Switch focus to right panel |
+
+### Mouse Support
+
+Mouse capture is enabled via `crossterm::EnableMouseCapture` on TUI startup and disabled on exit. All mouse interactions use `MouseEventKind::Down(MouseButton::Left)` for clicks and `MouseEventKind::ScrollUp`/`ScrollDown` for scroll wheel.
+
+#### Click Map Architecture
+
+A `ClickMap` struct is populated during each render pass and consumed during mouse event handling. During rendering, each clickable element records its bounding `Rect` and associated action target into the click map. When a mouse click arrives, the handler checks each region in the click map to determine what was clicked. The click map is rebuilt from scratch every frame.
+
+`ClickMap` fields:
+- `tabs` -- tab bar regions mapped to `ActiveTab` values
+- `left_panel_area` / `right_panel_area` -- full panel areas for Repositories tab focus switching
+- `tree_items` / `tree_inner_area` -- repo tree line targets mapped via `TreeClickTarget` enum (Repo, Category, Branch)
+- `agent_cards` -- right panel agent card regions mapped to (group_idx, agent_idx) pairs
+- `overview_panels` -- Overview tab panel regions mapped to global panel indices
+- `focus_left_area` / `focus_right_area` -- Focus mode panel areas for focus switching
+- `focus_left_tabs` -- Focus mode left panel tab regions mapped to `LeftPanelTab` values
+
+#### Mouse Click Behavior
+
+**Tab bar (all tabs):**
+
+| Click Target | Action |
+|--------------|--------|
+| Tab label | Switch to that tab (Repositories, Overview, or Focus) |
+
+**Repositories tab:**
+
+| Click Target | Action |
+|--------------|--------|
+| Tree item (repo) | Select the repo; click again when already selected to toggle collapse |
+| Tree item (category) | Select the category; click again when already selected to toggle collapse |
+| Tree item (branch) | Select the branch |
+| Agent card | Select the agent and focus the right panel |
+| Left panel (anywhere) | Switch keyboard focus to left panel |
+| Right panel (anywhere) | Switch keyboard focus to right panel |
+
+Clicking a tree item also sets keyboard focus to the left panel. Clicking an agent card sets focus to the right panel.
+
+**Overview tab:**
+
+| Click Target | Action |
+|--------------|--------|
+| Agent panel | Focus that terminal panel (`OverviewFocus::Terminal(idx)`) |
+
+**Focus mode tab:**
+
+| Click Target | Action |
+|--------------|--------|
+| Left panel tab (Changes/Panel 2/Panel 3) | Switch to that tab and focus the left panel |
+| Left panel area | Switch keyboard focus to left panel |
+| Right panel area | Switch keyboard focus to right panel |
+
+#### Cursor-Aware Scroll Wheel
+
+Scroll wheel events scroll the element under the mouse cursor rather than the keyboard-focused element. The scroll step is 3 lines per event.
+
+**Overview tab:**
+
+| Cursor Position | Scroll Action |
+|-----------------|---------------|
+| Over an agent panel | Scroll that panel's scrollback up/down (regardless of which panel has keyboard focus) |
+
+**Focus mode tab:**
+
+| Cursor Position | Scroll Action |
+|-----------------|---------------|
+| Over the right panel | Scroll the agent terminal scrollback up/down |
+| Over the left panel | Scroll the diff viewer up/down |
+
+The Repositories tab does not have scroll wheel handling.
