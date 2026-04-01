@@ -121,7 +121,7 @@ A multi-agent terminal overview that displays all active agents side-by-side wit
 ││                    │││                │││         ││
 │└──── Shift+↓ focus──┘│└────────────────┘│└─────────┘│
 ├──────────────────────┴──────────────────┴───────────┤
-│ ● connected  Shift+↓ enter terminal  ...    v0.0.9 │
+│ ● connected  Shift+↓ enter terminal  ...    v0.0.10 │
 └─────────────────────────────────────────────────────┘
 ```
 
@@ -173,7 +173,7 @@ On startup, `clust ui` automatically connects to the hub daemon, starting it if 
 ### Bottom Status Bar
 
 ```
-● connected  q to quit  Q to quit and stop hub  ↑↓←→ navigate  Shift+←→ panels  v toggle agents          v0.0.9
+● connected  q to quit  Q to quit and stop hub  ↑↓←→ navigate  Shift+←→ panels  v toggle agents          v0.0.10
 ```
 
 | Section | Description |
@@ -182,7 +182,7 @@ On startup, `clust ui` automatically connects to the hub daemon, starting it if 
 | Status label | `connected` or `disconnected` |
 | Focused agent | When an agent has keyboard focus (in Overview terminal focus or focus mode), shows the repo name in the repo's assigned color followed by `/branch` in secondary text color |
 | Shortcuts | Context-aware hints: on Repositories tab shows `q quit`, `Q stop+quit`, navigation hints; on Overview tab shows focus-dependent hints (e.g., `Shift+↓ enter terminal` or `Shift+↑ options`); in focus mode shows `Shift+←/→ switch panel`, `Shift+↑/↓ jump file`, `Esc exit` |
-| Version | Right-aligned, e.g. `v0.0.9` |
+| Version | Right-aligned, e.g. `v0.0.10` |
 
 ### Keyboard Shortcuts
 
@@ -259,7 +259,7 @@ When focus mode is active, the 1-row tab bar is replaced by a back-bar that show
 │      3      3│  let x = 1;   ││                    ││
 │                               │└────────────────────┘│
 ├─────────────────────────────────────────────────────┤
-│ ● connected  Shift+←/→ switch panel  ...     v0.0.9│
+│ ● connected  Shift+←/→ switch panel  ...     v0.0.10│
 └─────────────────────────────────────────────────────┘
 ```
 
@@ -271,7 +271,9 @@ The left panel has a tab bar at the top with three tabs: `Changes`, `Panel 2`, `
 
 - Displays the output of `git diff HEAD` for the agent's working directory
 - Unified inline format with dual-column line numbers (old and new)
-- Line-by-line color coding: additions use a green-tinted background (`R_DIFF_ADD_BG`), deletions use a red-tinted background (`R_DIFF_DEL_BG`), file headers use `R_BG_RAISED`, hunk headers use the accent color, context lines use the base background
+- Line-by-line color coding: additions use a green-tinted background (`R_DIFF_ADD_BG`), deletions use a red-tinted background (`R_DIFF_DEL_BG`), file headers use reverse-video styling (`R_ACCENT` background, `R_BG_BASE` foreground, bold) for visual prominence, hunk headers use the accent color, context lines use the base background
+- Blank separator lines are inserted between different files for visual spacing
+- File headers display clean file paths (e.g., `src/main.rs`) instead of raw `diff --git a/... b/...` lines
 - A gutter column (9 chars wide) shows old/new line numbers separated by a `│` divider; file headers and hunk headers suppress line numbers
 - The diff is refreshed every 2 seconds via a background tokio task that runs `git diff HEAD` in a `spawn_blocking` call
 - Scrolling is supported with `↑` / `↓` keys when the left panel is focused
@@ -300,7 +302,7 @@ The agent's `working_dir`, `repo_path`, and `branch_name` are passed to `open_ag
 - Diff state is managed via `ParsedDiff` (lines, file start indices, file names), `diff_scroll` (current scroll position), and `diff_error` (error message if `git diff` failed).
 - A background diff refresh task (`spawn_diff_task`) runs every 2 seconds and sends `DiffEvent::Updated` or `DiffEvent::Error` via an `mpsc` channel. A `watch` channel signals the task to stop.
 - `drain_diff_events()` is called each frame in the main event loop alongside `drain_output_events()`.
-- `parse_unified_diff()` parses raw `git diff HEAD` output into structured `DiffLine` entries with kind, content, line numbers, and file index.
+- `parse_unified_diff()` parses raw `git diff HEAD` output into structured `DiffLine` entries with kind (FileHeader, HunkHeader, Context, Add, Delete, FileMetadata, Separator), content, line numbers, and file index. Separator lines are automatically inserted between files during parsing.
 - On terminal resize, the focus mode panel is resized via `TerminalEmulator::resize()` (preserving scrollback history) and the hub is notified via `ResizeAgent`. On `FocusGained` events, dimensions are also re-sent unconditionally to account for PTY resizes by other clients while the window was unfocused.
 - Focus mode is orthogonal to tab cycling -- `Tab` / `Shift+Tab` simply toggles between `Repositories` and `Overview` (2 tabs). Focus mode is only entered explicitly via the entry points above.
 - State is tracked by an `in_focus_mode: bool` flag rather than a `previous_tab` option. The `ActiveTab` enum no longer has a `FocusMode` variant.

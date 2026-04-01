@@ -17,6 +17,7 @@ pub enum DiffLineKind {
     Add,
     Delete,
     FileMetadata,
+    Separator,
 }
 
 #[derive(Clone, Debug)]
@@ -58,6 +59,14 @@ pub fn parse_unified_diff(raw: &str) -> ParsedDiff {
     for text in raw.lines() {
         if text.starts_with("diff --git ") {
             if in_file {
+                // Visual separator between files
+                lines.push(DiffLine {
+                    kind: DiffLineKind::Separator,
+                    content: String::new(),
+                    old_lineno: None,
+                    new_lineno: None,
+                    file_idx,
+                });
                 file_idx += 1;
             }
             in_file = true;
@@ -292,6 +301,8 @@ diff --git a/README.md b/README.md
         assert_eq!(kinds[9], DiffLineKind::Context);       // let x
         assert_eq!(kinds[10], DiffLineKind::Context);      // let y
         assert_eq!(kinds[11], DiffLineKind::Context);      // }
+        assert_eq!(kinds[12], DiffLineKind::Separator);     // gap between files
+        assert_eq!(kinds[13], DiffLineKind::FileHeader);    // second file
     }
 
     #[test]
