@@ -93,7 +93,7 @@ clust repo [OPTIONS]
 
 | Flag | Long | Description |
 |------|------|-------------|
-| `-R` | `--register` | Register the current directory's git repository for tracking in the TUI. |
+| `-a` | `--add` | Register the current directory's git repository for tracking in the TUI. |
 | `-r` | `--remove` | Remove a repository from clust tracking. Stops all agents first. Prompts for confirmation. |
 | `-s` | `--stop` | Stop all agents running on the current repository (keeps repo tracked). |
 
@@ -151,8 +151,8 @@ clust -s a3f8c1
 clust -s
 
 # Register the current repo for TUI tracking
-clust repo -R
-clust repo --register
+clust repo -a
+clust repo --add
 
 # Remove a repo from tracking (stops agents, prompts for confirmation)
 clust repo --remove
@@ -201,7 +201,7 @@ These shortcuts are active in the `clust ui` dashboard. They are displayed in th
 | `↑` / `↓` | Move selection within current level |
 | `→` | Descend into selected item, or expand if collapsed |
 | `←` | Collapse current item, or ascend to parent level |
-| `Enter` | Toggle collapse/expand (left panel); enter focus mode for selected agent (right panel) |
+| `Enter` | Left panel: on repo opens context menu (Change Color); on branch with 1 agent opens focus mode, with multiple agents opens agent picker; on category toggles collapse. Right panel: enter focus mode for selected agent. |
 | `Shift+←` / `Shift+→` | Switch focus between left and right panels |
 | `v` | Toggle agent grouping between by-hub and by-repo (right panel) |
 

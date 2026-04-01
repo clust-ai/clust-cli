@@ -37,23 +37,26 @@ CREATE TABLE config (
 |-----|---------|-------------|
 | `default_agent` | *(none)* | The agent binary to use when none is specified. Set via `clust -d` or first-run prompt. |
 
-#### `repos` *(migration v2)*
+#### `repos` *(migration v2, extended in v3)*
 
-Registered git repositories tracked in the TUI. Branch/worktree data is ephemeral (fetched from git on each poll), only the registration is persisted.
+Registered git repositories tracked in the TUI. Branch/worktree data is ephemeral (fetched from git on each poll), only the registration and color are persisted.
 
 ```sql
 CREATE TABLE repos (
     path           TEXT PRIMARY KEY,  -- absolute path to repo root
     name           TEXT NOT NULL,     -- directory name
-    registered_at  TEXT NOT NULL      -- ISO 8601
+    registered_at  TEXT NOT NULL,     -- ISO 8601
+    color          TEXT               -- repo color name (e.g., "purple", "blue"); added in migration v3
 );
 ```
 
-Repos are registered via `clust repo -R` or auto-registered when an agent is launched inside a git repository. Stale entries (deleted repos) are cleaned up automatically when the TUI polls for repo state.
+Repos are registered via `clust repo -a` or auto-registered when an agent is launched inside a git repository. Stale entries (deleted repos) are cleaned up automatically when the TUI polls for repo state.
 
-#### `agent_history` *(deferred — migration v3)*
+Migration v3 adds the `color` column and backfills existing repos with cycling colors from the palette: `purple`, `blue`, `green`, `teal`, `orange`, `yellow`.
 
-Log of past agent sessions. Written when an agent exits. Useful for future features (UI history, analytics). Not yet created; will be added as migration v3.
+#### `agent_history` *(deferred — future migration)*
+
+Log of past agent sessions. Written when an agent exits. Useful for future features (UI history, analytics). Not yet created.
 
 ```sql
 CREATE TABLE agent_history (

@@ -58,3 +58,27 @@ pub const R_BG_ACTIVE: Color = Color::Rgb(72, 75, 82);  // #484b52
 // Diff backgrounds
 pub const R_DIFF_ADD_BG: Color = Color::Rgb(30, 50, 30);
 pub const R_DIFF_DEL_BG: Color = Color::Rgb(55, 25, 25);
+
+// Repository colors (badge text colors from theme.md)
+pub const R_REPO_PURPLE: Color = Color::Rgb(176, 152, 208); // #b098d0
+pub const R_REPO_BLUE: Color = Color::Rgb(128, 176, 212);   // #80b0d4
+pub const R_REPO_GREEN: Color = Color::Rgb(108, 200, 144);  // #6cc890
+pub const R_REPO_TEAL: Color = Color::Rgb(92, 192, 188);    // #5cc0bc
+pub const R_REPO_ORANGE: Color = Color::Rgb(216, 160, 96);  // #d8a060
+pub const R_REPO_YELLOW: Color = Color::Rgb(212, 188, 80);  // #d4bc50
+
+/// Map a repo color name to a ratatui Color.
+pub fn repo_color(name: &str) -> Color {
+    match name {
+        "purple" => R_REPO_PURPLE,
+        "blue" => R_REPO_BLUE,
+        "green" => R_REPO_GREEN,
+        "teal" => R_REPO_TEAL,
+        "orange" => R_REPO_ORANGE,
+        "yellow" => R_REPO_YELLOW,
+        _ => R_ACCENT,
+    }
+}
+
+/// All repo color names in palette order.
+pub const REPO_COLOR_NAMES: &[&str] = &["purple", "blue", "green", "teal", "orange", "yellow"];

@@ -117,7 +117,8 @@ async fn handle_connection(
                                     .file_name()
                                     .map(|n| n.to_string_lossy().into_owned())
                                     .unwrap_or_else(|| root_str.clone());
-                                let _ = crate::db::register_repo(db, &root_str, &name);
+                                let color = crate::db::next_repo_color(db);
+                                let _ = crate::db::register_repo(db, &root_str, &name, color);
                             }
                         }
                     }
@@ -279,7 +280,8 @@ async fn handle_connection(
                                 .file_name()
                                 .map(|n| n.to_string_lossy().into_owned())
                                 .unwrap_or_else(|| root_str.clone());
-                            crate::db::register_repo(db, &root_str, &name)
+                            let color = crate::db::next_repo_color(db);
+                            crate::db::register_repo(db, &root_str, &name, color)
                                 .map(|_| (root_str, name))
                         }
                         None => Err(format!("{path} is not inside a git repository")),
@@ -335,13 +337,16 @@ async fn handle_connection(
             // Do git I/O outside the lock
             let mut valid_repos = Vec::new();
             let mut stale_paths = Vec::new();
-            for (path, name) in repo_list {
+            for (path, name, color) in repo_list {
                 match crate::repo::get_repo_state(
                     std::path::Path::new(&path),
                     &name,
                     &agent_snapshots,
                 ) {
-                    Some(info) => valid_repos.push(info),
+                    Some(mut info) => {
+                        info.color = color;
+                        valid_repos.push(info);
+                    }
                     None => stale_paths.push(path),
                 }
             }
@@ -361,6 +366,32 @@ async fn handle_connection(
                 },
             )
             .await?;
+        }
+        CliMessage::SetRepoColor { path, color } => {
+            let result = {
+                let hub_state = state.lock().await;
+                if let Some(ref db) = hub_state.db {
+                    crate::db::set_repo_color(db, &path, &color)
+                } else {
+                    Err("database not initialized".into())
+                }
+            };
+            match result {
+                Ok(()) => {
+                    clust_ipc::send_message_write(
+                        &mut writer,
+                        &HubMessage::RepoColorSet { path, color },
+                    )
+                    .await?;
+                }
+                Err(e) => {
+                    clust_ipc::send_message_write(
+                        &mut writer,
+                        &HubMessage::Error { message: e },
+                    )
+                    .await?;
+                }
+            }
         }
         CliMessage::UnregisterRepo { path } => {
             let git_root = crate::repo::detect_git_root(&path);
