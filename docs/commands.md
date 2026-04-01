@@ -221,12 +221,23 @@ These shortcuts are active in the `clust ui` dashboard. They are displayed in th
 | `Shift+←` / `Shift+→` | Switch to previous/next agent panel |
 | All other keys | Forwarded to the focused agent's PTY |
 
-**Focus tab:**
+**Focus mode (right panel focused):**
 
 | Shortcut | Action |
 |----------|--------|
-| `Esc` | Exit focus mode, return to previous tab |
-| `Shift+↑` | Exit focus mode, return to previous tab |
+| `Esc` | Exit focus mode, return to originating tab |
+| `Shift+←` | Switch focus to left panel |
 | `Shift+PageUp` | Scroll up through scrollback history |
 | `Shift+PageDown` | Scroll down through scrollback history |
 | All other keys | Forwarded to the focused agent's PTY |
+
+**Focus mode (left panel focused):**
+
+| Shortcut | Action |
+|----------|--------|
+| `Esc` | Exit focus mode, return to originating tab |
+| `↑` / `↓` | Scroll diff up/down |
+| `Shift+↑` | Jump to previous file header |
+| `Shift+↓` | Jump to next file header |
+| `Shift+→` | Switch focus to right panel |
+| `Tab` | Cycle to next left panel tab |
