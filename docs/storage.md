@@ -46,13 +46,13 @@ CREATE TABLE repos (
     path           TEXT PRIMARY KEY,  -- absolute path to repo root
     name           TEXT NOT NULL,     -- directory name
     registered_at  TEXT NOT NULL,     -- ISO 8601
-    color          TEXT               -- repo color name (e.g., "purple", "blue"); added in migration v3
+    color          TEXT               -- repo color name (e.g., "red", "blue"); added in migration v3
 );
 ```
 
 Repos are registered via `clust repo -a` or auto-registered when an agent is launched inside a git repository. Stale entries (deleted repos) are cleaned up automatically when the TUI polls for repo state.
 
-Migration v3 adds the `color` column and backfills existing repos with cycling colors from the palette: `purple`, `blue`, `green`, `teal`, `orange`, `yellow`.
+Migration v3 adds the `color` column and backfills existing repos with cycling colors from the palette: `red`, `orange`, `yellow`, `lime`, `green`, `teal`, `blue`, `purple`, `pink`, `coral`.
 
 #### `agent_history` *(deferred — future migration)*
 

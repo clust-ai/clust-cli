@@ -59,26 +59,49 @@ pub const R_BG_ACTIVE: Color = Color::Rgb(72, 75, 82);  // #484b52
 pub const R_DIFF_ADD_BG: Color = Color::Rgb(30, 50, 30);
 pub const R_DIFF_DEL_BG: Color = Color::Rgb(55, 25, 25);
 
-// Repository colors (badge text colors from theme.md)
-pub const R_REPO_PURPLE: Color = Color::Rgb(176, 152, 208); // #b098d0
-pub const R_REPO_BLUE: Color = Color::Rgb(128, 176, 212);   // #80b0d4
-pub const R_REPO_GREEN: Color = Color::Rgb(108, 200, 144);  // #6cc890
-pub const R_REPO_TEAL: Color = Color::Rgb(92, 192, 188);    // #5cc0bc
-pub const R_REPO_ORANGE: Color = Color::Rgb(216, 160, 96);  // #d8a060
-pub const R_REPO_YELLOW: Color = Color::Rgb(212, 188, 80);  // #d4bc50
+// Repository colors — vibrant, high-chroma, perceptually distinct on dark bg
+pub const R_REPO_RED: Color = Color::Rgb(240, 96, 96);      // #f06060
+pub const R_REPO_ORANGE: Color = Color::Rgb(240, 160, 48);  // #f0a030
+pub const R_REPO_YELLOW: Color = Color::Rgb(224, 208, 64);  // #e0d040
+pub const R_REPO_LIME: Color = Color::Rgb(128, 224, 80);    // #80e050
+pub const R_REPO_GREEN: Color = Color::Rgb(64, 216, 144);   // #40d890
+pub const R_REPO_TEAL: Color = Color::Rgb(64, 208, 208);    // #40d0d0
+pub const R_REPO_BLUE: Color = Color::Rgb(80, 160, 240);    // #50a0f0
+pub const R_REPO_PURPLE: Color = Color::Rgb(160, 112, 240); // #a070f0
+pub const R_REPO_PINK: Color = Color::Rgb(224, 112, 192);   // #e070c0
+pub const R_REPO_CORAL: Color = Color::Rgb(240, 128, 112);  // #f08070
 
 /// Map a repo color name to a ratatui Color.
 pub fn repo_color(name: &str) -> Color {
     match name {
-        "purple" => R_REPO_PURPLE,
-        "blue" => R_REPO_BLUE,
-        "green" => R_REPO_GREEN,
-        "teal" => R_REPO_TEAL,
+        "red" => R_REPO_RED,
         "orange" => R_REPO_ORANGE,
         "yellow" => R_REPO_YELLOW,
+        "lime" => R_REPO_LIME,
+        "green" => R_REPO_GREEN,
+        "teal" => R_REPO_TEAL,
+        "blue" => R_REPO_BLUE,
+        "purple" => R_REPO_PURPLE,
+        "pink" => R_REPO_PINK,
+        "coral" => R_REPO_CORAL,
         _ => R_ACCENT,
     }
 }
 
+/// Dim a color to ~60% brightness for unfocused elements.
+pub fn dim_color(c: Color) -> Color {
+    match c {
+        Color::Rgb(r, g, b) => Color::Rgb(
+            (r as u16 * 60 / 100) as u8,
+            (g as u16 * 60 / 100) as u8,
+            (b as u16 * 60 / 100) as u8,
+        ),
+        other => other,
+    }
+}
+
 /// All repo color names in palette order.
-pub const REPO_COLOR_NAMES: &[&str] = &["purple", "blue", "green", "teal", "orange", "yellow"];
+pub const REPO_COLOR_NAMES: &[&str] = &[
+    "red", "orange", "yellow", "lime", "green",
+    "teal", "blue", "purple", "pink", "coral",
+];
