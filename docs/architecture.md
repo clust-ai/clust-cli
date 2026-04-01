@@ -113,6 +113,10 @@ CLI -> Hub:
   StopRepoAgents { path: String }
   SetRepoColor { path: String, color: String }
   ListRepos
+  ListWorktrees { working_dir: Option<String>, repo_name: Option<String> }
+  AddWorktree { working_dir: Option<String>, repo_name: Option<String>, branch_name: String, base_branch: Option<String>, checkout_existing: bool }
+  RemoveWorktree { working_dir: Option<String>, repo_name: Option<String>, branch_name: String, delete_local_branch: bool, force: bool }
+  GetWorktreeInfo { working_dir: Option<String>, repo_name: Option<String>, branch_name: String }
 
 Hub -> CLI:
   Ok
@@ -131,6 +135,10 @@ Hub -> CLI:
   RepoAgentsStopped { path: String, stopped_count: usize }
   RepoColorSet { path: String, color: String }
   RepoList { repos: Vec<RepoInfo> }
+  WorktreeList { repo_name: String, repo_path: String, worktrees: Vec<WorktreeEntry> }
+  WorktreeAdded { branch_name: String, path: String }
+  WorktreeRemoved { branch_name: String, stopped_agents: usize }
+  WorktreeInfoResult { info: WorktreeEntry }
 ```
 
 ### Connection Lifecycle

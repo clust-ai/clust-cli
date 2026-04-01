@@ -166,6 +166,26 @@ pub fn set_repo_color(conn: &Connection, path: &str, color: &str) -> Result<(), 
     Ok(())
 }
 
+/// Find a registered repository by name. Returns an error if multiple repos share the name.
+pub fn find_repo_by_name(conn: &Connection, name: &str) -> Result<Option<String>, String> {
+    let mut stmt = conn
+        .prepare("SELECT path FROM repos WHERE name = ?1")
+        .map_err(|e| format!("failed to prepare repo query: {e}"))?;
+    let paths: Vec<String> = stmt
+        .query_map([name], |row| row.get::<_, String>(0))
+        .map_err(|e| format!("failed to query repo: {e}"))?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| format!("failed to read repo: {e}"))?;
+
+    match paths.len() {
+        0 => Ok(None),
+        1 => Ok(Some(paths.into_iter().next().unwrap())),
+        _ => Err(format!(
+            "multiple repos named '{name}'; use the full path instead"
+        )),
+    }
+}
+
 /// Read the default agent from the config table. Returns `None` if not set.
 pub fn get_default_agent(conn: &Connection) -> Option<String> {
     conn.query_row(
@@ -337,6 +357,34 @@ mod tests {
         // Should not error when path doesn't exist
         unregister_repo(&conn, "/does/not/exist").unwrap();
         assert!(list_repos(&conn).unwrap().is_empty());
+    }
+
+    // ── find_repo_by_name tests ────────────────────────────────
+
+    #[test]
+    fn find_repo_by_name_no_match() {
+        let conn = in_memory_db();
+        assert_eq!(find_repo_by_name(&conn, "nonexistent").unwrap(), None);
+    }
+
+    #[test]
+    fn find_repo_by_name_single_match() {
+        let conn = in_memory_db();
+        register_repo(&conn, "/home/user/project", "project", "purple").unwrap();
+        assert_eq!(
+            find_repo_by_name(&conn, "project").unwrap(),
+            Some("/home/user/project".to_string())
+        );
+    }
+
+    #[test]
+    fn find_repo_by_name_multiple_matches_errors() {
+        let conn = in_memory_db();
+        register_repo(&conn, "/home/user/project", "project", "purple").unwrap();
+        register_repo(&conn, "/tmp/project", "project", "blue").unwrap();
+        let result = find_repo_by_name(&conn, "project");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("multiple repos"));
     }
 
     #[test]

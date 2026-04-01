@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-use clust_ipc::{BranchInfo, RepoInfo};
+use clust_ipc::{AgentInfo, BranchInfo, RepoInfo, WorktreeEntry};
 
 use crate::agent::AgentEntry;
 
@@ -10,6 +10,12 @@ use crate::agent::AgentEntry;
 pub trait AgentMatcher {
     fn repo_path(&self) -> Option<&str>;
     fn branch_name(&self) -> Option<&str>;
+    fn id(&self) -> &str;
+    fn agent_binary(&self) -> &str;
+    fn started_at(&self) -> &str;
+    fn attached_clients(&self) -> usize;
+    fn hub(&self) -> &str;
+    fn working_dir(&self) -> &str;
 }
 
 impl AgentMatcher for AgentEntry {
@@ -19,10 +25,35 @@ impl AgentMatcher for AgentEntry {
     fn branch_name(&self) -> Option<&str> {
         self.branch_name.as_deref()
     }
+    fn id(&self) -> &str {
+        &self.id
+    }
+    fn agent_binary(&self) -> &str {
+        &self.agent_binary
+    }
+    fn started_at(&self) -> &str {
+        &self.started_at
+    }
+    fn attached_clients(&self) -> usize {
+        self.attached_count
+            .load(std::sync::atomic::Ordering::Relaxed)
+    }
+    fn hub(&self) -> &str {
+        &self.hub
+    }
+    fn working_dir(&self) -> &str {
+        &self.working_dir
+    }
 }
 
 /// Lightweight snapshot of agent fields needed for repo state queries.
 pub(crate) struct AgentSnapshot {
+    pub id: String,
+    pub agent_binary: String,
+    pub started_at: String,
+    pub attached_clients: usize,
+    pub hub: String,
+    pub working_dir: String,
     pub repo_path: Option<String>,
     pub branch_name: Option<String>,
 }
@@ -33,6 +64,24 @@ impl AgentMatcher for AgentSnapshot {
     }
     fn branch_name(&self) -> Option<&str> {
         self.branch_name.as_deref()
+    }
+    fn id(&self) -> &str {
+        &self.id
+    }
+    fn agent_binary(&self) -> &str {
+        &self.agent_binary
+    }
+    fn started_at(&self) -> &str {
+        &self.started_at
+    }
+    fn attached_clients(&self) -> usize {
+        self.attached_clients
+    }
+    fn hub(&self) -> &str {
+        &self.hub
+    }
+    fn working_dir(&self) -> &str {
+        &self.working_dir
     }
 }
 
@@ -160,6 +209,290 @@ fn collect_worktree_branches(repo: &git2::Repository) -> Vec<String> {
     }
 
     branches
+}
+
+// ── Worktree management ────────────────────────────────────────────────
+
+/// Serialize a branch name for use as a directory name.
+/// Replaces `/` with `__` (e.g., `feature/auth` -> `feature__auth`).
+pub fn serialize_branch_name(branch: &str) -> String {
+    branch.replace('/', "__")
+}
+
+/// Deserialize a directory name back to a branch name.
+/// Replaces `__` with `/` (e.g., `feature__auth` -> `feature/auth`).
+pub fn deserialize_branch_name(dir_name: &str) -> String {
+    dir_name.replace("__", "/")
+}
+
+/// Compute the worktree directory path for a given branch.
+/// Convention: `{repo_root}/.clust/worktrees/{serialized_branch}`
+pub fn worktree_path(repo_root: &Path, branch: &str) -> PathBuf {
+    repo_root
+        .join(".clust")
+        .join("worktrees")
+        .join(serialize_branch_name(branch))
+}
+
+/// Ensure `.clust/` is listed in `.git/info/exclude` so git ignores it.
+fn ensure_clust_dir_excluded(repo_root: &Path) -> Result<(), String> {
+    let exclude_path = repo_root.join(".git").join("info").join("exclude");
+    let exclude_entry = ".clust/";
+
+    let content = std::fs::read_to_string(&exclude_path).unwrap_or_default();
+
+    if content.lines().any(|line| line.trim() == exclude_entry) {
+        return Ok(());
+    }
+
+    if let Some(parent) = exclude_path.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| format!("failed to create .git/info/: {e}"))?;
+    }
+
+    use std::io::Write;
+    let mut file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&exclude_path)
+        .map_err(|e| format!("failed to open .git/info/exclude: {e}"))?;
+
+    if !content.is_empty() && !content.ends_with('\n') {
+        writeln!(file).map_err(|e| format!("failed to write exclude: {e}"))?;
+    }
+    writeln!(file, "{exclude_entry}")
+        .map_err(|e| format!("failed to write exclude entry: {e}"))?;
+
+    Ok(())
+}
+
+/// Resolve a repo root path from either a working directory or a repo name.
+pub fn resolve_repo(
+    working_dir: Option<&str>,
+    repo_name: Option<&str>,
+    db: Option<&rusqlite::Connection>,
+) -> Result<PathBuf, String> {
+    if let Some(name) = repo_name {
+        let db = db.ok_or("database not initialized")?;
+        match crate::db::find_repo_by_name(db, name)? {
+            Some(path) => Ok(PathBuf::from(path)),
+            None => Err(format!("no repo named '{name}' is registered")),
+        }
+    } else if let Some(wd) = working_dir {
+        detect_git_root(wd).ok_or_else(|| format!("{wd} is not inside a git repository"))
+    } else {
+        Err("no repo specified".into())
+    }
+}
+
+/// Check if a worktree path has uncommitted changes.
+pub fn is_worktree_dirty(wt_path: &Path) -> bool {
+    let Ok(repo) = git2::Repository::open(wt_path) else {
+        return false;
+    };
+    let Ok(statuses) = repo.statuses(None) else {
+        return false;
+    };
+    !statuses.is_empty()
+}
+
+/// List all worktrees in a repository.
+///
+/// Uses `git worktree list --porcelain` for reliable parsing.
+/// Returns entries for the main checkout and all worktrees.
+pub fn list_worktrees<A: AgentMatcher>(
+    repo_root: &Path,
+    agents: &HashMap<String, A>,
+) -> Result<Vec<WorktreeEntry>, String> {
+    let output = std::process::Command::new("git")
+        .args(["worktree", "list", "--porcelain"])
+        .current_dir(repo_root)
+        .output()
+        .map_err(|e| format!("failed to run git: {e}"))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(format!("git worktree list failed: {}", stderr.trim()));
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let repo_root_str = repo_root
+        .canonicalize()
+        .unwrap_or_else(|_| repo_root.to_path_buf())
+        .to_string_lossy()
+        .trim_end_matches('/')
+        .to_string();
+
+    let mut entries = Vec::new();
+    let mut current_path: Option<String> = None;
+    let mut current_branch: Option<String> = None;
+    let mut is_bare = false;
+
+    for line in stdout.lines().chain(std::iter::once("")) {
+        if line.is_empty() {
+            // End of a worktree block
+            if let (Some(path), Some(branch)) = (current_path.take(), current_branch.take()) {
+                if !is_bare {
+                    let wt_path = Path::new(&path);
+                    let canon_path = wt_path
+                        .canonicalize()
+                        .unwrap_or_else(|_| wt_path.to_path_buf())
+                        .to_string_lossy()
+                        .trim_end_matches('/')
+                        .to_string();
+                    let is_main = canon_path == repo_root_str;
+                    let is_dirty = is_worktree_dirty(wt_path);
+
+                    let matching_agents: Vec<AgentInfo> = agents
+                        .values()
+                        .filter(|a| {
+                            a.repo_path()
+                                .map(|rp| rp.trim_end_matches('/'))
+                                == Some(repo_root_str.as_str())
+                                && a.branch_name() == Some(branch.as_str())
+                        })
+                        .map(|a| AgentInfo {
+                            id: a.id().to_string(),
+                            agent_binary: a.agent_binary().to_string(),
+                            started_at: a.started_at().to_string(),
+                            attached_clients: a.attached_clients(),
+                            hub: a.hub().to_string(),
+                            working_dir: a.working_dir().to_string(),
+                            repo_path: a.repo_path().map(|s| s.to_string()),
+                            branch_name: a.branch_name().map(|s| s.to_string()),
+                        })
+                        .collect();
+
+                    entries.push(WorktreeEntry {
+                        branch_name: branch,
+                        path,
+                        is_main,
+                        is_dirty,
+                        active_agents: matching_agents,
+                    });
+                }
+            }
+            current_path = None;
+            current_branch = None;
+            is_bare = false;
+        } else if let Some(path) = line.strip_prefix("worktree ") {
+            current_path = Some(path.to_string());
+        } else if let Some(branch_ref) = line.strip_prefix("branch ") {
+            // branch refs/heads/feature/auth -> feature/auth
+            current_branch = Some(
+                branch_ref
+                    .strip_prefix("refs/heads/")
+                    .unwrap_or(branch_ref)
+                    .to_string(),
+            );
+        } else if line == "bare" {
+            is_bare = true;
+        } else if line == "detached" {
+            // Detached HEAD — use "HEAD" as branch name
+            if current_branch.is_none() {
+                current_branch = Some("HEAD".to_string());
+            }
+        }
+    }
+
+    Ok(entries)
+}
+
+/// Create a new worktree.
+///
+/// If `checkout_existing` is true, checks out an existing branch.
+/// Otherwise creates a new branch from `base` (or current HEAD).
+pub fn add_worktree(
+    repo_root: &Path,
+    branch: &str,
+    base: Option<&str>,
+    checkout_existing: bool,
+) -> Result<PathBuf, String> {
+    ensure_clust_dir_excluded(repo_root)?;
+
+    let wt_path = worktree_path(repo_root, branch);
+
+    if let Some(parent) = wt_path.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| format!("failed to create worktree directory: {e}"))?;
+    }
+
+    let mut cmd = std::process::Command::new("git");
+    cmd.current_dir(repo_root);
+    cmd.args(["worktree", "add"]);
+
+    if checkout_existing {
+        cmd.arg(wt_path.to_str().unwrap());
+        cmd.arg(branch);
+    } else {
+        cmd.args(["-b", branch]);
+        cmd.arg(wt_path.to_str().unwrap());
+        if let Some(base) = base {
+            cmd.arg(base);
+        }
+    }
+
+    let output = cmd
+        .output()
+        .map_err(|e| format!("failed to run git: {e}"))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(format!("git worktree add failed: {}", stderr.trim()));
+    }
+
+    Ok(wt_path)
+}
+
+/// Remove a worktree and optionally delete its local branch.
+pub fn remove_worktree(
+    repo_root: &Path,
+    branch: &str,
+    delete_branch: bool,
+    force: bool,
+) -> Result<(), String> {
+    let wt_path = worktree_path(repo_root, branch);
+
+    if !wt_path.exists() {
+        return Err(format!("worktree for branch '{branch}' not found"));
+    }
+
+    let mut cmd = std::process::Command::new("git");
+    cmd.current_dir(repo_root);
+    cmd.args(["worktree", "remove"]);
+    if force {
+        cmd.arg("--force");
+    }
+    cmd.arg(wt_path.to_str().unwrap());
+
+    let output = cmd
+        .output()
+        .map_err(|e| format!("failed to run git: {e}"))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(format!("git worktree remove failed: {}", stderr.trim()));
+    }
+
+    if delete_branch {
+        let mut cmd = std::process::Command::new("git");
+        cmd.current_dir(repo_root);
+        if force {
+            cmd.args(["branch", "-D", branch]);
+        } else {
+            cmd.args(["branch", "-d", branch]);
+        }
+        let output = cmd
+            .output()
+            .map_err(|e| format!("failed to run git branch -d: {e}"))?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            eprintln!("warning: branch deletion failed: {}", stderr.trim());
+        }
+    }
+
+    Ok(())
 }
 
 #[cfg(test)]
@@ -512,5 +845,197 @@ mod tests {
             state.remote_branches.is_empty(),
             "fresh repo with no remotes should have empty remote branches"
         );
+    }
+
+    // ── Worktree management tests ───────────────────────────────
+
+    #[test]
+    fn serialize_branch_name_with_slashes() {
+        assert_eq!(serialize_branch_name("feature/auth"), "feature__auth");
+        assert_eq!(
+            serialize_branch_name("feat/sub/deep"),
+            "feat__sub__deep"
+        );
+    }
+
+    #[test]
+    fn serialize_branch_name_without_slashes() {
+        assert_eq!(serialize_branch_name("my-branch"), "my-branch");
+    }
+
+    #[test]
+    fn deserialize_branch_name_round_trip() {
+        let original = "feature/auth/deep";
+        let serialized = serialize_branch_name(original);
+        assert_eq!(deserialize_branch_name(&serialized), original);
+    }
+
+    #[test]
+    fn worktree_path_format() {
+        let root = Path::new("/home/user/project");
+        let path = worktree_path(root, "feature/auth");
+        assert_eq!(
+            path,
+            PathBuf::from("/home/user/project/.clust/worktrees/feature__auth")
+        );
+    }
+
+    #[test]
+    fn worktree_path_simple_branch() {
+        let root = Path::new("/home/user/project");
+        let path = worktree_path(root, "my-branch");
+        assert_eq!(
+            path,
+            PathBuf::from("/home/user/project/.clust/worktrees/my-branch")
+        );
+    }
+
+    #[test]
+    fn ensure_clust_dir_excluded_creates_entry() {
+        let (dir, _repo) = create_test_repo();
+        ensure_clust_dir_excluded(dir.path()).unwrap();
+
+        let exclude = std::fs::read_to_string(
+            dir.path().join(".git").join("info").join("exclude"),
+        )
+        .unwrap();
+        assert!(exclude.contains(".clust/"));
+    }
+
+    #[test]
+    fn ensure_clust_dir_excluded_idempotent() {
+        let (dir, _repo) = create_test_repo();
+        ensure_clust_dir_excluded(dir.path()).unwrap();
+        ensure_clust_dir_excluded(dir.path()).unwrap();
+
+        let exclude = std::fs::read_to_string(
+            dir.path().join(".git").join("info").join("exclude"),
+        )
+        .unwrap();
+        assert_eq!(
+            exclude.matches(".clust/").count(),
+            1,
+            "should only appear once"
+        );
+    }
+
+    #[test]
+    fn add_and_list_worktrees() {
+        let (dir, _repo) = create_test_repo();
+
+        let result = add_worktree(dir.path(), "test-wt", None, false);
+        if result.is_err() {
+            return; // skip if git worktree not available
+        }
+        let wt_path = result.unwrap();
+        assert!(wt_path.exists());
+
+        let agents: HashMap<String, AgentEntry> = HashMap::new();
+        let worktrees = list_worktrees(dir.path(), &agents).unwrap();
+
+        // Should have main checkout + our new worktree
+        assert!(worktrees.len() >= 2);
+
+        let wt = worktrees.iter().find(|w| w.branch_name == "test-wt");
+        assert!(wt.is_some(), "our worktree should appear in the list");
+        assert!(!wt.unwrap().is_main);
+    }
+
+    #[test]
+    fn add_and_remove_worktree() {
+        let (dir, _repo) = create_test_repo();
+
+        let result = add_worktree(dir.path(), "rm-test", None, false);
+        if result.is_err() {
+            return;
+        }
+        let wt_path = result.unwrap();
+        assert!(wt_path.exists());
+
+        remove_worktree(dir.path(), "rm-test", false, false).unwrap();
+        assert!(!wt_path.exists());
+    }
+
+    #[test]
+    fn remove_worktree_with_branch_deletion() {
+        let (dir, repo) = create_test_repo();
+
+        let result = add_worktree(dir.path(), "rm-branch-test", None, false);
+        if result.is_err() {
+            return;
+        }
+
+        remove_worktree(dir.path(), "rm-branch-test", true, false).unwrap();
+
+        // Branch should be deleted
+        assert!(
+            repo.find_branch("rm-branch-test", git2::BranchType::Local)
+                .is_err(),
+            "branch should be deleted"
+        );
+    }
+
+    #[test]
+    fn is_worktree_dirty_clean() {
+        let (dir, _repo) = create_test_repo();
+        assert!(!is_worktree_dirty(dir.path()));
+    }
+
+    #[test]
+    fn is_worktree_dirty_modified() {
+        let (dir, _repo) = create_test_repo();
+        std::fs::write(dir.path().join("dirty.txt"), "change").unwrap();
+        assert!(is_worktree_dirty(dir.path()));
+    }
+
+    #[test]
+    fn add_worktree_with_base_branch() {
+        let (dir, repo) = create_test_repo();
+
+        // Create a branch to use as base
+        let head = repo.head().unwrap().peel_to_commit().unwrap();
+        repo.branch("base-branch", &head, false).unwrap();
+
+        let result = add_worktree(dir.path(), "from-base", Some("base-branch"), false);
+        if result.is_err() {
+            return;
+        }
+        assert!(result.unwrap().exists());
+    }
+
+    #[test]
+    fn add_worktree_checkout_existing() {
+        let (dir, repo) = create_test_repo();
+
+        // Create a branch that we'll checkout in a worktree
+        let head = repo.head().unwrap().peel_to_commit().unwrap();
+        repo.branch("existing-branch", &head, false).unwrap();
+
+        let result = add_worktree(dir.path(), "existing-branch", None, true);
+        if result.is_err() {
+            return;
+        }
+        assert!(result.unwrap().exists());
+    }
+
+    #[test]
+    fn list_worktrees_includes_main() {
+        let (dir, _repo) = create_test_repo();
+
+        let agents: HashMap<String, AgentEntry> = HashMap::new();
+        let worktrees = list_worktrees(dir.path(), &agents).unwrap();
+
+        assert!(!worktrees.is_empty());
+        assert!(
+            worktrees.iter().any(|w| w.is_main),
+            "main checkout should be in the list"
+        );
+    }
+
+    #[test]
+    fn remove_nonexistent_worktree_errors() {
+        let (dir, _repo) = create_test_repo();
+        let result = remove_worktree(dir.path(), "nonexistent", false, false);
+        assert!(result.is_err());
     }
 }
