@@ -479,7 +479,7 @@ impl TreeSelection {
         }
         match self.level {
             TreeLevel::Repo => {
-                // Only descend if expanded; collapsed repos require Enter to open
+                // Only descend if expanded; collapsed repos require Space to expand
                 if !self.is_repo_collapsed(self.repo_idx) {
                     if self.is_unlinked_repo(repos) {
                         // Skip category level for "No Repository"
@@ -502,7 +502,7 @@ impl TreeSelection {
                 }
             }
             TreeLevel::Category => {
-                // Only descend if expanded; collapsed categories require Enter to open
+                // Only descend if expanded; collapsed categories require Space to expand
                 if !self.is_category_collapsed(self.repo_idx, self.category_idx)
                     && self.branch_count(repos) > 0
                 {
@@ -514,7 +514,7 @@ impl TreeSelection {
         }
     }
 
-    /// Left arrow: navigate up one level (never collapses — use Enter to toggle).
+    /// Left arrow: navigate up one level (never collapses — use Space to toggle).
     fn ascend(&mut self, repos: &[RepoInfo]) {
         match self.level {
             TreeLevel::Repo => {} // already at top
@@ -1256,13 +1256,11 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                                                     vec!["Change Color".to_string()],
                                                                 ),
                                                             });
-                                                        } else {
-                                                            selection.toggle_collapse();
                                                         }
                                                     }
                                                 }
                                                 TreeLevel::Category => {
-                                                    selection.toggle_collapse();
+                                                    // No action on Enter for categories (use Space)
                                                 }
                                                 TreeLevel::Branch => {
                                                     // Open agent(s) in focus mode from this branch
@@ -1396,6 +1394,9 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                                 .prev_group(&agents, agent_view_mode)
                                         }
                                     },
+                                    KeyCode::Char(' ') if focus == FocusPanel::Left => {
+                                        selection.toggle_collapse();
+                                    }
                                     _ => {}
                                 }
                             }
@@ -1959,6 +1960,12 @@ fn build_repo_tree_lines(
         let repo_selected = is_this_repo && selection.level == TreeLevel::Repo;
         let repo_collapsed = selection.is_repo_collapsed(repo_idx);
 
+        // Empty line spacer between repos
+        if repo_idx > 0 {
+            lines.push(Line::from(""));
+            targets.push(TreeClickTarget::Repo(repo_idx));
+        }
+
         // Repo name header with collapse chevron
         let chevron = if repo_collapsed { "▸" } else { "▾" };
         let repo_clr = repo
@@ -1966,28 +1973,27 @@ fn build_repo_tree_lines(
             .as_deref()
             .map(theme::repo_color)
             .unwrap_or(theme::R_ACCENT);
-        let bg = if repo_selected {
-            Some(theme::R_BG_HOVER)
+
+        // Selected: hover bg with colored text; otherwise: reverse-video (repo color bg, dark text)
+        let (line_bg, chev_fg, dot_fg, name_fg) = if repo_selected {
+            (Some(theme::R_BG_HOVER), theme::R_TEXT_TERTIARY, repo_clr, repo_clr)
         } else {
-            None
+            (Some(repo_clr), theme::R_BG_BASE, theme::R_BG_BASE, theme::R_BG_BASE)
         };
 
         let mut spans = Vec::new();
-        // Chevron in tertiary
-        let mut chev_style = Style::default().fg(theme::R_TEXT_TERTIARY);
-        if let Some(bg_color) = bg {
+        let mut chev_style = Style::default().fg(chev_fg);
+        if let Some(bg_color) = line_bg {
             chev_style = chev_style.bg(bg_color);
         }
         spans.push(Span::styled(format!(" {chevron} "), chev_style));
-        // Colored dot
-        let mut dot_style = Style::default().fg(repo_clr);
-        if let Some(bg_color) = bg {
+        let mut dot_style = Style::default().fg(dot_fg);
+        if let Some(bg_color) = line_bg {
             dot_style = dot_style.bg(bg_color);
         }
         spans.push(Span::styled("● ", dot_style));
-        // Repo name
-        let mut name_style = Style::default().fg(repo_clr).add_modifier(Modifier::BOLD);
-        if let Some(bg_color) = bg {
+        let mut name_style = Style::default().fg(name_fg).add_modifier(Modifier::BOLD);
+        if let Some(bg_color) = line_bg {
             name_style = name_style.bg(bg_color);
         }
         spans.push(Span::styled(repo.name.clone(), name_style));
@@ -1999,7 +2005,7 @@ fn build_repo_tree_lines(
                     .bg(theme::R_BG_HOVER),
             ));
         }
-        lines.push(pad_line(spans, width, bg));
+        lines.push(pad_line(spans, width, line_bg));
         targets.push(TreeClickTarget::Repo(repo_idx));
 
         // Skip children if repo is collapsed
@@ -2110,6 +2116,7 @@ fn build_repo_tree_lines(
                         branch_connector,
                         branch_selected,
                         width,
+                        repo_clr,
                     ));
                     targets.push(TreeClickTarget::Branch(repo_idx, 0, i));
                 }
@@ -2159,6 +2166,7 @@ fn build_repo_tree_lines(
                         branch_connector,
                         branch_selected,
                         width,
+                        repo_clr,
                     ));
                     targets.push(TreeClickTarget::Branch(repo_idx, 1, i));
                 }
@@ -2176,6 +2184,7 @@ fn format_branch_line(
     connector: &str,
     is_selected: bool,
     width: u16,
+    repo_color: Color,
 ) -> Line<'static> {
     let mut spans = Vec::new();
     let bg = if is_selected {
@@ -2209,7 +2218,7 @@ fn format_branch_line(
     }
 
     let name_color = if is_selected || branch.is_head {
-        theme::R_ACCENT_BRIGHT
+        repo_color
     } else {
         theme::R_TEXT_PRIMARY
     };
@@ -2510,7 +2519,7 @@ fn render_agent_list_by_repo(
         let is_no_repo = repo == NO_REPOSITORY;
         if !hide_headers {
             if ridx > 0 {
-                constraints.push(Constraint::Length(2)); // empty line gap between repos
+                constraints.push(Constraint::Length(1)); // empty line gap between repos
             }
             constraints.push(Constraint::Length(1)); // repo header
         }
@@ -2575,12 +2584,10 @@ fn render_agent_list_by_repo(
                 Span::styled(
                     format!(" {repo_display} "),
                     Style::default()
-                        .fg(theme::R_BG_BASE)
-                        .bg(header_color)
+                        .fg(header_color)
                         .add_modifier(Modifier::BOLD),
                 ),
-            ]))
-            .style(Style::default().bg(header_color));
+            ]));
             frame.render_widget(repo_header, areas[area_idx]);
             area_idx += 1;
         }
@@ -2890,9 +2897,10 @@ fn render_help_overlay(frame: &mut Frame, area: Rect, active_tab: ActiveTab, in_
         lines.push(Line::from(""));
         lines.push(header_line("Repositories"));
         lines.push(binding_line("\u{2191} / \u{2193}", "Navigate items"));
-        lines.push(binding_line("\u{2190} / \u{2192}", "Collapse / expand"));
+        lines.push(binding_line("\u{2190} / \u{2192}", "Navigate tree"));
         lines.push(binding_line("Shift+\u{2190}/\u{2192}", "Switch panel"));
         lines.push(binding_line("Enter", "Open menu / focus agent"));
+        lines.push(binding_line("Space", "Collapse / expand"));
         lines.push(binding_line("v", "Toggle agent grouping"));
     }
 
@@ -3124,14 +3132,15 @@ mod tests {
         let (lines, _targets) = build_repo_tree_lines(&repos, &sel, 80);
 
         // alpha: name + header + branch = 3
+        // spacer between repos = 1
         // beta: name + header + branch = 3
-        assert_eq!(lines.len(), 6);
+        assert_eq!(lines.len(), 7);
     }
 
     #[test]
     fn format_branch_line_shows_agent_indicator() {
         let branch = make_branch("main", false, 1, false);
-        let line = format_branch_line(&branch, "│", "├─", false, 80);
+        let line = format_branch_line(&branch, "│", "├─", false, 80, theme::R_ACCENT);
         let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
         assert!(text.contains("●"), "should have active agent indicator");
         assert!(text.contains("main"));
@@ -3140,7 +3149,7 @@ mod tests {
     #[test]
     fn format_branch_line_no_agent_indicator() {
         let branch = make_branch("main", false, 0, false);
-        let line = format_branch_line(&branch, "│", "├─", false, 80);
+        let line = format_branch_line(&branch, "│", "├─", false, 80, theme::R_ACCENT);
         let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
         assert!(!text.contains("●"), "should not have agent indicator");
     }
@@ -3148,7 +3157,7 @@ mod tests {
     #[test]
     fn format_branch_line_shows_worktree_indicator() {
         let branch = make_branch("feature", false, 0, true);
-        let line = format_branch_line(&branch, " ", "└─", false, 80);
+        let line = format_branch_line(&branch, " ", "└─", false, 80, theme::R_ACCENT);
         let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
         assert!(text.contains("⎇"), "should have worktree indicator");
     }
@@ -3156,7 +3165,7 @@ mod tests {
     #[test]
     fn format_branch_line_no_worktree_indicator() {
         let branch = make_branch("feature", false, 0, false);
-        let line = format_branch_line(&branch, " ", "└─", false, 80);
+        let line = format_branch_line(&branch, " ", "└─", false, 80, theme::R_ACCENT);
         let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
         assert!(!text.contains("⎇"), "should not have worktree indicator");
     }
@@ -3164,7 +3173,7 @@ mod tests {
     #[test]
     fn format_branch_line_head_and_agent_and_worktree() {
         let branch = make_branch("main", true, 1, true);
-        let line = format_branch_line(&branch, "│", "├─", false, 80);
+        let line = format_branch_line(&branch, "│", "├─", false, 80, theme::R_ACCENT);
         let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
         assert!(text.contains("●"), "agent indicator");
         assert!(text.contains("main"), "branch name");

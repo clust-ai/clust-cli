@@ -327,9 +327,10 @@ These shortcuts are active in the `clust ui` dashboard. They are displayed in th
 | Shortcut | Action |
 |----------|--------|
 | `↑` / `↓` | Move selection within current level |
-| `→` | Descend into selected item, or expand if collapsed |
-| `←` | Collapse current item, or ascend to parent level |
-| `Enter` | Left panel: on repo opens context menu (Change Color); on branch with 1 agent opens focus mode, with multiple agents opens agent picker; on category toggles collapse. Right panel: enter focus mode for selected agent. |
+| `→` | Descend into selected item (navigate tree) |
+| `←` | Ascend to parent level (navigate tree) |
+| `Enter` | Left panel: on repo opens context menu (Change Color); on branch with 1 agent opens focus mode, with multiple agents opens agent picker. Right panel: enter focus mode for selected agent. |
+| `Space` | Left panel: toggle collapse/expand on repo or category level |
 | `Shift+←` / `Shift+→` | Switch focus between left and right panels |
 | `v` | Toggle agent grouping between by-hub and by-repo (right panel) |
 
