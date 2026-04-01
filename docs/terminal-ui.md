@@ -194,7 +194,7 @@ On startup, `clust ui` automatically connects to the hub daemon, starting it if 
 | `Tab` | Switch to next tab |
 | `Shift+Tab` | Switch to previous tab |
 | `?` | Toggle keyboard shortcut overlay |
-| `Alt+E` | Open the create-agent modal |
+| `Opt+E` (macOS) / `Alt+E` | Open the create-agent modal |
 
 **Repositories tab:**
 
@@ -337,7 +337,7 @@ Key names are displayed in accent color (left-aligned, 16 chars wide); descripti
 
 ### Create Agent Modal
 
-A multi-step modal for creating new agents on git worktrees, opened globally with `Alt+E`. The modal guides the user through 4 sequential steps:
+A multi-step modal for creating new agents on git worktrees, opened globally with `Opt+E` (macOS) / `Alt+E`. The modal guides the user through 4 sequential steps:
 
 | Step | Title | Description |
 |------|-------|-------------|
@@ -356,7 +356,7 @@ A multi-step modal for creating new agents on git worktrees, opened globally wit
 
 **Rendering:** The modal is rendered as a centered overlay (60 columns wide, 60% of terminal height) with a titled border, input field with visible cursor, and a scrollable list with fuzzy-matched results. The selected item is indicated with a `>` prefix and bold text.
 
-The `Alt+E` hint is shown in the status bar.
+The `Opt+E` / `Alt+E` hint is shown in the status bar (platform-aware).
 
 ### Mouse Support
 
