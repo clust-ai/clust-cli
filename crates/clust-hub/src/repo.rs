@@ -85,6 +85,7 @@ pub fn get_repo_state<A: AgentMatcher>(
     Some(RepoInfo {
         path: path.to_string_lossy().into_owned(),
         name: name.to_string(),
+        color: None,
         local_branches,
         remote_branches,
     })

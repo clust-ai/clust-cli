@@ -111,6 +111,7 @@ CLI -> Hub:
   RegisterRepo { path: String }
   UnregisterRepo { path: String }
   StopRepoAgents { path: String }
+  SetRepoColor { path: String, color: String }
   ListRepos
 
 Hub -> CLI:
@@ -128,6 +129,7 @@ Hub -> CLI:
   RepoRegistered { path: String, name: String }
   RepoUnregistered { path: String, name: String, stopped_agents: usize }
   RepoAgentsStopped { path: String, stopped_count: usize }
+  RepoColorSet { path: String, color: String }
   RepoList { repos: Vec<RepoInfo> }
 ```
 
