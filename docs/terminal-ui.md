@@ -113,8 +113,8 @@ A multi-agent terminal overview that displays all active agents side-by-side wit
 ┌─────────────────────────────────────────────────────┐
 │ [options bar]                                       │
 ├──────────────────────┬──────────────────┬───────────┤
-│┌────────────────────┐│┌────────────────┐│┌─────────┐│
-││ a3f8c1·claude·main●│││ b7e2d9·claude● │││ c4a1e0 ·││
+│┌──────────────────────┐│┌────────────────┐│┌─────────┐│
+││a3f8c1·claude·repo/main●│││ b7e2d9·claude● │││ c4a1e0 ·││
 ││                    │││                │││         ││
 ││ Agent PTY output   │││ Agent PTY out  │││ (partial││
 ││ (VTE emulated)     │││ (VTE emulated) │││  view)  ││
@@ -131,7 +131,7 @@ A multi-agent terminal overview that displays all active agents side-by-side wit
 - **Agent panels (horizontal):** Fixed-width columns sized so exactly 2.5 panels fit across the screen (showing 2 full panels + half of a third), with a minimum width of 40 columns. When more agents exist than fit on screen, horizontal scrolling is enabled with `◀ N` / `N ▶` indicators.
 - Each panel has **box-drawing borders** (top, bottom, left, right). When a panel's agent is associated with a repository, the border color uses the repo's assigned color (bright when focused, dimmed to 60% brightness when unfocused via `dim_color()`). Panels without a repo fall back to accent blue when focused and subtle gray when unfocused.
 - The **focused panel** displays a centered `Shift+↓ focus` hint in its bottom border (rendered via `Block::title_bottom()`). The shortcut text uses the bright accent color and the label uses secondary text color. This hint only appears when a terminal panel is focused in overview mode (not in focus mode, where `Shift+↓` means "jump to next file" instead).
-- Inside the border, a **header row** shows agent ID (accent-colored), separator, agent binary name, optional branch name (in tertiary text color, preceded by a `·` separator), and status indicator (`●` green for running, `[exited]` red for exited). The branch name is sourced from `AgentInfo.branch_name` and updates on each sync cycle (every 2 seconds).
+- Inside the border, a **header row** shows agent ID (accent-colored), separator, agent binary name, optional repo/branch info, and status indicator (`●` green for running, `[exited]` red for exited). When the agent has a `repo_path`, the repo name (extracted from the path's last component) is displayed in the repo's assigned color, followed by `/branch_name` in tertiary text color (e.g., `myrepo/main`). When the agent has no `repo_path` but has a `branch_name`, the branch is shown alone in tertiary text color. Both are preceded by a `·` separator. The branch name is sourced from `AgentInfo.branch_name` and updates on each sync cycle (every 2 seconds).
 - The **terminal area** below the header renders the agent's PTY output using a `vt100`-backed terminal emulator (`TerminalEmulator`) with full ANSI support (cursor movement, SGR colors/styles, erase operations, scroll regions, line wrapping, alternate screen buffer). The terminal emulator gets the inner width (total panel width minus 2 border columns).
 
 **Focus modes:**
@@ -147,6 +147,7 @@ A multi-agent terminal overview that displays all active agents side-by-side wit
 |---------|----------|--------|
 | Options Bar | `Shift+↓` | Enter terminal focus (returns to last focused panel) |
 | Options Bar | `Shift+←` / `Shift+→` | Scroll viewport left/right |
+| Terminal | `Esc` | Deselect terminal, return to options bar |
 | Terminal | `Shift+↑` | Return to options bar |
 | Terminal | `Shift+←` / `Shift+→` | Switch focus to previous/next agent panel (wraps around) |
 | Terminal | `PageUp` / `PageDown` | Scroll focused panel through scrollback history |
@@ -230,6 +231,7 @@ Context menus appear as centered modal overlays. They support arrow key navigati
 
 | Shortcut | Action |
 |----------|--------|
+| `Esc` | Deselect terminal, return to options bar |
 | `Shift+↑` | Exit terminal, return to options bar |
 | `Shift+↓` | Enter focus mode for the focused agent |
 | `Shift+←` / `Shift+→` | Switch to previous/next agent panel |
