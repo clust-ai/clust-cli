@@ -1726,6 +1726,14 @@ fn build_repo_tree_lines(
             name_style = name_style.bg(bg_color);
         }
         spans.push(Span::styled(repo.name.clone(), name_style));
+        if repo_selected && !repo.path.is_empty() {
+            spans.push(Span::styled(
+                "  Enter",
+                Style::default()
+                    .fg(theme::R_TEXT_TERTIARY)
+                    .bg(theme::R_BG_HOVER),
+            ));
+        }
         lines.push(pad_line(spans, width, bg));
         targets.push(TreeClickTarget::Repo(repo_idx));
 
@@ -1774,6 +1782,13 @@ fn build_repo_tree_lines(
                     name_style = name_style.bg(bg_color);
                 }
                 spans.push(Span::styled(agent.name.clone(), name_style));
+                if branch_selected {
+                    let mut hint_style = Style::default().fg(theme::R_TEXT_TERTIARY);
+                    if let Some(bg_color) = bg {
+                        hint_style = hint_style.bg(bg_color);
+                    }
+                    spans.push(Span::styled("  Enter", hint_style));
+                }
                 lines.push(pad_line(spans, width, bg));
                 targets.push(TreeClickTarget::Branch(repo_idx, 0, i));
             }
@@ -1946,6 +1961,14 @@ fn format_branch_line(
             wt_style = wt_style.bg(bg_color);
         }
         spans.push(Span::styled(" ⎇".to_string(), wt_style));
+    }
+
+    if is_selected {
+        let mut hint_style = Style::default().fg(theme::R_TEXT_TERTIARY);
+        if let Some(bg_color) = bg {
+            hint_style = hint_style.bg(bg_color);
+        }
+        spans.push(Span::styled("  Enter", hint_style));
     }
 
     pad_line(spans, width, bg)
@@ -2367,10 +2390,14 @@ fn render_agent_card(
     let attached = format_attached(agent.attached_clients);
 
     let mut lines = vec![
-        Line::from(Span::styled(
-            &agent.id,
-            Style::default().fg(theme::R_ACCENT),
-        )),
+        Line::from(if is_selected {
+            vec![
+                Span::styled(&agent.id, Style::default().fg(theme::R_ACCENT)),
+                Span::styled("  Enter", Style::default().fg(theme::R_TEXT_TERTIARY)),
+            ]
+        } else {
+            vec![Span::styled(&agent.id, Style::default().fg(theme::R_ACCENT))]
+        }),
         Line::from({
             let mut spans = vec![
                 Span::styled(
@@ -2511,35 +2538,84 @@ fn render_status_bar(
 }
 
 fn render_help_overlay(frame: &mut Frame, area: Rect, active_tab: ActiveTab, in_focus_mode: bool) {
-    let mut bindings: Vec<(&str, &str)> = vec![
-        ("q / Esc", "Quit"),
-        ("Q", "Quit and stop hub"),
-        ("Ctrl+C", "Quit"),
-        ("Tab", "Next tab"),
-        ("Shift+Tab", "Previous tab"),
-    ];
+    // Each section: optional header, then binding rows or sub-context labels.
+    let mut lines: Vec<Line> = Vec::new();
 
+    // Helper closures for consistent styling
+    let binding_line = |key: &str, desc: &str| -> Line<'static> {
+        Line::from(vec![
+            Span::styled(
+                format!(" {:<16}", key),
+                Style::default().fg(theme::R_ACCENT),
+            ),
+            Span::styled(
+                desc.to_string(),
+                Style::default().fg(theme::R_TEXT_PRIMARY),
+            ),
+        ])
+    };
+    let header_line = |title: &str| -> Line<'static> {
+        Line::from(Span::styled(
+            format!(" {title}"),
+            Style::default()
+                .fg(theme::R_TEXT_SECONDARY)
+                .add_modifier(Modifier::BOLD),
+        ))
+    };
+    let sub_label_line = |label: &str| -> Line<'static> {
+        Line::from(Span::styled(
+            format!("   {label}"),
+            Style::default().fg(theme::R_TEXT_TERTIARY),
+        ))
+    };
+
+    // -- Global --
+    lines.push(binding_line("q / Esc", "Quit"));
+    lines.push(binding_line("Q", "Quit and stop hub"));
+    lines.push(binding_line("Ctrl+C", "Quit"));
+    lines.push(binding_line("Tab", "Next tab"));
+    lines.push(binding_line("Shift+Tab", "Previous tab"));
+    lines.push(binding_line("?", "Toggle this help"));
+
+    // -- Repositories --
     if active_tab == ActiveTab::Repositories {
-        bindings.extend([
-            ("↑ / ↓", "Navigate items"),
-            ("← / →", "Collapse / expand"),
-            ("Shift+←/→", "Switch panel"),
-            ("Enter", "Action / open / toggle"),
-            ("v", "Toggle agent grouping"),
-        ]);
+        lines.push(Line::from(""));
+        lines.push(header_line("Repositories"));
+        lines.push(binding_line("\u{2191} / \u{2193}", "Navigate items"));
+        lines.push(binding_line("\u{2190} / \u{2192}", "Collapse / expand"));
+        lines.push(binding_line("Shift+\u{2190}/\u{2192}", "Switch panel"));
+        lines.push(binding_line("Enter", "Open menu / focus agent"));
+        lines.push(binding_line("v", "Toggle agent grouping"));
     }
 
+    // -- Overview --
+    if active_tab == ActiveTab::Overview {
+        lines.push(Line::from(""));
+        lines.push(header_line("Overview"));
+        lines.push(binding_line("Shift+\u{2190}/\u{2192}", "Scroll panels"));
+        lines.push(binding_line("Shift+\u{2193}", "Enter terminal"));
+        lines.push(sub_label_line("In terminal:"));
+        lines.push(binding_line("Shift+\u{2191}", "Back to options bar"));
+        lines.push(binding_line("Shift+\u{2193}", "Enter focus mode"));
+        lines.push(binding_line("Shift+\u{2190}/\u{2192}", "Switch agent"));
+        lines.push(binding_line("PgUp / PgDn", "Scroll terminal"));
+    }
+
+    // -- Focus Mode --
     if in_focus_mode {
-        bindings.extend([
-            ("Esc", "Exit focus mode"),
-            ("Shift+←/→", "Switch panel"),
-            ("Shift+PgUp", "Scroll up"),
-            ("Shift+PgDn", "Scroll down"),
-        ]);
+        lines.push(Line::from(""));
+        lines.push(header_line("Focus Mode"));
+        lines.push(binding_line("Esc", "Exit focus mode"));
+        lines.push(binding_line("Shift+\u{2190}/\u{2192}", "Switch panel"));
+        lines.push(binding_line("Shift+PgUp/PgDn", "Scroll terminal"));
+        lines.push(sub_label_line("Left panel:"));
+        lines.push(binding_line("Tab", "Cycle tabs"));
+        lines.push(binding_line("\u{2191} / \u{2193}", "Scroll diff"));
+        lines.push(binding_line("Shift+\u{2191}/\u{2193}", "Jump file"));
     }
 
-    let modal_width: u16 = 38;
-    let modal_height: u16 = bindings.len() as u16 + 2; // +2 for border
+    let modal_width: u16 = 44;
+    let modal_height: u16 = lines.len() as u16 + 2; // +2 for border
 
     let [horz_area] = Layout::horizontal([Constraint::Length(modal_width)])
         .flex(Flex::Center)
@@ -2561,22 +2637,6 @@ fn render_help_overlay(frame: &mut Frame, area: Rect, active_tab: ActiveTab, in_
 
     let inner = block.inner(modal_rect);
     frame.render_widget(block, modal_rect);
-
-    let lines: Vec<Line> = bindings
-        .iter()
-        .map(|(key, desc)| {
-            Line::from(vec![
-                Span::styled(
-                    format!(" {:<14}", key),
-                    Style::default().fg(theme::R_ACCENT),
-                ),
-                Span::styled(
-                    desc.to_string(),
-                    Style::default().fg(theme::R_TEXT_PRIMARY),
-                ),
-            ])
-        })
-        .collect();
 
     frame.render_widget(Paragraph::new(lines), inner);
 }
