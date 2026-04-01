@@ -35,6 +35,7 @@ pub enum CliMessage {
     RegisterRepo { path: String },
     UnregisterRepo { path: String },
     StopRepoAgents { path: String },
+    SetRepoColor { path: String, color: String },
     ListRepos,
 }
 
@@ -56,6 +57,7 @@ pub struct AgentInfo {
 pub struct RepoInfo {
     pub path: String,
     pub name: String,
+    pub color: Option<String>,
     pub local_branches: Vec<BranchInfo>,
     pub remote_branches: Vec<BranchInfo>,
 }
@@ -85,6 +87,7 @@ pub enum HubMessage {
     RepoRegistered { path: String, name: String },
     RepoUnregistered { path: String, name: String, stopped_agents: usize },
     RepoAgentsStopped { path: String, stopped_count: usize },
+    RepoColorSet { path: String, color: String },
     RepoList { repos: Vec<RepoInfo> },
     AgentReplayComplete { id: String },
 }
@@ -646,6 +649,7 @@ mod tests {
             repos: vec![RepoInfo {
                 path: "/home/user/project".into(),
                 name: "project".into(),
+                color: Some("blue".into()),
                 local_branches: vec![
                     BranchInfo {
                         name: "main".into(),
@@ -674,6 +678,24 @@ mod tests {
     #[tokio::test]
     async fn hub_repo_list_empty() {
         assert_hub_round_trip(HubMessage::RepoList { repos: vec![] }).await;
+    }
+
+    #[tokio::test]
+    async fn cli_set_repo_color() {
+        assert_cli_round_trip(CliMessage::SetRepoColor {
+            path: "/home/user/project".into(),
+            color: "purple".into(),
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn hub_repo_color_set() {
+        assert_hub_round_trip(HubMessage::RepoColorSet {
+            path: "/home/user/project".into(),
+            color: "teal".into(),
+        })
+        .await;
     }
 
     // ── Path helpers ───────────────────────────────────────────────

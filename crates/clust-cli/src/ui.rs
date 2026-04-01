@@ -19,6 +19,7 @@ use ratatui::{
 use clust_ipc::{AgentInfo, CliMessage, HubMessage, RepoInfo, DEFAULT_HUB};
 
 use crate::{
+    context_menu::{ContextMenu, ContextMenuItem, MenuResult},
     format::{format_attached, format_started},
     ipc,
     overview::{self, OverviewFocus, OverviewState},
@@ -138,6 +139,29 @@ pub(crate) struct ClickMap {
     pub(crate) focus_left_area: Rect,
     pub(crate) focus_right_area: Rect,
     pub(crate) focus_left_tabs: Vec<(Rect, overview::LeftPanelTab)>,
+}
+
+// ---------------------------------------------------------------------------
+// Active menu overlay
+// ---------------------------------------------------------------------------
+
+/// Tracks which context menu is currently open.
+enum ActiveMenu {
+    /// Pick an agent to open in focus mode (from a branch with multiple agents).
+    AgentPicker {
+        agents: Vec<AgentInfo>,
+        menu: ContextMenu,
+    },
+    /// Repo-level context menu (e.g. "Change Color").
+    RepoActions {
+        repo_path: String,
+        menu: ContextMenu,
+    },
+    /// Color picker sub-menu for a repo.
+    ColorPicker {
+        repo_path: String,
+        menu: ContextMenu,
+    },
 }
 
 // ---------------------------------------------------------------------------
@@ -567,6 +591,7 @@ pub fn run(hub_name: &str) -> io::Result<()> {
     let mut last_agent_fetch = Instant::now() - Duration::from_secs(10);
     let mut last_repo_fetch = Instant::now() - Duration::from_secs(10);
 
+    let mut active_menu: Option<ActiveMenu> = None;
     let mut hub_stopped = false;
     let mut hub_count: usize = 1;
     let mut show_help = false;
@@ -609,6 +634,7 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                 dr.push(RepoInfo {
                     path: String::new(),
                     name: "No Repository".to_string(),
+                    color: None,
                     local_branches: unlinked
                         .iter()
                         .map(|a| {
@@ -642,6 +668,11 @@ pub fn run(hub_name: &str) -> io::Result<()> {
         let cur_tab = active_tab;
         let overview_focus = overview_state.focus;
         let show_help_now = show_help;
+        let menu_ref = &active_menu;
+        let repo_colors: HashMap<String, String> = repos
+            .iter()
+            .filter_map(|r| r.color.as_ref().map(|c| (r.path.clone(), c.clone())))
+            .collect();
 
         let mut click_map = ClickMap::default();
 
@@ -690,6 +721,7 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                         cur_focus == FocusPanel::Right,
                         agent_view_mode,
                         &mut click_map,
+                        &repo_colors,
                     );
                 }
                 ActiveTab::Overview => {
@@ -710,6 +742,15 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                 overview_focus,
             );
 
+            if let Some(ref menu_state) = menu_ref {
+                let menu = match menu_state {
+                    ActiveMenu::AgentPicker { ref menu, .. } => menu,
+                    ActiveMenu::RepoActions { ref menu, .. } => menu,
+                    ActiveMenu::ColorPicker { ref menu, .. } => menu,
+                };
+                menu.render(frame, content_area);
+            }
+
             if show_help_now {
                 render_help_overlay(frame, content_area, cur_tab);
             }
@@ -718,6 +759,78 @@ pub fn run(hub_name: &str) -> io::Result<()> {
         if event::poll(Duration::from_millis(100))? {
             match event::read()? {
                 Event::Key(key) if key.kind == KeyEventKind::Press => {
+                    // Context menu overlay: intercept all keys when active
+                    if let Some(ref mut menu_state) = active_menu {
+                        let result = match menu_state {
+                            ActiveMenu::AgentPicker { ref mut menu, .. } => menu.handle_key(key.code),
+                            ActiveMenu::RepoActions { ref mut menu, .. } => menu.handle_key(key.code),
+                            ActiveMenu::ColorPicker { ref mut menu, .. } => menu.handle_key(key.code),
+                        };
+                        match result {
+                            MenuResult::Selected(idx) => {
+                                // Take ownership of the menu state to process the action
+                                let taken = active_menu.take().unwrap();
+                                match taken {
+                                    ActiveMenu::AgentPicker { agents: picker_agents, .. } => {
+                                        if let Some(agent) = picker_agents.get(idx) {
+                                            let agent_id = agent.id.clone();
+                                            let agent_binary = agent.agent_binary.clone();
+                                            let working_dir = agent.working_dir.clone();
+                                            let fm_cols = (last_content_area.width * 40 / 100)
+                                                .saturating_sub(2)
+                                                .max(1);
+                                            let fm_rows =
+                                                last_content_area.height.saturating_sub(3).max(1);
+                                            focus_mode_state.open_agent(
+                                                &agent_id,
+                                                &agent_binary,
+                                                fm_cols,
+                                                fm_rows,
+                                                &working_dir,
+                                            );
+                                            previous_tab = Some(active_tab);
+                                            active_tab = ActiveTab::FocusMode;
+                                        }
+                                    }
+                                    ActiveMenu::RepoActions { repo_path, .. } => {
+                                        if idx == 0 {
+                                            // "Change Color" selected → open color picker
+                                            let items: Vec<ContextMenuItem> =
+                                                theme::REPO_COLOR_NAMES
+                                                    .iter()
+                                                    .map(|&name| ContextMenuItem {
+                                                        label: name[0..1].to_uppercase()
+                                                            + &name[1..],
+                                                        color: Some(theme::repo_color(name)),
+                                                    })
+                                                    .collect();
+                                            active_menu = Some(ActiveMenu::ColorPicker {
+                                                repo_path,
+                                                menu: ContextMenu::with_colors(
+                                                    "Choose Color",
+                                                    items,
+                                                ),
+                                            });
+                                        }
+                                    }
+                                    ActiveMenu::ColorPicker { repo_path, .. } => {
+                                        if let Some(&color_name) =
+                                            theme::REPO_COLOR_NAMES.get(idx)
+                                        {
+                                            set_repo_color_ipc(&repo_path, color_name);
+                                            // Force repo refresh
+                                            last_repo_fetch =
+                                                Instant::now() - Duration::from_secs(10);
+                                        }
+                                    }
+                                }
+                            }
+                            MenuResult::Dismissed => {
+                                active_menu = None;
+                            }
+                            MenuResult::None => {}
+                        }
+                    } else
                     // Focus mode: behavior depends on which side has focus
                     if active_tab == ActiveTab::FocusMode
                         && focus_mode_state.is_active()
@@ -1006,7 +1119,75 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                     }
                                     KeyCode::Enter => {
                                         if focus == FocusPanel::Left {
-                                            selection.toggle_collapse();
+                                            match selection.level {
+                                                TreeLevel::Repo => {
+                                                    // Open context menu for real repos
+                                                    if let Some(repo) = display_repos.get(selection.repo_idx) {
+                                                        if !repo.path.is_empty() {
+                                                            active_menu = Some(ActiveMenu::RepoActions {
+                                                                repo_path: repo.path.clone(),
+                                                                menu: ContextMenu::new(
+                                                                    &repo.name,
+                                                                    vec!["Change Color".to_string()],
+                                                                ),
+                                                            });
+                                                        } else {
+                                                            selection.toggle_collapse();
+                                                        }
+                                                    }
+                                                }
+                                                TreeLevel::Category => {
+                                                    selection.toggle_collapse();
+                                                }
+                                                TreeLevel::Branch => {
+                                                    // Open agent(s) in focus mode from this branch
+                                                    if let Some(repo) = display_repos.get(selection.repo_idx) {
+                                                        let branches = if selection.category_idx == 0 {
+                                                            &repo.local_branches
+                                                        } else {
+                                                            &repo.remote_branches
+                                                        };
+                                                        if let Some(branch) = branches.get(selection.branch_idx) {
+                                                            let matching: Vec<AgentInfo> = agents
+                                                                .iter()
+                                                                .filter(|a| {
+                                                                    a.repo_path.as_deref() == Some(&*repo.path)
+                                                                        && a.branch_name.as_deref() == Some(&*branch.name)
+                                                                })
+                                                                .cloned()
+                                                                .collect();
+                                                            if matching.len() == 1 {
+                                                                let agent = &matching[0];
+                                                                let fm_cols = (last_content_area.width * 40 / 100)
+                                                                    .saturating_sub(2)
+                                                                    .max(1);
+                                                                let fm_rows = last_content_area
+                                                                    .height
+                                                                    .saturating_sub(3)
+                                                                    .max(1);
+                                                                focus_mode_state.open_agent(
+                                                                    &agent.id,
+                                                                    &agent.agent_binary,
+                                                                    fm_cols,
+                                                                    fm_rows,
+                                                                    &agent.working_dir,
+                                                                );
+                                                                previous_tab = Some(active_tab);
+                                                                active_tab = ActiveTab::FocusMode;
+                                                            } else if matching.len() > 1 {
+                                                                let labels: Vec<String> = matching
+                                                                    .iter()
+                                                                    .map(|a| format!("{} ({})", a.agent_binary, a.id))
+                                                                    .collect();
+                                                                active_menu = Some(ActiveMenu::AgentPicker {
+                                                                    menu: ContextMenu::new("Open Agent", labels),
+                                                                    agents: matching,
+                                                                });
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                            }
                                         } else if focus == FocusPanel::Right {
                                             if let Some(agent) = resolve_selected_agent(
                                                 &agents,
@@ -1445,25 +1626,41 @@ fn build_repo_tree_lines(
     for (repo_idx, repo) in repos.iter().enumerate() {
         let is_this_repo = repo_idx == selection.repo_idx;
         let repo_selected = is_this_repo && selection.level == TreeLevel::Repo;
-        let repo_open = is_this_repo && selection.level != TreeLevel::Repo;
         let repo_collapsed = selection.is_repo_collapsed(repo_idx);
 
         // Repo name header with collapse chevron
         let chevron = if repo_collapsed { "▸" } else { "▾" };
-        let (name_color, bg) = if repo_selected {
-            (theme::R_ACCENT_BRIGHT, Some(theme::R_BG_HOVER))
-        } else if repo_open {
-            (theme::R_ACCENT_DIM, None)
+        let repo_clr = repo
+            .color
+            .as_deref()
+            .map(theme::repo_color)
+            .unwrap_or(theme::R_ACCENT);
+        let bg = if repo_selected {
+            Some(theme::R_BG_HOVER)
         } else {
-            (theme::R_ACCENT, None)
+            None
         };
 
-        let text = format!(" {chevron} {}", repo.name);
-        let mut style = Style::default().fg(name_color).add_modifier(Modifier::BOLD);
+        let mut spans = Vec::new();
+        // Chevron in tertiary
+        let mut chev_style = Style::default().fg(theme::R_TEXT_TERTIARY);
         if let Some(bg_color) = bg {
-            style = style.bg(bg_color);
+            chev_style = chev_style.bg(bg_color);
         }
-        lines.push(pad_line(vec![Span::styled(text, style)], width, bg));
+        spans.push(Span::styled(format!(" {chevron} "), chev_style));
+        // Colored dot
+        let mut dot_style = Style::default().fg(repo_clr);
+        if let Some(bg_color) = bg {
+            dot_style = dot_style.bg(bg_color);
+        }
+        spans.push(Span::styled("● ", dot_style));
+        // Repo name
+        let mut name_style = Style::default().fg(repo_clr).add_modifier(Modifier::BOLD);
+        if let Some(bg_color) = bg {
+            name_style = name_style.bg(bg_color);
+        }
+        spans.push(Span::styled(repo.name.clone(), name_style));
+        lines.push(pad_line(spans, width, bg));
         targets.push(TreeClickTarget::Repo(repo_idx));
 
         // Skip children if repo is collapsed
@@ -1703,6 +1900,7 @@ fn pad_line(spans: Vec<Span<'static>>, width: u16, bg: Option<Color>) -> Line<'s
     Line::from(all_spans)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn render_right_panel(
     frame: &mut Frame,
     area: Rect,
@@ -1711,6 +1909,7 @@ fn render_right_panel(
     focused: bool,
     mode: AgentViewMode,
     click_map: &mut ClickMap,
+    repo_colors: &HashMap<String, String>,
 ) {
     frame.render_widget(
         Block::default().style(Style::default().bg(theme::R_BG_BASE)),
@@ -1738,7 +1937,7 @@ fn render_right_panel(
         };
         frame.render_widget(indicator, indicator_area);
     } else {
-        render_agent_list(frame, area, agents, agent_sel, focused, mode, click_map);
+        render_agent_list(frame, area, agents, agent_sel, focused, mode, click_map, repo_colors);
     }
 }
 
@@ -1789,6 +1988,7 @@ fn render_logo(frame: &mut Frame, area: Rect) {
     frame.render_widget(paragraph, horz_area);
 }
 
+#[allow(clippy::too_many_arguments)]
 fn render_agent_list(
     frame: &mut Frame,
     area: Rect,
@@ -1797,6 +1997,7 @@ fn render_agent_list(
     focused: bool,
     mode: AgentViewMode,
     click_map: &mut ClickMap,
+    repo_colors: &HashMap<String, String>,
 ) {
     let block = Block::default().padding(Padding::new(2, 2, 1, 0));
 
@@ -1824,10 +2025,10 @@ fn render_agent_list(
 
     match mode {
         AgentViewMode::ByHub => render_agent_list_by_hub(
-            frame, inner, agents, agent_sel, focused, &mode_line, &indicator, click_map,
+            frame, inner, agents, agent_sel, focused, &mode_line, &indicator, click_map, repo_colors,
         ),
         AgentViewMode::ByRepo => render_agent_list_by_repo(
-            frame, inner, agents, agent_sel, focused, &mode_line, &indicator, click_map,
+            frame, inner, agents, agent_sel, focused, &mode_line, &indicator, click_map, repo_colors,
         ),
     }
 }
@@ -1842,6 +2043,7 @@ fn render_agent_list_by_hub(
     mode_line: &Paragraph<'_>,
     indicator: &Paragraph<'_>,
     click_map: &mut ClickMap,
+    _repo_colors: &HashMap<String, String>,
 ) {
     let mut sorted: Vec<&AgentInfo> = agents.iter().collect();
     sorted.sort_by(|a, b| a.hub.cmp(&b.hub).then(a.started_at.cmp(&b.started_at)));
@@ -1930,6 +2132,7 @@ fn render_agent_list_by_repo(
     mode_line: &Paragraph<'_>,
     indicator: &Paragraph<'_>,
     click_map: &mut ClickMap,
+    repo_colors: &HashMap<String, String>,
 ) {
     let mut sorted: Vec<&AgentInfo> = agents.iter().collect();
     sorted.sort_by(|a, b| {
@@ -2010,10 +2213,17 @@ fn render_agent_list_by_repo(
                 .file_name()
                 .map(|n| n.to_string_lossy().into_owned())
                 .unwrap_or_else(|| repo.clone());
-            let repo_header = Paragraph::new(Line::from(vec![Span::styled(
-                format!(" {repo_display}"),
-                Style::default().fg(theme::R_ACCENT),
-            )]));
+            let header_color = repo_colors
+                .get(repo.as_str())
+                .map(|c| theme::repo_color(c))
+                .unwrap_or(theme::R_ACCENT);
+            let repo_header = Paragraph::new(Line::from(vec![
+                Span::styled("● ", Style::default().fg(header_color)),
+                Span::styled(
+                    repo_display,
+                    Style::default().fg(header_color).add_modifier(Modifier::BOLD),
+                ),
+            ]));
             frame.render_widget(repo_header, areas[area_idx]);
             area_idx += 1;
         }
@@ -2246,7 +2456,7 @@ fn render_help_overlay(frame: &mut Frame, area: Rect, active_tab: ActiveTab) {
             ("↑ / ↓", "Navigate items"),
             ("← / →", "Collapse / expand"),
             ("Shift+←/→", "Switch panel"),
-            ("Enter", "Toggle collapse / focus"),
+            ("Enter", "Action / open / toggle"),
             ("v", "Toggle agent grouping"),
         ]);
     }
@@ -2343,6 +2553,22 @@ fn fetch_repos() -> Vec<RepoInfo> {
     })
 }
 
+fn set_repo_color_ipc(path: &str, color: &str) {
+    let path = path.to_string();
+    let color = color.to_string();
+    block_on_async(async {
+        let Ok(mut stream) = ipc::try_connect().await else {
+            return;
+        };
+        let _ = clust_ipc::send_message(
+            &mut stream,
+            &CliMessage::SetRepoColor { path, color },
+        )
+        .await;
+        let _ = clust_ipc::recv_message::<HubMessage>(&mut stream).await;
+    });
+}
+
 /// Run an async future from the synchronous UI loop.
 /// Requires the multi-thread tokio scheduler (`#[tokio::main]`).
 fn block_on_async<F: std::future::Future>(f: F) -> F::Output {
@@ -2377,6 +2603,7 @@ mod tests {
         clust_ipc::RepoInfo {
             path: format!("/repos/{name}"),
             name: name.to_string(),
+            color: Some("blue".to_string()),
             local_branches: local,
             remote_branches: remote,
         }

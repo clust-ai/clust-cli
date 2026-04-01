@@ -1,4 +1,5 @@
 mod cli;
+mod context_menu;
 mod format;
 mod ipc;
 mod output_filter;
@@ -89,13 +90,13 @@ async fn main() {
 
     // Subcommand: repo
     if let Some(cli::Commands::Repo {
-        register,
+        add,
         remove,
         stop,
     }) = args.command
     {
-        if register {
-            handle_register().await;
+        if add {
+            handle_add().await;
         } else if remove {
             handle_repo_remove().await;
         } else if stop {
@@ -937,13 +938,13 @@ async fn handle_default_picker() {
     }
 }
 
-async fn handle_register() {
+async fn handle_add() {
     println!();
     let working_dir = std::env::current_dir()
         .map(|p| p.to_string_lossy().into_owned())
         .unwrap_or_else(|_| ".".into());
 
-    let spinner = spin("registering repository");
+    let spinner = spin("adding repository");
     let mut stream = match ipc::connect_to_hub().await {
         Ok(s) => s,
         Err(e) => {

@@ -44,6 +44,9 @@ fn run_migrations(conn: &Connection) -> Result<(), String> {
     if current_version < 2 {
         migrate_v2(conn)?;
     }
+    if current_version < 3 {
+        migrate_v3(conn)?;
+    }
 
     Ok(())
 }
@@ -73,24 +76,55 @@ fn migrate_v2(conn: &Connection) -> Result<(), String> {
     .map_err(|e| format!("migration v2 failed: {e}"))
 }
 
-/// Register a repository path. Silently ignores duplicates.
-pub fn register_repo(conn: &Connection, path: &str, name: &str) -> Result<(), String> {
+/// Migration v3: add color column to repos table.
+fn migrate_v3(conn: &Connection) -> Result<(), String> {
+    conn.execute_batch(
+        "ALTER TABLE repos ADD COLUMN color TEXT;
+         INSERT INTO schema_version (version) VALUES (3);",
+    )
+    .map_err(|e| format!("migration v3 failed: {e}"))?;
+
+    // Backfill existing repos with cycling colors
+    let mut stmt = conn
+        .prepare("SELECT path FROM repos ORDER BY name")
+        .map_err(|e| format!("migration v3 backfill prepare failed: {e}"))?;
+    let paths: Vec<String> = stmt
+        .query_map([], |row| row.get(0))
+        .map_err(|e| format!("migration v3 backfill query failed: {e}"))?
+        .filter_map(|r| r.ok())
+        .collect();
+    for (i, path) in paths.iter().enumerate() {
+        let color = REPO_COLORS[i % REPO_COLORS.len()];
+        conn.execute(
+            "UPDATE repos SET color = ?1 WHERE path = ?2",
+            rusqlite::params![color, path],
+        )
+        .map_err(|e| format!("migration v3 backfill update failed: {e}"))?;
+    }
+    Ok(())
+}
+
+/// Available colors for repository identification.
+pub const REPO_COLORS: &[&str] = &["purple", "blue", "green", "teal", "orange", "yellow"];
+
+/// Register a repository path with a color. Silently ignores duplicates.
+pub fn register_repo(conn: &Connection, path: &str, name: &str, color: &str) -> Result<(), String> {
     let now = chrono::Utc::now().to_rfc3339();
     conn.execute(
-        "INSERT OR IGNORE INTO repos (path, name, registered_at) VALUES (?1, ?2, ?3)",
-        rusqlite::params![path, name, now],
+        "INSERT OR IGNORE INTO repos (path, name, registered_at, color) VALUES (?1, ?2, ?3, ?4)",
+        rusqlite::params![path, name, now, color],
     )
     .map_err(|e| format!("failed to register repo: {e}"))?;
     Ok(())
 }
 
-/// List all registered repositories, ordered by name.
-pub fn list_repos(conn: &Connection) -> Result<Vec<(String, String)>, String> {
+/// List all registered repositories, ordered by name. Returns (path, name, color).
+pub fn list_repos(conn: &Connection) -> Result<Vec<(String, String, Option<String>)>, String> {
     let mut stmt = conn
-        .prepare("SELECT path, name FROM repos ORDER BY name")
+        .prepare("SELECT path, name, color FROM repos ORDER BY name")
         .map_err(|e| format!("failed to prepare repo query: {e}"))?;
     let rows = stmt
-        .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
         .map_err(|e| format!("failed to query repos: {e}"))?;
     rows.collect::<Result<Vec<_>, _>>()
         .map_err(|e| format!("failed to collect repos: {e}"))
@@ -111,6 +145,24 @@ pub fn is_repo_registered(conn: &Connection, path: &str) -> bool {
 pub fn unregister_repo(conn: &Connection, path: &str) -> Result<(), String> {
     conn.execute("DELETE FROM repos WHERE path = ?1", [path])
         .map_err(|e| format!("failed to unregister repo: {e}"))?;
+    Ok(())
+}
+
+/// Pick the next color for a new repo (cycles through the palette).
+pub fn next_repo_color(conn: &Connection) -> &'static str {
+    let count: i64 = conn
+        .query_row("SELECT COUNT(*) FROM repos", [], |row| row.get(0))
+        .unwrap_or(0);
+    REPO_COLORS[count as usize % REPO_COLORS.len()]
+}
+
+/// Update the color of an existing repository.
+pub fn set_repo_color(conn: &Connection, path: &str, color: &str) -> Result<(), String> {
+    conn.execute(
+        "UPDATE repos SET color = ?1 WHERE path = ?2",
+        rusqlite::params![color, path],
+    )
+    .map_err(|e| format!("failed to set repo color: {e}"))?;
     Ok(())
 }
 
@@ -226,7 +278,7 @@ mod tests {
     #[test]
     fn register_and_list_repo() {
         let conn = in_memory_db();
-        register_repo(&conn, "/home/user/project", "project").unwrap();
+        register_repo(&conn, "/home/user/project", "project", "blue").unwrap();
         let repos = list_repos(&conn).unwrap();
         assert_eq!(repos.len(), 1);
         assert_eq!(repos[0].0, "/home/user/project");
@@ -236,8 +288,8 @@ mod tests {
     #[test]
     fn register_duplicate_is_noop() {
         let conn = in_memory_db();
-        register_repo(&conn, "/tmp/repo", "repo").unwrap();
-        register_repo(&conn, "/tmp/repo", "repo").unwrap();
+        register_repo(&conn, "/tmp/repo", "repo", "green").unwrap();
+        register_repo(&conn, "/tmp/repo", "repo", "green").unwrap();
         let repos = list_repos(&conn).unwrap();
         assert_eq!(repos.len(), 1);
     }
@@ -246,14 +298,14 @@ mod tests {
     fn is_repo_registered_true_false() {
         let conn = in_memory_db();
         assert!(!is_repo_registered(&conn, "/tmp/repo"));
-        register_repo(&conn, "/tmp/repo", "repo").unwrap();
+        register_repo(&conn, "/tmp/repo", "repo", "green").unwrap();
         assert!(is_repo_registered(&conn, "/tmp/repo"));
     }
 
     #[test]
     fn unregister_repo_removes_entry() {
         let conn = in_memory_db();
-        register_repo(&conn, "/tmp/repo", "repo").unwrap();
+        register_repo(&conn, "/tmp/repo", "repo", "green").unwrap();
         assert!(is_repo_registered(&conn, "/tmp/repo"));
         unregister_repo(&conn, "/tmp/repo").unwrap();
         assert!(!is_repo_registered(&conn, "/tmp/repo"));
@@ -263,11 +315,11 @@ mod tests {
     #[test]
     fn list_repos_ordered_by_name() {
         let conn = in_memory_db();
-        register_repo(&conn, "/z/zebra", "zebra").unwrap();
-        register_repo(&conn, "/a/alpha", "alpha").unwrap();
-        register_repo(&conn, "/m/mid", "mid").unwrap();
+        register_repo(&conn, "/z/zebra", "zebra", "purple").unwrap();
+        register_repo(&conn, "/a/alpha", "alpha", "blue").unwrap();
+        register_repo(&conn, "/m/mid", "mid", "green").unwrap();
         let repos = list_repos(&conn).unwrap();
-        let names: Vec<&str> = repos.iter().map(|(_, n)| n.as_str()).collect();
+        let names: Vec<&str> = repos.iter().map(|(_, n, _)| n.as_str()).collect();
         assert_eq!(names, vec!["alpha", "mid", "zebra"]);
     }
 
@@ -275,7 +327,7 @@ mod tests {
     fn migration_v2_is_idempotent() {
         let conn = in_memory_db();
         run_migrations(&conn).unwrap();
-        register_repo(&conn, "/tmp/repo", "repo").unwrap();
+        register_repo(&conn, "/tmp/repo", "repo", "green").unwrap();
         assert_eq!(list_repos(&conn).unwrap().len(), 1);
     }
 
@@ -323,5 +375,70 @@ mod tests {
         // v1 data should still be intact
         set_default_agent(&conn, "claude").unwrap();
         assert_eq!(get_default_agent(&conn), Some("claude".to_string()));
+    }
+
+    // ── Repo color tests ────────────────────────────────────────
+
+    #[test]
+    fn register_repo_stores_color() {
+        let conn = in_memory_db();
+        register_repo(&conn, "/tmp/repo", "repo", "purple").unwrap();
+        let repos = list_repos(&conn).unwrap();
+        assert_eq!(repos.len(), 1);
+        assert_eq!(repos[0].2, Some("purple".to_string()));
+    }
+
+    #[test]
+    fn set_repo_color_updates() {
+        let conn = in_memory_db();
+        register_repo(&conn, "/tmp/repo", "repo", "blue").unwrap();
+        set_repo_color(&conn, "/tmp/repo", "teal").unwrap();
+        let repos = list_repos(&conn).unwrap();
+        assert_eq!(repos[0].2, Some("teal".to_string()));
+    }
+
+    #[test]
+    fn next_repo_color_cycles() {
+        let conn = in_memory_db();
+        // Empty DB → first color
+        assert_eq!(next_repo_color(&conn), REPO_COLORS[0]);
+        // Add one repo → second color
+        register_repo(&conn, "/a", "a", "purple").unwrap();
+        assert_eq!(next_repo_color(&conn), REPO_COLORS[1]);
+        // Add enough to wrap around
+        for (i, color) in REPO_COLORS.iter().enumerate().skip(1) {
+            register_repo(&conn, &format!("/r{i}"), &format!("r{i}"), color).unwrap();
+        }
+        assert_eq!(next_repo_color(&conn), REPO_COLORS[0]);
+    }
+
+    #[test]
+    fn migration_v3_backfills_colors() {
+        // Simulate v2 database with repos but no color column
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS schema_version (version INTEGER PRIMARY KEY);",
+        )
+        .unwrap();
+        migrate_v1(&conn).unwrap();
+        migrate_v2(&conn).unwrap();
+        // Insert repos without color (v2 schema has no color column)
+        let now = chrono::Utc::now().to_rfc3339();
+        conn.execute(
+            "INSERT INTO repos (path, name, registered_at) VALUES (?1, ?2, ?3)",
+            rusqlite::params!["/a/alpha", "alpha", now],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO repos (path, name, registered_at) VALUES (?1, ?2, ?3)",
+            rusqlite::params!["/b/beta", "beta", now],
+        )
+        .unwrap();
+        // Run migration v3
+        migrate_v3(&conn).unwrap();
+        // Repos should now have colors (ordered by name: alpha, beta)
+        let repos = list_repos(&conn).unwrap();
+        assert_eq!(repos[0].2, Some(REPO_COLORS[0].to_string())); // alpha
+        assert_eq!(repos[1].2, Some(REPO_COLORS[1].to_string())); // beta
     }
 }
