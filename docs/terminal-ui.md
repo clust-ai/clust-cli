@@ -97,7 +97,7 @@ The active tab is highlighted with the accent color. A `Tab/Shift+Tab` hint is s
 
 #### Content Panels (Repositories tab)
 
-- **Left panel (40%):** Repository tracker with `(2,2,1,0)` padding. Shows a tree view of registered git repositories with their local and remote branches. Repository header lines use reverse-video styling (repo color background, dark text, bold) for visual prominence; when selected, the header uses the standard hover background with colored text instead. An empty line separates each repository group in the tree for visual clarity. Repository names are preceded by a colored `●` dot matching the repo's assigned color (from the 10-color repo palette: red, orange, yellow, lime, green, teal, blue, purple, pink, coral). Tree connectors use `├──` / `└──` for clear hierarchy. Branch names are rendered Bold. Remote branches are collapsed by default. Branches with active agents display a green `●` indicator with count; branches checked out in worktrees display a `⎇` indicator. The current HEAD branch is highlighted using the repo's assigned color. Displays "No repositories found" when no repos are registered. Uses background colors for visual separation (no borders). The focused panel shows a bright accent dot; the unfocused panel shows a dim dot. Agents not associated with any git repository are grouped under a synthetic "No Repository" entry at the bottom of the tree. This entry has no local/remote category level -- agents are listed directly under the repo node with their binary name and working directory. Navigation skips the category level for this group.
+- **Left panel (40%):** Repository tracker with `(2,2,1,0)` padding. Shows a "Repositories" title on the first row with the focus indicator (`●`) right-aligned on the same line, followed by a 1-row spacer, then the tree content below. Shows a tree view of registered git repositories with their local and remote branches. Repository header lines use reverse-video styling (repo color background, dark text, bold) for visual prominence; when selected, the header uses the standard hover background with colored text instead. An empty line separates each repository group in the tree for visual clarity. Repository names are preceded by a colored `●` dot matching the repo's assigned color (from the 10-color repo palette: red, orange, yellow, lime, green, teal, blue, purple, pink, coral). Tree connectors use `├──` / `└──` for clear hierarchy. Branch names are rendered Bold. Remote branches are collapsed by default. Branches with active agents display a green `●` indicator with count; branches checked out in worktrees display a `⎇` indicator. The current HEAD branch is highlighted using the repo's assigned color. Displays "No repositories found" when no repos are registered. Uses background colors for visual separation (no borders). The focused panel shows a bright accent dot; the unfocused panel shows a dim dot. Agents not associated with any git repository are grouped under a synthetic "No Repository" entry at the bottom of the tree. This entry has no local/remote category level -- agents are listed directly under the repo node with their binary name and working directory. Navigation skips the category level for this group.
 - **Vertical divider (1 col):** A single-column divider between the two panels.
 - **Right panel (60%):** Shows agent cards grouped by repository (default) or by hub name, with section headers and `(2,2,1,0)` padding. 1-line gaps separate agent cards within a group and a 1-line spacer follows each group header. The mode label line shows the current grouping (e.g., "by repo") with a "v to switch" hint. When only a single default group exists (only "default_hub" in by-hub mode, or only "No repository" in by-repo mode), the group header is hidden for a cleaner look. In by-repo mode, agents without a linked repository display their working directory on the agent card. Displays the CLUST logo when no agents are running.
 
@@ -121,7 +121,7 @@ A multi-agent terminal overview that displays all active agents side-by-side wit
 ││                    │││                │││         ││
 │└──── Shift+↓ focus──┘│└────────────────┘│└─────────┘│
 ├──────────────────────┴──────────────────┴───────────┤
-│ ● connected  Shift+↓ enter terminal  ...    v0.0.9 │
+│ ● connected  Shift+↓ enter terminal  ...    v0.0.10 │
 └─────────────────────────────────────────────────────┘
 ```
 
@@ -173,7 +173,7 @@ On startup, `clust ui` automatically connects to the hub daemon, starting it if 
 ### Bottom Status Bar
 
 ```
-● connected  q to quit  Q to quit and stop hub  ↑↓←→ navigate  Shift+←→ panels  v toggle agents          v0.0.9
+● connected  q to quit  Q to quit and stop hub  ↑↓←→ navigate  Shift+←→ panels  v toggle agents          v0.0.10
 ```
 
 | Section | Description |
@@ -182,7 +182,7 @@ On startup, `clust ui` automatically connects to the hub daemon, starting it if 
 | Status label | `connected` or `disconnected` |
 | Focused agent | When an agent has keyboard focus (in Overview terminal focus or focus mode), shows the repo name in the repo's assigned color followed by `/branch` in secondary text color |
 | Shortcuts | Context-aware hints: on Repositories tab shows `q quit`, `Q stop+quit`, navigation hints; on Overview tab shows focus-dependent hints (e.g., `Shift+↓ enter terminal` or `Shift+↑ options`); in focus mode shows `Shift+←/→ switch panel`, `Shift+↑/↓ jump file`, `Esc exit` |
-| Version | Right-aligned, e.g. `v0.0.9` |
+| Version | Right-aligned, e.g. `v0.0.10` |
 
 ### Keyboard Shortcuts
 
@@ -259,7 +259,7 @@ When focus mode is active, the 1-row tab bar is replaced by a back-bar that show
 │      3      3│  let x = 1;   ││                    ││
 │                               │└────────────────────┘│
 ├─────────────────────────────────────────────────────┤
-│ ● connected  Shift+←/→ switch panel  ...     v0.0.9│
+│ ● connected  Shift+←/→ switch panel  ...     v0.0.10│
 └─────────────────────────────────────────────────────┘
 ```
 
@@ -374,6 +374,7 @@ A `ClickMap` struct is populated during each render pass and consumed during mou
 - `left_panel_area` / `right_panel_area` -- full panel areas for Repositories tab focus switching
 - `tree_items` / `tree_inner_area` -- repo tree line targets mapped via `TreeClickTarget` enum (Repo, Category, Branch)
 - `agent_cards` -- right panel agent card regions mapped to (group_idx, agent_idx) pairs
+- `mode_label_area` -- right panel mode label region (the "by repo / by hub" line) for click-to-toggle view mode
 - `overview_panels` -- Overview tab panel regions mapped to global panel indices
 - `focus_left_area` / `focus_right_area` -- Focus mode panel areas for focus switching
 - `focus_left_tabs` -- Focus mode left panel tab regions mapped to `LeftPanelTab` values
@@ -393,6 +394,7 @@ A `ClickMap` struct is populated during each render pass and consumed during mou
 | Tree item (repo) | Select the repo; click again when already selected to toggle collapse |
 | Tree item (category) | Select the category; click again when already selected to toggle collapse |
 | Tree item (branch) | Select the branch |
+| Mode label ("by repo/hub  v to switch") | Toggle agent grouping between by-hub and by-repo (same as pressing `v`) |
 | Agent card | Select the agent and focus the right panel |
 | Left panel (anywhere) | Switch keyboard focus to left panel |
 | Right panel (anywhere) | Switch keyboard focus to right panel |

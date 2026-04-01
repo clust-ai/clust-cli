@@ -136,6 +136,7 @@ pub(crate) struct ClickMap {
     tree_items: Vec<TreeClickTarget>,
     tree_inner_area: Rect,
     agent_cards: Vec<(Rect, usize, usize)>, // (area, group_idx, agent_idx)
+    mode_label_area: Rect,
 
     // Overview tab
     pub(crate) overview_panels: Vec<(Rect, usize)>, // (area, global_panel_idx)
@@ -1614,6 +1615,15 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                     }
                                     focus = FocusPanel::Left;
                                 }
+                                // Mode label click (right panel) → toggle view mode
+                                else if click_map.mode_label_area.contains(pos) {
+                                    agent_view_mode = match agent_view_mode {
+                                        AgentViewMode::ByHub => AgentViewMode::ByRepo,
+                                        AgentViewMode::ByRepo => AgentViewMode::ByHub,
+                                    };
+                                    agent_selection = AgentSelection::default();
+                                    focus = FocusPanel::Right;
+                                }
                                 // Agent card clicks (right panel)
                                 else if let Some((_, gidx, aidx)) = click_map.agent_cards.iter().find(|(r, _, _)| r.contains(pos)) {
                                     agent_selection.group_idx = *gidx;
@@ -1928,27 +1938,21 @@ fn render_left_panel(
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
-    if repos.is_empty() {
-        let text = Paragraph::new(Line::from(Span::styled(
-            "No repositories found",
-            Style::default().fg(theme::R_TEXT_TERTIARY),
-        )))
-        .alignment(Alignment::Center);
+    // Split inner into title row, spacer, and tree area
+    let [title_area, _spacer, tree_area] = Layout::vertical([
+        Constraint::Length(1),
+        Constraint::Length(1),
+        Constraint::Min(0),
+    ])
+    .areas(inner);
 
-        let [centered] = Layout::vertical([Constraint::Length(1)])
-            .flex(Flex::Center)
-            .areas(inner);
+    // Title + focus indicator on the same row
+    let title = Paragraph::new(Span::styled(
+        "Repositories",
+        Style::default().fg(theme::R_TEXT_TERTIARY),
+    ));
+    frame.render_widget(title, title_area);
 
-        frame.render_widget(text, centered);
-    } else {
-        let (lines, targets) = build_repo_tree_lines(repos, selection, inner.width);
-        click_map.tree_inner_area = inner;
-        click_map.tree_items = targets;
-        let paragraph = Paragraph::new(lines);
-        frame.render_widget(paragraph, inner);
-    }
-
-    // Focus indicator in top-right corner
     let indicator_color = if focused {
         theme::R_ACCENT_BRIGHT
     } else {
@@ -1959,13 +1963,27 @@ fn render_left_panel(
         Style::default().fg(indicator_color).bg(theme::R_BG_SURFACE),
     ))
     .alignment(Alignment::Right);
-    let indicator_area = Rect {
-        x: inner.x,
-        y: inner.y,
-        width: inner.width,
-        height: 1,
-    };
-    frame.render_widget(indicator, indicator_area);
+    frame.render_widget(indicator, title_area);
+
+    if repos.is_empty() {
+        let text = Paragraph::new(Line::from(Span::styled(
+            "No repositories found",
+            Style::default().fg(theme::R_TEXT_TERTIARY),
+        )))
+        .alignment(Alignment::Center);
+
+        let [centered] = Layout::vertical([Constraint::Length(1)])
+            .flex(Flex::Center)
+            .areas(tree_area);
+
+        frame.render_widget(text, centered);
+    } else {
+        let (lines, targets) = build_repo_tree_lines(repos, selection, tree_area.width);
+        click_map.tree_inner_area = tree_area;
+        click_map.tree_items = targets;
+        let paragraph = Paragraph::new(lines);
+        frame.render_widget(paragraph, tree_area);
+    }
 }
 
 fn build_repo_tree_lines(
@@ -2463,6 +2481,7 @@ fn render_agent_list_by_hub(
     let areas = Layout::vertical(constraints).split(inner);
 
     frame.render_widget(mode_line.clone(), areas[0]);
+    click_map.mode_label_area = areas[0];
     frame.render_widget(
         indicator.clone(),
         Rect {
@@ -2574,6 +2593,7 @@ fn render_agent_list_by_repo(
     let areas = Layout::vertical(constraints).split(inner);
 
     frame.render_widget(mode_line.clone(), areas[0]);
+    click_map.mode_label_area = areas[0];
     frame.render_widget(
         indicator.clone(),
         Rect {
