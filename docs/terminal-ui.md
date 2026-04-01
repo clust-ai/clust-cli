@@ -86,15 +86,14 @@ The dashboard has a top tab bar, two content panels separated by a vertical divi
 
 #### Tab Bar
 
-A 1-row bar at the top of the terminal with three tabs:
+A 1-row bar at the top of the terminal with two tabs:
 
 | Tab | Description |
 |-----|-------------|
 | `Repositories` | Two-panel view with repo tree and agent cards (default) |
 | `Overview` | Multi-agent terminal overview with horizontal panels |
-| `Focus` | Single-agent focus view with a 60%-width left panel (tabbed, with diff viewer) and 40%-width terminal panel on the right |
 
-The active tab is highlighted with the accent color. A `Tab/Shift+Tab` hint is shown to the right of the tabs.
+The active tab is highlighted with the accent color. A `Tab/Shift+Tab` hint is shown to the right of the tabs. Focus mode is not a tab -- it is an overlay state entered explicitly from either tab (see Focus Mode section below). When focus mode is active, the tab bar is replaced by a back-bar header.
 
 #### Content Panels (Repositories tab)
 
@@ -161,7 +160,7 @@ A multi-agent terminal overview that displays all active agents side-by-side wit
 - Lazy initialization: overview connections are only established on first switch to the Overview tab.
 - On connect, each panel's background task consumes the hub's replay buffer before entering the main output loop, so panels show recent history immediately.
 - On terminal resize, all panels are resized via `TerminalEmulator::resize()` (which preserves accumulated scrollback history) and the hub is notified via `ResizeAgent`. Same-size resizes are skipped as a no-op to preserve content. The viewport is scrolled automatically to keep the focused panel visible.
-- **Force-resize triggers:** Panel dimensions are re-sent to the hub unconditionally (bypassing the same-size skip) in several scenarios where the hub's PTY may have been resized by another client: (1) switching to the Overview tab via `Tab`/`Shift+Tab` when already initialized, (2) returning from focus mode to Overview, (3) navigating between panels with `Shift+←`/`Shift+→` (focused panel only), (4) entering terminal focus with `Shift+↓` (focused panel only), and (5) when the terminal window regains focus (`FocusGained` event). The `EnableFocusChange`/`DisableFocusChange` crossterm sequences are used to detect window focus changes.
+- **Force-resize triggers:** Panel dimensions are re-sent to the hub unconditionally (bypassing the same-size skip) in several scenarios where the hub's PTY may have been resized by another client: (1) switching to the Overview tab via `Tab`/`Shift+Tab` when already initialized, (2) exiting focus mode back to Overview (when `in_focus_mode` is set to `false`), (3) navigating between panels with `Shift+←`/`Shift+→` (focused panel only), (4) entering terminal focus with `Shift+↓` (focused panel only), and (5) when the terminal window regains focus (`FocusGained` event). The `EnableFocusChange`/`DisableFocusChange` crossterm sequences are used to detect window focus changes.
 - Each panel has a `panel_scroll_offset` for scrolling through the combined scrollback + live grid. When scrolled, a `↑N` indicator appears in the panel header.
 - On exit, all connections are detached and background tasks are aborted.
 
@@ -179,7 +178,7 @@ On startup, `clust ui` automatically connects to the hub daemon, starting it if 
 |---------|-------------|
 | Status dot | Green `●` when connected, dim when disconnected |
 | Status label | `connected` or `disconnected` |
-| Shortcuts | Context-aware hints: on Repositories tab shows `q quit`, `Q stop+quit`, navigation hints; on Overview tab shows focus-dependent hints (e.g., `Shift+↓ enter terminal` or `Shift+↑ options`); on Focus tab shows `Shift+←/→ switch panel`, `Shift+↑/↓ jump file`, `Esc exit` |
+| Shortcuts | Context-aware hints: on Repositories tab shows `q quit`, `Q stop+quit`, navigation hints; on Overview tab shows focus-dependent hints (e.g., `Shift+↓ enter terminal` or `Shift+↑ options`); in focus mode shows `Shift+←/→ switch panel`, `Shift+↑/↓ jump file`, `Esc exit` |
 | Version | Right-aligned, e.g. `v0.0.9` |
 
 ### Keyboard Shortcuts
@@ -233,12 +232,17 @@ Context menus appear as centered modal overlays. They support arrow key navigati
 | `Shift+PageUp` / `Shift+PageDown` | Scroll focused panel through scrollback history (same as above) |
 | All other keys | Forwarded to the focused agent's PTY |
 
-#### Focus Tab
+#### Focus Mode
 
-A single-agent focus view with a two-panel split: a 60%-width left panel with tabbed content (including a git diff viewer) and a 40%-width right panel displaying the agent's terminal.
+Focus mode is an overlay state (tracked by an `in_focus_mode` boolean), not a tab. When active, the tab bar is replaced by a back-bar header and the content area shows a single-agent focus view with a two-panel split: a 60%-width left panel with tabbed content (including a git diff viewer) and a 40%-width right panel displaying the agent's terminal.
+
+**Back-bar header:**
+
+When focus mode is active, the 1-row tab bar is replaced by a back-bar that shows: `<- Esc  Back to [tab name]  agent-id . binary  Shift+<-/-> panels  Shift+up/down jump file`. The left side shows the escape hint and origin tab name; the center shows the agent identity; the right side shows keyboard hints.
 
 ```
 ┌─────────────────────────────────────────────────────┐
+│ ← Esc  Back to Overview  a3f8c1 · claude   Shift+←/→ panels  Shift+↑/↓ jump file │
 │ Changes │ Panel 2 │ Panel 3 │┌────────────────────┐│
 │                               ││ a3f8c1 · claude ●  ││
 │      1      1│fn main() {     ││                    ││
@@ -268,16 +272,16 @@ The left panel has a tab bar at the top with three tabs: `Changes`, `Panel 2`, `
 
 **Panel focus:**
 
-The focus view has a concept of which side (left or right) has keyboard focus. The focused side is indicated by visual cues (tab bar highlight, panel border accent). `Shift+←` and `Shift+→` switch focus between the left and right panels. `Esc` from the left panel returns focus to the right panel; `Esc` from the right panel exits focus mode.
+The focus view has a concept of which side (left or right) has keyboard focus. The focused side is indicated by visual cues (tab bar highlight, panel border accent). `Shift+←` and `Shift+→` switch focus between the left and right panels. `Esc` exits focus mode from either panel (left or right).
 
 **Entry points:**
 
-- **From Overview tab:** While in terminal focus, press `Shift+↓` to open the focused agent in focus mode.
-- **From Repositories tab:** While the right panel is focused, press `Enter` on a selected agent to open it in focus mode.
+- **From Overview tab:** While in terminal focus, press `Shift+↓` to open the focused agent in focus mode. The `in_focus_mode` flag is set to `true`.
+- **From Repositories tab:** While the right panel is focused, press `Enter` on a selected agent to open it in focus mode. The `in_focus_mode` flag is set to `true`.
 
 The agent's `working_dir` is passed to `open_agent()` to determine the git repository for the diff viewer.
 
-**Exit:** Press `Esc` (when right panel is focused) or `Shift+↑` (when right panel is focused) to return to the previous tab.
+**Exit:** Press `Esc` from either panel to exit focus mode and return to the originating tab. The `in_focus_mode` flag is set back to `false`.
 
 **Implementation:**
 
@@ -290,21 +294,21 @@ The agent's `working_dir` is passed to `open_agent()` to determine the git repos
 - `drain_diff_events()` is called each frame in the main event loop alongside `drain_output_events()`.
 - `parse_unified_diff()` parses raw `git diff HEAD` output into structured `DiffLine` entries with kind, content, line numbers, and file index.
 - On terminal resize, the focus mode panel is resized via `TerminalEmulator::resize()` (preserving scrollback history) and the hub is notified via `ResizeAgent`. On `FocusGained` events, dimensions are also re-sent unconditionally to account for PTY resizes by other clients while the window was unfocused.
-- Tab cycling (`Tab` / `Shift+Tab`) skips the Focus tab; it is only entered explicitly via the entry points above.
+- Focus mode is orthogonal to tab cycling -- `Tab` / `Shift+Tab` simply toggles between `Repositories` and `Overview` (2 tabs). Focus mode is only entered explicitly via the entry points above.
+- State is tracked by an `in_focus_mode: bool` flag rather than a `previous_tab` option. The `ActiveTab` enum no longer has a `FocusMode` variant.
 - On exit (via `close_panel()`), the diff task is stopped via the watch channel and aborted, diff state is cleared, and the panel's connection is detached.
 
-**Keyboard shortcuts (Focus tab, right panel focused):**
+**Keyboard shortcuts (focus mode, right panel focused):**
 
 | Shortcut | Action |
 |----------|--------|
-| `Esc` | Exit focus mode, return to previous tab |
-| `Shift+↑` | Exit focus mode, return to previous tab |
+| `Esc` | Exit focus mode, return to originating tab |
 | `Shift+←` | Switch focus to left panel |
 | `Shift+PageUp` | Scroll up through scrollback history |
 | `Shift+PageDown` | Scroll down through scrollback history |
 | All other keys | Forwarded to the focused agent's PTY |
 
-**Keyboard shortcuts (Focus tab, left panel focused):**
+**Keyboard shortcuts (focus mode, left panel focused):**
 
 | Shortcut | Action |
 |----------|--------|
@@ -313,7 +317,7 @@ The agent's `working_dir` is passed to `open_agent()` to determine the git repos
 | `Shift+↓` | Jump to next file header |
 | `Shift+→` | Switch focus to right panel |
 | `Tab` | Cycle to next left panel tab |
-| `Esc` | Switch focus to right panel |
+| `Esc` | Exit focus mode, return to originating tab |
 
 ### Mouse Support
 
@@ -334,11 +338,11 @@ A `ClickMap` struct is populated during each render pass and consumed during mou
 
 #### Mouse Click Behavior
 
-**Tab bar (all tabs):**
+**Tab bar (when not in focus mode):**
 
 | Click Target | Action |
 |--------------|--------|
-| Tab label | Switch to that tab (Repositories, Overview, or Focus) |
+| Tab label | Switch to that tab (Repositories or Overview) |
 
 **Repositories tab:**
 
@@ -359,7 +363,7 @@ Clicking a tree item also sets keyboard focus to the left panel. Clicking an age
 |--------------|--------|
 | Agent panel | Focus that terminal panel (`OverviewFocus::Terminal(idx)`) |
 
-**Focus mode tab:**
+**Focus mode:**
 
 | Click Target | Action |
 |--------------|--------|
@@ -377,7 +381,7 @@ Scroll wheel events scroll the element under the mouse cursor rather than the ke
 |-----------------|---------------|
 | Over an agent panel | Scroll that panel's scrollback up/down (regardless of which panel has keyboard focus) |
 
-**Focus mode tab:**
+**Focus mode:**
 
 | Cursor Position | Scroll Action |
 |-----------------|---------------|

@@ -61,23 +61,20 @@ enum FocusPanel {
 enum ActiveTab {
     Repositories,
     Overview,
-    FocusMode,
 }
 
 impl ActiveTab {
     fn next(self) -> Self {
         match self {
             Self::Repositories => Self::Overview,
-            Self::Overview => Self::FocusMode,
-            Self::FocusMode => Self::Repositories,
+            Self::Overview => Self::Repositories,
         }
     }
 
     fn prev(self) -> Self {
         match self {
-            Self::Repositories => Self::FocusMode,
+            Self::Repositories => Self::Overview,
             Self::Overview => Self::Repositories,
-            Self::FocusMode => Self::Overview,
         }
     }
 
@@ -85,7 +82,6 @@ impl ActiveTab {
         match self {
             Self::Repositories => "Repositories",
             Self::Overview => "Overview",
-            Self::FocusMode => "Focus",
         }
     }
 }
@@ -597,7 +593,7 @@ pub fn run(hub_name: &str) -> io::Result<()> {
     let mut show_help = false;
     let mut overview_state = OverviewState::new();
     let mut focus_mode_state = overview::FocusModeState::new();
-    let mut previous_tab: Option<ActiveTab> = None;
+    let mut in_focus_mode = false;
     let (init_cols, init_rows) = crossterm::terminal::size().unwrap_or((80, 24));
     let mut last_content_area = Rect {
         x: 0,
@@ -666,6 +662,7 @@ pub fn run(hub_name: &str) -> io::Result<()> {
         let notice = update_notice.lock().unwrap().clone();
         let cur_focus = focus;
         let cur_tab = active_tab;
+        let cur_focus_mode = in_focus_mode;
         let overview_focus = overview_state.focus;
         let show_help_now = show_help;
         let menu_ref = &active_menu;
@@ -679,8 +676,8 @@ pub fn run(hub_name: &str) -> io::Result<()> {
         terminal.draw(|frame| {
             let area = frame.area();
 
-            // Top-level: tab bar + content area + status bar
-            let [tab_bar_area, content_area, status_area] = Layout::vertical([
+            // Top-level: header (1 row) + content area + status bar (1 row)
+            let [header_area, content_area, status_area] = Layout::vertical([
                 Constraint::Length(1),
                 Constraint::Min(0),
                 Constraint::Length(1),
@@ -689,46 +686,54 @@ pub fn run(hub_name: &str) -> io::Result<()> {
 
             last_content_area = content_area;
 
-            render_tab_bar(frame, tab_bar_area, cur_tab, &mut click_map);
+            if cur_focus_mode {
+                render_focus_back_bar(
+                    frame,
+                    header_area,
+                    &focus_mode_state,
+                    cur_tab,
+                );
+                overview::render_focus_mode(frame, content_area, &mut focus_mode_state, &mut click_map);
+            } else {
+                render_tab_bar(frame, header_area, cur_tab, &mut click_map);
 
-            match cur_tab {
-                ActiveTab::Repositories => {
-                    // Content: left (40%) + divider (1 col) + right (60%)
-                    let [left_area, divider_area, right_area] = Layout::horizontal([
-                        Constraint::Percentage(40),
-                        Constraint::Length(1),
-                        Constraint::Percentage(60),
-                    ])
-                    .areas(content_area);
+                match cur_tab {
+                    ActiveTab::Repositories => {
+                        // Content: left (40%) + divider (1 col) + right (60%)
+                        let [left_area, divider_area, right_area] =
+                            Layout::horizontal([
+                                Constraint::Percentage(40),
+                                Constraint::Length(1),
+                                Constraint::Percentage(60),
+                            ])
+                            .areas(content_area);
 
-                    click_map.left_panel_area = left_area;
-                    click_map.right_panel_area = right_area;
+                        click_map.left_panel_area = left_area;
+                        click_map.right_panel_area = right_area;
 
-                    render_left_panel(
-                        frame,
-                        left_area,
-                        &display_repos,
-                        &selection,
-                        cur_focus == FocusPanel::Left,
-                        &mut click_map,
-                    );
-                    render_divider(frame, divider_area);
-                    render_right_panel(
-                        frame,
-                        right_area,
-                        &agents,
-                        &agent_selection,
-                        cur_focus == FocusPanel::Right,
-                        agent_view_mode,
-                        &mut click_map,
-                        &repo_colors,
-                    );
-                }
-                ActiveTab::Overview => {
-                    overview::render_overview(frame, content_area, &mut overview_state, &mut click_map);
-                }
-                ActiveTab::FocusMode => {
-                    overview::render_focus_mode(frame, content_area, &mut focus_mode_state, &mut click_map);
+                        render_left_panel(
+                            frame,
+                            left_area,
+                            &display_repos,
+                            &selection,
+                            cur_focus == FocusPanel::Left,
+                            &mut click_map,
+                        );
+                        render_divider(frame, divider_area);
+                        render_right_panel(
+                            frame,
+                            right_area,
+                            &agents,
+                            &agent_selection,
+                            cur_focus == FocusPanel::Right,
+                            agent_view_mode,
+                            &mut click_map,
+                            &repo_colors,
+                        );
+                    }
+                    ActiveTab::Overview => {
+                        overview::render_overview(frame, content_area, &mut overview_state, &mut click_map);
+                    }
                 }
             }
 
@@ -739,6 +744,7 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                 &notice,
                 hub_name,
                 cur_tab,
+                cur_focus_mode,
                 overview_focus,
             );
 
@@ -752,7 +758,7 @@ pub fn run(hub_name: &str) -> io::Result<()> {
             }
 
             if show_help_now {
-                render_help_overlay(frame, content_area, cur_tab);
+                render_help_overlay(frame, content_area, cur_tab, cur_focus_mode);
             }
         })?;
 
@@ -788,8 +794,7 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                                 fm_rows,
                                                 &working_dir,
                                             );
-                                            previous_tab = Some(active_tab);
-                                            active_tab = ActiveTab::FocusMode;
+                                            in_focus_mode = true;
                                         }
                                     }
                                     ActiveMenu::RepoActions { repo_path, .. } => {
@@ -832,7 +837,7 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                         }
                     } else
                     // Focus mode: behavior depends on which side has focus
-                    if active_tab == ActiveTab::FocusMode
+                    if in_focus_mode
                         && focus_mode_state.is_active()
                     {
                         let shift = key.modifiers.contains(KeyModifiers::SHIFT);
@@ -867,27 +872,21 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                             focus_mode_state.left_tab.next();
                                     }
                                     KeyCode::Esc => {
-                                        focus_mode_state.focus_side =
-                                            overview::FocusSide::Right;
-                                    }
-                                    _ => {}
-                                }
-                            }
-                        } else {
-                            // Right panel focused: current behavior
-                            if shift {
-                                match key.code {
-                                    KeyCode::Up => {
                                         focus_mode_state.shutdown();
-                                        active_tab = previous_tab
-                                            .take()
-                                            .unwrap_or(ActiveTab::Repositories);
+                                        in_focus_mode = false;
                                         if active_tab == ActiveTab::Overview
                                             && overview_state.initialized
                                         {
                                             overview_state.force_resize_all();
                                         }
                                     }
+                                    _ => {}
+                                }
+                            }
+                        } else {
+                            // Right panel focused
+                            if shift {
+                                match key.code {
                                     KeyCode::Left => {
                                         focus_mode_state.focus_side =
                                             overview::FocusSide::Left;
@@ -926,9 +925,7 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                 }
                             } else if key.code == KeyCode::Esc {
                                 focus_mode_state.shutdown();
-                                active_tab = previous_tab
-                                    .take()
-                                    .unwrap_or(ActiveTab::Repositories);
+                                in_focus_mode = false;
                                 if active_tab == ActiveTab::Overview
                                     && overview_state.initialized
                                 {
@@ -982,8 +979,7 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                                 fm_rows,
                                                 &working_dir,
                                             );
-                                            previous_tab = Some(active_tab);
-                                            active_tab = ActiveTab::FocusMode;
+                                            in_focus_mode = true;
                                         }
                                     }
                                 }
@@ -1046,13 +1042,8 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                 hub_stopped = true;
                                 break;
                             }
-                            // Tab switching (skip FocusMode — entered explicitly)
                             KeyCode::Tab => {
-                                let mut next = active_tab.next();
-                                if next == ActiveTab::FocusMode {
-                                    next = next.next();
-                                }
-                                active_tab = next;
+                                active_tab = active_tab.next();
                                 if active_tab == ActiveTab::Overview {
                                     if !overview_state.initialized {
                                         overview_state
@@ -1063,11 +1054,7 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                 }
                             }
                             KeyCode::BackTab => {
-                                let mut prev = active_tab.prev();
-                                if prev == ActiveTab::FocusMode {
-                                    prev = prev.prev();
-                                }
-                                active_tab = prev;
+                                active_tab = active_tab.prev();
                                 if active_tab == ActiveTab::Overview {
                                     if !overview_state.initialized {
                                         overview_state
@@ -1172,8 +1159,7 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                                                     fm_rows,
                                                                     &agent.working_dir,
                                                                 );
-                                                                previous_tab = Some(active_tab);
-                                                                active_tab = ActiveTab::FocusMode;
+                                                                in_focus_mode = true;
                                                             } else if matching.len() > 1 {
                                                                 let labels: Vec<String> = matching
                                                                     .iter()
@@ -1215,8 +1201,7 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                                     fm_rows,
                                                     &working_dir,
                                                 );
-                                                previous_tab = Some(active_tab);
-                                                active_tab = ActiveTab::FocusMode;
+                                                in_focus_mode = true;
                                             }
                                         }
                                     }
@@ -1287,11 +1272,11 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                         width: cols,
                         height: rows.saturating_sub(2), // tab bar + status bar
                     };
-                    if active_tab == ActiveTab::Overview {
+                    if active_tab == ActiveTab::Overview && !in_focus_mode {
                         overview_state
                             .handle_resize(agents.len(), new_content_area);
                     }
-                    if active_tab == ActiveTab::FocusMode {
+                    if in_focus_mode {
                         let fm_cols = (new_content_area.width * 40 / 100)
                             .saturating_sub(2)
                             .max(1);
@@ -1311,14 +1296,12 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                             height: rows.saturating_sub(2),
                         };
                         last_content_area = new_content_area;
-                        if active_tab == ActiveTab::Overview {
+                        if active_tab == ActiveTab::Overview && !in_focus_mode {
                             overview_state
                                 .handle_resize(agents.len(), new_content_area);
                             overview_state.force_resize_all();
                         }
-                        if active_tab == ActiveTab::FocusMode
-                            && focus_mode_state.is_active()
-                        {
+                        if in_focus_mode && focus_mode_state.is_active() {
                             let fm_cols = (new_content_area.width * 40 / 100)
                                 .saturating_sub(2)
                                 .max(1);
@@ -1332,8 +1315,18 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                 Event::Mouse(MouseEvent { kind: MouseEventKind::Down(MouseButton::Left), column, row, .. }) => {
                     let pos = Position { x: column, y: row };
 
-                    // Tab bar clicks — always active
-                    if let Some((_, tab)) = click_map.tabs.iter().find(|(r, _)| r.contains(pos)) {
+                    if in_focus_mode {
+                        // Focus mode click handling
+                        if let Some((_, tab)) = click_map.focus_left_tabs.iter().find(|(r, _)| r.contains(pos)) {
+                            focus_mode_state.left_tab = *tab;
+                            focus_mode_state.focus_side = overview::FocusSide::Left;
+                        } else if click_map.focus_left_area.contains(pos) {
+                            focus_mode_state.focus_side = overview::FocusSide::Left;
+                        } else if click_map.focus_right_area.contains(pos) {
+                            focus_mode_state.focus_side = overview::FocusSide::Right;
+                        }
+                    } else if let Some((_, tab)) = click_map.tabs.iter().find(|(r, _)| r.contains(pos)) {
+                        // Tab bar clicks
                         active_tab = *tab;
                     } else {
                         match active_tab {
@@ -1391,70 +1384,48 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                     overview_state.focus = overview::OverviewFocus::Terminal(*idx);
                                 }
                             }
-                            ActiveTab::FocusMode => {
-                                // Left tab clicks
-                                if let Some((_, tab)) = click_map.focus_left_tabs.iter().find(|(r, _)| r.contains(pos)) {
-                                    focus_mode_state.left_tab = *tab;
-                                    focus_mode_state.focus_side = overview::FocusSide::Left;
-                                }
-                                // Panel focus switching
-                                else if click_map.focus_left_area.contains(pos) {
-                                    focus_mode_state.focus_side = overview::FocusSide::Left;
-                                } else if click_map.focus_right_area.contains(pos) {
-                                    focus_mode_state.focus_side = overview::FocusSide::Right;
-                                }
-                            }
                         }
                     }
                 }
                 Event::Mouse(MouseEvent { kind: MouseEventKind::ScrollUp, column, row, .. }) => {
                     let pos = Position { x: column, y: row };
-                    match active_tab {
-                        ActiveTab::Overview => {
-                            // Scroll the panel under cursor
-                            if let Some((_, idx)) = click_map.overview_panels.iter().find(|(r, _)| r.contains(pos)) {
-                                if let Some(panel) = overview_state.panels.get_mut(*idx) {
-                                    let max = panel.vterm.scrollback_len();
-                                    panel.panel_scroll_offset = (panel.panel_scroll_offset + 3).min(max);
-                                }
+                    if in_focus_mode && focus_mode_state.is_active() {
+                        if click_map.focus_right_area.contains(pos) {
+                            if let Some(panel) = &mut focus_mode_state.panel {
+                                let max = panel.vterm.scrollback_len();
+                                panel.panel_scroll_offset =
+                                    (panel.panel_scroll_offset + 3).min(max);
+                            }
+                        } else if click_map.focus_left_area.contains(pos) {
+                            focus_mode_state.diff_scroll_up();
+                        }
+                    } else if active_tab == ActiveTab::Overview {
+                        if let Some((_, idx)) = click_map.overview_panels.iter().find(|(r, _)| r.contains(pos)) {
+                            if let Some(panel) = overview_state.panels.get_mut(*idx) {
+                                let max = panel.vterm.scrollback_len();
+                                panel.panel_scroll_offset = (panel.panel_scroll_offset + 3).min(max);
                             }
                         }
-                        ActiveTab::FocusMode if focus_mode_state.is_active() => {
-                            if click_map.focus_right_area.contains(pos) {
-                                if let Some(panel) = &mut focus_mode_state.panel {
-                                    let max = panel.vterm.scrollback_len();
-                                    panel.panel_scroll_offset =
-                                        (panel.panel_scroll_offset + 3).min(max);
-                                }
-                            } else if click_map.focus_left_area.contains(pos) {
-                                focus_mode_state.diff_scroll_up();
-                            }
-                        }
-                        _ => {}
                     }
                 }
                 Event::Mouse(MouseEvent { kind: MouseEventKind::ScrollDown, column, row, .. }) => {
                     let pos = Position { x: column, y: row };
-                    match active_tab {
-                        ActiveTab::Overview => {
-                            if let Some((_, idx)) = click_map.overview_panels.iter().find(|(r, _)| r.contains(pos)) {
-                                if let Some(panel) = overview_state.panels.get_mut(*idx) {
-                                    panel.panel_scroll_offset =
-                                        panel.panel_scroll_offset.saturating_sub(3);
-                                }
+                    if in_focus_mode && focus_mode_state.is_active() {
+                        if click_map.focus_right_area.contains(pos) {
+                            if let Some(panel) = &mut focus_mode_state.panel {
+                                panel.panel_scroll_offset =
+                                    panel.panel_scroll_offset.saturating_sub(3);
+                            }
+                        } else if click_map.focus_left_area.contains(pos) {
+                            focus_mode_state.diff_scroll_down();
+                        }
+                    } else if active_tab == ActiveTab::Overview {
+                        if let Some((_, idx)) = click_map.overview_panels.iter().find(|(r, _)| r.contains(pos)) {
+                            if let Some(panel) = overview_state.panels.get_mut(*idx) {
+                                panel.panel_scroll_offset =
+                                    panel.panel_scroll_offset.saturating_sub(3);
                             }
                         }
-                        ActiveTab::FocusMode if focus_mode_state.is_active() => {
-                            if click_map.focus_right_area.contains(pos) {
-                                if let Some(panel) = &mut focus_mode_state.panel {
-                                    panel.panel_scroll_offset =
-                                        panel.panel_scroll_offset.saturating_sub(3);
-                                }
-                            } else if click_map.focus_left_area.contains(pos) {
-                                focus_mode_state.diff_scroll_down();
-                            }
-                        }
-                        _ => {}
                     }
                 }
                 _ => {}
@@ -1493,11 +1464,7 @@ pub fn run(hub_name: &str) -> io::Result<()> {
 // ---------------------------------------------------------------------------
 
 fn render_tab_bar(frame: &mut Frame, area: Rect, active_tab: ActiveTab, click_map: &mut ClickMap) {
-    let tabs = [
-        ActiveTab::Repositories,
-        ActiveTab::Overview,
-        ActiveTab::FocusMode,
-    ];
+    let tabs = [ActiveTab::Repositories, ActiveTab::Overview];
     let mut spans = Vec::new();
     let mut cursor_x = area.x;
 
@@ -1548,6 +1515,81 @@ fn render_tab_bar(frame: &mut Frame, area: Rect, active_tab: ActiveTab, click_ma
             " ".repeat(remaining),
             Style::default().bg(theme::R_BG_RAISED),
         ));
+    }
+
+    frame.render_widget(Paragraph::new(Line::from(spans)), area);
+}
+
+fn render_focus_back_bar(
+    frame: &mut Frame,
+    area: Rect,
+    state: &overview::FocusModeState,
+    origin_tab: ActiveTab,
+) {
+    let bg = Style::default().bg(theme::R_BG_RAISED);
+    let mut spans = Vec::new();
+
+    // Left: back indicator
+    spans.push(Span::styled(
+        " \u{2190} ",
+        Style::default()
+            .fg(theme::R_ACCENT_BRIGHT)
+            .bg(theme::R_BG_RAISED),
+    ));
+    spans.push(Span::styled(
+        "Esc",
+        Style::default()
+            .fg(theme::R_TEXT_PRIMARY)
+            .bg(theme::R_BG_RAISED)
+            .add_modifier(Modifier::BOLD),
+    ));
+    spans.push(Span::styled(
+        format!("  Back to {}", origin_tab.label()),
+        Style::default()
+            .fg(theme::R_TEXT_SECONDARY)
+            .bg(theme::R_BG_RAISED),
+    ));
+
+    // Center: agent info
+    if let Some(panel) = &state.panel {
+        spans.push(Span::styled("    ", bg));
+        spans.push(Span::styled(
+            panel.id.clone(),
+            Style::default()
+                .fg(theme::R_TEXT_PRIMARY)
+                .bg(theme::R_BG_RAISED),
+        ));
+        spans.push(Span::styled(
+            format!(" \u{00b7} {}", panel.agent_binary),
+            Style::default()
+                .fg(theme::R_TEXT_TERTIARY)
+                .bg(theme::R_BG_RAISED),
+        ));
+    }
+
+    // Right: keyboard hints
+    let hints = "Shift+\u{2190}/\u{2192} panels  Shift+\u{2191}/\u{2193} jump file";
+    let left_width: usize = spans.iter().map(|s| s.content.chars().count()).sum();
+    let hints_width = hints.chars().count();
+    let gap = (area.width as usize)
+        .saturating_sub(left_width)
+        .saturating_sub(hints_width)
+        .saturating_sub(1); // trailing space
+    if gap > 0 {
+        spans.push(Span::styled(" ".repeat(gap), bg));
+    }
+    spans.push(Span::styled(
+        hints,
+        Style::default()
+            .fg(theme::R_TEXT_TERTIARY)
+            .bg(theme::R_BG_RAISED),
+    ));
+
+    // Fill remaining
+    let total_width: usize = spans.iter().map(|s| s.content.chars().count()).sum();
+    let remaining = (area.width as usize).saturating_sub(total_width);
+    if remaining > 0 {
+        spans.push(Span::styled(" ".repeat(remaining), bg));
     }
 
     frame.render_widget(Paragraph::new(Line::from(spans)), area);
@@ -2346,6 +2388,7 @@ fn render_agent_card(
     frame.render_widget(Paragraph::new(lines), inner);
 }
 
+#[allow(clippy::too_many_arguments)]
 fn render_status_bar(
     frame: &mut Frame,
     area: Rect,
@@ -2353,6 +2396,7 @@ fn render_status_bar(
     update_notice: &Option<String>,
     hub_name: &str,
     active_tab: ActiveTab,
+    in_focus_mode: bool,
     overview_focus: OverviewFocus,
 ) {
     let bg = Style::default().bg(theme::R_BG_RAISED);
@@ -2382,7 +2426,7 @@ fn render_status_bar(
         ));
     }
 
-    let hint_text = if active_tab == ActiveTab::FocusMode {
+    let hint_text = if in_focus_mode {
         "Shift+\u{2190}/\u{2192} switch panel  Shift+\u{2191}/\u{2193} jump file  Esc exit"
     } else if active_tab == ActiveTab::Overview {
         match overview_focus {
@@ -2442,7 +2486,7 @@ fn render_status_bar(
     );
 }
 
-fn render_help_overlay(frame: &mut Frame, area: Rect, active_tab: ActiveTab) {
+fn render_help_overlay(frame: &mut Frame, area: Rect, active_tab: ActiveTab, in_focus_mode: bool) {
     let mut bindings: Vec<(&str, &str)> = vec![
         ("q / Esc", "Quit"),
         ("Q", "Quit and stop hub"),
@@ -2461,10 +2505,10 @@ fn render_help_overlay(frame: &mut Frame, area: Rect, active_tab: ActiveTab) {
         ]);
     }
 
-    if active_tab == ActiveTab::FocusMode {
+    if in_focus_mode {
         bindings.extend([
             ("Esc", "Exit focus mode"),
-            ("Shift+↑", "Exit focus mode"),
+            ("Shift+←/→", "Switch panel"),
             ("Shift+PgUp", "Scroll up"),
             ("Shift+PgDn", "Scroll down"),
         ]);
@@ -3217,23 +3261,20 @@ mod tests {
     fn active_tab_next_cycles() {
         let tab = ActiveTab::Repositories;
         assert_eq!(tab.next(), ActiveTab::Overview);
-        assert_eq!(tab.next().next(), ActiveTab::FocusMode);
-        assert_eq!(tab.next().next().next(), ActiveTab::Repositories);
+        assert_eq!(tab.next().next(), ActiveTab::Repositories);
     }
 
     #[test]
     fn active_tab_prev_cycles() {
         let tab = ActiveTab::Repositories;
-        assert_eq!(tab.prev(), ActiveTab::FocusMode);
-        assert_eq!(tab.prev().prev(), ActiveTab::Overview);
-        assert_eq!(tab.prev().prev().prev(), ActiveTab::Repositories);
+        assert_eq!(tab.prev(), ActiveTab::Overview);
+        assert_eq!(tab.prev().prev(), ActiveTab::Repositories);
     }
 
     #[test]
     fn active_tab_labels() {
         assert_eq!(ActiveTab::Repositories.label(), "Repositories");
         assert_eq!(ActiveTab::Overview.label(), "Overview");
-        assert_eq!(ActiveTab::FocusMode.label(), "Focus");
     }
 
     #[test]
