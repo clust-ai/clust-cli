@@ -781,7 +781,32 @@ fn render_agent_panel(
         Span::styled(" ", Style::default().bg(header_bg)),
     ];
 
-    if let Some(ref branch) = panel.branch_name {
+    if let Some(ref rp) = panel.repo_path {
+        let repo_display = std::path::Path::new(rp)
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| rp.clone());
+        let repo_fg = repo_color.unwrap_or(theme::R_ACCENT);
+        header_spans.push(Span::styled(
+            "· ",
+            Style::default()
+                .fg(theme::R_TEXT_TERTIARY)
+                .bg(header_bg),
+        ));
+        header_spans.push(Span::styled(
+            repo_display,
+            Style::default().fg(repo_fg).bg(header_bg),
+        ));
+        if let Some(ref branch) = panel.branch_name {
+            header_spans.push(Span::styled(
+                format!("/{branch}"),
+                Style::default()
+                    .fg(theme::R_TEXT_TERTIARY)
+                    .bg(header_bg),
+            ));
+        }
+        header_spans.push(Span::styled(" ", Style::default().bg(header_bg)));
+    } else if let Some(ref branch) = panel.branch_name {
         header_spans.push(Span::styled(
             "· ",
             Style::default()

@@ -1145,6 +1145,7 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                             }
                         } else {
                             match key.code {
+                                KeyCode::Esc => overview_state.exit_terminal(),
                                 KeyCode::PageUp => overview_state.panel_scroll_up(),
                                 KeyCode::PageDown => overview_state.panel_scroll_down(),
                                 _ => {
