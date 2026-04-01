@@ -136,6 +136,10 @@ pub(crate) struct ClickMap {
     pub(crate) focus_right_area: Rect,
     pub(crate) focus_left_tabs: Vec<(Rect, overview::LeftPanelTab)>,
     focus_back_button: Rect,
+
+    // Context menu overlay
+    menu_modal_rect: Rect,
+    menu_inner_rect: Rect,
 }
 
 // ---------------------------------------------------------------------------
@@ -756,7 +760,9 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                     ActiveMenu::RepoActions { ref menu, .. } => menu,
                     ActiveMenu::ColorPicker { ref menu, .. } => menu,
                 };
-                menu.render(frame, content_area);
+                let (modal_rect, inner_rect) = menu.render(frame, content_area);
+                click_map.menu_modal_rect = modal_rect;
+                click_map.menu_inner_rect = inner_rect;
             }
 
             if show_help_now {
@@ -1317,7 +1323,79 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                 Event::Mouse(MouseEvent { kind: MouseEventKind::Down(MouseButton::Left), column, row, .. }) => {
                     let pos = Position { x: column, y: row };
 
-                    if in_focus_mode {
+                    if active_menu.is_some() {
+                        if click_map.menu_inner_rect.contains(pos) {
+                            let idx = (row - click_map.menu_inner_rect.y) as usize;
+                            let item_count = match active_menu.as_ref().unwrap() {
+                                ActiveMenu::AgentPicker { menu, .. } => menu.items.len(),
+                                ActiveMenu::RepoActions { menu, .. } => menu.items.len(),
+                                ActiveMenu::ColorPicker { menu, .. } => menu.items.len(),
+                            };
+                            if idx < item_count {
+                                // Highlight the clicked item then select it
+                                match active_menu.as_mut().unwrap() {
+                                    ActiveMenu::AgentPicker { menu, .. } => menu.selected_idx = idx,
+                                    ActiveMenu::RepoActions { menu, .. } => menu.selected_idx = idx,
+                                    ActiveMenu::ColorPicker { menu, .. } => menu.selected_idx = idx,
+                                }
+                                let taken = active_menu.take().unwrap();
+                                match taken {
+                                    ActiveMenu::AgentPicker { agents: picker_agents, .. } => {
+                                        if let Some(agent) = picker_agents.get(idx) {
+                                            let agent_id = agent.id.clone();
+                                            let agent_binary = agent.agent_binary.clone();
+                                            let working_dir = agent.working_dir.clone();
+                                            let fm_cols = (last_content_area.width * 40 / 100)
+                                                .saturating_sub(2)
+                                                .max(1);
+                                            let fm_rows =
+                                                last_content_area.height.saturating_sub(3).max(1);
+                                            focus_mode_state.open_agent(
+                                                &agent_id,
+                                                &agent_binary,
+                                                fm_cols,
+                                                fm_rows,
+                                                &working_dir,
+                                            );
+                                            in_focus_mode = true;
+                                        }
+                                    }
+                                    ActiveMenu::RepoActions { repo_path, .. } => {
+                                        if idx == 0 {
+                                            let items: Vec<ContextMenuItem> =
+                                                theme::REPO_COLOR_NAMES
+                                                    .iter()
+                                                    .map(|&name| ContextMenuItem {
+                                                        label: name[0..1].to_uppercase()
+                                                            + &name[1..],
+                                                        color: Some(theme::repo_color(name)),
+                                                    })
+                                                    .collect();
+                                            active_menu = Some(ActiveMenu::ColorPicker {
+                                                repo_path,
+                                                menu: ContextMenu::with_colors(
+                                                    "Choose Color",
+                                                    items,
+                                                ),
+                                            });
+                                        }
+                                    }
+                                    ActiveMenu::ColorPicker { repo_path, .. } => {
+                                        if let Some(&color_name) =
+                                            theme::REPO_COLOR_NAMES.get(idx)
+                                        {
+                                            set_repo_color_ipc(&repo_path, color_name);
+                                            last_repo_fetch =
+                                                Instant::now() - Duration::from_secs(10);
+                                        }
+                                    }
+                                }
+                            }
+                        } else if !click_map.menu_modal_rect.contains(pos) {
+                            // Click outside modal → dismiss
+                            active_menu = None;
+                        }
+                    } else if in_focus_mode {
                         // Focus mode click handling
                         if click_map.focus_back_button.contains(pos) {
                             focus_mode_state.shutdown();
@@ -1399,7 +1477,15 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                 }
                 Event::Mouse(MouseEvent { kind: MouseEventKind::ScrollUp, column, row, .. }) => {
                     let pos = Position { x: column, y: row };
-                    if in_focus_mode && focus_mode_state.is_active() {
+                    if active_menu.is_some() {
+                        match active_menu.as_mut().unwrap() {
+                            ActiveMenu::AgentPicker { menu, .. }
+                            | ActiveMenu::RepoActions { menu, .. }
+                            | ActiveMenu::ColorPicker { menu, .. } => {
+                                menu.selected_idx = menu.selected_idx.saturating_sub(1);
+                            }
+                        }
+                    } else if in_focus_mode && focus_mode_state.is_active() {
                         if click_map.focus_right_area.contains(pos) {
                             if let Some(panel) = &mut focus_mode_state.panel {
                                 let max = panel.vterm.scrollback_len();
@@ -1420,7 +1506,17 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                 }
                 Event::Mouse(MouseEvent { kind: MouseEventKind::ScrollDown, column, row, .. }) => {
                     let pos = Position { x: column, y: row };
-                    if in_focus_mode && focus_mode_state.is_active() {
+                    if active_menu.is_some() {
+                        match active_menu.as_mut().unwrap() {
+                            ActiveMenu::AgentPicker { menu, .. }
+                            | ActiveMenu::RepoActions { menu, .. }
+                            | ActiveMenu::ColorPicker { menu, .. } => {
+                                if !menu.items.is_empty() {
+                                    menu.selected_idx = (menu.selected_idx + 1).min(menu.items.len() - 1);
+                                }
+                            }
+                        }
+                    } else if in_focus_mode && focus_mode_state.is_active() {
                         if click_map.focus_right_area.contains(pos) {
                             if let Some(panel) = &mut focus_mode_state.panel {
                                 panel.panel_scroll_offset =
