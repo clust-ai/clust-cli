@@ -114,12 +114,12 @@ A multi-agent terminal overview that displays all active agents side-by-side wit
 │ [options bar]                                       │
 ├──────────────────────┬──────────────────┬───────────┤
 │┌────────────────────┐│┌────────────────┐│┌─────────┐│
-││ a3f8c1 · claude ●  │││ b7e2d9 · claude│││ c4a1e0 ·││
+││ a3f8c1·claude·main●│││ b7e2d9·claude● │││ c4a1e0 ·││
 ││                    │││                │││         ││
 ││ Agent PTY output   │││ Agent PTY out  │││ (partial││
 ││ (VTE emulated)     │││ (VTE emulated) │││  view)  ││
 ││                    │││                │││         ││
-│└────────────────────┘│└────────────────┘│└─────────┘│
+│└──── Shift+↓ focus──┘│└────────────────┘│└─────────┘│
 ├──────────────────────┴──────────────────┴───────────┤
 │ ● connected  Shift+↓ enter terminal  ...    v0.0.9 │
 └─────────────────────────────────────────────────────┘
@@ -130,7 +130,8 @@ A multi-agent terminal overview that displays all active agents side-by-side wit
 - **Options bar (1 row):** Top row, reserved for future filter buttons. Background changes based on focus.
 - **Agent panels (horizontal):** Fixed-width columns sized so exactly 2.5 panels fit across the screen (showing 2 full panels + half of a third), with a minimum width of 40 columns. When more agents exist than fit on screen, horizontal scrolling is enabled with `◀ N` / `N ▶` indicators.
 - Each panel has **box-drawing borders** (top, bottom, left, right). The border color is accent blue when the panel is focused, and subtle gray when unfocused.
-- Inside the border, a **header row** shows agent ID (accent-colored), separator, agent binary name, and status indicator (`●` green for running, `[exited]` red for exited).
+- The **focused panel** displays a centered `Shift+↓ focus` hint in its bottom border (rendered via `Block::title_bottom()`). The shortcut text uses the bright accent color and the label uses secondary text color. This hint only appears when a terminal panel is focused in overview mode (the exact condition where `Shift+↓` opens focus mode).
+- Inside the border, a **header row** shows agent ID (accent-colored), separator, agent binary name, optional branch name (in tertiary text color, preceded by a `·` separator), and status indicator (`●` green for running, `[exited]` red for exited). The branch name is sourced from `AgentInfo.branch_name` and updates on each sync cycle (every 2 seconds).
 - The **terminal area** below the header renders the agent's PTY output using a `vt100`-backed terminal emulator (`TerminalEmulator`) with full ANSI support (cursor movement, SGR colors/styles, erase operations, scroll regions, line wrapping, alternate screen buffer). The terminal emulator gets the inner width (total panel width minus 2 border columns).
 
 **Focus modes:**

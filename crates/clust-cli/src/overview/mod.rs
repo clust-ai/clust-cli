@@ -53,6 +53,7 @@ pub enum AgentOutputEvent {
 pub struct AgentPanel {
     pub id: String,
     pub agent_binary: String,
+    pub branch_name: Option<String>,
     pub vterm: TerminalEmulator,
     pub command_tx: mpsc::Sender<PanelCommand>,
     pub exited: bool,
@@ -113,6 +114,13 @@ impl OverviewState {
         for agent in agents {
             if !self.panels.iter().any(|p| p.id == agent.id) {
                 self.spawn_agent_connection(agent);
+            }
+        }
+
+        // Update metadata that may change during agent lifetime
+        for agent in agents {
+            if let Some(panel) = self.panels.iter_mut().find(|p| p.id == agent.id) {
+                panel.branch_name = agent.branch_name.clone();
             }
         }
 
@@ -381,6 +389,7 @@ impl OverviewState {
         self.panels.push(AgentPanel {
             id,
             agent_binary: binary,
+            branch_name: agent.branch_name.clone(),
             vterm: TerminalEmulator::new(cols as usize, rows as usize),
             command_tx,
             exited: false,
@@ -691,10 +700,23 @@ fn render_agent_panel(frame: &mut Frame, area: Rect, panel: &mut AgentPanel, foc
         theme::R_TEXT_TERTIARY
     };
 
-    let block = Block::default()
+    let mut block = Block::default()
         .borders(Borders::ALL)
         .border_style(Style::default().fg(border_color))
         .style(Style::default().bg(theme::R_BG_BASE));
+
+    if focused {
+        block = block.title_bottom(
+            Line::from(vec![
+                Span::styled(
+                    " Shift+\u{2193} ",
+                    Style::default().fg(theme::R_ACCENT_BRIGHT),
+                ),
+                Span::styled("focus ", Style::default().fg(theme::R_TEXT_SECONDARY)),
+            ])
+            .centered(),
+        );
+    }
 
     let inner = block.inner(area);
     frame.render_widget(block, area);
@@ -742,6 +764,22 @@ fn render_agent_panel(frame: &mut Frame, area: Rect, panel: &mut AgentPanel, foc
         ),
         Span::styled(" ", Style::default().bg(header_bg)),
     ];
+
+    if let Some(ref branch) = panel.branch_name {
+        header_spans.push(Span::styled(
+            "· ",
+            Style::default()
+                .fg(theme::R_TEXT_TERTIARY)
+                .bg(header_bg),
+        ));
+        header_spans.push(Span::styled(
+            branch.as_str(),
+            Style::default()
+                .fg(theme::R_TEXT_TERTIARY)
+                .bg(header_bg),
+        ));
+        header_spans.push(Span::styled(" ", Style::default().bg(header_bg)));
+    }
 
     if panel.exited {
         header_spans.push(Span::styled(
@@ -922,6 +960,7 @@ impl FocusModeState {
         self.panel = Some(AgentPanel {
             id,
             agent_binary: binary,
+            branch_name: None,
             vterm: TerminalEmulator::new(cols as usize, rows as usize),
             command_tx,
             exited: false,
