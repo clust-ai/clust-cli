@@ -1,9 +1,11 @@
 pub mod gitdiff;
 pub mod input;
 
+use std::collections::HashMap;
+
 use ratatui::{
     layout::{Constraint, Layout, Rect},
-    style::{Modifier, Style},
+    style::{Color, Modifier, Style},
     text::{Line, Span},
     widgets::{Block, Borders, Paragraph},
     Frame,
@@ -54,6 +56,7 @@ pub struct AgentPanel {
     pub id: String,
     pub agent_binary: String,
     pub branch_name: Option<String>,
+    pub repo_path: Option<String>,
     pub vterm: TerminalEmulator,
     pub command_tx: mpsc::Sender<PanelCommand>,
     pub exited: bool,
@@ -121,6 +124,7 @@ impl OverviewState {
         for agent in agents {
             if let Some(panel) = self.panels.iter_mut().find(|p| p.id == agent.id) {
                 panel.branch_name = agent.branch_name.clone();
+                panel.repo_path = agent.repo_path.clone();
             }
         }
 
@@ -390,6 +394,7 @@ impl OverviewState {
             id,
             agent_binary: binary,
             branch_name: agent.branch_name.clone(),
+            repo_path: agent.repo_path.clone(),
             vterm: TerminalEmulator::new(cols as usize, rows as usize),
             command_tx,
             exited: false,
@@ -588,7 +593,7 @@ async fn agent_connection_task(
 // Rendering
 // ---------------------------------------------------------------------------
 
-pub fn render_overview(frame: &mut Frame, area: Rect, state: &mut OverviewState, click_map: &mut ClickMap) {
+pub fn render_overview(frame: &mut Frame, area: Rect, state: &mut OverviewState, click_map: &mut ClickMap, repo_colors: &HashMap<String, String>) {
     // Split into options bar (1 row) + panels area
     let [options_area, panels_area] = Layout::vertical([
         Constraint::Length(1),
@@ -629,7 +634,10 @@ pub fn render_overview(frame: &mut Frame, area: Rect, state: &mut OverviewState,
         let global_idx = scroll_offset + i;
         let is_focused = matches!(focus, OverviewFocus::Terminal(idx) if idx == global_idx);
         click_map.overview_panels.push((panel_areas[i], global_idx));
-        render_agent_panel(frame, panel_areas[i], panel, is_focused);
+        let panel_color = panel.repo_path.as_ref()
+            .and_then(|rp| repo_colors.get(rp.as_str()))
+            .map(|cn| theme::repo_color(cn));
+        render_agent_panel(frame, panel_areas[i], panel, is_focused, false, panel_color);
     }
 
     // Scroll indicators
@@ -688,16 +696,24 @@ fn render_options_bar(frame: &mut Frame, area: Rect, focused: bool) {
     );
 }
 
-fn render_agent_panel(frame: &mut Frame, area: Rect, panel: &mut AgentPanel, focused: bool) {
+fn render_agent_panel(
+    frame: &mut Frame,
+    area: Rect,
+    panel: &mut AgentPanel,
+    focused: bool,
+    in_focus_mode: bool,
+    repo_color: Option<Color>,
+) {
     if area.height < 3 {
         return;
     }
 
-    // Border color indicates focus
-    let border_color = if focused {
-        theme::R_ACCENT_BRIGHT
-    } else {
-        theme::R_TEXT_TERTIARY
+    // Border color: use repo color when available, accent as fallback
+    let border_color = match (focused, repo_color) {
+        (true, Some(c)) => c,
+        (false, Some(c)) => theme::dim_color(c),
+        (true, None) => theme::R_ACCENT_BRIGHT,
+        (false, None) => theme::R_TEXT_TERTIARY,
     };
 
     let mut block = Block::default()
@@ -705,7 +721,7 @@ fn render_agent_panel(frame: &mut Frame, area: Rect, panel: &mut AgentPanel, foc
         .border_style(Style::default().fg(border_color))
         .style(Style::default().bg(theme::R_BG_BASE));
 
-    if focused {
+    if focused && !in_focus_mode {
         block = block.title_bottom(
             Line::from(vec![
                 Span::styled(
@@ -902,6 +918,7 @@ pub struct FocusModeState {
     diff_stop_tx: Option<watch::Sender<bool>>,
     diff_task: Option<JoinHandle<()>>,
     pub working_dir: Option<String>,
+    pub repo_path: Option<String>,
 }
 
 impl FocusModeState {
@@ -924,10 +941,12 @@ impl FocusModeState {
             diff_stop_tx: None,
             diff_task: None,
             working_dir: None,
+            repo_path: None,
         }
     }
 
     /// Open an agent in focus mode, replacing any existing panel.
+    #[allow(clippy::too_many_arguments)]
     pub fn open_agent(
         &mut self,
         agent_id: &str,
@@ -935,6 +954,8 @@ impl FocusModeState {
         cols: u16,
         rows: u16,
         working_dir: &str,
+        repo_path: Option<&str>,
+        branch_name: Option<&str>,
     ) {
         self.close_panel();
 
@@ -946,6 +967,7 @@ impl FocusModeState {
         self.diff_scroll = 0;
         self.diff_error = None;
         self.working_dir = Some(working_dir.to_string());
+        self.repo_path = repo_path.map(|s| s.to_string());
 
         let id = agent_id.to_string();
         let binary = agent_binary.to_string();
@@ -960,7 +982,8 @@ impl FocusModeState {
         self.panel = Some(AgentPanel {
             id,
             agent_binary: binary,
-            branch_name: None,
+            branch_name: branch_name.map(|s| s.to_string()),
+            repo_path: repo_path.map(|s| s.to_string()),
             vterm: TerminalEmulator::new(cols as usize, rows as usize),
             command_tx,
             exited: false,
@@ -1119,11 +1142,12 @@ impl FocusModeState {
         self.diff_scroll = 0;
         self.diff_error = None;
         self.working_dir = None;
+        self.repo_path = None;
     }
 }
 
 /// Render the focus mode view: 60% left panel with tabs, 40% agent panel right.
-pub fn render_focus_mode(frame: &mut Frame, area: Rect, state: &mut FocusModeState, click_map: &mut ClickMap) {
+pub fn render_focus_mode(frame: &mut Frame, area: Rect, state: &mut FocusModeState, click_map: &mut ClickMap, repo_colors: &HashMap<String, String>) {
     let [left_area, right_area] = Layout::horizontal([
         Constraint::Percentage(60),
         Constraint::Percentage(40),
@@ -1138,8 +1162,11 @@ pub fn render_focus_mode(frame: &mut Frame, area: Rect, state: &mut FocusModeSta
 
     // Right side: agent panel or empty state
     let right_focused = state.focus_side == FocusSide::Right;
+    let panel_color = state.repo_path.as_ref()
+        .and_then(|rp| repo_colors.get(rp.as_str()))
+        .map(|cn| theme::repo_color(cn));
     match &mut state.panel {
-        Some(panel) => render_agent_panel(frame, right_area, panel, right_focused),
+        Some(panel) => render_agent_panel(frame, right_area, panel, right_focused, true, panel_color),
         None => render_empty_state(frame, right_area),
     }
 }

@@ -698,8 +698,9 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                     &focus_mode_state,
                     cur_tab,
                     &mut click_map,
+                    &repo_colors,
                 );
-                overview::render_focus_mode(frame, content_area, &mut focus_mode_state, &mut click_map);
+                overview::render_focus_mode(frame, content_area, &mut focus_mode_state, &mut click_map, &repo_colors);
             } else {
                 render_tab_bar(frame, header_area, cur_tab, &mut click_map);
 
@@ -738,10 +739,31 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                         );
                     }
                     ActiveTab::Overview => {
-                        overview::render_overview(frame, content_area, &mut overview_state, &mut click_map);
+                        overview::render_overview(frame, content_area, &mut overview_state, &mut click_map, &repo_colors);
                     }
                 }
             }
+
+            // Resolve focused agent info for status bar
+            let focused_agent_info: Option<(String, ratatui::style::Color, String)> = if cur_focus_mode {
+                state_to_agent_info(&focus_mode_state, &repo_colors)
+            } else if let OverviewFocus::Terminal(idx) = overview_focus {
+                overview_state.panels.get(idx).and_then(|panel| {
+                    let rp = panel.repo_path.as_ref()?;
+                    let repo_display = std::path::Path::new(rp)
+                        .file_name()
+                        .map(|n| n.to_string_lossy().into_owned())
+                        .unwrap_or_else(|| rp.clone());
+                    let repo_clr = repo_colors
+                        .get(rp.as_str())
+                        .map(|c| theme::repo_color(c))
+                        .unwrap_or(theme::R_ACCENT);
+                    let branch = panel.branch_name.clone().unwrap_or_default();
+                    Some((repo_display, repo_clr, branch))
+                })
+            } else {
+                None
+            };
 
             render_status_bar(
                 frame,
@@ -752,6 +774,7 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                 cur_tab,
                 cur_focus_mode,
                 overview_focus,
+                focused_agent_info.as_ref(),
             );
 
             if let Some(ref menu_state) = menu_ref {
@@ -801,6 +824,8 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                                 fm_cols,
                                                 fm_rows,
                                                 &working_dir,
+                                                agent.repo_path.as_deref(),
+                                                agent.branch_name.as_deref(),
                                             );
                                             in_focus_mode = true;
                                         }
@@ -966,11 +991,16 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                             let agent_id = panel.id.clone();
                                             let agent_binary =
                                                 panel.agent_binary.clone();
-                                            let working_dir = agents
+                                            let found = agents
                                                 .iter()
-                                                .find(|a| a.id == agent_id)
+                                                .find(|a| a.id == agent_id);
+                                            let working_dir = found
                                                 .map(|a| a.working_dir.clone())
                                                 .unwrap_or_default();
+                                            let repo_path = found
+                                                .and_then(|a| a.repo_path.clone());
+                                            let branch_name = found
+                                                .and_then(|a| a.branch_name.clone());
                                             let fm_cols = (last_content_area.width
                                                 * 40
                                                 / 100)
@@ -986,6 +1016,8 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                                 fm_cols,
                                                 fm_rows,
                                                 &working_dir,
+                                                repo_path.as_deref(),
+                                                branch_name.as_deref(),
                                             );
                                             in_focus_mode = true;
                                         }
@@ -1166,6 +1198,8 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                                                     fm_cols,
                                                                     fm_rows,
                                                                     &agent.working_dir,
+                                                                    agent.repo_path.as_deref(),
+                                                                    agent.branch_name.as_deref(),
                                                                 );
                                                                 in_focus_mode = true;
                                                             } else if matching.len() > 1 {
@@ -1193,6 +1227,8 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                                     agent.agent_binary.clone();
                                                 let working_dir =
                                                     agent.working_dir.clone();
+                                                let agent_repo_path = agent.repo_path.clone();
+                                                let agent_branch = agent.branch_name.clone();
                                                 let fm_cols = (last_content_area.width
                                                     * 40
                                                     / 100)
@@ -1208,6 +1244,8 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                                     fm_cols,
                                                     fm_rows,
                                                     &working_dir,
+                                                    agent_repo_path.as_deref(),
+                                                    agent_branch.as_deref(),
                                                 );
                                                 in_focus_mode = true;
                                             }
@@ -1632,6 +1670,7 @@ fn render_focus_back_bar(
     state: &overview::FocusModeState,
     origin_tab: ActiveTab,
     click_map: &mut ClickMap,
+    repo_colors: &HashMap<String, String>,
 ) {
     let bg = Style::default().bg(theme::R_BG_RAISED);
     let mut spans = Vec::new();
@@ -1685,6 +1724,36 @@ fn render_focus_back_bar(
                 .fg(theme::R_TEXT_TERTIARY)
                 .bg(theme::R_BG_RAISED),
         ));
+
+        // Repo name (colored) and branch
+        if let Some(ref repo_path) = state.repo_path {
+            let repo_display = std::path::Path::new(repo_path)
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_else(|| repo_path.clone());
+            let repo_clr = repo_colors
+                .get(repo_path.as_str())
+                .map(|c| theme::repo_color(c))
+                .unwrap_or(theme::R_ACCENT);
+            spans.push(Span::styled(
+                " \u{00b7} ",
+                Style::default()
+                    .fg(theme::R_TEXT_TERTIARY)
+                    .bg(theme::R_BG_RAISED),
+            ));
+            spans.push(Span::styled(
+                repo_display,
+                Style::default().fg(repo_clr).bg(theme::R_BG_RAISED),
+            ));
+        }
+        if let Some(ref branch) = panel.branch_name {
+            spans.push(Span::styled(
+                format!("/{branch}"),
+                Style::default()
+                    .fg(theme::R_TEXT_SECONDARY)
+                    .bg(theme::R_BG_RAISED),
+            ));
+        }
     }
 
     // Right: keyboard hints
@@ -2341,7 +2410,7 @@ fn render_agent_list_by_repo(
         let is_no_repo = repo == NO_REPOSITORY;
         if !hide_headers {
             if ridx > 0 {
-                constraints.push(Constraint::Length(1)); // gap before repo header
+                constraints.push(Constraint::Length(2)); // empty line gap between repos
             }
             constraints.push(Constraint::Length(1)); // repo header
         }
@@ -2391,9 +2460,9 @@ fn render_agent_list_by_repo(
         let is_no_repo = repo == NO_REPOSITORY;
         if !hide_headers {
             if gidx > 0 {
-                area_idx += 1; // skip gap before repo header
+                area_idx += 2; // skip empty line gap between repos
             }
-            // Repo header — show just the repo name (last path component)
+            // Repo header — reverse video: repo color background, dark text
             let repo_display = std::path::Path::new(repo)
                 .file_name()
                 .map(|n| n.to_string_lossy().into_owned())
@@ -2403,12 +2472,15 @@ fn render_agent_list_by_repo(
                 .map(|c| theme::repo_color(c))
                 .unwrap_or(theme::R_ACCENT);
             let repo_header = Paragraph::new(Line::from(vec![
-                Span::styled("● ", Style::default().fg(header_color)),
                 Span::styled(
-                    repo_display,
-                    Style::default().fg(header_color).add_modifier(Modifier::BOLD),
+                    format!(" {repo_display} "),
+                    Style::default()
+                        .fg(theme::R_BG_BASE)
+                        .bg(header_color)
+                        .add_modifier(Modifier::BOLD),
                 ),
-            ]));
+            ]))
+            .style(Style::default().bg(header_color));
             frame.render_widget(repo_header, areas[area_idx]);
             area_idx += 1;
         }
@@ -2535,6 +2607,27 @@ fn render_agent_card(
     frame.render_widget(Paragraph::new(lines), inner);
 }
 
+fn state_to_agent_info(
+    state: &overview::FocusModeState,
+    repo_colors: &HashMap<String, String>,
+) -> Option<(String, ratatui::style::Color, String)> {
+    let rp = state.repo_path.as_ref()?;
+    let repo_display = std::path::Path::new(rp)
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| rp.clone());
+    let repo_clr = repo_colors
+        .get(rp.as_str())
+        .map(|c| theme::repo_color(c))
+        .unwrap_or(theme::R_ACCENT);
+    let branch = state
+        .panel
+        .as_ref()
+        .and_then(|p| p.branch_name.clone())
+        .unwrap_or_default();
+    Some((repo_display, repo_clr, branch))
+}
+
 #[allow(clippy::too_many_arguments)]
 fn render_status_bar(
     frame: &mut Frame,
@@ -2545,6 +2638,7 @@ fn render_status_bar(
     active_tab: ActiveTab,
     in_focus_mode: bool,
     overview_focus: OverviewFocus,
+    focused_agent_info: Option<&(String, ratatui::style::Color, String)>,
 ) {
     let bg = Style::default().bg(theme::R_BG_RAISED);
 
@@ -2571,6 +2665,23 @@ fn render_status_bar(
             hub_name.to_string(),
             Style::default().fg(theme::R_ACCENT).bg(theme::R_BG_RAISED),
         ));
+    }
+
+    // Focused agent: repo/branch
+    if let Some((repo_name, repo_clr, branch)) = focused_agent_info {
+        left_spans.push(Span::styled("  ", Style::default().bg(theme::R_BG_RAISED)));
+        left_spans.push(Span::styled(
+            repo_name.clone(),
+            Style::default().fg(*repo_clr).bg(theme::R_BG_RAISED),
+        ));
+        if !branch.is_empty() {
+            left_spans.push(Span::styled(
+                format!("/{branch}"),
+                Style::default()
+                    .fg(theme::R_TEXT_SECONDARY)
+                    .bg(theme::R_BG_RAISED),
+            ));
+        }
     }
 
     let hint_text = if in_focus_mode {
