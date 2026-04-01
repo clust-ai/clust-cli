@@ -13,7 +13,7 @@ use tokio::task::JoinHandle;
 
 use clust_ipc::{AgentInfo, CliMessage, HubMessage};
 
-use crate::{ipc, terminal_emulator::TerminalEmulator, theme};
+use crate::{ipc, terminal_emulator::TerminalEmulator, theme, ui::ClickMap};
 
 /// Minimum width in columns for a single agent panel.
 const MIN_PANEL_WIDTH: u16 = 40;
@@ -299,25 +299,6 @@ impl OverviewState {
         }
     }
 
-    /// Scroll the focused panel's scrollback up by N lines (for mouse wheel).
-    pub fn panel_scroll_up_lines(&mut self, n: usize) {
-        if let OverviewFocus::Terminal(idx) = self.focus {
-            if let Some(panel) = self.panels.get_mut(idx) {
-                let max = panel.vterm.scrollback_len();
-                panel.panel_scroll_offset = (panel.panel_scroll_offset + n).min(max);
-            }
-        }
-    }
-
-    /// Scroll the focused panel's scrollback down by N lines (for mouse wheel).
-    pub fn panel_scroll_down_lines(&mut self, n: usize) {
-        if let OverviewFocus::Terminal(idx) = self.focus {
-            if let Some(panel) = self.panels.get_mut(idx) {
-                panel.panel_scroll_offset = panel.panel_scroll_offset.saturating_sub(n);
-            }
-        }
-    }
-
     /// Scroll viewport left.
     pub fn scroll_left(&mut self) {
         if self.scroll_offset > 0 {
@@ -598,7 +579,7 @@ async fn agent_connection_task(
 // Rendering
 // ---------------------------------------------------------------------------
 
-pub fn render_overview(frame: &mut Frame, area: Rect, state: &mut OverviewState) {
+pub fn render_overview(frame: &mut Frame, area: Rect, state: &mut OverviewState, click_map: &mut ClickMap) {
     // Split into options bar (1 row) + panels area
     let [options_area, panels_area] = Layout::vertical([
         Constraint::Length(1),
@@ -638,6 +619,7 @@ pub fn render_overview(frame: &mut Frame, area: Rect, state: &mut OverviewState)
     for (i, panel) in state.panels[scroll_offset..end].iter_mut().enumerate() {
         let global_idx = scroll_offset + i;
         let is_focused = matches!(focus, OverviewFocus::Terminal(idx) if idx == global_idx);
+        click_map.overview_panels.push((panel_areas[i], global_idx));
         render_agent_panel(frame, panel_areas[i], panel, is_focused);
     }
 
@@ -1102,15 +1084,18 @@ impl FocusModeState {
 }
 
 /// Render the focus mode view: 60% left panel with tabs, 40% agent panel right.
-pub fn render_focus_mode(frame: &mut Frame, area: Rect, state: &mut FocusModeState) {
+pub fn render_focus_mode(frame: &mut Frame, area: Rect, state: &mut FocusModeState, click_map: &mut ClickMap) {
     let [left_area, right_area] = Layout::horizontal([
         Constraint::Percentage(60),
         Constraint::Percentage(40),
     ])
     .areas(area);
 
+    click_map.focus_left_area = left_area;
+    click_map.focus_right_area = right_area;
+
     // Left side: tab bar + content
-    render_left_panel(frame, left_area, state);
+    render_left_panel(frame, left_area, state, click_map);
 
     // Right side: agent panel or empty state
     let right_focused = state.focus_side == FocusSide::Right;
@@ -1120,7 +1105,7 @@ pub fn render_focus_mode(frame: &mut Frame, area: Rect, state: &mut FocusModeSta
     }
 }
 
-fn render_left_panel(frame: &mut Frame, area: Rect, state: &FocusModeState) {
+fn render_left_panel(frame: &mut Frame, area: Rect, state: &FocusModeState, click_map: &mut ClickMap) {
     if area.height < 2 {
         frame.render_widget(
             Block::default().style(Style::default().bg(theme::R_BG_BASE)),
@@ -1137,7 +1122,7 @@ fn render_left_panel(frame: &mut Frame, area: Rect, state: &FocusModeState) {
 
     // Render tab bar
     let left_focused = state.focus_side == FocusSide::Left;
-    render_left_tab_bar(frame, tab_area, state.left_tab, left_focused);
+    render_left_tab_bar(frame, tab_area, state.left_tab, left_focused, click_map);
 
     // Render active tab content
     match state.left_tab {
@@ -1162,8 +1147,10 @@ fn render_left_tab_bar(
     area: Rect,
     active: LeftPanelTab,
     panel_focused: bool,
+    click_map: &mut ClickMap,
 ) {
     let mut spans = Vec::new();
+    let mut cursor_x = area.x;
 
     for (i, tab) in LeftPanelTab::all().iter().enumerate() {
         if i > 0 {
@@ -1173,6 +1160,7 @@ fn render_left_tab_bar(
                     .fg(theme::R_TEXT_TERTIARY)
                     .bg(theme::R_BG_SURFACE),
             ));
+            cursor_x += 1;
         }
 
         let is_active = *tab == active;
@@ -1193,7 +1181,15 @@ fn render_left_tab_bar(
             Style::default().fg(fg).bg(bg)
         };
 
-        spans.push(Span::styled(format!(" {} ", tab.label()), style));
+        let label = format!(" {} ", tab.label());
+        let label_width = label.chars().count() as u16;
+        click_map.focus_left_tabs.push((
+            Rect { x: cursor_x, y: area.y, width: label_width, height: 1 },
+            *tab,
+        ));
+        cursor_x += label_width;
+
+        spans.push(Span::styled(label, style));
     }
 
     // Fill rest with background

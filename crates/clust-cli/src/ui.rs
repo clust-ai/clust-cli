@@ -4,12 +4,12 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use crossterm::{
-    event::{self, Event, KeyCode, KeyEventKind, KeyModifiers, MouseEvent, MouseEventKind, EnableMouseCapture, DisableMouseCapture, EnableFocusChange, DisableFocusChange},
+    event::{self, Event, KeyCode, KeyEventKind, KeyModifiers, MouseButton, MouseEvent, MouseEventKind, EnableMouseCapture, DisableMouseCapture, EnableFocusChange, DisableFocusChange},
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
     ExecutableCommand,
 };
 use ratatui::{
-    layout::{Alignment, Constraint, Flex, Layout, Rect},
+    layout::{Alignment, Constraint, Flex, Layout, Position, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
     widgets::{Block, Borders, Clear, Padding, Paragraph},
@@ -103,6 +103,41 @@ enum AgentViewMode {
     ByHub,
     /// Group agents by their git repository path (default).
     ByRepo,
+}
+
+// ---------------------------------------------------------------------------
+// Click map – populated during rendering, consumed during mouse handling
+// ---------------------------------------------------------------------------
+
+/// Identifies which tree item a display line corresponds to.
+#[derive(Clone, Debug)]
+enum TreeClickTarget {
+    Repo(usize),
+    Category(usize, usize),
+    Branch(usize, usize, usize),
+}
+
+/// Accumulates clickable regions during rendering so the mouse handler can
+/// map a click position to a UI action.
+#[derive(Default)]
+pub(crate) struct ClickMap {
+    // Tab bar
+    tabs: Vec<(Rect, ActiveTab)>,
+
+    // Repositories tab
+    left_panel_area: Rect,
+    right_panel_area: Rect,
+    tree_items: Vec<TreeClickTarget>,
+    tree_inner_area: Rect,
+    agent_cards: Vec<(Rect, usize, usize)>, // (area, group_idx, agent_idx)
+
+    // Overview tab
+    pub(crate) overview_panels: Vec<(Rect, usize)>, // (area, global_panel_idx)
+
+    // Focus mode
+    pub(crate) focus_left_area: Rect,
+    pub(crate) focus_right_area: Rect,
+    pub(crate) focus_left_tabs: Vec<(Rect, overview::LeftPanelTab)>,
 }
 
 // ---------------------------------------------------------------------------
@@ -608,6 +643,8 @@ pub fn run(hub_name: &str) -> io::Result<()> {
         let overview_focus = overview_state.focus;
         let show_help_now = show_help;
 
+        let mut click_map = ClickMap::default();
+
         terminal.draw(|frame| {
             let area = frame.area();
 
@@ -621,7 +658,7 @@ pub fn run(hub_name: &str) -> io::Result<()> {
 
             last_content_area = content_area;
 
-            render_tab_bar(frame, tab_bar_area, cur_tab);
+            render_tab_bar(frame, tab_bar_area, cur_tab, &mut click_map);
 
             match cur_tab {
                 ActiveTab::Repositories => {
@@ -633,12 +670,16 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                     ])
                     .areas(content_area);
 
+                    click_map.left_panel_area = left_area;
+                    click_map.right_panel_area = right_area;
+
                     render_left_panel(
                         frame,
                         left_area,
                         &display_repos,
                         &selection,
                         cur_focus == FocusPanel::Left,
+                        &mut click_map,
                     );
                     render_divider(frame, divider_area);
                     render_right_panel(
@@ -648,13 +689,14 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                         &agent_selection,
                         cur_focus == FocusPanel::Right,
                         agent_view_mode,
+                        &mut click_map,
                     );
                 }
                 ActiveTab::Overview => {
-                    overview::render_overview(frame, content_area, &mut overview_state);
+                    overview::render_overview(frame, content_area, &mut overview_state, &mut click_map);
                 }
                 ActiveTab::FocusMode => {
-                    overview::render_focus_mode(frame, content_area, &mut focus_mode_state);
+                    overview::render_focus_mode(frame, content_area, &mut focus_mode_state, &mut click_map);
                 }
             }
 
@@ -1106,37 +1148,132 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                         }
                     }
                 }
-                Event::Mouse(MouseEvent { kind: MouseEventKind::ScrollUp, .. }) => {
-                    if active_tab == ActiveTab::Overview {
-                        overview_state.panel_scroll_up_lines(3);
-                    } else if active_tab == ActiveTab::FocusMode
-                        && focus_mode_state.is_active()
-                    {
-                        if focus_mode_state.focus_side == overview::FocusSide::Right {
-                            if let Some(panel) = &mut focus_mode_state.panel {
-                                let max = panel.vterm.scrollback_len();
-                                panel.panel_scroll_offset =
-                                    (panel.panel_scroll_offset + 3).min(max);
+                Event::Mouse(MouseEvent { kind: MouseEventKind::Down(MouseButton::Left), column, row, .. }) => {
+                    let pos = Position { x: column, y: row };
+
+                    // Tab bar clicks — always active
+                    if let Some((_, tab)) = click_map.tabs.iter().find(|(r, _)| r.contains(pos)) {
+                        active_tab = *tab;
+                    } else {
+                        match active_tab {
+                            ActiveTab::Repositories => {
+                                // Tree item clicks (left panel)
+                                if click_map.tree_inner_area.contains(pos) {
+                                    let line_idx = (row - click_map.tree_inner_area.y) as usize;
+                                    if let Some(target) = click_map.tree_items.get(line_idx) {
+                                        match target {
+                                            TreeClickTarget::Repo(ri) => {
+                                                if selection.level == TreeLevel::Repo && selection.repo_idx == *ri {
+                                                    selection.toggle_collapse();
+                                                } else {
+                                                    selection.repo_idx = *ri;
+                                                    selection.level = TreeLevel::Repo;
+                                                }
+                                            }
+                                            TreeClickTarget::Category(ri, ci) => {
+                                                if selection.level == TreeLevel::Category
+                                                    && selection.repo_idx == *ri
+                                                    && selection.category_idx == *ci
+                                                {
+                                                    selection.toggle_collapse();
+                                                } else {
+                                                    selection.repo_idx = *ri;
+                                                    selection.category_idx = *ci;
+                                                    selection.level = TreeLevel::Category;
+                                                }
+                                            }
+                                            TreeClickTarget::Branch(ri, ci, bi) => {
+                                                selection.repo_idx = *ri;
+                                                selection.category_idx = *ci;
+                                                selection.branch_idx = *bi;
+                                                selection.level = TreeLevel::Branch;
+                                            }
+                                        }
+                                        focus = FocusPanel::Left;
+                                    }
+                                }
+                                // Agent card clicks (right panel)
+                                else if let Some((_, gidx, aidx)) = click_map.agent_cards.iter().find(|(r, _, _)| r.contains(pos)) {
+                                    agent_selection.group_idx = *gidx;
+                                    agent_selection.agent_idx = *aidx;
+                                    focus = FocusPanel::Right;
+                                }
+                                // Panel focus switching (click anywhere in a panel)
+                                else if click_map.left_panel_area.contains(pos) {
+                                    focus = FocusPanel::Left;
+                                } else if click_map.right_panel_area.contains(pos) {
+                                    focus = FocusPanel::Right;
+                                }
                             }
-                        } else {
-                            focus_mode_state.diff_scroll_up();
+                            ActiveTab::Overview => {
+                                if let Some((_, idx)) = click_map.overview_panels.iter().find(|(r, _)| r.contains(pos)) {
+                                    overview_state.focus = overview::OverviewFocus::Terminal(*idx);
+                                }
+                            }
+                            ActiveTab::FocusMode => {
+                                // Left tab clicks
+                                if let Some((_, tab)) = click_map.focus_left_tabs.iter().find(|(r, _)| r.contains(pos)) {
+                                    focus_mode_state.left_tab = *tab;
+                                    focus_mode_state.focus_side = overview::FocusSide::Left;
+                                }
+                                // Panel focus switching
+                                else if click_map.focus_left_area.contains(pos) {
+                                    focus_mode_state.focus_side = overview::FocusSide::Left;
+                                } else if click_map.focus_right_area.contains(pos) {
+                                    focus_mode_state.focus_side = overview::FocusSide::Right;
+                                }
+                            }
                         }
                     }
                 }
-                Event::Mouse(MouseEvent { kind: MouseEventKind::ScrollDown, .. }) => {
-                    if active_tab == ActiveTab::Overview {
-                        overview_state.panel_scroll_down_lines(3);
-                    } else if active_tab == ActiveTab::FocusMode
-                        && focus_mode_state.is_active()
-                    {
-                        if focus_mode_state.focus_side == overview::FocusSide::Right {
-                            if let Some(panel) = &mut focus_mode_state.panel {
-                                panel.panel_scroll_offset =
-                                    panel.panel_scroll_offset.saturating_sub(3);
+                Event::Mouse(MouseEvent { kind: MouseEventKind::ScrollUp, column, row, .. }) => {
+                    let pos = Position { x: column, y: row };
+                    match active_tab {
+                        ActiveTab::Overview => {
+                            // Scroll the panel under cursor
+                            if let Some((_, idx)) = click_map.overview_panels.iter().find(|(r, _)| r.contains(pos)) {
+                                if let Some(panel) = overview_state.panels.get_mut(*idx) {
+                                    let max = panel.vterm.scrollback_len();
+                                    panel.panel_scroll_offset = (panel.panel_scroll_offset + 3).min(max);
+                                }
                             }
-                        } else {
-                            focus_mode_state.diff_scroll_down();
                         }
+                        ActiveTab::FocusMode if focus_mode_state.is_active() => {
+                            if click_map.focus_right_area.contains(pos) {
+                                if let Some(panel) = &mut focus_mode_state.panel {
+                                    let max = panel.vterm.scrollback_len();
+                                    panel.panel_scroll_offset =
+                                        (panel.panel_scroll_offset + 3).min(max);
+                                }
+                            } else if click_map.focus_left_area.contains(pos) {
+                                focus_mode_state.diff_scroll_up();
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                Event::Mouse(MouseEvent { kind: MouseEventKind::ScrollDown, column, row, .. }) => {
+                    let pos = Position { x: column, y: row };
+                    match active_tab {
+                        ActiveTab::Overview => {
+                            if let Some((_, idx)) = click_map.overview_panels.iter().find(|(r, _)| r.contains(pos)) {
+                                if let Some(panel) = overview_state.panels.get_mut(*idx) {
+                                    panel.panel_scroll_offset =
+                                        panel.panel_scroll_offset.saturating_sub(3);
+                                }
+                            }
+                        }
+                        ActiveTab::FocusMode if focus_mode_state.is_active() => {
+                            if click_map.focus_right_area.contains(pos) {
+                                if let Some(panel) = &mut focus_mode_state.panel {
+                                    panel.panel_scroll_offset =
+                                        panel.panel_scroll_offset.saturating_sub(3);
+                                }
+                            } else if click_map.focus_left_area.contains(pos) {
+                                focus_mode_state.diff_scroll_down();
+                            }
+                        }
+                        _ => {}
                     }
                 }
                 _ => {}
@@ -1174,15 +1311,17 @@ pub fn run(hub_name: &str) -> io::Result<()> {
 // Rendering functions
 // ---------------------------------------------------------------------------
 
-fn render_tab_bar(frame: &mut Frame, area: Rect, active_tab: ActiveTab) {
+fn render_tab_bar(frame: &mut Frame, area: Rect, active_tab: ActiveTab, click_map: &mut ClickMap) {
     let tabs = [
         ActiveTab::Repositories,
         ActiveTab::Overview,
         ActiveTab::FocusMode,
     ];
     let mut spans = Vec::new();
+    let mut cursor_x = area.x;
 
     spans.push(Span::styled(" ", Style::default().bg(theme::R_BG_RAISED)));
+    cursor_x += 1;
 
     for (i, tab) in tabs.iter().enumerate() {
         if i > 0 {
@@ -1192,6 +1331,7 @@ fn render_tab_bar(frame: &mut Frame, area: Rect, active_tab: ActiveTab) {
                     .fg(theme::R_TEXT_TERTIARY)
                     .bg(theme::R_BG_RAISED),
             ));
+            cursor_x += 3;
         }
 
         let (fg, bg) = if *tab == active_tab {
@@ -1200,10 +1340,15 @@ fn render_tab_bar(frame: &mut Frame, area: Rect, active_tab: ActiveTab) {
             (theme::R_TEXT_SECONDARY, theme::R_BG_RAISED)
         };
 
-        spans.push(Span::styled(
-            format!(" {} ", tab.label()),
-            Style::default().fg(fg).bg(bg),
+        let label = format!(" {} ", tab.label());
+        let label_width = label.chars().count() as u16;
+        click_map.tabs.push((
+            Rect { x: cursor_x, y: area.y, width: label_width, height: 1 },
+            *tab,
         ));
+        cursor_x += label_width;
+
+        spans.push(Span::styled(label, Style::default().fg(fg).bg(bg)));
     }
 
     // Tab switching hint
@@ -1240,6 +1385,7 @@ fn render_left_panel(
     repos: &[RepoInfo],
     selection: &TreeSelection,
     focused: bool,
+    click_map: &mut ClickMap,
 ) {
     let block = Block::default()
         .style(Style::default().bg(theme::R_BG_SURFACE))
@@ -1261,8 +1407,9 @@ fn render_left_panel(
 
         frame.render_widget(text, centered);
     } else {
-        let mut lines = vec![];
-        lines.extend(build_repo_tree_lines(repos, selection, inner.width));
+        let (lines, targets) = build_repo_tree_lines(repos, selection, inner.width);
+        click_map.tree_inner_area = inner;
+        click_map.tree_items = targets;
         let paragraph = Paragraph::new(lines);
         frame.render_widget(paragraph, inner);
     }
@@ -1291,8 +1438,9 @@ fn build_repo_tree_lines(
     repos: &[RepoInfo],
     selection: &TreeSelection,
     width: u16,
-) -> Vec<Line<'static>> {
+) -> (Vec<Line<'static>>, Vec<TreeClickTarget>) {
     let mut lines = Vec::new();
+    let mut targets = Vec::new();
 
     for (repo_idx, repo) in repos.iter().enumerate() {
         let is_this_repo = repo_idx == selection.repo_idx;
@@ -1316,6 +1464,7 @@ fn build_repo_tree_lines(
             style = style.bg(bg_color);
         }
         lines.push(pad_line(vec![Span::styled(text, style)], width, bg));
+        targets.push(TreeClickTarget::Repo(repo_idx));
 
         // Skip children if repo is collapsed
         if repo_collapsed {
@@ -1363,6 +1512,7 @@ fn build_repo_tree_lines(
                 }
                 spans.push(Span::styled(agent.name.clone(), name_style));
                 lines.push(pad_line(spans, width, bg));
+                targets.push(TreeClickTarget::Branch(repo_idx, 0, i));
             }
             continue;
         }
@@ -1400,6 +1550,7 @@ fn build_repo_tree_lines(
                 width,
                 cat_bg,
             ));
+            targets.push(TreeClickTarget::Category(repo_idx, 0));
 
             if !local_cat_collapsed {
                 let continuation = if has_remote { "│" } else { " " };
@@ -1417,6 +1568,7 @@ fn build_repo_tree_lines(
                         branch_selected,
                         width,
                     ));
+                    targets.push(TreeClickTarget::Branch(repo_idx, 0, i));
                 }
             }
         }
@@ -1448,6 +1600,7 @@ fn build_repo_tree_lines(
                 width,
                 cat_bg,
             ));
+            targets.push(TreeClickTarget::Category(repo_idx, 1));
 
             if !remote_cat_collapsed {
                 for (i, branch) in repo.remote_branches.iter().enumerate() {
@@ -1464,13 +1617,14 @@ fn build_repo_tree_lines(
                         branch_selected,
                         width,
                     ));
+                    targets.push(TreeClickTarget::Branch(repo_idx, 1, i));
                 }
             }
         }
 
     }
 
-    lines
+    (lines, targets)
 }
 
 fn format_branch_line(
@@ -1556,6 +1710,7 @@ fn render_right_panel(
     agent_sel: &AgentSelection,
     focused: bool,
     mode: AgentViewMode,
+    click_map: &mut ClickMap,
 ) {
     frame.render_widget(
         Block::default().style(Style::default().bg(theme::R_BG_BASE)),
@@ -1583,7 +1738,7 @@ fn render_right_panel(
         };
         frame.render_widget(indicator, indicator_area);
     } else {
-        render_agent_list(frame, area, agents, agent_sel, focused, mode);
+        render_agent_list(frame, area, agents, agent_sel, focused, mode, click_map);
     }
 }
 
@@ -1641,6 +1796,7 @@ fn render_agent_list(
     agent_sel: &AgentSelection,
     focused: bool,
     mode: AgentViewMode,
+    click_map: &mut ClickMap,
 ) {
     let block = Block::default().padding(Padding::new(2, 2, 1, 0));
 
@@ -1668,14 +1824,15 @@ fn render_agent_list(
 
     match mode {
         AgentViewMode::ByHub => render_agent_list_by_hub(
-            frame, inner, agents, agent_sel, focused, &mode_line, &indicator,
+            frame, inner, agents, agent_sel, focused, &mode_line, &indicator, click_map,
         ),
         AgentViewMode::ByRepo => render_agent_list_by_repo(
-            frame, inner, agents, agent_sel, focused, &mode_line, &indicator,
+            frame, inner, agents, agent_sel, focused, &mode_line, &indicator, click_map,
         ),
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn render_agent_list_by_hub(
     frame: &mut Frame,
     inner: Rect,
@@ -1684,6 +1841,7 @@ fn render_agent_list_by_hub(
     focused: bool,
     mode_line: &Paragraph<'_>,
     indicator: &Paragraph<'_>,
+    click_map: &mut ClickMap,
 ) {
     let mut sorted: Vec<&AgentInfo> = agents.iter().collect();
     sorted.sort_by(|a, b| a.hub.cmp(&b.hub).then(a.started_at.cmp(&b.started_at)));
@@ -1752,6 +1910,7 @@ fn render_agent_list_by_hub(
         let agent_count = agents_in_hub.len();
         for (aidx, agent) in agents_in_hub {
             let is_selected = focused && pidx == agent_sel.group_idx && aidx == agent_sel.agent_idx;
+            click_map.agent_cards.push((areas[area_idx], pidx, aidx));
             render_agent_card(frame, areas[area_idx], agent, is_selected, false);
             area_idx += 1;
             if aidx < agent_count - 1 {
@@ -1761,6 +1920,7 @@ fn render_agent_list_by_hub(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn render_agent_list_by_repo(
     frame: &mut Frame,
     inner: Rect,
@@ -1769,6 +1929,7 @@ fn render_agent_list_by_repo(
     focused: bool,
     mode_line: &Paragraph<'_>,
     indicator: &Paragraph<'_>,
+    click_map: &mut ClickMap,
 ) {
     let mut sorted: Vec<&AgentInfo> = agents.iter().collect();
     sorted.sort_by(|a, b| {
@@ -1888,6 +2049,7 @@ fn render_agent_list_by_repo(
             for (bidx, agent) in branch_agents.into_iter().enumerate() {
                 let is_selected =
                     focused && gidx == agent_sel.group_idx && flat_agent_idx == agent_sel.agent_idx;
+                click_map.agent_cards.push((areas[area_idx], gidx, flat_agent_idx));
                 render_agent_card(
                     frame,
                     areas[area_idx],
@@ -2223,7 +2385,7 @@ mod tests {
     #[test]
     fn tree_empty_repos_produces_no_lines() {
         let sel = TreeSelection::default();
-        let lines = build_repo_tree_lines(&[], &sel, 80);
+        let (lines, _targets) = build_repo_tree_lines(&[], &sel, 80);
         assert!(lines.is_empty());
     }
 
@@ -2238,7 +2400,7 @@ mod tests {
             vec![],
         );
         let sel = TreeSelection::default();
-        let lines = build_repo_tree_lines(&[repo], &sel, 80);
+        let (lines, _targets) = build_repo_tree_lines(&[repo], &sel, 80);
 
         // Should have: repo name + "Local Branches" header + 2 branch lines
         assert_eq!(lines.len(), 4);
@@ -2268,7 +2430,7 @@ mod tests {
             vec![make_branch("origin/main", false, 0, false)],
         );
         let sel = TreeSelection::default();
-        let lines = build_repo_tree_lines(&[repo], &sel, 80);
+        let (lines, _targets) = build_repo_tree_lines(&[repo], &sel, 80);
 
         // repo name + local header + 1 local branch + remote header (collapsed by default)
         assert_eq!(lines.len(), 4);
@@ -2296,7 +2458,7 @@ mod tests {
             make_repo("beta", vec![make_branch("main", true, 0, false)], vec![]),
         ];
         let sel = TreeSelection::default();
-        let lines = build_repo_tree_lines(&repos, &sel, 80);
+        let (lines, _targets) = build_repo_tree_lines(&repos, &sel, 80);
 
         // alpha: name + header + branch = 3
         // beta: name + header + branch = 3
@@ -2522,7 +2684,7 @@ mod tests {
     fn tree_selected_repo_shows_expanded_chevron() {
         let repos = sample_repos();
         let sel = TreeSelection::default(); // repo 0 selected, expanded by default
-        let lines = build_repo_tree_lines(&repos, &sel, 80);
+        let (lines, _targets) = build_repo_tree_lines(&repos, &sel, 80);
         let first = lines[0]
             .spans
             .iter()
@@ -2538,7 +2700,7 @@ mod tests {
     fn tree_non_selected_repo_shows_expanded_chevron() {
         let repos = sample_repos();
         let sel = TreeSelection::default(); // repo 0 selected, not repo 1
-        let lines = build_repo_tree_lines(&repos, &sel, 80);
+        let (lines, _targets) = build_repo_tree_lines(&repos, &sel, 80);
         let beta_line = lines
             .iter()
             .find(|l| {
@@ -2559,7 +2721,7 @@ mod tests {
         let mut sel = TreeSelection::default();
         sel.descend(&repos); // -> Category
         sel.descend(&repos); // -> Branch 0 (main)
-        let lines = build_repo_tree_lines(&repos, &sel, 80);
+        let (lines, _targets) = build_repo_tree_lines(&repos, &sel, 80);
         // Branch line for "main" should have indicator
         let main_line = lines
             .iter()
@@ -2769,7 +2931,7 @@ mod tests {
         let mut sel = TreeSelection::default();
         sel.toggle_collapse(); // collapse repo 0
 
-        let lines = build_repo_tree_lines(&[repo], &sel, 80);
+        let (lines, _targets) = build_repo_tree_lines(&[repo], &sel, 80);
         // Only the repo header line should remain
         assert_eq!(lines.len(), 1);
         let text: String = lines[0].spans.iter().map(|s| s.content.as_ref()).collect();
@@ -2794,7 +2956,7 @@ mod tests {
         sel.descend(std::slice::from_ref(&repo)); // -> Category
         sel.toggle_collapse(); // collapse local category
 
-        let lines = build_repo_tree_lines(&[repo], &sel, 80);
+        let (lines, _targets) = build_repo_tree_lines(&[repo], &sel, 80);
         // repo header + category header (collapsed, no branches)
         assert_eq!(lines.len(), 2);
     }
