@@ -135,6 +135,7 @@ pub(crate) struct ClickMap {
     pub(crate) focus_left_area: Rect,
     pub(crate) focus_right_area: Rect,
     pub(crate) focus_left_tabs: Vec<(Rect, overview::LeftPanelTab)>,
+    focus_back_button: Rect,
 }
 
 // ---------------------------------------------------------------------------
@@ -692,6 +693,7 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                     header_area,
                     &focus_mode_state,
                     cur_tab,
+                    &mut click_map,
                 );
                 overview::render_focus_mode(frame, content_area, &mut focus_mode_state, &mut click_map);
             } else {
@@ -1317,7 +1319,15 @@ pub fn run(hub_name: &str) -> io::Result<()> {
 
                     if in_focus_mode {
                         // Focus mode click handling
-                        if let Some((_, tab)) = click_map.focus_left_tabs.iter().find(|(r, _)| r.contains(pos)) {
+                        if click_map.focus_back_button.contains(pos) {
+                            focus_mode_state.shutdown();
+                            in_focus_mode = false;
+                            if active_tab == ActiveTab::Overview
+                                && overview_state.initialized
+                            {
+                                overview_state.force_resize_all();
+                            }
+                        } else if let Some((_, tab)) = click_map.focus_left_tabs.iter().find(|(r, _)| r.contains(pos)) {
                             focus_mode_state.left_tab = *tab;
                             focus_mode_state.focus_side = overview::FocusSide::Left;
                         } else if click_map.focus_left_area.contains(pos) {
@@ -1525,9 +1535,11 @@ fn render_focus_back_bar(
     area: Rect,
     state: &overview::FocusModeState,
     origin_tab: ActiveTab,
+    click_map: &mut ClickMap,
 ) {
     let bg = Style::default().bg(theme::R_BG_RAISED);
     let mut spans = Vec::new();
+    let mut cursor_x = area.x;
 
     // Left: back indicator
     spans.push(Span::styled(
@@ -1543,12 +1555,24 @@ fn render_focus_back_bar(
             .bg(theme::R_BG_RAISED)
             .add_modifier(Modifier::BOLD),
     ));
+    let back_label = format!("  Back to {}", origin_tab.label());
     spans.push(Span::styled(
-        format!("  Back to {}", origin_tab.label()),
+        &back_label,
         Style::default()
             .fg(theme::R_TEXT_SECONDARY)
             .bg(theme::R_BG_RAISED),
     ));
+
+    // Record the entire back button region (arrow + Esc + label)
+    let back_width: u16 = spans.iter().map(|s| s.content.chars().count()).sum::<usize>() as u16;
+    click_map.focus_back_button = Rect {
+        x: cursor_x,
+        y: area.y,
+        width: back_width,
+        height: 1,
+    };
+    cursor_x += back_width;
+    let _ = cursor_x; // suppress unused warning
 
     // Center: agent info
     if let Some(panel) = &state.panel {
