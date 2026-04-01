@@ -1588,8 +1588,8 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                                 selection.level = TreeLevel::Branch;
                                             }
                                         }
-                                        focus = FocusPanel::Left;
                                     }
+                                    focus = FocusPanel::Left;
                                 }
                                 // Agent card clicks (right panel)
                                 else if let Some((_, gidx, aidx)) = click_map.agent_cards.iter().find(|(r, _, _)| r.contains(pos)) {

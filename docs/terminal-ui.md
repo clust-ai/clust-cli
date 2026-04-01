@@ -394,7 +394,7 @@ A `ClickMap` struct is populated during each render pass and consumed during mou
 | Left panel (anywhere) | Switch keyboard focus to left panel |
 | Right panel (anywhere) | Switch keyboard focus to right panel |
 
-Clicking a tree item also sets keyboard focus to the left panel. Clicking an agent card sets focus to the right panel.
+Clicking anywhere in the tree area (including empty space) sets keyboard focus to the left panel. Clicking an agent card sets focus to the right panel.
 
 **Overview tab:**
 
