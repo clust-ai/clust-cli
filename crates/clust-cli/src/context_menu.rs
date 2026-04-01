@@ -89,7 +89,8 @@ impl ContextMenu {
     }
 
     /// Render the context menu as a centered modal overlay.
-    pub fn render(&self, frame: &mut Frame, area: Rect) {
+    /// Returns `(modal_rect, inner_rect)` for mouse hit-testing.
+    pub fn render(&self, frame: &mut Frame, area: Rect) -> (Rect, Rect) {
         // Calculate dimensions
         let label_max: usize = self.items.iter().map(|i| i.label.chars().count()).max().unwrap_or(0);
         let title_len = self.title.chars().count();
@@ -181,6 +182,8 @@ impl ContextMenu {
             .collect();
 
         frame.render_widget(Paragraph::new(lines), inner);
+
+        (modal_rect, inner)
     }
 }
 
