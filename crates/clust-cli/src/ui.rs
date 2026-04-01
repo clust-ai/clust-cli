@@ -637,6 +637,8 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                 fm_cols,
                 fm_rows,
                 &result.working_dir,
+                None,
+                None,
             );
             in_focus_mode = true;
         }
@@ -1489,6 +1491,8 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                                 fm_cols,
                                                 fm_rows,
                                                 &working_dir,
+                                                agent.repo_path.as_deref(),
+                                                agent.branch_name.as_deref(),
                                             );
                                             in_focus_mode = true;
                                         }
