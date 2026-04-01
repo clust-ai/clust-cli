@@ -2559,7 +2559,7 @@ fn render_agent_list_by_repo(
         let is_no_repo = repo == NO_REPOSITORY;
         if !hide_headers {
             if gidx > 0 {
-                area_idx += 2; // skip empty line gap between repos
+                area_idx += 1; // skip empty line gap between repos
             }
             // Repo header — reverse video: repo color background, dark text
             let repo_display = std::path::Path::new(repo)
@@ -2783,19 +2783,20 @@ fn render_status_bar(
         }
     }
 
+    let mod_key = if cfg!(target_os = "macos") { "Opt" } else { "Alt" };
     let hint_text = if in_focus_mode {
-        "Shift+\u{2190}/\u{2192} switch panel  Shift+\u{2191}/\u{2193} jump file  Esc exit  Alt+E new agent"
+        format!("Shift+\u{2190}/\u{2192} switch panel  Shift+\u{2191}/\u{2193} jump file  Esc exit  {mod_key}+E new agent")
     } else if active_tab == ActiveTab::Overview {
         match overview_focus {
             OverviewFocus::Terminal(_) => {
-                "Shift+\u{2191} options  Shift+\u{2193} focus  Shift+\u{2190}/\u{2192} switch agent  Alt+E new agent"
+                format!("Shift+\u{2191} options  Shift+\u{2193} focus  Shift+\u{2190}/\u{2192} switch agent  {mod_key}+E new agent")
             }
             OverviewFocus::OptionsBar => {
-                "Shift+\u{2193} enter terminal  Shift+\u{2190}/\u{2192} scroll  Alt+E new agent  q quit  ? keys"
+                format!("Shift+\u{2193} enter terminal  Shift+\u{2190}/\u{2192} scroll  {mod_key}+E new agent  q quit  ? keys")
             }
         }
     } else {
-        "Alt+E new agent  q quit  Q stop+quit  ? keys"
+        format!("{mod_key}+E new agent  q quit  Q stop+quit  ? keys")
     };
 
     left_spans.extend([

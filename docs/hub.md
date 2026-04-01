@@ -135,7 +135,7 @@ When the hub receives a `CreateWorktreeAgent` message (sent from the TUI create-
 2. Spawn an agent in the new worktree directory (same logic as `StartAgent`).
 3. Return `WorktreeAgentStarted { id, agent_binary, working_dir }` to the CLI.
 
-This combines worktree creation and agent spawning into a single atomic operation, used by the `Alt+E` modal in the TUI.
+This combines worktree creation and agent spawning into a single atomic operation, used by the `Opt+E` / `Alt+E` modal in the TUI.
 
 ### Repository Resolution
 
