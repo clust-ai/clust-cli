@@ -140,7 +140,7 @@ Hub -> CLI:
   WorktreeAdded { branch_name: String, path: String }
   WorktreeRemoved { branch_name: String, stopped_agents: usize }
   WorktreeInfoResult { info: WorktreeEntry }
-  WorktreeAgentStarted { id: String, agent_binary: String, working_dir: String }
+  WorktreeAgentStarted { id: String, agent_binary: String, working_dir: String, repo_path: Option<String>, branch_name: Option<String> }
 ```
 
 ### Connection Lifecycle

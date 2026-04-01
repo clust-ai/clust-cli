@@ -154,6 +154,8 @@ pub enum HubMessage {
         id: String,
         agent_binary: String,
         working_dir: String,
+        repo_path: Option<String>,
+        branch_name: Option<String>,
     },
 }
 
@@ -966,6 +968,8 @@ mod tests {
             id: "abc123".into(),
             agent_binary: "claude".into(),
             working_dir: "/home/user/project/.clust/worktrees/feature__foo".into(),
+            repo_path: Some("/home/user/project".into()),
+            branch_name: Some("feature/foo".into()),
         })
         .await;
     }
