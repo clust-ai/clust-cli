@@ -83,6 +83,102 @@ clust ui
 
 `clust .` is an alias for `clust ui`.
 
+### `clust wt` / `clust worktree`
+
+Git worktree management. All subcommands operate on the repository detected from the current directory, or on a registered repository specified by `-r/--repo`.
+
+```
+clust wt [OPTIONS] <COMMAND>
+```
+
+| Flag | Long | Description |
+|------|------|-------------|
+| `-r` | `--repo <NAME>` | Target a registered repo by name instead of using the current working directory. |
+
+#### `clust wt ls`
+
+List all worktrees in the repository. Shows branch name, active agent count, dirty status, and the main worktree indicator.
+
+```
+clust wt ls
+clust wt ls -r my-repo
+```
+
+#### `clust wt add`
+
+Create a new worktree. Creates a new branch by default, or checks out an existing branch with `--checkout`.
+
+```
+clust wt add <NAME> [OPTIONS]
+```
+
+| Argument | Description |
+|----------|-------------|
+| `NAME` | Branch name for the new worktree. |
+
+| Flag | Long | Description |
+|------|------|-------------|
+| `-b` | `--branch <BASE>` | Base branch to create from (default: current HEAD). |
+| | `--checkout` | Check out an existing branch instead of creating a new one. |
+| `-p` | `--prompt [PROMPT]` | Start an agent in the new worktree. Optionally pass a prompt string. |
+
+```bash
+# Create worktree with new branch
+clust wt add feature/auth
+
+# Create from a specific base branch
+clust wt add feature/auth -b develop
+
+# Check out an existing branch
+clust wt add feature/auth --checkout
+
+# Create worktree and start an agent in it
+clust wt add feature/auth -p "implement auth module"
+
+# Create worktree and start agent with no prompt
+clust wt add feature/auth -p
+```
+
+#### `clust wt rm`
+
+Remove a worktree. Refuses to remove dirty worktrees unless `--force` is used.
+
+```
+clust wt rm [OPTIONS]
+```
+
+| Flag | Long | Description |
+|------|------|-------------|
+| `-b` | `--branch <NAME>` | Target branch (default: current worktree's branch). |
+| `-l` | `--local` | Also delete the local branch after removing the worktree. |
+| | `--force` | Force remove even if the worktree has uncommitted changes. |
+
+```bash
+# Remove current worktree
+clust wt rm
+
+# Remove a specific worktree by branch
+clust wt rm -b feature/auth
+
+# Remove and delete the local branch
+clust wt rm -l
+
+# Force remove dirty worktree
+clust wt rm --force
+```
+
+#### `clust wt info`
+
+Show detailed information about a specific worktree, including path, dirty status, and active agents.
+
+```
+clust wt info <NAME>
+```
+
+| Argument | Description |
+|----------|-------------|
+| `NAME` | Branch name of the worktree to inspect. |
+
 ### `clust repo`
 
 Repository management.
@@ -165,6 +261,37 @@ clust repo -s
 # Open terminal UI
 clust ui
 clust .
+
+# List worktrees
+clust wt ls
+clust worktree ls
+
+# List worktrees for a specific registered repo
+clust wt ls -r my-repo
+
+# Create a new worktree
+clust wt add feature/auth
+
+# Create worktree from a base branch
+clust wt add feature/auth -b develop
+
+# Check out existing branch as worktree
+clust wt add feature/auth --checkout
+
+# Create worktree and start agent with prompt
+clust wt add feature/auth -p "implement auth"
+
+# Remove current worktree
+clust wt rm
+
+# Remove worktree by branch and delete the local branch
+clust wt rm -b feature/auth -l
+
+# Force remove dirty worktree
+clust wt rm --force
+
+# Show worktree details
+clust wt info feature/auth
 
 # Show help
 clust -h
