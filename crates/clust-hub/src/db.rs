@@ -105,7 +105,10 @@ fn migrate_v3(conn: &Connection) -> Result<(), String> {
 }
 
 /// Available colors for repository identification.
-pub const REPO_COLORS: &[&str] = &["purple", "blue", "green", "teal", "orange", "yellow"];
+pub const REPO_COLORS: &[&str] = &[
+    "red", "orange", "yellow", "lime", "green",
+    "teal", "blue", "purple", "pink", "coral",
+];
 
 /// Register a repository path with a color. Silently ignores duplicates.
 pub fn register_repo(conn: &Connection, path: &str, name: &str, color: &str) -> Result<(), String> {

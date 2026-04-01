@@ -59,24 +59,22 @@ Color palette used across all clust UIs (CLI and TUI).
 | infoText     | `#78b4dc`                  |
 | infoMuted    | `rgba(88,152,196,0.10)`    |
 
-## Badges
+## Repository Colors
 
-| Token       | Value                      |
-|-------------|----------------------------|
-| purple-bg   | `rgba(150,120,200,0.13)`   |
-| purple-text | `#b098d0`                  |
-| blue-bg     | `rgba(88,152,210,0.12)`    |
-| blue-text   | `#80b0d4`                  |
-| green-bg    | `rgba(80,180,110,0.12)`    |
-| green-text  | `#6cc890`                  |
-| teal-bg     | `rgba(56,170,166,0.12)`    |
-| teal-text   | `#5cc0bc`                  |
-| orange-bg   | `rgba(210,130,65,0.12)`    |
-| orange-text | `#d8a060`                  |
-| gray-bg     | `rgba(140,142,150,0.12)`   |
-| gray-text   | `#a0a2a8`                  |
-| yellow-bg   | `rgba(200,168,50,0.12)`    |
-| yellow-text | `#d4bc50`                  |
+10 vibrant, high-chroma colors for repo identity across the UI (borders, headers, status bar).
+
+| Name   | Hex       | RGB             |
+|--------|-----------|-----------------|
+| red    | `#f06060` | (240, 96, 96)   |
+| orange | `#f0a030` | (240, 160, 48)  |
+| yellow | `#e0d040` | (224, 208, 64)  |
+| lime   | `#80e050` | (128, 224, 80)  |
+| green  | `#40d890` | (64, 216, 144)  |
+| teal   | `#40d0d0` | (64, 208, 208)  |
+| blue   | `#50a0f0` | (80, 160, 240)  |
+| purple | `#a070f0` | (160, 112, 240) |
+| pink   | `#e070c0` | (224, 112, 192) |
+| coral  | `#f08070` | (240, 128, 112) |
 
 ## Diff
 
