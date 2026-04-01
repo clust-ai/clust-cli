@@ -125,6 +125,18 @@ The hub handles Git worktree operations on behalf of CLI clients. Worktrees are 
 - **Remove**: Prunes the worktree from git and removes its directory. Stops any agents running in the worktree. Refuses to remove dirty worktrees unless `--force` is specified. Optionally deletes the local branch (`--local`).
 - **Info**: Returns detailed information for a single worktree including path, dirty status, and active agents.
 
+### Create Worktree Agent
+
+When the hub receives a `CreateWorktreeAgent` message (sent from the TUI create-agent modal):
+
+1. Create or check out a worktree using the existing `add_worktree()` logic:
+   - If `new_branch` is provided, create a new worktree with that branch (using `target_branch` as the base branch if specified).
+   - If `new_branch` is not provided, check out the `target_branch` as a worktree.
+2. Spawn an agent in the new worktree directory (same logic as `StartAgent`).
+3. Return `WorktreeAgentStarted { id, agent_binary, working_dir }` to the CLI.
+
+This combines worktree creation and agent spawning into a single atomic operation, used by the `Alt+E` modal in the TUI.
+
 ### Repository Resolution
 
 When the CLI sends a worktree command, the hub resolves the target repository via one of two methods:
