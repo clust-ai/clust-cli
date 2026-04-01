@@ -801,6 +801,130 @@ async fn handle_connection(
                 }
             }
         }
+        CliMessage::CreateWorktreeAgent {
+            repo_path,
+            target_branch,
+            new_branch,
+            prompt,
+            agent_binary,
+            cols,
+            rows,
+            accept_edits,
+            hub,
+        } => {
+            // Determine branch name and whether to create or checkout
+            let branch_name = new_branch
+                .as_deref()
+                .or(target_branch.as_deref())
+                .ok_or("either target_branch or new_branch must be provided");
+
+            let branch_name = match branch_name {
+                Ok(b) => b.to_string(),
+                Err(e) => {
+                    clust_ipc::send_message_write(
+                        &mut writer,
+                        &HubMessage::Error { message: e.to_string() },
+                    )
+                    .await?;
+                    return Ok(());
+                }
+            };
+
+            // Use the existing add_worktree which places worktrees at
+            // <repo>/.clust/worktrees/<serialized_branch>/
+            let repo_root = std::path::Path::new(&repo_path);
+            let checkout_existing = new_branch.is_none();
+            let base = if new_branch.is_some() {
+                target_branch.as_deref()
+            } else {
+                None
+            };
+
+            let worktree_path = match crate::repo::add_worktree(
+                repo_root,
+                &branch_name,
+                base,
+                checkout_existing,
+            ) {
+                Ok(path) => path,
+                Err(e) => {
+                    clust_ipc::send_message_write(
+                        &mut writer,
+                        &HubMessage::Error { message: e },
+                    )
+                    .await?;
+                    return Ok(());
+                }
+            };
+
+            let working_dir = worktree_path.to_string_lossy().into_owned();
+
+            // Detect git info from the new worktree
+            let (wt_repo_path, wt_branch_name, is_worktree) =
+                match crate::repo::detect_git_root(&working_dir) {
+                    Some(root) => {
+                        let rp = root.to_string_lossy().into_owned();
+                        let (bn, iw) =
+                            crate::repo::detect_branch_and_worktree(&working_dir);
+                        (Some(rp), bn.or(Some(branch_name)), iw)
+                    }
+                    None => (Some(repo_path.clone()), Some(branch_name), true),
+                };
+
+            // Spawn agent in the worktree
+            let result = {
+                let mut hub_state = state.lock().await;
+                agent::spawn_agent(
+                    &mut hub_state,
+                    agent::SpawnAgentParams {
+                        prompt,
+                        agent_binary,
+                        working_dir: working_dir.clone(),
+                        cols,
+                        rows,
+                        accept_edits,
+                        hub,
+                        repo_path: wt_repo_path,
+                        branch_name: wt_branch_name,
+                        is_worktree,
+                    },
+                    state.clone(),
+                )
+            };
+
+            match result {
+                Ok((id, binary)) => {
+                    // Auto-register repo
+                    {
+                        let hub_state = state.lock().await;
+                        if let Some(ref db) = hub_state.db {
+                            let name = std::path::Path::new(&repo_path)
+                                .file_name()
+                                .map(|n| n.to_string_lossy().into_owned())
+                                .unwrap_or_else(|| repo_path.clone());
+                            let _ = crate::db::register_repo(db, &repo_path, &name, "");
+                        }
+                    }
+                    // One-shot response (no streaming — TUI attaches separately)
+                    clust_ipc::send_message_write(
+                        &mut writer,
+                        &HubMessage::WorktreeAgentStarted {
+                            id,
+                            agent_binary: binary,
+                            working_dir,
+                        },
+                    )
+                    .await?;
+                }
+                Err(e) => {
+                    clust_ipc::send_message_write(
+                        &mut writer,
+                        &HubMessage::Error { message: e },
+                    )
+                    .await?;
+                }
+            }
+        }
         _ => {
             clust_ipc::send_message_write(
                 &mut writer,

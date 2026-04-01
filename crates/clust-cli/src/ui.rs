@@ -20,11 +20,18 @@ use clust_ipc::{AgentInfo, CliMessage, HubMessage, RepoInfo, DEFAULT_HUB};
 
 use crate::{
     context_menu::{ContextMenu, ContextMenuItem, MenuResult},
+    create_agent_modal::{CreateAgentModal, ModalResult},
     format::{format_attached, format_started},
     ipc,
     overview::{self, OverviewFocus, OverviewState},
     theme, version,
 };
+
+struct AgentStartResult {
+    agent_id: String,
+    agent_binary: String,
+    working_dir: String,
+}
 
 const LOGO_LINES: &[&str] = &[
     "██████╗ ██╗     ██╗   ██╗███████╗████████╗",
@@ -607,11 +614,32 @@ pub fn run(hub_name: &str) -> io::Result<()> {
         height: init_rows.saturating_sub(2), // tab bar + status bar
     };
 
+    // Create-agent modal state
+    let mut create_modal: Option<CreateAgentModal> = None;
+    let (agent_start_tx, mut agent_start_rx) =
+        tokio::sync::mpsc::channel::<AgentStartResult>(4);
+
     loop {
         // Drain output events (non-blocking, runs regardless of tab)
         overview_state.drain_output_events();
         focus_mode_state.drain_output_events();
         focus_mode_state.drain_diff_events();
+
+        // Check for completed agent start requests
+        if let Ok(result) = agent_start_rx.try_recv() {
+            let fm_cols = (last_content_area.width * 40 / 100)
+                .saturating_sub(2)
+                .max(1);
+            let fm_rows = last_content_area.height.saturating_sub(3).max(1);
+            focus_mode_state.open_agent(
+                &result.agent_id,
+                &result.agent_binary,
+                fm_cols,
+                fm_rows,
+                &result.working_dir,
+            );
+            in_focus_mode = true;
+        }
 
         // Periodically fetch agent list and repo state from hub
         let mut agents_refreshed = false;
@@ -677,6 +705,7 @@ pub fn run(hub_name: &str) -> io::Result<()> {
             .collect();
 
         let mut click_map = ClickMap::default();
+        let show_modal = create_modal.is_some();
 
         terminal.draw(|frame| {
             let area = frame.area();
@@ -791,6 +820,12 @@ pub fn run(hub_name: &str) -> io::Result<()> {
             if show_help_now {
                 render_help_overlay(frame, content_area, cur_tab, cur_focus_mode);
             }
+
+            if show_modal {
+                if let Some(ref modal) = create_modal {
+                    modal.render(frame, content_area);
+                }
+            }
         })?;
 
         if event::poll(Duration::from_millis(100))? {
@@ -867,6 +902,66 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                 active_menu = None;
                             }
                             MenuResult::None => {}
+                        }
+                    // Create-agent modal takes priority over all other input
+                    } else if let Some(ref mut modal) = create_modal {
+                        match modal.handle_key(key) {
+                            ModalResult::Cancelled => {
+                                create_modal = None;
+                            }
+                            ModalResult::Completed(output) => {
+                                create_modal = None;
+                                let tx = agent_start_tx.clone();
+                                let hub = hub_name.to_string();
+                                let (cols, rows) =
+                                    crossterm::terminal::size().unwrap_or((80, 24));
+                                tokio::spawn(async move {
+                                    if let Ok(mut stream) = ipc::try_connect().await {
+                                        let msg = CliMessage::CreateWorktreeAgent {
+                                            repo_path: output.repo_path,
+                                            target_branch: output.target_branch,
+                                            new_branch: output.new_branch,
+                                            prompt: output.prompt,
+                                            agent_binary: None,
+                                            cols,
+                                            rows: rows.saturating_sub(2).max(1),
+                                            accept_edits: false,
+                                            hub,
+                                        };
+                                        if clust_ipc::send_message(&mut stream, &msg)
+                                            .await
+                                            .is_ok()
+                                        {
+                                            if let Ok(HubMessage::WorktreeAgentStarted {
+                                                id,
+                                                agent_binary,
+                                                working_dir,
+                                            }) = clust_ipc::recv_message::<HubMessage>(
+                                                &mut stream,
+                                            )
+                                            .await
+                                            {
+                                                let _ = tx
+                                                    .send(AgentStartResult {
+                                                        agent_id: id,
+                                                        agent_binary,
+                                                        working_dir,
+                                                    })
+                                                    .await;
+                                            }
+                                        }
+                                    }
+                                });
+                            }
+                            ModalResult::Pending => {}
+                        }
+                    } else if key.code == KeyCode::Char('e')
+                        && key.modifiers.contains(KeyModifiers::ALT)
+                    {
+                        // Global shortcut: Alt+E opens create-agent modal
+                        if !repos.is_empty() {
+                            create_modal = Some(CreateAgentModal::new(repos.clone()));
+                            show_help = false;
                         }
                     } else
                     // Focus mode: behavior depends on which side has focus
@@ -1515,8 +1610,8 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                 }
                 Event::Mouse(MouseEvent { kind: MouseEventKind::ScrollUp, column, row, .. }) => {
                     let pos = Position { x: column, y: row };
-                    if active_menu.is_some() {
-                        match active_menu.as_mut().unwrap() {
+                    if let Some(ref mut menu_variant) = active_menu {
+                        match menu_variant {
                             ActiveMenu::AgentPicker { menu, .. }
                             | ActiveMenu::RepoActions { menu, .. }
                             | ActiveMenu::ColorPicker { menu, .. } => {
@@ -1544,8 +1639,8 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                 }
                 Event::Mouse(MouseEvent { kind: MouseEventKind::ScrollDown, column, row, .. }) => {
                     let pos = Position { x: column, y: row };
-                    if active_menu.is_some() {
-                        match active_menu.as_mut().unwrap() {
+                    if let Some(ref mut menu_variant) = active_menu {
+                        match menu_variant {
                             ActiveMenu::AgentPicker { menu, .. }
                             | ActiveMenu::RepoActions { menu, .. }
                             | ActiveMenu::ColorPicker { menu, .. } => {
@@ -2685,18 +2780,18 @@ fn render_status_bar(
     }
 
     let hint_text = if in_focus_mode {
-        "Shift+\u{2190}/\u{2192} switch panel  Shift+\u{2191}/\u{2193} jump file  Esc exit"
+        "Shift+\u{2190}/\u{2192} switch panel  Shift+\u{2191}/\u{2193} jump file  Esc exit  Alt+E new agent"
     } else if active_tab == ActiveTab::Overview {
         match overview_focus {
             OverviewFocus::Terminal(_) => {
-                "Shift+\u{2191} options  Shift+\u{2193} focus  Shift+\u{2190}/\u{2192} switch agent"
+                "Shift+\u{2191} options  Shift+\u{2193} focus  Shift+\u{2190}/\u{2192} switch agent  Alt+E new agent"
             }
             OverviewFocus::OptionsBar => {
-                "Shift+\u{2193} enter terminal  Shift+\u{2190}/\u{2192} scroll  q quit  Press ? for keys"
+                "Shift+\u{2193} enter terminal  Shift+\u{2190}/\u{2192} scroll  Alt+E new agent  q quit  ? keys"
             }
         }
     } else {
-        "q quit  Q stop+quit  Press ? for keys"
+        "Alt+E new agent  q quit  Q stop+quit  ? keys"
     };
 
     left_spans.extend([
