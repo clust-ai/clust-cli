@@ -326,6 +326,14 @@ async fn handle_connection(
                         (
                             k.clone(),
                             crate::repo::AgentSnapshot {
+                                id: v.id.clone(),
+                                agent_binary: v.agent_binary.clone(),
+                                started_at: v.started_at.clone(),
+                                attached_clients: v
+                                    .attached_count
+                                    .load(std::sync::atomic::Ordering::Relaxed),
+                                hub: v.hub.clone(),
+                                working_dir: v.working_dir.clone(),
                                 repo_path: v.repo_path.clone(),
                                 branch_name: v.branch_name.clone(),
                             },
@@ -489,6 +497,300 @@ async fn handle_connection(
                         },
                     )
                     .await?;
+                }
+                Err(e) => {
+                    clust_ipc::send_message_write(
+                        &mut writer,
+                        &HubMessage::Error { message: e },
+                    )
+                    .await?;
+                }
+            }
+        }
+        CliMessage::ListWorktrees {
+            working_dir,
+            repo_name,
+        } => {
+            let repo_root = {
+                let hub_state = state.lock().await;
+                crate::repo::resolve_repo(
+                    working_dir.as_deref(),
+                    repo_name.as_deref(),
+                    hub_state.db.as_ref(),
+                )
+            };
+            match repo_root {
+                Ok(root) => {
+                    let agent_snapshots = {
+                        let hub_state = state.lock().await;
+                        hub_state
+                            .agents
+                            .iter()
+                            .map(|(k, v)| {
+                                (
+                                    k.clone(),
+                                    crate::repo::AgentSnapshot {
+                                        id: v.id.clone(),
+                                        agent_binary: v.agent_binary.clone(),
+                                        started_at: v.started_at.clone(),
+                                        attached_clients: v
+                                            .attached_count
+                                            .load(Ordering::Relaxed),
+                                        hub: v.hub.clone(),
+                                        working_dir: v.working_dir.clone(),
+                                        repo_path: v.repo_path.clone(),
+                                        branch_name: v.branch_name.clone(),
+                                    },
+                                )
+                            })
+                            .collect::<std::collections::HashMap<_, _>>()
+                    };
+                    let name = root
+                        .file_name()
+                        .map(|n| n.to_string_lossy().into_owned())
+                        .unwrap_or_default();
+                    match crate::repo::list_worktrees(&root, &agent_snapshots) {
+                        Ok(worktrees) => {
+                            clust_ipc::send_message_write(
+                                &mut writer,
+                                &HubMessage::WorktreeList {
+                                    repo_name: name,
+                                    repo_path: root.to_string_lossy().into_owned(),
+                                    worktrees,
+                                },
+                            )
+                            .await?;
+                        }
+                        Err(e) => {
+                            clust_ipc::send_message_write(
+                                &mut writer,
+                                &HubMessage::Error { message: e },
+                            )
+                            .await?;
+                        }
+                    }
+                }
+                Err(e) => {
+                    clust_ipc::send_message_write(
+                        &mut writer,
+                        &HubMessage::Error { message: e },
+                    )
+                    .await?;
+                }
+            }
+        }
+        CliMessage::AddWorktree {
+            working_dir,
+            repo_name,
+            branch_name,
+            base_branch,
+            checkout_existing,
+        } => {
+            let repo_root = {
+                let hub_state = state.lock().await;
+                crate::repo::resolve_repo(
+                    working_dir.as_deref(),
+                    repo_name.as_deref(),
+                    hub_state.db.as_ref(),
+                )
+            };
+            match repo_root {
+                Ok(root) => {
+                    match crate::repo::add_worktree(
+                        &root,
+                        &branch_name,
+                        base_branch.as_deref(),
+                        checkout_existing,
+                    ) {
+                        Ok(wt_path) => {
+                            clust_ipc::send_message_write(
+                                &mut writer,
+                                &HubMessage::WorktreeAdded {
+                                    branch_name,
+                                    path: wt_path.to_string_lossy().into_owned(),
+                                },
+                            )
+                            .await?;
+                        }
+                        Err(e) => {
+                            clust_ipc::send_message_write(
+                                &mut writer,
+                                &HubMessage::Error { message: e },
+                            )
+                            .await?;
+                        }
+                    }
+                }
+                Err(e) => {
+                    clust_ipc::send_message_write(
+                        &mut writer,
+                        &HubMessage::Error { message: e },
+                    )
+                    .await?;
+                }
+            }
+        }
+        CliMessage::RemoveWorktree {
+            working_dir,
+            repo_name,
+            branch_name,
+            delete_local_branch,
+            force,
+        } => {
+            let repo_root = {
+                let hub_state = state.lock().await;
+                crate::repo::resolve_repo(
+                    working_dir.as_deref(),
+                    repo_name.as_deref(),
+                    hub_state.db.as_ref(),
+                )
+            };
+            match repo_root {
+                Ok(root) => {
+                    let wt_path = crate::repo::worktree_path(&root, &branch_name);
+
+                    // Check dirty state unless --force
+                    if !force && crate::repo::is_worktree_dirty(&wt_path) {
+                        clust_ipc::send_message_write(
+                            &mut writer,
+                            &HubMessage::Error {
+                                message:
+                                    "worktree has uncommitted changes (use --force to override)"
+                                        .into(),
+                            },
+                        )
+                        .await?;
+                        return Ok(());
+                    }
+
+                    // Stop agents running in this worktree
+                    let root_str = root.to_string_lossy().into_owned();
+                    let agent_ids = {
+                        let hub_state = state.lock().await;
+                        hub_state
+                            .agents
+                            .values()
+                            .filter(|e| {
+                                e.repo_path.as_deref() == Some(root_str.as_str())
+                                    && e.branch_name.as_deref() == Some(branch_name.as_str())
+                            })
+                            .map(|e| e.id.clone())
+                            .collect::<Vec<_>>()
+                    };
+                    let stopped_count = agent_ids.len();
+
+                    for id in &agent_ids {
+                        let state = state.clone();
+                        let id = id.clone();
+                        tokio::spawn(async move {
+                            let _ = agent::stop_agent(&state, &id).await;
+                        });
+                    }
+
+                    match crate::repo::remove_worktree(
+                        &root,
+                        &branch_name,
+                        delete_local_branch,
+                        force,
+                    ) {
+                        Ok(()) => {
+                            clust_ipc::send_message_write(
+                                &mut writer,
+                                &HubMessage::WorktreeRemoved {
+                                    branch_name,
+                                    stopped_agents: stopped_count,
+                                },
+                            )
+                            .await?;
+                        }
+                        Err(e) => {
+                            clust_ipc::send_message_write(
+                                &mut writer,
+                                &HubMessage::Error { message: e },
+                            )
+                            .await?;
+                        }
+                    }
+                }
+                Err(e) => {
+                    clust_ipc::send_message_write(
+                        &mut writer,
+                        &HubMessage::Error { message: e },
+                    )
+                    .await?;
+                }
+            }
+        }
+        CliMessage::GetWorktreeInfo {
+            working_dir,
+            repo_name,
+            branch_name,
+        } => {
+            let repo_root = {
+                let hub_state = state.lock().await;
+                crate::repo::resolve_repo(
+                    working_dir.as_deref(),
+                    repo_name.as_deref(),
+                    hub_state.db.as_ref(),
+                )
+            };
+            match repo_root {
+                Ok(root) => {
+                    let agent_snapshots = {
+                        let hub_state = state.lock().await;
+                        hub_state
+                            .agents
+                            .iter()
+                            .map(|(k, v)| {
+                                (
+                                    k.clone(),
+                                    crate::repo::AgentSnapshot {
+                                        id: v.id.clone(),
+                                        agent_binary: v.agent_binary.clone(),
+                                        started_at: v.started_at.clone(),
+                                        attached_clients: v
+                                            .attached_count
+                                            .load(Ordering::Relaxed),
+                                        hub: v.hub.clone(),
+                                        working_dir: v.working_dir.clone(),
+                                        repo_path: v.repo_path.clone(),
+                                        branch_name: v.branch_name.clone(),
+                                    },
+                                )
+                            })
+                            .collect::<std::collections::HashMap<_, _>>()
+                    };
+                    match crate::repo::list_worktrees(&root, &agent_snapshots) {
+                        Ok(worktrees) => {
+                            match worktrees.into_iter().find(|w| w.branch_name == branch_name) {
+                                Some(info) => {
+                                    clust_ipc::send_message_write(
+                                        &mut writer,
+                                        &HubMessage::WorktreeInfoResult { info },
+                                    )
+                                    .await?;
+                                }
+                                None => {
+                                    clust_ipc::send_message_write(
+                                        &mut writer,
+                                        &HubMessage::Error {
+                                            message: format!(
+                                                "no worktree found for branch '{branch_name}'"
+                                            ),
+                                        },
+                                    )
+                                    .await?;
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            clust_ipc::send_message_write(
+                                &mut writer,
+                                &HubMessage::Error { message: e },
+                            )
+                            .await?;
+                        }
+                    }
                 }
                 Err(e) => {
                     clust_ipc::send_message_write(

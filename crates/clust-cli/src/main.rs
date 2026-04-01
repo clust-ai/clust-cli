@@ -88,6 +88,30 @@ async fn main() {
         return;
     }
 
+    // Subcommand: wt / worktree
+    if let Some(cli::Commands::Wt(cli::WtArgs { repo, command })) = args.command {
+        match command {
+            cli::WtCommands::Ls => handle_wt_ls(repo).await,
+            cli::WtCommands::Add(add_args) => {
+                handle_wt_add(
+                    repo,
+                    add_args.name,
+                    add_args.base_branch,
+                    add_args.checkout,
+                    add_args.prompt,
+                )
+                .await;
+            }
+            cli::WtCommands::Rm(rm_args) => {
+                handle_wt_rm(repo, rm_args.delete_local, rm_args.branch, rm_args.force).await;
+            }
+            cli::WtCommands::Info(info_args) => {
+                handle_wt_info(repo, info_args.name).await;
+            }
+        }
+        return;
+    }
+
     // Subcommand: repo
     if let Some(cli::Commands::Repo {
         add,
@@ -170,6 +194,7 @@ async fn main() {
         args.accept_edits,
         args.use_agent,
         hub_name,
+        None,
     )
     .await;
 }
@@ -295,12 +320,14 @@ async fn check_default_and_prompt() -> Option<Option<String>> {
 }
 
 /// Start a new agent. If background is false, attach to it.
+/// If `working_dir_override` is provided, use it instead of cwd.
 async fn handle_start(
     prompt: Option<String>,
     background: bool,
     accept_edits: bool,
     use_agent: Option<String>,
     hub: String,
+    working_dir_override: Option<String>,
 ) {
     // If --use was provided, use that agent directly; otherwise check/prompt for default
     let agent_binary = if let Some(agent) = use_agent {
@@ -313,9 +340,11 @@ async fn handle_start(
         agent_override.unwrap()
     };
 
-    let working_dir = std::env::current_dir()
-        .map(|p| p.to_string_lossy().into_owned())
-        .unwrap_or_else(|_| ".".into());
+    let working_dir = working_dir_override.unwrap_or_else(|| {
+        std::env::current_dir()
+            .map(|p| p.to_string_lossy().into_owned())
+            .unwrap_or_else(|_| ".".into())
+    });
 
     if background {
         println!();
@@ -697,7 +726,7 @@ async fn handle_select(hub: Option<String>) {
         SelectAction::Attach(id) => handle_attach(id).await,
         SelectAction::NewAgent => {
             let hub_name = hub.unwrap_or_else(|| clust_ipc::DEFAULT_HUB.into());
-            handle_start(None, false, false, None, hub_name).await;
+            handle_start(None, false, false, None, hub_name, None).await;
         }
     }
 }
@@ -1063,6 +1092,409 @@ async fn handle_repo_stop() {
         }
         Err(e) => {
             stop_spin_err(spinner, &format!("{e}"));
+            std::process::exit(1);
+        }
+    }
+    println!();
+}
+
+// ── Worktree handlers ──────────────────────────────────────────────
+
+/// Detect the current worktree's branch name from the working directory path.
+/// Looks for the `.clust/worktrees/{serialized_branch}` convention.
+fn detect_current_worktree_branch(cwd: &str) -> Option<String> {
+    let path = std::path::Path::new(cwd);
+    for ancestor in path.ancestors() {
+        if let Some(parent) = ancestor.parent() {
+            if parent.ends_with(".clust/worktrees") {
+                let dir_name = ancestor.file_name()?.to_str()?;
+                return Some(dir_name.replace("__", "/"));
+            }
+        }
+    }
+    None
+}
+
+async fn handle_wt_ls(repo_name: Option<String>) {
+    println!();
+    let working_dir = std::env::current_dir()
+        .map(|p| p.to_string_lossy().into_owned())
+        .unwrap_or_else(|_| ".".into());
+
+    let spinner = spin("listing worktrees");
+    let mut stream = match ipc::connect_to_hub().await {
+        Ok(s) => s,
+        Err(e) => {
+            stop_spin_err(spinner, &format!("failed to connect to hub: {e}"));
+            std::process::exit(1);
+        }
+    };
+
+    if let Err(e) = clust_ipc::send_message(
+        &mut stream,
+        &CliMessage::ListWorktrees {
+            working_dir: if repo_name.is_some() {
+                None
+            } else {
+                Some(working_dir.clone())
+            },
+            repo_name: repo_name.clone(),
+        },
+    )
+    .await
+    {
+        stop_spin_err(spinner, &format!("failed to send request: {e}"));
+        std::process::exit(1);
+    }
+
+    match clust_ipc::recv_message::<HubMessage>(&mut stream).await {
+        Ok(HubMessage::WorktreeList {
+            repo_name: name,
+            worktrees,
+            ..
+        }) => {
+            stop_spin(
+                spinner,
+                &format!(
+                    "{} worktree{}",
+                    worktrees.len(),
+                    if worktrees.len() == 1 { "" } else { "s" }
+                ),
+            );
+            println!();
+            if worktrees.is_empty() {
+                println!(
+                    "  {}no worktrees{}",
+                    theme::TEXT_SECONDARY,
+                    theme::RESET
+                );
+            } else {
+                println!(
+                    "  {}{}{}",
+                    theme::ACCENT,
+                    name,
+                    theme::RESET
+                );
+                println!();
+                println!(
+                    "  {}  {:<24} {:<8} STATUS{}",
+                    theme::TEXT_TERTIARY,
+                    "BRANCH",
+                    "AGENTS",
+                    theme::RESET
+                );
+                for wt in &worktrees {
+                    let indicator = if wt.is_main { "●" } else { " " };
+                    let branch_color = if wt.is_main {
+                        theme::ACCENT_BRIGHT
+                    } else {
+                        theme::TEXT_PRIMARY
+                    };
+                    let status = if wt.is_dirty { "dirty" } else { "clean" };
+                    let status_color = if wt.is_dirty {
+                        theme::WARNING
+                    } else {
+                        theme::TEXT_SECONDARY
+                    };
+                    let agent_count = wt.active_agents.len();
+
+                    println!(
+                        "  {}{}{} {}{:<24}{} {}{:<8}{} {}{}{}",
+                        theme::ACCENT,
+                        indicator,
+                        theme::RESET,
+                        branch_color,
+                        wt.branch_name,
+                        theme::RESET,
+                        theme::TEXT_SECONDARY,
+                        agent_count,
+                        theme::RESET,
+                        status_color,
+                        status,
+                        theme::RESET,
+                    );
+                }
+            }
+        }
+        Ok(HubMessage::Error { message }) => {
+            stop_spin_err(spinner, &message);
+            std::process::exit(1);
+        }
+        _ => {
+            stop_spin_err(spinner, "unexpected response from hub");
+            std::process::exit(1);
+        }
+    }
+    println!();
+}
+
+async fn handle_wt_add(
+    repo_name: Option<String>,
+    name: String,
+    base_branch: Option<String>,
+    checkout: bool,
+    prompt: Option<String>,
+) {
+    println!();
+    let working_dir = std::env::current_dir()
+        .map(|p| p.to_string_lossy().into_owned())
+        .unwrap_or_else(|_| ".".into());
+
+    let spinner = spin(&format!("creating worktree '{name}'"));
+    let mut stream = match ipc::connect_to_hub().await {
+        Ok(s) => s,
+        Err(e) => {
+            stop_spin_err(spinner, &format!("failed to connect to hub: {e}"));
+            std::process::exit(1);
+        }
+    };
+
+    if let Err(e) = clust_ipc::send_message(
+        &mut stream,
+        &CliMessage::AddWorktree {
+            working_dir: if repo_name.is_some() {
+                None
+            } else {
+                Some(working_dir.clone())
+            },
+            repo_name: repo_name.clone(),
+            branch_name: name.clone(),
+            base_branch,
+            checkout_existing: checkout,
+        },
+    )
+    .await
+    {
+        stop_spin_err(spinner, &format!("failed to send request: {e}"));
+        std::process::exit(1);
+    }
+
+    match clust_ipc::recv_message::<HubMessage>(&mut stream).await {
+        Ok(HubMessage::WorktreeAdded { path, .. }) => {
+            stop_spin(spinner, &format!("worktree '{name}' created at {path}"));
+
+            // If -p/--prompt was provided, start an agent in the worktree
+            if let Some(prompt_text) = prompt {
+                let actual_prompt = if prompt_text.is_empty() {
+                    None
+                } else {
+                    Some(prompt_text)
+                };
+                println!();
+                handle_start(
+                    actual_prompt,
+                    true, // background — don't attach
+                    false,
+                    None,
+                    clust_ipc::DEFAULT_HUB.into(),
+                    Some(path),
+                )
+                .await;
+            }
+        }
+        Ok(HubMessage::Error { message }) => {
+            stop_spin_err(spinner, &message);
+            std::process::exit(1);
+        }
+        _ => {
+            stop_spin_err(spinner, "unexpected response from hub");
+            std::process::exit(1);
+        }
+    }
+    println!();
+}
+
+async fn handle_wt_rm(
+    repo_name: Option<String>,
+    delete_local: bool,
+    branch: Option<String>,
+    force: bool,
+) {
+    println!();
+    let working_dir = std::env::current_dir()
+        .map(|p| p.to_string_lossy().into_owned())
+        .unwrap_or_else(|_| ".".into());
+
+    // Determine target branch
+    let branch_name = match branch {
+        Some(b) => b,
+        None => match detect_current_worktree_branch(&working_dir) {
+            Some(b) => b,
+            None => {
+                eprintln!(
+                    "  {}✘{} {}not inside a clust worktree; use -b to specify the branch{}",
+                    theme::ERROR,
+                    theme::RESET,
+                    theme::TEXT_PRIMARY,
+                    theme::RESET,
+                );
+                println!();
+                std::process::exit(1);
+            }
+        },
+    };
+
+    let spinner = spin(&format!("removing worktree '{branch_name}'"));
+    let mut stream = match ipc::connect_to_hub().await {
+        Ok(s) => s,
+        Err(e) => {
+            stop_spin_err(spinner, &format!("failed to connect to hub: {e}"));
+            std::process::exit(1);
+        }
+    };
+
+    if let Err(e) = clust_ipc::send_message(
+        &mut stream,
+        &CliMessage::RemoveWorktree {
+            working_dir: if repo_name.is_some() {
+                None
+            } else {
+                Some(working_dir.clone())
+            },
+            repo_name: repo_name.clone(),
+            branch_name: branch_name.clone(),
+            delete_local_branch: delete_local,
+            force,
+        },
+    )
+    .await
+    {
+        stop_spin_err(spinner, &format!("failed to send request: {e}"));
+        std::process::exit(1);
+    }
+
+    match clust_ipc::recv_message::<HubMessage>(&mut stream).await {
+        Ok(HubMessage::WorktreeRemoved {
+            stopped_agents, ..
+        }) => {
+            let mut msg = format!("worktree '{branch_name}' removed");
+            if stopped_agents > 0 {
+                msg.push_str(&format!(
+                    " ({stopped_agents} agent{} stopped)",
+                    if stopped_agents == 1 { "" } else { "s" }
+                ));
+            }
+            stop_spin(spinner, &msg);
+        }
+        Ok(HubMessage::Error { message }) => {
+            stop_spin_err(spinner, &message);
+            std::process::exit(1);
+        }
+        _ => {
+            stop_spin_err(spinner, "unexpected response from hub");
+            std::process::exit(1);
+        }
+    }
+    println!();
+}
+
+async fn handle_wt_info(repo_name: Option<String>, name: String) {
+    println!();
+    let working_dir = std::env::current_dir()
+        .map(|p| p.to_string_lossy().into_owned())
+        .unwrap_or_else(|_| ".".into());
+
+    let spinner = spin("fetching worktree info");
+    let mut stream = match ipc::connect_to_hub().await {
+        Ok(s) => s,
+        Err(e) => {
+            stop_spin_err(spinner, &format!("failed to connect to hub: {e}"));
+            std::process::exit(1);
+        }
+    };
+
+    if let Err(e) = clust_ipc::send_message(
+        &mut stream,
+        &CliMessage::GetWorktreeInfo {
+            working_dir: if repo_name.is_some() {
+                None
+            } else {
+                Some(working_dir.clone())
+            },
+            repo_name: repo_name.clone(),
+            branch_name: name.clone(),
+        },
+    )
+    .await
+    {
+        stop_spin_err(spinner, &format!("failed to send request: {e}"));
+        std::process::exit(1);
+    }
+
+    match clust_ipc::recv_message::<HubMessage>(&mut stream).await {
+        Ok(HubMessage::WorktreeInfoResult { info }) => {
+            stop_spin(spinner, &format!("worktree '{}'", info.branch_name));
+            println!();
+
+            let status = if info.is_dirty { "dirty" } else { "clean" };
+            let status_color = if info.is_dirty {
+                theme::WARNING
+            } else {
+                theme::SUCCESS
+            };
+
+            println!(
+                "  {}branch{}     {}{}{}",
+                theme::TEXT_SECONDARY,
+                theme::RESET,
+                theme::TEXT_PRIMARY,
+                info.branch_name,
+                theme::RESET,
+            );
+            println!(
+                "  {}path{}       {}{}{}",
+                theme::TEXT_SECONDARY,
+                theme::RESET,
+                theme::TEXT_PRIMARY,
+                info.path,
+                theme::RESET,
+            );
+            println!(
+                "  {}status{}     {}{}{}",
+                theme::TEXT_SECONDARY,
+                theme::RESET,
+                status_color,
+                status,
+                theme::RESET,
+            );
+
+            let agent_count = info.active_agents.len();
+            println!(
+                "  {}agents{}     {}{}{}",
+                theme::TEXT_SECONDARY,
+                theme::RESET,
+                theme::TEXT_PRIMARY,
+                if agent_count == 0 {
+                    "none".to_string()
+                } else {
+                    format!(
+                        "{agent_count} running"
+                    )
+                },
+                theme::RESET,
+            );
+
+            for agent in &info.active_agents {
+                println!(
+                    "               {}{}{}  {}{}{}  {}{}{}",
+                    theme::ACCENT,
+                    agent.id,
+                    theme::RESET,
+                    theme::TEXT_PRIMARY,
+                    agent.agent_binary,
+                    theme::RESET,
+                    theme::TEXT_SECONDARY,
+                    format_started(&agent.started_at),
+                    theme::RESET,
+                );
+            }
+        }
+        Ok(HubMessage::Error { message }) => {
+            stop_spin_err(spinner, &message);
+            std::process::exit(1);
+        }
+        _ => {
+            stop_spin_err(spinner, "unexpected response from hub");
             std::process::exit(1);
         }
     }

@@ -37,6 +37,29 @@ pub enum CliMessage {
     StopRepoAgents { path: String },
     SetRepoColor { path: String, color: String },
     ListRepos,
+    ListWorktrees {
+        working_dir: Option<String>,
+        repo_name: Option<String>,
+    },
+    AddWorktree {
+        working_dir: Option<String>,
+        repo_name: Option<String>,
+        branch_name: String,
+        base_branch: Option<String>,
+        checkout_existing: bool,
+    },
+    RemoveWorktree {
+        working_dir: Option<String>,
+        repo_name: Option<String>,
+        branch_name: String,
+        delete_local_branch: bool,
+        force: bool,
+    },
+    GetWorktreeInfo {
+        working_dir: Option<String>,
+        repo_name: Option<String>,
+        branch_name: String,
+    },
 }
 
 /// Info about a running agent, returned in AgentList.
@@ -71,6 +94,16 @@ pub struct BranchInfo {
     pub is_worktree: bool,
 }
 
+/// Info about a single worktree in a repository.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct WorktreeEntry {
+    pub branch_name: String,
+    pub path: String,
+    pub is_main: bool,
+    pub is_dirty: bool,
+    pub active_agents: Vec<AgentInfo>,
+}
+
 /// Messages sent from Hub to CLI.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum HubMessage {
@@ -90,6 +123,22 @@ pub enum HubMessage {
     RepoColorSet { path: String, color: String },
     RepoList { repos: Vec<RepoInfo> },
     AgentReplayComplete { id: String },
+    WorktreeList {
+        repo_name: String,
+        repo_path: String,
+        worktrees: Vec<WorktreeEntry>,
+    },
+    WorktreeAdded {
+        branch_name: String,
+        path: String,
+    },
+    WorktreeRemoved {
+        branch_name: String,
+        stopped_agents: usize,
+    },
+    WorktreeInfoResult {
+        info: WorktreeEntry,
+    },
 }
 
 /// Returns the clust data directory: `~/.clust/`.
@@ -694,6 +743,169 @@ mod tests {
         assert_hub_round_trip(HubMessage::RepoColorSet {
             path: "/home/user/project".into(),
             color: "teal".into(),
+        })
+        .await;
+    }
+
+    // ── Worktree message round-trips ─────────────────────────────
+
+    #[tokio::test]
+    async fn cli_list_worktrees_with_working_dir() {
+        assert_cli_round_trip(CliMessage::ListWorktrees {
+            working_dir: Some("/home/user/project".into()),
+            repo_name: None,
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn cli_list_worktrees_with_repo_name() {
+        assert_cli_round_trip(CliMessage::ListWorktrees {
+            working_dir: None,
+            repo_name: Some("my-project".into()),
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn cli_add_worktree_new_branch() {
+        assert_cli_round_trip(CliMessage::AddWorktree {
+            working_dir: Some("/home/user/project".into()),
+            repo_name: None,
+            branch_name: "feature/auth".into(),
+            base_branch: Some("main".into()),
+            checkout_existing: false,
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn cli_add_worktree_checkout_existing() {
+        assert_cli_round_trip(CliMessage::AddWorktree {
+            working_dir: None,
+            repo_name: Some("my-project".into()),
+            branch_name: "existing-branch".into(),
+            base_branch: None,
+            checkout_existing: true,
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn cli_remove_worktree() {
+        assert_cli_round_trip(CliMessage::RemoveWorktree {
+            working_dir: Some("/home/user/project".into()),
+            repo_name: None,
+            branch_name: "feature/auth".into(),
+            delete_local_branch: true,
+            force: false,
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn cli_remove_worktree_force() {
+        assert_cli_round_trip(CliMessage::RemoveWorktree {
+            working_dir: None,
+            repo_name: Some("my-project".into()),
+            branch_name: "dirty-branch".into(),
+            delete_local_branch: false,
+            force: true,
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn cli_get_worktree_info() {
+        assert_cli_round_trip(CliMessage::GetWorktreeInfo {
+            working_dir: Some("/home/user/project".into()),
+            repo_name: None,
+            branch_name: "feature/auth".into(),
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn hub_worktree_list_populated() {
+        assert_hub_round_trip(HubMessage::WorktreeList {
+            repo_name: "project".into(),
+            repo_path: "/home/user/project".into(),
+            worktrees: vec![
+                WorktreeEntry {
+                    branch_name: "main".into(),
+                    path: "/home/user/project".into(),
+                    is_main: true,
+                    is_dirty: false,
+                    active_agents: vec![],
+                },
+                WorktreeEntry {
+                    branch_name: "feature/auth".into(),
+                    path: "/home/user/project/.clust/worktrees/feature__auth".into(),
+                    is_main: false,
+                    is_dirty: true,
+                    active_agents: vec![AgentInfo {
+                        id: "abc123".into(),
+                        agent_binary: "claude".into(),
+                        started_at: "2026-03-25T10:00:00Z".into(),
+                        attached_clients: 1,
+                        hub: DEFAULT_HUB.into(),
+                        working_dir: "/home/user/project/.clust/worktrees/feature__auth".into(),
+                        repo_path: Some("/home/user/project".into()),
+                        branch_name: Some("feature/auth".into()),
+                    }],
+                },
+            ],
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn hub_worktree_list_empty() {
+        assert_hub_round_trip(HubMessage::WorktreeList {
+            repo_name: "project".into(),
+            repo_path: "/home/user/project".into(),
+            worktrees: vec![],
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn hub_worktree_added() {
+        assert_hub_round_trip(HubMessage::WorktreeAdded {
+            branch_name: "feature/auth".into(),
+            path: "/home/user/project/.clust/worktrees/feature__auth".into(),
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn hub_worktree_removed() {
+        assert_hub_round_trip(HubMessage::WorktreeRemoved {
+            branch_name: "feature/auth".into(),
+            stopped_agents: 2,
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn hub_worktree_removed_no_agents() {
+        assert_hub_round_trip(HubMessage::WorktreeRemoved {
+            branch_name: "clean-branch".into(),
+            stopped_agents: 0,
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn hub_worktree_info_result() {
+        assert_hub_round_trip(HubMessage::WorktreeInfoResult {
+            info: WorktreeEntry {
+                branch_name: "feature/auth".into(),
+                path: "/home/user/project/.clust/worktrees/feature__auth".into(),
+                is_main: false,
+                is_dirty: false,
+                active_agents: vec![],
+            },
         })
         .await;
     }

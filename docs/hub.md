@@ -114,6 +114,26 @@ All PTY output is recorded in the agent's replay buffer as it arrives. When a cl
 
 Any attached client can send input. The hub writes it directly to the agent's PTY master. Multiple clients sending input simultaneously is allowed (agent sees interleaved input).
 
+## Worktree Management
+
+The hub handles Git worktree operations on behalf of CLI clients. Worktrees are stored in a `.zm-worktrees/` directory at the repository root. Each worktree directory is named using a serialized form of the branch name (slashes are replaced with double underscores, e.g., `feature/auth` becomes `feature__auth`).
+
+### Operations
+
+- **List**: Enumerates all worktrees (including main) via `git2`, checks dirty status, and matches active agents to each worktree by working directory.
+- **Add**: Creates a new worktree with either a new branch or an existing branch (`--checkout`). Optionally launches an agent in the new worktree.
+- **Remove**: Prunes the worktree from git and removes its directory. Stops any agents running in the worktree. Refuses to remove dirty worktrees unless `--force` is specified. Optionally deletes the local branch (`--local`).
+- **Info**: Returns detailed information for a single worktree including path, dirty status, and active agents.
+
+### Repository Resolution
+
+When the CLI sends a worktree command, the hub resolves the target repository via one of two methods:
+
+1. **By name** (`-r/--repo`): Looks up the registered repo by name in SQLite. Errors if zero or multiple matches are found.
+2. **By working directory**: Uses the `working_dir` from the CLI request and resolves the git root via `git2`.
+
+The hub also ensures the `.clust/` directory is added to `.git/info/exclude` so it does not pollute the repository.
+
 ## In-Memory State
 
 ```rust

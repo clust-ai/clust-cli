@@ -1,4 +1,4 @@
-use clap::{Parser, Subcommand};
+use clap::{Args, Parser, Subcommand};
 
 #[derive(Parser)]
 #[command(name = "clust", version, about = "Agent manager CLI")]
@@ -52,6 +52,9 @@ pub enum Commands {
     },
     /// Open the Clust terminal UI
     Ui,
+    /// Worktree management
+    #[command(alias = "worktree")]
+    Wt(WtArgs),
     /// Repository management
     Repo {
         /// Add the current directory's git repository for tracking
@@ -66,6 +69,67 @@ pub enum Commands {
         #[arg(short = 's', long = "stop")]
         stop: bool,
     },
+}
+
+#[derive(Args)]
+pub struct WtArgs {
+    /// Target a registered repo by name (instead of using cwd)
+    #[arg(short = 'r', long = "repo")]
+    pub repo: Option<String>,
+
+    #[command(subcommand)]
+    pub command: WtCommands,
+}
+
+#[derive(Subcommand)]
+pub enum WtCommands {
+    /// List all worktrees in the repository
+    Ls,
+    /// Create a new worktree
+    Add(WtAddArgs),
+    /// Remove a worktree
+    Rm(WtRmArgs),
+    /// Show details for a worktree
+    Info(WtInfoArgs),
+}
+
+#[derive(Args)]
+pub struct WtAddArgs {
+    /// Branch name for the new worktree
+    pub name: String,
+
+    /// Base branch to create from (default: current HEAD)
+    #[arg(short = 'b', long = "branch")]
+    pub base_branch: Option<String>,
+
+    /// Checkout an existing branch instead of creating a new one
+    #[arg(long = "checkout")]
+    pub checkout: bool,
+
+    /// Start an agent in the new worktree with optional prompt
+    #[arg(short = 'p', long = "prompt", num_args = 0..=1, default_missing_value = "")]
+    pub prompt: Option<String>,
+}
+
+#[derive(Args)]
+pub struct WtRmArgs {
+    /// Also delete the local branch
+    #[arg(short = 'l', long = "local")]
+    pub delete_local: bool,
+
+    /// Target branch (default: current worktree's branch)
+    #[arg(short = 'b', long = "branch")]
+    pub branch: Option<String>,
+
+    /// Force remove even if worktree is dirty
+    #[arg(long = "force")]
+    pub force: bool,
+}
+
+#[derive(Args)]
+pub struct WtInfoArgs {
+    /// Branch name of the worktree
+    pub name: String,
 }
 
 /// Validate a hub name follows snake_case: starts with a lowercase ASCII letter,
@@ -510,5 +574,189 @@ mod tests {
     fn validate_hub_name_consecutive_underscores() {
         assert!(validate_hub_name("my__hub").is_err());
         assert!(validate_hub_name("a__b__c").is_err());
+    }
+
+    // ── Worktree subcommand tests ──────────────────────────────
+
+    #[test]
+    fn parse_wt_ls() {
+        let cli = Cli::try_parse_from(["clust", "wt", "ls"]).unwrap();
+        match cli.command {
+            Some(Commands::Wt(WtArgs { repo, command })) => {
+                assert!(repo.is_none());
+                assert!(matches!(command, WtCommands::Ls));
+            }
+            _ => panic!("expected Wt command"),
+        }
+    }
+
+    #[test]
+    fn parse_worktree_alias_ls() {
+        let cli = Cli::try_parse_from(["clust", "worktree", "ls"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(Commands::Wt(WtArgs { command: WtCommands::Ls, .. }))
+        ));
+    }
+
+    #[test]
+    fn parse_wt_ls_with_repo() {
+        let cli = Cli::try_parse_from(["clust", "wt", "-r", "my-project", "ls"]).unwrap();
+        match cli.command {
+            Some(Commands::Wt(WtArgs { repo, command })) => {
+                assert_eq!(repo.as_deref(), Some("my-project"));
+                assert!(matches!(command, WtCommands::Ls));
+            }
+            _ => panic!("expected Wt command"),
+        }
+    }
+
+    #[test]
+    fn parse_wt_add_name_only() {
+        let cli = Cli::try_parse_from(["clust", "wt", "add", "my-feature"]).unwrap();
+        match cli.command {
+            Some(Commands::Wt(WtArgs {
+                command: WtCommands::Add(WtAddArgs { name, base_branch, checkout, prompt }),
+                ..
+            })) => {
+                assert_eq!(name, "my-feature");
+                assert!(base_branch.is_none());
+                assert!(!checkout);
+                assert!(prompt.is_none());
+            }
+            _ => panic!("expected Wt Add command"),
+        }
+    }
+
+    #[test]
+    fn parse_wt_add_with_base_branch() {
+        let cli = Cli::try_parse_from(["clust", "wt", "add", "feat", "-b", "main"]).unwrap();
+        match cli.command {
+            Some(Commands::Wt(WtArgs {
+                command: WtCommands::Add(WtAddArgs { name, base_branch, .. }),
+                ..
+            })) => {
+                assert_eq!(name, "feat");
+                assert_eq!(base_branch.as_deref(), Some("main"));
+            }
+            _ => panic!("expected Wt Add command"),
+        }
+    }
+
+    #[test]
+    fn parse_wt_add_with_checkout() {
+        let cli = Cli::try_parse_from(["clust", "wt", "add", "feat", "--checkout"]).unwrap();
+        match cli.command {
+            Some(Commands::Wt(WtArgs {
+                command: WtCommands::Add(WtAddArgs { checkout, .. }),
+                ..
+            })) => {
+                assert!(checkout);
+            }
+            _ => panic!("expected Wt Add command"),
+        }
+    }
+
+    #[test]
+    fn parse_wt_add_with_prompt_no_value() {
+        let cli = Cli::try_parse_from(["clust", "wt", "add", "feat", "-p"]).unwrap();
+        match cli.command {
+            Some(Commands::Wt(WtArgs {
+                command: WtCommands::Add(WtAddArgs { prompt, .. }),
+                ..
+            })) => {
+                assert_eq!(prompt.as_deref(), Some(""));
+            }
+            _ => panic!("expected Wt Add command"),
+        }
+    }
+
+    #[test]
+    fn parse_wt_add_with_prompt_value() {
+        let cli =
+            Cli::try_parse_from(["clust", "wt", "add", "feat", "-p", "fix the bug"]).unwrap();
+        match cli.command {
+            Some(Commands::Wt(WtArgs {
+                command: WtCommands::Add(WtAddArgs { prompt, .. }),
+                ..
+            })) => {
+                assert_eq!(prompt.as_deref(), Some("fix the bug"));
+            }
+            _ => panic!("expected Wt Add command"),
+        }
+    }
+
+    #[test]
+    fn parse_wt_rm_defaults() {
+        let cli = Cli::try_parse_from(["clust", "wt", "rm"]).unwrap();
+        match cli.command {
+            Some(Commands::Wt(WtArgs {
+                command: WtCommands::Rm(WtRmArgs { delete_local, branch, force }),
+                ..
+            })) => {
+                assert!(!delete_local);
+                assert!(branch.is_none());
+                assert!(!force);
+            }
+            _ => panic!("expected Wt Rm command"),
+        }
+    }
+
+    #[test]
+    fn parse_wt_rm_with_branch_and_local() {
+        let cli =
+            Cli::try_parse_from(["clust", "wt", "rm", "-b", "my-branch", "-l"]).unwrap();
+        match cli.command {
+            Some(Commands::Wt(WtArgs {
+                command: WtCommands::Rm(WtRmArgs { delete_local, branch, force }),
+                ..
+            })) => {
+                assert!(delete_local);
+                assert_eq!(branch.as_deref(), Some("my-branch"));
+                assert!(!force);
+            }
+            _ => panic!("expected Wt Rm command"),
+        }
+    }
+
+    #[test]
+    fn parse_wt_rm_force() {
+        let cli = Cli::try_parse_from(["clust", "wt", "rm", "--force"]).unwrap();
+        match cli.command {
+            Some(Commands::Wt(WtArgs {
+                command: WtCommands::Rm(WtRmArgs { force, .. }),
+                ..
+            })) => {
+                assert!(force);
+            }
+            _ => panic!("expected Wt Rm command"),
+        }
+    }
+
+    #[test]
+    fn parse_wt_info() {
+        let cli = Cli::try_parse_from(["clust", "wt", "info", "my-branch"]).unwrap();
+        match cli.command {
+            Some(Commands::Wt(WtArgs {
+                command: WtCommands::Info(WtInfoArgs { name }),
+                ..
+            })) => {
+                assert_eq!(name, "my-branch");
+            }
+            _ => panic!("expected Wt Info command"),
+        }
+    }
+
+    #[test]
+    fn parse_wt_with_repo_flag() {
+        let cli =
+            Cli::try_parse_from(["clust", "wt", "-r", "my-repo", "add", "feat"]).unwrap();
+        match cli.command {
+            Some(Commands::Wt(WtArgs { repo, command })) => {
+                assert_eq!(repo.as_deref(), Some("my-repo"));
+                assert!(matches!(command, WtCommands::Add(WtAddArgs { .. })));
+            }
+            _ => panic!("expected Wt command"),
+        }
     }
 }
