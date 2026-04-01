@@ -22,7 +22,7 @@ pub const KNOWN_AGENTS: &[KnownAgent] = &[
         binary: "opencode",
         display_name: "Open Code",
         accept_edits_args: None,
-        tested: true,
+        tested: false,
     },
     KnownAgent {
         binary: "aider",
@@ -87,7 +87,6 @@ mod tests {
             .map(|a| a.binary)
             .collect();
         assert!(tested.contains(&"claude"));
-        assert!(tested.contains(&"opencode"));
-        assert_eq!(tested.len(), 2);
+        assert_eq!(tested.len(), 1);
     }
 }
