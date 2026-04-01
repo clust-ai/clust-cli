@@ -1352,18 +1352,32 @@ fn render_diff_viewer(frame: &mut Frame, area: Rect, state: &FocusModeState) {
     let mut lines = Vec::with_capacity(visible_height);
 
     for diff_line in &diff.lines[start..end] {
+        // Separator: blank line between files
+        if diff_line.kind == gitdiff::DiffLineKind::Separator {
+            lines.push(Line::from(Span::styled(
+                " ".repeat(area.width as usize),
+                bg_style,
+            )));
+            continue;
+        }
+
         let (line_bg, content_fg) = match diff_line.kind {
-            gitdiff::DiffLineKind::FileHeader => (theme::R_BG_RAISED, theme::R_TEXT_PRIMARY),
+            gitdiff::DiffLineKind::FileHeader => (theme::R_ACCENT, theme::R_BG_BASE),
             gitdiff::DiffLineKind::FileMetadata => (theme::R_BG_SURFACE, theme::R_TEXT_TERTIARY),
             gitdiff::DiffLineKind::HunkHeader => (theme::R_BG_SURFACE, theme::R_ACCENT),
             gitdiff::DiffLineKind::Add => (theme::R_DIFF_ADD_BG, theme::R_TEXT_PRIMARY),
             gitdiff::DiffLineKind::Delete => (theme::R_DIFF_DEL_BG, theme::R_TEXT_PRIMARY),
             gitdiff::DiffLineKind::Context => (theme::R_BG_BASE, theme::R_TEXT_SECONDARY),
+            gitdiff::DiffLineKind::Separator => unreachable!(),
         };
 
         let gutter_style = Style::default().fg(theme::R_TEXT_TERTIARY).bg(line_bg);
         let sep_style = Style::default().fg(theme::R_TEXT_DISABLED).bg(line_bg);
-        let content_style = Style::default().fg(content_fg).bg(line_bg);
+        let content_style = if diff_line.kind == gitdiff::DiffLineKind::FileHeader {
+            Style::default().fg(content_fg).bg(line_bg).add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(content_fg).bg(line_bg)
+        };
 
         // Build gutter: " old  new│"
         let old_str = match diff_line.old_lineno {
@@ -1383,15 +1397,21 @@ fn render_diff_viewer(frame: &mut Frame, area: Rect, state: &FocusModeState) {
             _ => (format!("{}{}", old_str, new_str), "│"),
         };
 
-        // Pad content to fill the full width
-        let display_content = &diff_line.content;
+        // File headers: show clean file name instead of raw "diff --git ..." line
+        let display_content = if diff_line.kind == gitdiff::DiffLineKind::FileHeader {
+            diff.file_names.get(diff_line.file_idx)
+                .map(|s| format!(" {s}"))
+                .unwrap_or_else(|| diff_line.content.clone())
+        } else {
+            diff_line.content.clone()
+        };
         let content_chars = display_content.chars().count();
         let pad = (content_width as usize).saturating_sub(content_chars);
 
         let mut spans = vec![
             Span::styled(gutter_text, gutter_style),
             Span::styled(separator, sep_style),
-            Span::styled(display_content.to_string(), content_style),
+            Span::styled(display_content, content_style),
         ];
 
         if pad > 0 {
