@@ -31,6 +31,8 @@ struct AgentStartResult {
     agent_id: String,
     agent_binary: String,
     working_dir: String,
+    repo_path: Option<String>,
+    branch_name: Option<String>,
 }
 
 const LOGO_LINES: &[&str] = &[
@@ -637,8 +639,8 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                 fm_cols,
                 fm_rows,
                 &result.working_dir,
-                None,
-                None,
+                result.repo_path.as_deref(),
+                result.branch_name.as_deref(),
             );
             in_focus_mode = true;
         }
@@ -918,39 +920,58 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                 let (cols, rows) =
                                     crossterm::terminal::size().unwrap_or((80, 24));
                                 tokio::spawn(async move {
-                                    if let Ok(mut stream) = ipc::try_connect().await {
-                                        let msg = CliMessage::CreateWorktreeAgent {
-                                            repo_path: output.repo_path,
-                                            target_branch: output.target_branch,
-                                            new_branch: output.new_branch,
-                                            prompt: output.prompt,
-                                            agent_binary: None,
-                                            cols,
-                                            rows: rows.saturating_sub(2).max(1),
-                                            accept_edits: false,
-                                            hub,
-                                        };
-                                        if clust_ipc::send_message(&mut stream, &msg)
-                                            .await
-                                            .is_ok()
-                                        {
-                                            if let Ok(HubMessage::WorktreeAgentStarted {
-                                                id,
-                                                agent_binary,
-                                                working_dir,
-                                            }) = clust_ipc::recv_message::<HubMessage>(
-                                                &mut stream,
-                                            )
-                                            .await
-                                            {
-                                                let _ = tx
-                                                    .send(AgentStartResult {
-                                                        agent_id: id,
-                                                        agent_binary,
-                                                        working_dir,
-                                                    })
-                                                    .await;
-                                            }
+                                    let mut stream = match ipc::try_connect().await {
+                                        Ok(s) => s,
+                                        Err(e) => {
+                                            eprintln!("agent create: hub connect failed: {e}");
+                                            return;
+                                        }
+                                    };
+                                    let msg = CliMessage::CreateWorktreeAgent {
+                                        repo_path: output.repo_path,
+                                        target_branch: output.target_branch,
+                                        new_branch: output.new_branch,
+                                        prompt: output.prompt,
+                                        agent_binary: None,
+                                        cols,
+                                        rows: rows.saturating_sub(2).max(1),
+                                        accept_edits: false,
+                                        hub,
+                                    };
+                                    if let Err(e) =
+                                        clust_ipc::send_message(&mut stream, &msg).await
+                                    {
+                                        eprintln!("agent create: send failed: {e}");
+                                        return;
+                                    }
+                                    match clust_ipc::recv_message::<HubMessage>(&mut stream)
+                                        .await
+                                    {
+                                        Ok(HubMessage::WorktreeAgentStarted {
+                                            id,
+                                            agent_binary,
+                                            working_dir,
+                                            repo_path,
+                                            branch_name,
+                                        }) => {
+                                            let _ = tx
+                                                .send(AgentStartResult {
+                                                    agent_id: id,
+                                                    agent_binary,
+                                                    working_dir,
+                                                    repo_path,
+                                                    branch_name,
+                                                })
+                                                .await;
+                                        }
+                                        Ok(HubMessage::Error { message }) => {
+                                            eprintln!("agent create: hub error: {message}");
+                                        }
+                                        Ok(_) => {
+                                            eprintln!("agent create: unexpected hub response");
+                                        }
+                                        Err(e) => {
+                                            eprintln!("agent create: recv failed: {e}");
                                         }
                                     }
                                 });

@@ -871,6 +871,10 @@ async fn handle_connection(
                     None => (Some(repo_path.clone()), Some(branch_name), true),
                 };
 
+            // Clone git info before moving into SpawnAgentParams
+            let response_repo_path = wt_repo_path.clone();
+            let response_branch_name = wt_branch_name.clone();
+
             // Spawn agent in the worktree
             let result = {
                 let mut hub_state = state.lock().await;
@@ -912,6 +916,8 @@ async fn handle_connection(
                             id,
                             agent_binary: binary,
                             working_dir,
+                            repo_path: response_repo_path,
+                            branch_name: response_branch_name,
                         },
                     )
                     .await?;
