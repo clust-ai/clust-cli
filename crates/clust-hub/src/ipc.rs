@@ -1053,6 +1053,108 @@ async fn handle_connection(
                 }
             }
         }
+        CliMessage::PurgeRepo { path } => {
+            let git_root = crate::repo::detect_git_root(&path);
+            match git_root {
+                Some(root) => {
+                    // Stop all repo agents
+                    let root_str = root.to_string_lossy().into_owned();
+                    let agent_ids = {
+                        let hub_state = state.lock().await;
+                        hub_state
+                            .agents
+                            .values()
+                            .filter(|e| {
+                                e.repo_path.as_deref() == Some(root_str.as_str())
+                            })
+                            .map(|e| e.id.clone())
+                            .collect::<Vec<_>>()
+                    };
+                    let stopped_agents = agent_ids.len();
+
+                    for id in &agent_ids {
+                        let state = state.clone();
+                        let id = id.clone();
+                        tokio::spawn(async move {
+                            let _ = agent::stop_agent(&state, &id).await;
+                        });
+                    }
+
+                    match crate::repo::purge_repo(&root) {
+                        Ok(result) => {
+                            clust_ipc::send_message_write(
+                                &mut writer,
+                                &HubMessage::RepoPurged {
+                                    path: root_str,
+                                    stopped_agents,
+                                    removed_worktrees: result.removed_worktrees,
+                                    deleted_branches: result.deleted_branches,
+                                },
+                            )
+                            .await?;
+                        }
+                        Err(e) => {
+                            clust_ipc::send_message_write(
+                                &mut writer,
+                                &HubMessage::Error { message: e },
+                            )
+                            .await?;
+                        }
+                    }
+                }
+                None => {
+                    clust_ipc::send_message_write(
+                        &mut writer,
+                        &HubMessage::Error {
+                            message: format!("{path} is not inside a git repository"),
+                        },
+                    )
+                    .await?;
+                }
+            }
+        }
+        CliMessage::CleanStaleRefs {
+            working_dir,
+            repo_name,
+        } => {
+            let repo_root = {
+                let hub_state = state.lock().await;
+                crate::repo::resolve_repo(
+                    working_dir.as_deref(),
+                    repo_name.as_deref(),
+                    hub_state.db.as_ref(),
+                )
+            };
+            match repo_root {
+                Ok(root) => {
+                    match crate::repo::clean_stale_refs(&root) {
+                        Ok(()) => {
+                            clust_ipc::send_message_write(
+                                &mut writer,
+                                &HubMessage::StaleRefsCleaned {
+                                    path: root.to_string_lossy().into_owned(),
+                                },
+                            )
+                            .await?;
+                        }
+                        Err(e) => {
+                            clust_ipc::send_message_write(
+                                &mut writer,
+                                &HubMessage::Error { message: e },
+                            )
+                            .await?;
+                        }
+                    }
+                }
+                Err(e) => {
+                    clust_ipc::send_message_write(
+                        &mut writer,
+                        &HubMessage::Error { message: e },
+                    )
+                    .await?;
+                }
+            }
+        }
         _ => {
             clust_ipc::send_message_write(
                 &mut writer,

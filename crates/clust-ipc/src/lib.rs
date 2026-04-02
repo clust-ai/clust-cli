@@ -83,6 +83,13 @@ pub enum CliMessage {
         repo_name: Option<String>,
         branch_name: String,
     },
+    PurgeRepo {
+        path: String,
+    },
+    CleanStaleRefs {
+        working_dir: Option<String>,
+        repo_name: Option<String>,
+    },
 }
 
 /// Info about a running agent, returned in AgentList.
@@ -175,6 +182,15 @@ pub enum HubMessage {
     },
     RemoteBranchDeleted {
         branch_name: String,
+    },
+    RepoPurged {
+        path: String,
+        stopped_agents: usize,
+        removed_worktrees: usize,
+        deleted_branches: usize,
+    },
+    StaleRefsCleaned {
+        path: String,
     },
 }
 
@@ -885,6 +901,23 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn cli_purge_repo() {
+        assert_cli_round_trip(CliMessage::PurgeRepo {
+            path: "/home/user/project".into(),
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn cli_clean_stale_refs() {
+        assert_cli_round_trip(CliMessage::CleanStaleRefs {
+            working_dir: Some("/home/user/project".into()),
+            repo_name: None,
+        })
+        .await;
+    }
+
+    #[tokio::test]
     async fn cli_get_worktree_info() {
         assert_cli_round_trip(CliMessage::GetWorktreeInfo {
             working_dir: Some("/home/user/project".into()),
@@ -978,6 +1011,25 @@ mod tests {
     async fn hub_remote_branch_deleted() {
         assert_hub_round_trip(HubMessage::RemoteBranchDeleted {
             branch_name: "origin/feature/auth".into(),
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn hub_repo_purged() {
+        assert_hub_round_trip(HubMessage::RepoPurged {
+            path: "/home/user/project".into(),
+            stopped_agents: 3,
+            removed_worktrees: 2,
+            deleted_branches: 5,
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn hub_stale_refs_cleaned() {
+        assert_hub_round_trip(HubMessage::StaleRefsCleaned {
+            path: "/home/user/project".into(),
         })
         .await;
     }

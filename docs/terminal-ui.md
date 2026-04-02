@@ -208,7 +208,7 @@ On startup, `clust ui` automatically connects to the hub daemon, starting it if 
 | `↑` / `↓` | Move selection within current level |
 | `→` | Descend into selected item (navigate tree) |
 | `←` | Ascend to parent level (navigate tree) |
-| `Enter` | Left panel: on repo opens context menu (Change Color); on branch with 1 agent opens focus mode, with multiple agents opens agent picker. Right panel: enter focus mode for selected agent. |
+| `Enter` | Left panel: on repo opens repo context menu; on local branch opens local branch context menu; on remote branch opens remote branch context menu. Right panel: enter focus mode for selected agent. |
 | `Space` | Left panel: toggle collapse/expand on repo or category level |
 | `Shift+←` / `Shift+→` | Switch focus between left and right panels |
 | `v` | Toggle agent grouping between by-hub and by-repo (right panel) |
@@ -219,9 +219,12 @@ On startup, `clust ui` automatically connects to the hub daemon, starting it if 
 
 **Context Menus:**
 
-Context menus appear as centered modal overlays. They support arrow key navigation, Enter to confirm, Esc to dismiss, and number keys 1-9/0 for direct item selection. Two context menus are available in the Repositories tab:
+Context menus appear as centered modal overlays. They support arrow key navigation, Enter to confirm, Esc to dismiss, and number keys 1-9/0 for direct item selection. Context menus may include an optional description field -- body text rendered between the title and the numbered items (used for confirmation dialogs). Mouse clicks on menu items are supported; clicking outside the modal dismisses it.
 
-- **Repo context menu:** Appears on Enter when a repo is selected. Contains "Change Color" which opens the color picker.
+- **Repo context menu:** Appears on Enter when a repo is selected. Contains: "Change Color" (opens color picker), "Open in File System", "Open in Terminal", "Stop All Agents", "Unregister", "Clean Stale Refs" (prunes stale remote tracking refs), and "Purge" (opens confirmation dialog).
+- **Purge confirmation dialog:** A `ConfirmAction` menu with a description explaining the destructive operation ("This will stop all agents, delete all worktrees, and delete all local branches."). Options are "Confirm" and "Cancel". On confirm, sends `PurgeRepo` IPC message which stops all agents, removes all worktrees, deletes all non-HEAD local branches, and cleans stale remote refs.
+- **Local branch context menu:** Appears on Enter when a local branch is selected. Contains: "Start Agent" (always shown), "Stop Agents" and "Open Agent" (shown when the branch has active agents), "Remove Worktree" (shown when the branch is a worktree), and "Delete Branch" (force-deletes the local branch via `DeleteLocalBranch` IPC).
+- **Remote branch context menu:** Appears on Enter when a remote branch is selected. Contains: "Start Agent" (creates a worktree from the remote branch and starts an agent), "Create Worktree" (checks out the remote branch as a worktree), and "Delete Remote Branch" (deletes the remote branch via `DeleteRemoteBranch` IPC).
 - **Color picker:** Shows the 10 available repo colors (red, orange, yellow, lime, green, teal, blue, purple, pink, coral) with colored `●` indicators. Selecting a color sends a `SetRepoColor` IPC message to the hub.
 - **Agent picker:** Appears on Enter when a branch has multiple active agents. Lists agent IDs for selection; selecting one opens focus mode.
 

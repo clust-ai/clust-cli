@@ -119,6 +119,10 @@ CLI -> Hub:
   RemoveWorktree { working_dir: Option<String>, repo_name: Option<String>, branch_name: String, delete_local_branch: bool, force: bool }
   GetWorktreeInfo { working_dir: Option<String>, repo_name: Option<String>, branch_name: String }
   CreateWorktreeAgent { repo_path: String, target_branch: Option<String>, new_branch: Option<String>, prompt: Option<String>, agent_binary: Option<String>, cols: u16, rows: u16, accept_edits: bool, hub: String }
+  DeleteLocalBranch { working_dir: Option<String>, repo_name: Option<String>, branch_name: String, force: bool }
+  DeleteRemoteBranch { working_dir: Option<String>, repo_name: Option<String>, branch_name: String }
+  PurgeRepo { path: String }
+  CleanStaleRefs { working_dir: Option<String>, repo_name: Option<String> }
 
 Hub -> CLI:
   Ok
@@ -142,6 +146,10 @@ Hub -> CLI:
   WorktreeRemoved { branch_name: String, stopped_agents: usize }
   WorktreeInfoResult { info: WorktreeEntry }
   WorktreeAgentStarted { id: String, agent_binary: String, working_dir: String, repo_path: Option<String>, branch_name: Option<String> }
+  LocalBranchDeleted { branch_name: String, stopped_agents: usize }
+  RemoteBranchDeleted { branch_name: String }
+  RepoPurged { path: String, stopped_agents: usize, removed_worktrees: usize, deleted_branches: usize }
+  StaleRefsCleaned { path: String }
 ```
 
 ### Connection Lifecycle

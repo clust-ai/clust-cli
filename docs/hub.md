@@ -147,6 +147,50 @@ When the CLI sends a worktree command, the hub resolves the target repository vi
 
 The hub also ensures the `.clust/` directory is added to `.git/info/exclude` so it does not pollute the repository.
 
+## Branch Management
+
+The hub handles branch deletion operations on behalf of CLI clients.
+
+### Delete Local Branch
+
+When the hub receives a `DeleteLocalBranch` message:
+
+1. Resolve the target repository (by working directory or repo name).
+2. If the branch is checked out as a worktree, remove the worktree first (force removal) and stop any agents running in it.
+3. Delete the local branch using `git branch -D` (force) or `git branch -d` (non-force).
+4. Return `LocalBranchDeleted { branch_name, stopped_agents }`.
+
+### Delete Remote Branch
+
+When the hub receives a `DeleteRemoteBranch` message:
+
+1. Resolve the target repository.
+2. Parse the remote name and branch from the full ref (e.g., `origin/feature` -> remote `origin`, branch `feature`).
+3. Delete the remote branch using `git push <remote> --delete <branch>`.
+4. Return `RemoteBranchDeleted { branch_name }`.
+
+## Repository Maintenance
+
+### Clean Stale Refs
+
+When the hub receives a `CleanStaleRefs` message:
+
+1. Resolve the target repository.
+2. List all remotes via `git remote`.
+3. Run `git remote prune <remote>` for each remote to remove stale remote tracking refs.
+4. Return `StaleRefsCleaned { path }`.
+
+### Purge Repository
+
+When the hub receives a `PurgeRepo` message:
+
+1. Detect the git root from the provided path.
+2. Stop all agents associated with the repository.
+3. Remove all non-main worktrees using `git worktree remove --force`.
+4. Delete all non-HEAD local branches using `git branch -D`.
+5. Clean stale remote refs (same as `CleanStaleRefs`).
+6. Return `RepoPurged { path, stopped_agents, removed_worktrees, deleted_branches }`.
+
 ## In-Memory State
 
 ```rust
