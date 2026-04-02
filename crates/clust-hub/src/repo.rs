@@ -554,6 +554,111 @@ pub fn delete_remote_branch(
     Ok(())
 }
 
+/// Result of a repository purge operation.
+pub struct PurgeResult {
+    pub removed_worktrees: usize,
+    pub deleted_branches: usize,
+}
+
+/// Purge a repository: remove all worktrees, delete all non-HEAD local branches,
+/// and clean stale remote refs.
+pub fn purge_repo(repo_root: &Path) -> Result<PurgeResult, String> {
+    // 1. Remove all non-main worktrees
+    let wt_output = std::process::Command::new("git")
+        .current_dir(repo_root)
+        .args(["worktree", "list", "--porcelain"])
+        .output()
+        .map_err(|e| format!("failed to list worktrees: {e}"))?;
+
+    let mut removed_worktrees = 0;
+    let mut current_path: Option<String> = None;
+    let mut is_main = false;
+
+    for line in String::from_utf8_lossy(&wt_output.stdout).lines() {
+        if let Some(path) = line.strip_prefix("worktree ") {
+            current_path = Some(path.to_string());
+            is_main = false;
+        } else if line == "bare" || current_path.as_deref() == Some(repo_root.to_string_lossy().trim_end_matches('/')) {
+            is_main = true;
+        } else if line.is_empty() {
+            if let Some(ref path) = current_path {
+                if !is_main && path != repo_root.to_string_lossy().trim_end_matches('/') {
+                    let _ = std::process::Command::new("git")
+                        .current_dir(repo_root)
+                        .args(["worktree", "remove", "--force", path])
+                        .output();
+                    removed_worktrees += 1;
+                }
+            }
+            current_path = None;
+        }
+    }
+    // Handle last entry if file doesn't end with blank line
+    if let Some(ref path) = current_path {
+        if !is_main && path != repo_root.to_string_lossy().trim_end_matches('/') {
+            let _ = std::process::Command::new("git")
+                .current_dir(repo_root)
+                .args(["worktree", "remove", "--force", path])
+                .output();
+            removed_worktrees += 1;
+        }
+    }
+
+    // 2. Delete all non-HEAD local branches
+    let repo = git2::Repository::open(repo_root)
+        .map_err(|e| format!("failed to open repo: {e}"))?;
+    let head_name = repo.head().ok().and_then(|h| h.shorthand().map(String::from));
+
+    let mut deleted_branches = 0;
+    if let Ok(branches) = repo.branches(Some(git2::BranchType::Local)) {
+        let names: Vec<String> = branches
+            .filter_map(|b| b.ok())
+            .filter_map(|(branch, _)| branch.name().ok()?.map(String::from))
+            .filter(|name| head_name.as_deref() != Some(name.as_str()))
+            .collect();
+
+        for name in &names {
+            let result = std::process::Command::new("git")
+                .current_dir(repo_root)
+                .args(["branch", "-D", name])
+                .output();
+            if result.is_ok() {
+                deleted_branches += 1;
+            }
+        }
+    }
+
+    // 3. Clean stale remote refs
+    let _ = clean_stale_refs(repo_root);
+
+    Ok(PurgeResult {
+        removed_worktrees,
+        deleted_branches,
+    })
+}
+
+/// Prune stale remote tracking refs for all remotes.
+pub fn clean_stale_refs(repo_root: &Path) -> Result<(), String> {
+    let output = std::process::Command::new("git")
+        .current_dir(repo_root)
+        .args(["remote"])
+        .output()
+        .map_err(|e| format!("failed to list remotes: {e}"))?;
+
+    let remotes = String::from_utf8_lossy(&output.stdout);
+    for remote in remotes.lines() {
+        let remote = remote.trim();
+        if !remote.is_empty() {
+            let _ = std::process::Command::new("git")
+                .current_dir(repo_root)
+                .args(["remote", "prune", remote])
+                .output();
+        }
+    }
+
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

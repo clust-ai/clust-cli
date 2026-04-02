@@ -29,6 +29,8 @@ pub struct ContextMenuItem {
 /// Reusable modal context menu with numbered items, arrow navigation, and enter/esc.
 pub struct ContextMenu {
     pub title: String,
+    /// Optional body text shown between the title and the numbered items.
+    pub description: Option<String>,
     pub items: Vec<ContextMenuItem>,
     pub selected_idx: usize,
 }
@@ -38,6 +40,7 @@ impl ContextMenu {
     pub fn new(title: &str, labels: Vec<String>) -> Self {
         Self {
             title: title.to_string(),
+            description: None,
             items: labels
                 .into_iter()
                 .map(|label| ContextMenuItem { label, color: None })
@@ -50,9 +53,16 @@ impl ContextMenu {
     pub fn with_colors(title: &str, items: Vec<ContextMenuItem>) -> Self {
         Self {
             title: title.to_string(),
+            description: None,
             items,
             selected_idx: 0,
         }
+    }
+
+    /// Set an optional description shown between the title and items.
+    pub fn with_description(mut self, desc: String) -> Self {
+        self.description = Some(desc);
+        self
     }
 
     /// Process a key event. Returns the menu result.
@@ -96,9 +106,16 @@ impl ContextMenu {
         let title_len = self.title.chars().count();
         // "  N  ● label  " => 2 + 1 + 2 + 2 + label + 2
         let item_width = 5 + 2 + label_max + 2; // number prefix + optional dot + label + padding
-        let content_width = item_width.max(title_len + 4);
+        let desc_lines: Vec<&str> = self
+            .description
+            .as_deref()
+            .map(|d| d.lines().collect())
+            .unwrap_or_default();
+        let desc_max_width: usize = desc_lines.iter().map(|l| l.chars().count()).max().unwrap_or(0);
+        let content_width = item_width.max(title_len + 4).max(desc_max_width + 2);
         let modal_width = (content_width + 2) as u16; // +2 for borders
-        let modal_height = (self.items.len() + 3) as u16; // +2 borders, +1 title line
+        let desc_height = if desc_lines.is_empty() { 0 } else { desc_lines.len() + 1 }; // +1 blank line after
+        let modal_height = (self.items.len() + desc_height + 3) as u16; // +2 borders, +1 title line
 
         let [horz_area] = Layout::horizontal([Constraint::Length(modal_width)])
             .flex(Flex::Center)
@@ -132,58 +149,74 @@ impl ContextMenu {
         let inner = block.inner(modal_rect);
         frame.render_widget(block, modal_rect);
 
-        let lines: Vec<Line> = self
-            .items
-            .iter()
-            .enumerate()
-            .map(|(i, item)| {
-                let is_selected = i == self.selected_idx;
-                let num = index_to_char(i);
-                let bg = if is_selected {
-                    theme::R_BG_HOVER
-                } else {
-                    theme::R_BG_OVERLAY
-                };
+        let mut lines: Vec<Line> = Vec::new();
 
-                let mut spans = vec![Span::styled(
-                    format!(" {num} "),
-                    Style::default().fg(theme::R_TEXT_TERTIARY).bg(bg),
-                )];
+        // Render description lines if present
+        for line_text in &desc_lines {
+            lines.push(Line::from(Span::styled(
+                format!(" {line_text}"),
+                Style::default().fg(theme::R_TEXT_SECONDARY).bg(theme::R_BG_OVERLAY),
+            )));
+        }
+        if !desc_lines.is_empty() {
+            lines.push(Line::from(""));
+        }
 
-                if let Some(color) = item.color {
-                    spans.push(Span::styled(
-                        "● ",
-                        Style::default().fg(color).bg(bg),
-                    ));
-                }
+        for (i, item) in self.items.iter().enumerate() {
+            let is_selected = i == self.selected_idx;
+            let num = index_to_char(i);
+            let bg = if is_selected {
+                theme::R_BG_HOVER
+            } else {
+                theme::R_BG_OVERLAY
+            };
 
-                let label_fg = if is_selected {
-                    theme::R_TEXT_PRIMARY
-                } else {
-                    theme::R_TEXT_SECONDARY
-                };
+            let mut spans = vec![Span::styled(
+                format!(" {num} "),
+                Style::default().fg(theme::R_TEXT_TERTIARY).bg(bg),
+            )];
+
+            if let Some(color) = item.color {
                 spans.push(Span::styled(
-                    item.label.clone(),
-                    Style::default().fg(label_fg).bg(bg),
+                    "● ",
+                    Style::default().fg(color).bg(bg),
                 ));
+            }
 
-                // Pad to fill width
-                let content_len: usize = spans.iter().map(|s| s.content.chars().count()).sum();
-                let remaining = (inner.width as usize).saturating_sub(content_len);
-                if remaining > 0 {
-                    spans.push(Span::styled(
-                        " ".repeat(remaining),
-                        Style::default().bg(bg),
-                    ));
-                }
+            let label_fg = if is_selected {
+                theme::R_TEXT_PRIMARY
+            } else {
+                theme::R_TEXT_SECONDARY
+            };
+            spans.push(Span::styled(
+                item.label.clone(),
+                Style::default().fg(label_fg).bg(bg),
+            ));
 
-                Line::from(spans)
-            })
-            .collect();
+            // Pad to fill width
+            let content_len: usize = spans.iter().map(|s| s.content.chars().count()).sum();
+            let remaining = (inner.width as usize).saturating_sub(content_len);
+            if remaining > 0 {
+                spans.push(Span::styled(
+                    " ".repeat(remaining),
+                    Style::default().bg(bg),
+                ));
+            }
+
+            lines.push(Line::from(spans));
+        }
 
         frame.render_widget(Paragraph::new(lines), inner);
 
-        (modal_rect, inner)
+        // Return an items-only rect for mouse hit-testing (offset past description)
+        let items_rect = Rect {
+            x: inner.x,
+            y: inner.y + desc_height as u16,
+            width: inner.width,
+            height: inner.height.saturating_sub(desc_height as u16),
+        };
+
+        (modal_rect, items_rect)
     }
 }
 

@@ -188,6 +188,11 @@ enum BranchAction {
     DeleteRemoteBranch,
 }
 
+/// Action to execute after user confirms in a confirmation dialog.
+enum ConfirmedAction {
+    PurgeRepo { repo_path: String },
+}
+
 /// Tracks which context menu is currently open.
 enum ActiveMenu {
     /// Pick an agent to open in focus mode (from a branch with multiple agents).
@@ -211,6 +216,11 @@ enum ActiveMenu {
         branch_name: String,
         agents: Vec<AgentInfo>,
         actions: Vec<BranchAction>,
+        menu: ContextMenu,
+    },
+    /// Confirmation dialog for destructive actions.
+    ConfirmAction {
+        action: ConfirmedAction,
         menu: ContextMenu,
     },
 }
@@ -903,6 +913,7 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                     ActiveMenu::RepoActions { ref menu, .. } => menu,
                     ActiveMenu::ColorPicker { ref menu, .. } => menu,
                     ActiveMenu::BranchActions { ref menu, .. } => menu,
+                    ActiveMenu::ConfirmAction { ref menu, .. } => menu,
                 };
                 let (modal_rect, inner_rect) = menu.render(frame, content_area);
                 click_map.menu_modal_rect = modal_rect;
@@ -930,6 +941,7 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                             ActiveMenu::RepoActions { ref mut menu, .. } => menu.handle_key(key.code),
                             ActiveMenu::ColorPicker { ref mut menu, .. } => menu.handle_key(key.code),
                             ActiveMenu::BranchActions { ref mut menu, .. } => menu.handle_key(key.code),
+                            ActiveMenu::ConfirmAction { ref mut menu, .. } => menu.handle_key(key.code),
                         };
                         match result {
                             MenuResult::Selected(idx) => {
@@ -1002,6 +1014,30 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                                     Instant::now() - Duration::from_secs(10);
                                                 last_agent_fetch =
                                                     Instant::now() - Duration::from_secs(10);
+                                            }
+                                            5 => {
+                                                // "Clean Stale Refs"
+                                                clean_stale_refs_ipc(&repo_path);
+                                                last_repo_fetch =
+                                                    Instant::now() - Duration::from_secs(10);
+                                            }
+                                            6 => {
+                                                // "Purge" → open confirmation dialog
+                                                active_menu = Some(ActiveMenu::ConfirmAction {
+                                                    action: ConfirmedAction::PurgeRepo {
+                                                        repo_path,
+                                                    },
+                                                    menu: ContextMenu::new(
+                                                        "Purge Repository",
+                                                        vec![
+                                                            "Confirm".to_string(),
+                                                            "Cancel".to_string(),
+                                                        ],
+                                                    )
+                                                    .with_description(
+                                                        "This will stop all agents, delete all\nworktrees, and delete all local branches.".to_string(),
+                                                    ),
+                                                });
                                             }
                                             _ => {}
                                         }
@@ -1163,7 +1199,7 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                                 }
                                                 BranchAction::RemoteStartAgent => {
                                                     if let Some(local) =
-                                                        branch_name.splitn(2, '/').nth(1)
+                                                        branch_name.split_once('/').map(|x| x.1)
                                                     {
                                                         let tx = agent_start_tx.clone();
                                                         let hub = hub_name.to_string();
@@ -1238,7 +1274,7 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                                 }
                                                 BranchAction::RemoteCreateWorktree => {
                                                     if let Some(local) =
-                                                        branch_name.splitn(2, '/').nth(1)
+                                                        branch_name.split_once('/').map(|x| x.1)
                                                     {
                                                         add_worktree_ipc(
                                                             &repo_path,
@@ -1256,6 +1292,19 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                                     );
                                                     last_repo_fetch =
                                                         Instant::now() - Duration::from_secs(10);
+                                                }
+                                            }
+                                        }
+                                    }
+                                    ActiveMenu::ConfirmAction { action, .. } => {
+                                        if idx == 0 {
+                                            match action {
+                                                ConfirmedAction::PurgeRepo { repo_path } => {
+                                                    purge_repo_ipc(&repo_path);
+                                                    last_repo_fetch = Instant::now()
+                                                        - Duration::from_secs(10);
+                                                    last_agent_fetch = Instant::now()
+                                                        - Duration::from_secs(10);
                                                 }
                                             }
                                         }
@@ -1650,6 +1699,8 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                                                         "Open in Terminal".to_string(),
                                                                         "Stop All Agents".to_string(),
                                                                         "Unregister".to_string(),
+                                                                        "Clean Stale Refs".to_string(),
+                                                                        "Purge".to_string(),
                                                                     ],
                                                                 ),
                                                             });
@@ -1890,6 +1941,7 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                 ActiveMenu::RepoActions { menu, .. } => menu.items.len(),
                                 ActiveMenu::ColorPicker { menu, .. } => menu.items.len(),
                                 ActiveMenu::BranchActions { menu, .. } => menu.items.len(),
+                                ActiveMenu::ConfirmAction { menu, .. } => menu.items.len(),
                             };
                             if idx < item_count {
                                 // Highlight the clicked item then select it
@@ -1898,6 +1950,7 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                     ActiveMenu::RepoActions { menu, .. } => menu.selected_idx = idx,
                                     ActiveMenu::ColorPicker { menu, .. } => menu.selected_idx = idx,
                                     ActiveMenu::BranchActions { menu, .. } => menu.selected_idx = idx,
+                                    ActiveMenu::ConfirmAction { menu, .. } => menu.selected_idx = idx,
                                 }
                                 let taken = active_menu.take().unwrap();
                                 match taken {
@@ -1962,6 +2015,28 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                                     Instant::now() - Duration::from_secs(10);
                                                 last_agent_fetch =
                                                     Instant::now() - Duration::from_secs(10);
+                                            }
+                                            5 => {
+                                                clean_stale_refs_ipc(&repo_path);
+                                                last_repo_fetch =
+                                                    Instant::now() - Duration::from_secs(10);
+                                            }
+                                            6 => {
+                                                active_menu = Some(ActiveMenu::ConfirmAction {
+                                                    action: ConfirmedAction::PurgeRepo {
+                                                        repo_path,
+                                                    },
+                                                    menu: ContextMenu::new(
+                                                        "Purge Repository",
+                                                        vec![
+                                                            "Confirm".to_string(),
+                                                            "Cancel".to_string(),
+                                                        ],
+                                                    )
+                                                    .with_description(
+                                                        "This will stop all agents, delete all\nworktrees, and delete all local branches.".to_string(),
+                                                    ),
+                                                });
                                             }
                                             _ => {}
                                         }
@@ -2122,7 +2197,7 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                                 }
                                                 BranchAction::RemoteStartAgent => {
                                                     if let Some(local) =
-                                                        branch_name.splitn(2, '/').nth(1)
+                                                        branch_name.split_once('/').map(|x| x.1)
                                                     {
                                                         let tx = agent_start_tx.clone();
                                                         let hub = hub_name.to_string();
@@ -2197,7 +2272,7 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                                 }
                                                 BranchAction::RemoteCreateWorktree => {
                                                     if let Some(local) =
-                                                        branch_name.splitn(2, '/').nth(1)
+                                                        branch_name.split_once('/').map(|x| x.1)
                                                     {
                                                         add_worktree_ipc(
                                                             &repo_path,
@@ -2215,6 +2290,19 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                                     );
                                                     last_repo_fetch =
                                                         Instant::now() - Duration::from_secs(10);
+                                                }
+                                            }
+                                        }
+                                    }
+                                    ActiveMenu::ConfirmAction { action, .. } => {
+                                        if idx == 0 {
+                                            match action {
+                                                ConfirmedAction::PurgeRepo { repo_path } => {
+                                                    purge_repo_ipc(&repo_path);
+                                                    last_repo_fetch = Instant::now()
+                                                        - Duration::from_secs(10);
+                                                    last_agent_fetch = Instant::now()
+                                                        - Duration::from_secs(10);
                                                 }
                                             }
                                         }
@@ -2321,7 +2409,8 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                             ActiveMenu::AgentPicker { menu, .. }
                             | ActiveMenu::RepoActions { menu, .. }
                             | ActiveMenu::ColorPicker { menu, .. }
-                            | ActiveMenu::BranchActions { menu, .. } => {
+                            | ActiveMenu::BranchActions { menu, .. }
+                            | ActiveMenu::ConfirmAction { menu, .. } => {
                                 menu.selected_idx = menu.selected_idx.saturating_sub(1);
                             }
                         }
@@ -2351,7 +2440,8 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                             ActiveMenu::AgentPicker { menu, .. }
                             | ActiveMenu::RepoActions { menu, .. }
                             | ActiveMenu::ColorPicker { menu, .. }
-                            | ActiveMenu::BranchActions { menu, .. } => {
+                            | ActiveMenu::BranchActions { menu, .. }
+                            | ActiveMenu::ConfirmAction { menu, .. } => {
                                 if !menu.items.is_empty() {
                                     menu.selected_idx = (menu.selected_idx + 1).min(menu.items.len() - 1);
                                 }
@@ -3907,6 +3997,39 @@ fn add_worktree_ipc(repo_path: &str, branch_name: &str, base_branch: &str) {
                 branch_name,
                 base_branch: Some(base_branch),
                 checkout_existing: false,
+            },
+        )
+        .await;
+        let _ = clust_ipc::recv_message::<HubMessage>(&mut stream).await;
+    });
+}
+
+fn purge_repo_ipc(path: &str) {
+    let path = path.to_string();
+    block_on_async(async {
+        let Ok(mut stream) = ipc::try_connect().await else {
+            return;
+        };
+        let _ = clust_ipc::send_message(
+            &mut stream,
+            &CliMessage::PurgeRepo { path },
+        )
+        .await;
+        let _ = clust_ipc::recv_message::<HubMessage>(&mut stream).await;
+    });
+}
+
+fn clean_stale_refs_ipc(path: &str) {
+    let working_dir = path.to_string();
+    block_on_async(async {
+        let Ok(mut stream) = ipc::try_connect().await else {
+            return;
+        };
+        let _ = clust_ipc::send_message(
+            &mut stream,
+            &CliMessage::CleanStaleRefs {
+                working_dir: Some(working_dir),
+                repo_name: None,
             },
         )
         .await;
