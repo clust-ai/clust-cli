@@ -209,9 +209,6 @@ fn run_worktree_selector(branch_name: &str, dirty: bool) -> CleanupChoice {
     render_worktree_selector(&mut stdout, selected);
 
     loop {
-        if !event::poll(std::time::Duration::from_millis(100)).unwrap_or(false) {
-            continue;
-        }
         let ev = match event::read() {
             Ok(ev) => ev,
             Err(_) => continue,
@@ -304,7 +301,7 @@ impl Drop for RawModeGuard {
 // ── Git operations ─────────────────────────────────────────────────
 
 /// Check if a worktree has uncommitted changes.
-fn is_worktree_dirty(repo_path: &str, branch: &str) -> bool {
+pub fn is_worktree_dirty(repo_path: &str, branch: &str) -> bool {
     let serialized = branch.replace('/', "__");
     let wt_path = Path::new(repo_path)
         .join(".clust")

@@ -155,6 +155,7 @@ A multi-agent terminal overview that displays all active agents side-by-side wit
 
 **Implementation:**
 
+- Each `AgentPanel` stores `is_worktree: bool` indicating whether the agent is running in a git worktree. This is used to determine whether to show worktree cleanup dialogs when the agent is stopped or exits.
 - Each agent panel runs a **background tokio task** that maintains its own IPC streaming connection to the hub (attach, receive output, forward input).
 - Output events are sent to the UI thread via an `mpsc` channel and drained each frame.
 - `TerminalEmulator` wraps a `vt100::Parser` (`vt100 = 0.15`) for full ANSI escape sequence handling, including alternate screen buffer support (private mode sequences like `?1049h`/`?1049l`), cursor visibility, scroll regions, and all standard SGR attributes. The `vt100` crate maintains scrollback internally (default 2,000 lines, configurable via `with_scrollback_capacity()`). The `TerminalEmulator` provides conversion to ratatui `Line`/`Span` types for TUI rendering (`to_ratatui_lines()`, `to_ratatui_lines_scrolled()`), to ANSI-escaped strings for direct stdout output (`to_ansi_lines_scrolled()`), and URL detection at screen coordinates (`url_at_position()`, `url_at_position_scrolled()`). It is also used as a shadow terminal in the attached session for scrollback (with 5,000-line capacity).
@@ -223,9 +224,10 @@ Context menus appear as centered modal overlays. They support arrow key navigati
 
 - **Repo context menu:** Appears on Enter when a repo is selected. Contains: "Change Color" (opens color picker), "Open in File System", "Open in Terminal", "Stop All Agents", "Unregister", "Clean Stale Refs" (prunes stale remote tracking refs), and "Purge" (opens confirmation dialog).
 - **Purge confirmation dialog:** A `ConfirmAction` menu with a description explaining the destructive operation ("This will stop all agents, delete all worktrees, and delete all local branches."). Options are "Confirm" and "Cancel". On confirm, sends `PurgeRepo` IPC message which stops all agents, removes all worktrees, deletes all non-HEAD local branches, and cleans stale remote refs.
-- **Local branch context menu:** Appears on Enter when a local branch is selected. Contains: "Start Agent" (always shown; creates a worktree and starts an agent), "Start Agent (in place)" (shown only for the HEAD branch; starts an agent directly in the repo root without creating a worktree, using the existing `StartAgent` IPC message), "Pull" (always shown; pulls or fetches the branch -- see Pull Branch below), "Stop Agents" and "Open Agent" (shown when the branch has active agents), "Remove Worktree" (shown when the branch is a worktree), and "Delete Branch" (force-deletes the local branch via `DeleteLocalBranch` IPC).
+- **Local branch context menu:** Appears on Enter when a local branch is selected. Contains: "Start Agent" (always shown; creates a worktree and starts an agent), "Start Agent (in place)" (shown only for the HEAD branch; starts an agent directly in the repo root without creating a worktree, using the existing `StartAgent` IPC message), "Pull" (always shown; pulls or fetches the branch -- see Pull Branch below), "Stop Agents" and "Open Agent" (shown when the branch has active agents), "Remove Worktree" (shown when the branch is a worktree), and "Delete Branch" (force-deletes the local branch via `DeleteLocalBranch` IPC). When "Stop Agents" is selected and the stopped agents were in worktrees, a worktree cleanup dialog is shown after stopping.
 - **Remote branch context menu:** Appears on Enter when a remote branch is selected. Contains: "Start Agent" (creates a worktree from the remote branch and starts an agent), "Create Worktree" (checks out the remote branch as a worktree), and "Delete Remote Branch" (deletes the remote branch via `DeleteRemoteBranch` IPC).
 - **Color picker:** Shows the 10 available repo colors (red, orange, yellow, lime, green, teal, blue, purple, pink, coral) with colored `●` indicators. Selecting a color sends a `SetRepoColor` IPC message to the hub.
+- **Worktree cleanup dialog:** Appears after stopping agents that were running in worktrees. Shows the worktree branch name (with a dirty indicator if the worktree has uncommitted changes) and offers three options: "Keep" (leave the worktree as-is), "Discard worktree" (remove the worktree via `RemoveWorktree` IPC with force), "Discard worktree + branch" (remove both worktree and local branch). When multiple worktrees need cleanup, dialogs are shown sequentially. Dismissing a cleanup dialog (Esc) advances to the next pending cleanup. This dialog is triggered from three contexts: (1) "Stop All Agents" in the repo context menu, (2) "Stop Agents" in the local branch context menu, (3) exiting focus mode (Esc) when the focused agent has exited and was running in a worktree.
 - **Agent picker:** Appears on Enter when a branch has multiple active agents. Lists agent IDs for selection; selecting one opens focus mode.
 
 **Overview tab (Options Bar focused):**
@@ -299,11 +301,11 @@ The focus view has a concept of which side (left or right) has keyboard focus. T
 
 The agent's `working_dir`, `repo_path`, and `branch_name` are passed to `open_agent()` to determine the git repository for the diff viewer and to display repo/branch identity in the back-bar and status bar.
 
-**Exit:** Press `Esc` from either panel to exit focus mode and return to the originating tab. The `in_focus_mode` flag is set back to `false`.
+**Exit:** Press `Esc` from either panel to exit focus mode and return to the originating tab. The `in_focus_mode` flag is set back to `false`. If the focused agent has exited and was running in a worktree, a worktree cleanup dialog is shown before returning to the originating tab.
 
 **Implementation:**
 
-- `FocusModeState` manages a single `AgentPanel` with its own IPC background task, output channel, and `TerminalEmulator`.
+- `FocusModeState` manages a single `AgentPanel` with its own IPC background task, output channel, and `TerminalEmulator`. It also tracks `branch_name` (in addition to `working_dir` and `repo_path`) to support worktree cleanup dialogs when exiting focus mode.
 - The panel dimensions are calculated as 40% of the content area width (minus borders) by the content area height (minus header).
 - `FocusSide` enum tracks which panel has keyboard focus (`Left` or `Right`).
 - `LeftPanelTab` enum tracks the active tab in the left panel (`Changes`, `Panel2`, `Panel3`) with `next()` for cycling.
