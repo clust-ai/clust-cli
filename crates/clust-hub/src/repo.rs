@@ -16,6 +16,7 @@ pub trait AgentMatcher {
     fn attached_clients(&self) -> usize;
     fn hub(&self) -> &str;
     fn working_dir(&self) -> &str;
+    fn is_worktree(&self) -> bool;
 }
 
 impl AgentMatcher for AgentEntry {
@@ -44,6 +45,9 @@ impl AgentMatcher for AgentEntry {
     fn working_dir(&self) -> &str {
         &self.working_dir
     }
+    fn is_worktree(&self) -> bool {
+        self.is_worktree
+    }
 }
 
 /// Lightweight snapshot of agent fields needed for repo state queries.
@@ -56,6 +60,7 @@ pub(crate) struct AgentSnapshot {
     pub working_dir: String,
     pub repo_path: Option<String>,
     pub branch_name: Option<String>,
+    pub is_worktree: bool,
 }
 
 impl AgentMatcher for AgentSnapshot {
@@ -82,6 +87,9 @@ impl AgentMatcher for AgentSnapshot {
     }
     fn working_dir(&self) -> &str {
         &self.working_dir
+    }
+    fn is_worktree(&self) -> bool {
+        self.is_worktree
     }
 }
 
@@ -360,6 +368,7 @@ pub fn list_worktrees<A: AgentMatcher>(
                             working_dir: a.working_dir().to_string(),
                             repo_path: a.repo_path().map(|s| s.to_string()),
                             branch_name: a.branch_name().map(|s| s.to_string()),
+                            is_worktree: a.is_worktree(),
                         })
                         .collect();
 

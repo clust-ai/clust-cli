@@ -41,6 +41,7 @@ async fn request_response_over_real_socket() {
             working_dir: "/tmp".into(),
             repo_path: None,
             branch_name: None,
+            is_worktree: false,
         }],
     };
     send_message(&mut server_stream, &response).await.unwrap();
@@ -98,6 +99,9 @@ async fn bidirectional_streaming_over_split_socket() {
                 &HubMessage::AgentStarted {
                     id: "abc123".into(),
                     agent_binary: "claude".into(),
+                    is_worktree: false,
+                    repo_path: None,
+                    branch_name: None,
                 },
             )
             .await
@@ -151,6 +155,9 @@ async fn bidirectional_streaming_over_split_socket() {
         HubMessage::AgentStarted {
             id: "abc123".into(),
             agent_binary: "claude".into(),
+            is_worktree: false,
+            repo_path: None,
+            branch_name: None,
         }
     );
 

@@ -668,6 +668,7 @@ pub fn run(hub_name: &str) -> io::Result<()> {
     let mut active_menu: Option<ActiveMenu> = None;
     let mut hub_stopped = false;
     let mut hub_count: usize = 1;
+    let mut worktree_cleanups: Vec<crate::worktree::WorktreeCleanup> = vec![];
     let mut show_help = false;
     let mut overview_state = OverviewState::new();
     let mut focus_mode_state = overview::FocusModeState::new();
@@ -1612,6 +1613,10 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                 names.sort();
                                 names.dedup();
                                 hub_count = names.len().max(1);
+                                // Collect worktree info before stopping
+                                worktree_cleanups = crate::worktree::collect_worktree_cleanups(
+                                    &agents, &agents,
+                                );
                                 block_on_async(async {
                                     if let Ok(mut stream) = ipc::try_connect().await {
                                         let _ = ipc::send_stop(&mut stream).await;
@@ -2490,6 +2495,7 @@ pub fn run(hub_name: &str) -> io::Result<()> {
             theme::TEXT_SECONDARY,
             theme::RESET
         );
+        crate::worktree::prompt_worktree_cleanup(&worktree_cleanups);
     }
 
     if let Some(ref msg) = *update_notice.lock().unwrap() {
@@ -4486,6 +4492,7 @@ mod tests {
             working_dir: "/tmp".to_string(),
             repo_path: None,
             branch_name: None,
+            is_worktree: false,
         }
     }
 
