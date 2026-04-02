@@ -1,4 +1,5 @@
 pub mod agents;
+pub mod branch;
 
 use std::io;
 use std::path::PathBuf;

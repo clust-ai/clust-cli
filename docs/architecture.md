@@ -75,6 +75,7 @@ The CLI is a thin client. It does NOT manage agent processes directly.
 - Split-stream variants for bidirectional sessions
 - Socket path and clust directory helpers
 - Known agent registry (`KNOWN_AGENTS`) with accept-edits metadata
+- Branch name sanitization (`sanitize_branch_name`) for converting user input into valid git branch names
 
 ## IPC Design
 
