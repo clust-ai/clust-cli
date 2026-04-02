@@ -90,6 +90,10 @@ pub enum CliMessage {
         working_dir: Option<String>,
         repo_name: Option<String>,
     },
+    PullBranch {
+        repo_path: String,
+        branch_name: String,
+    },
 }
 
 /// Info about a running agent, returned in AgentList.
@@ -204,6 +208,10 @@ pub enum HubMessage {
     },
     StaleRefsCleaned {
         path: String,
+    },
+    BranchPulled {
+        branch_name: String,
+        summary: String,
     },
 }
 
