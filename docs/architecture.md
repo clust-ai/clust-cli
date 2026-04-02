@@ -151,6 +151,7 @@ Hub -> CLI:
   LocalBranchDeleted { branch_name: String, stopped_agents: usize }
   RemoteBranchDeleted { branch_name: String }
   RepoPurged { path: String, stopped_agents: usize, removed_worktrees: usize, deleted_branches: usize }
+  PurgeProgress { step: String }
   StaleRefsCleaned { path: String }
   BranchPulled { branch_name: String, summary: String }
 ```

@@ -206,6 +206,9 @@ pub enum HubMessage {
         removed_worktrees: usize,
         deleted_branches: usize,
     },
+    PurgeProgress {
+        step: String,
+    },
     StaleRefsCleaned {
         path: String,
     },

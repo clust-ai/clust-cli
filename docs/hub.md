@@ -224,12 +224,13 @@ When the hub receives a `CleanStaleRefs` message:
 When the hub receives a `PurgeRepo` message:
 
 1. Detect the git root from the provided path.
-2. Stop all agents associated with the repository.
-3. Remove all non-main worktrees using `git worktree remove --force`.
-4. Remove the `.clust/worktrees/` directory entirely to catch any leftover files from worktrees that were not cleanly removed.
-5. Delete all non-HEAD local branches using `git branch -D`.
-6. Clean stale remote refs (same as `CleanStaleRefs`).
-7. Return `RepoPurged { path, stopped_agents, removed_worktrees, deleted_branches }`.
+2. Stop all agents associated with the repository. Sends `PurgeProgress { step: "Stopping agents..." }` and awaits agent process termination before proceeding.
+3. Remove all non-main worktrees using `git worktree remove --force`. Sends `PurgeProgress { step: "Removing worktrees..." }`. Also removes the `.clust/worktrees/` directory entirely to catch any leftover files.
+4. Delete all non-HEAD local branches using `git branch -D`. Sends `PurgeProgress { step: "Deleting branches..." }`.
+5. Clean stale remote refs (same as `CleanStaleRefs`). Sends `PurgeProgress { step: "Cleaning stale refs..." }`.
+6. Return `RepoPurged { path, stopped_agents, removed_worktrees, deleted_branches }`.
+
+Each phase sends a `PurgeProgress` IPC message to the client before execution, allowing the TUI to display real-time progress. The hub awaits agent stops before proceeding to worktree removal to prevent race conditions.
 
 ## In-Memory State
 
