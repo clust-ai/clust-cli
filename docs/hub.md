@@ -121,7 +121,7 @@ The hub handles Git worktree operations on behalf of CLI clients. Worktrees are 
 ### Operations
 
 - **List**: Enumerates all worktrees (including main) via `git2`, checks dirty status, and matches active agents to each worktree by working directory.
-- **Add**: Creates a new worktree with either a new branch or an existing branch (`--checkout`). Optionally launches an agent in the new worktree.
+- **Add**: Creates a new worktree with either a new branch or an existing branch (`--checkout`). New branch names are sanitized via `sanitize_branch_name()` (existing branches checked out with `--checkout` are not sanitized). Optionally launches an agent in the new worktree.
 - **Remove**: Prunes the worktree from git and removes its directory. Stops any agents running in the worktree. Refuses to remove dirty worktrees unless `--force` is specified. Optionally deletes the local branch (`--local`).
 - **Info**: Returns detailed information for a single worktree including path, dirty status, and active agents.
 
@@ -129,7 +129,8 @@ The hub handles Git worktree operations on behalf of CLI clients. Worktrees are 
 
 When the hub receives a `CreateWorktreeAgent` message (sent from the TUI create-agent modal):
 
-1. Create or check out a worktree using the existing `add_worktree()` logic:
+1. Sanitize the branch name via `clust_ipc::branch::sanitize_branch_name()` as defense-in-depth (the CLI also sanitizes before sending). Only new branch names are sanitized; existing branch names (from `target_branch`) are already valid git refs.
+2. Create or check out a worktree using the existing `add_worktree()` logic:
    - If `new_branch` is provided, create a new worktree with that branch (using `target_branch` as the base branch if specified).
    - If `new_branch` is not provided, check out the `target_branch` as a worktree.
 2. Spawn an agent in the new worktree directory (same logic as `StartAgent`).

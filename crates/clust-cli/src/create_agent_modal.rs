@@ -189,14 +189,14 @@ impl CreateAgentModal {
                 ModalResult::Pending
             }
             ModalStep::NewBranch => {
-                let trimmed = self.input.trim().to_string();
-                if self.new_branch_required && trimmed.is_empty() {
+                let sanitized = clust_ipc::branch::sanitize_branch_name(&self.input);
+                if self.new_branch_required && sanitized.is_empty() {
                     return ModalResult::Pending;
                 }
-                self.new_branch_name = if trimmed.is_empty() {
+                self.new_branch_name = if self.input.trim().is_empty() {
                     None
                 } else {
-                    Some(trimmed)
+                    Some(sanitized)
                 };
                 self.step = ModalStep::EnterPrompt;
                 self.reset_input();
