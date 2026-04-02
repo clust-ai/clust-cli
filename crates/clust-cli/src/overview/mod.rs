@@ -7,7 +7,7 @@ use ratatui::{
     layout::{Constraint, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Paragraph},
+    widgets::{Block, Borders, Paragraph, Wrap},
     Frame,
 };
 use tokio::sync::{mpsc, watch};
@@ -1313,6 +1313,7 @@ fn render_diff_viewer(frame: &mut Frame, area: Rect, state: &FocusModeState) {
                 err.as_str(),
                 Style::default().fg(theme::R_ERROR),
             )))
+            .wrap(Wrap { trim: false })
             .style(bg_style),
             area,
         );

@@ -28,12 +28,26 @@ use crate::{
     theme, version,
 };
 
-struct AgentStartResult {
-    agent_id: String,
-    agent_binary: String,
-    working_dir: String,
-    repo_path: Option<String>,
-    branch_name: Option<String>,
+enum AgentStartResult {
+    Started {
+        agent_id: String,
+        agent_binary: String,
+        working_dir: String,
+        repo_path: Option<String>,
+        branch_name: Option<String>,
+    },
+    Failed(String),
+}
+
+enum StatusLevel {
+    Error,
+    Success,
+}
+
+struct StatusMessage {
+    text: String,
+    level: StatusLevel,
+    created: Instant,
 }
 
 const LOGO_LINES: &[&str] = &[
@@ -627,6 +641,7 @@ pub fn run(hub_name: &str) -> io::Result<()> {
     let mut overview_state = OverviewState::new();
     let mut focus_mode_state = overview::FocusModeState::new();
     let mut in_focus_mode = false;
+    let mut status_message: Option<StatusMessage> = None;
     let (init_cols, init_rows) = crossterm::terminal::size().unwrap_or((80, 24));
     let mut last_content_area = Rect {
         x: 0,
@@ -648,20 +663,50 @@ pub fn run(hub_name: &str) -> io::Result<()> {
 
         // Check for completed agent start requests
         if let Ok(result) = agent_start_rx.try_recv() {
-            let fm_cols = (last_content_area.width * 40 / 100)
-                .saturating_sub(2)
-                .max(1);
-            let fm_rows = last_content_area.height.saturating_sub(3).max(1);
-            focus_mode_state.open_agent(
-                &result.agent_id,
-                &result.agent_binary,
-                fm_cols,
-                fm_rows,
-                &result.working_dir,
-                result.repo_path.as_deref(),
-                result.branch_name.as_deref(),
-            );
-            in_focus_mode = true;
+            match result {
+                AgentStartResult::Started {
+                    agent_id,
+                    agent_binary,
+                    working_dir,
+                    repo_path,
+                    branch_name,
+                } => {
+                    let fm_cols = (last_content_area.width * 40 / 100)
+                        .saturating_sub(2)
+                        .max(1);
+                    let fm_rows = last_content_area.height.saturating_sub(3).max(1);
+                    focus_mode_state.open_agent(
+                        &agent_id,
+                        &agent_binary,
+                        fm_cols,
+                        fm_rows,
+                        &working_dir,
+                        repo_path.as_deref(),
+                        branch_name.as_deref(),
+                    );
+                    in_focus_mode = true;
+                    let branch_label = branch_name.as_deref().unwrap_or("unknown");
+                    status_message = Some(StatusMessage {
+                        text: format!("Agent started on {branch_label}"),
+                        level: StatusLevel::Success,
+                        created: Instant::now(),
+                    });
+                }
+                AgentStartResult::Failed(msg) => {
+                    status_message = Some(StatusMessage {
+                        text: msg,
+                        level: StatusLevel::Error,
+                        created: Instant::now(),
+                    });
+                }
+            }
+        }
+
+        // Auto-dismiss status messages after 5 seconds
+        if let Some(ref msg) = status_message {
+            if msg.created.elapsed() >= Duration::from_secs(5) {
+                status_message = None;
+            }
         }
 
         // Periodically fetch agent list and repo state from hub
@@ -720,6 +765,7 @@ pub fn run(hub_name: &str) -> io::Result<()> {
         let cur_tab = active_tab;
         let cur_focus_mode = in_focus_mode;
         let overview_focus = overview_state.focus;
+        let status_msg_ref = status_message.as_ref();
         let show_help_now = show_help;
         let menu_ref = &active_menu;
         let repo_colors: HashMap<String, String> = repos
@@ -827,6 +873,7 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                 cur_focus_mode,
                 overview_focus,
                 focused_agent_info.as_ref(),
+                status_msg_ref,
             );
 
             if let Some(ref menu_state) = menu_ref {
@@ -942,7 +989,9 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                     let mut stream = match ipc::try_connect().await {
                                         Ok(s) => s,
                                         Err(e) => {
-                                            eprintln!("agent create: hub connect failed: {e}");
+                                            let _ = tx.send(AgentStartResult::Failed(
+                                                format!("Agent create failed: hub connect error: {e}")
+                                            )).await;
                                             return;
                                         }
                                     };
@@ -960,7 +1009,9 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                     if let Err(e) =
                                         clust_ipc::send_message(&mut stream, &msg).await
                                     {
-                                        eprintln!("agent create: send failed: {e}");
+                                        let _ = tx.send(AgentStartResult::Failed(
+                                            format!("Agent create failed: send error: {e}")
+                                        )).await;
                                         return;
                                     }
                                     match clust_ipc::recv_message::<HubMessage>(&mut stream)
@@ -974,7 +1025,7 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                             branch_name,
                                         }) => {
                                             let _ = tx
-                                                .send(AgentStartResult {
+                                                .send(AgentStartResult::Started {
                                                     agent_id: id,
                                                     agent_binary,
                                                     working_dir,
@@ -984,13 +1035,19 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                                 .await;
                                         }
                                         Ok(HubMessage::Error { message }) => {
-                                            eprintln!("agent create: hub error: {message}");
+                                            let _ = tx.send(AgentStartResult::Failed(
+                                                format!("Agent create failed: {message}")
+                                            )).await;
                                         }
                                         Ok(_) => {
-                                            eprintln!("agent create: unexpected hub response");
+                                            let _ = tx.send(AgentStartResult::Failed(
+                                                "Agent create failed: unexpected hub response".to_string()
+                                            )).await;
                                         }
                                         Err(e) => {
-                                            eprintln!("agent create: recv failed: {e}");
+                                            let _ = tx.send(AgentStartResult::Failed(
+                                                format!("Agent create failed: recv error: {e}")
+                                            )).await;
                                         }
                                     }
                                 });
@@ -2857,6 +2914,7 @@ fn render_status_bar(
     in_focus_mode: bool,
     overview_focus: OverviewFocus,
     focused_agent_info: Option<&(String, ratatui::style::Color, String)>,
+    status_message: Option<&StatusMessage>,
 ) {
     let bg = Style::default().bg(theme::R_BG_RAISED);
 
@@ -2902,31 +2960,46 @@ fn render_status_bar(
         }
     }
 
-    let mod_key = if cfg!(target_os = "macos") { "Opt" } else { "Alt" };
-    let hint_text = if in_focus_mode {
-        format!("Shift+\u{2190}/\u{2192} switch panel  Shift+\u{2191}/\u{2193} jump file  Esc exit  {mod_key}+E new agent")
-    } else if active_tab == ActiveTab::Overview {
-        match overview_focus {
-            OverviewFocus::Terminal(_) => {
-                format!("Shift+\u{2191} options  Shift+\u{2193} focus  Shift+\u{2190}/\u{2192} switch agent  {mod_key}+E new agent")
-            }
-            OverviewFocus::OptionsBar => {
-                format!("Shift+\u{2193} enter terminal  Shift+\u{2190}/\u{2192} scroll  {mod_key}+E new agent  q quit  ? keys")
-            }
-        }
+    // Status message overrides keybinding hints
+    if let Some(msg) = status_message {
+        let color = match msg.level {
+            StatusLevel::Error => theme::R_ERROR,
+            StatusLevel::Success => theme::R_SUCCESS,
+        };
+        left_spans.extend([
+            Span::styled("  ", Style::default().bg(theme::R_BG_RAISED)),
+            Span::styled(
+                msg.text.clone(),
+                Style::default().fg(color).bg(theme::R_BG_RAISED),
+            ),
+        ]);
     } else {
-        format!("{mod_key}+E new agent  q quit  Q stop+quit  ? keys")
-    };
+        let mod_key = if cfg!(target_os = "macos") { "Opt" } else { "Alt" };
+        let hint_text = if in_focus_mode {
+            format!("Shift+\u{2190}/\u{2192} switch panel  Shift+\u{2191}/\u{2193} jump file  Esc exit  {mod_key}+E new agent")
+        } else if active_tab == ActiveTab::Overview {
+            match overview_focus {
+                OverviewFocus::Terminal(_) => {
+                    format!("Shift+\u{2191} options  Shift+\u{2193} focus  Shift+\u{2190}/\u{2192} switch agent  {mod_key}+E new agent")
+                }
+                OverviewFocus::OptionsBar => {
+                    format!("Shift+\u{2193} enter terminal  Shift+\u{2190}/\u{2192} scroll  {mod_key}+E new agent  q quit  ? keys")
+                }
+            }
+        } else {
+            format!("{mod_key}+E new agent  q quit  Q stop+quit  ? keys")
+        };
 
-    left_spans.extend([
-        Span::styled("  ", Style::default().bg(theme::R_BG_RAISED)),
-        Span::styled(
-            hint_text,
-            Style::default()
-                .fg(theme::R_TEXT_TERTIARY)
-                .bg(theme::R_BG_RAISED),
-        ),
-    ]);
+        left_spans.extend([
+            Span::styled("  ", Style::default().bg(theme::R_BG_RAISED)),
+            Span::styled(
+                hint_text,
+                Style::default()
+                    .fg(theme::R_TEXT_TERTIARY)
+                    .bg(theme::R_BG_RAISED),
+            ),
+        ]);
+    }
 
     if let Some(ref msg) = *update_notice {
         left_spans.push(Span::styled("  ", Style::default().bg(theme::R_BG_RAISED)));
