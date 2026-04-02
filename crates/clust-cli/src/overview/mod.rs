@@ -20,10 +20,16 @@ use crate::{ipc, terminal_emulator::TerminalEmulator, theme, ui::ClickMap};
 /// Minimum width in columns for a single agent panel.
 const MIN_PANEL_WIDTH: u16 = 40;
 
-/// Calculate the total panel width (including borders) for a given available width.
-/// Targets 2.5 panels across the screen so the user sees 2 full + half of a third.
-fn panel_total_width(available_width: u16) -> u16 {
-    (available_width * 2 / 5).max(MIN_PANEL_WIDTH)
+/// Maximum number of panels that fit side-by-side at MIN_PANEL_WIDTH.
+fn max_panels_for_width(available_width: u16) -> usize {
+    (available_width / MIN_PANEL_WIDTH).max(1) as usize
+}
+
+/// Width of each panel when `count` panels share the available width evenly.
+/// A single panel still only gets half the screen (never full width).
+fn panel_width_for_count(available_width: u16, count: usize) -> u16 {
+    let slots = (count as u16).max(2); // at least 2 slots so 1 panel = half width
+    (available_width / slots).max(MIN_PANEL_WIDTH)
 }
 
 // ---------------------------------------------------------------------------
@@ -230,10 +236,9 @@ impl OverviewState {
         if self.panels.is_empty() {
             return 0;
         }
-        let pw = panel_total_width(width);
-        // Ceiling division so the partially-visible panel is included.
-        let max_fit = width.div_ceil(pw).max(1) as usize;
-        max_fit.min(self.panels.len() - self.scroll_offset)
+        let remaining = self.panels.len() - self.scroll_offset;
+        let max_fit = max_panels_for_width(width);
+        remaining.min(max_fit)
     }
 
     /// Move focus to the previous agent terminal.
@@ -333,8 +338,7 @@ impl OverviewState {
             self.scroll_offset = idx;
         }
         if self.viewport_width > 0 {
-            let pw = panel_total_width(self.viewport_width);
-            let fully_visible = (self.viewport_width / pw).max(1) as usize;
+            let fully_visible = max_panels_for_width(self.viewport_width);
             if idx >= self.scroll_offset + fully_visible {
                 self.scroll_offset = idx + 1 - fully_visible;
             }
@@ -371,9 +375,12 @@ impl OverviewState {
         // Each panel has: top border (1) + header (1) + terminal content + bottom border (1)
         self.panel_rows = available_height.saturating_sub(3).max(1);
 
-        // Panel width targets 2.5 panels across the screen.
+        // Derive panel width from the number of panels that will be visible.
         // VTE terminal gets the inner width: total minus 2 border columns.
-        let pw = panel_total_width(content_area.width);
+        let remaining = agent_count.saturating_sub(self.scroll_offset).max(1);
+        let max_fit = max_panels_for_width(content_area.width);
+        let visible = remaining.min(max_fit);
+        let pw = panel_width_for_count(content_area.width, visible);
         self.panel_cols = pw.saturating_sub(2).max(1);
     }
 
@@ -621,10 +628,10 @@ pub fn render_overview(frame: &mut Frame, area: Rect, state: &mut OverviewState,
     let end = (state.scroll_offset + visible_count).min(state.panels.len());
     let actual_visible = end - state.scroll_offset;
 
-    // Fixed-width columns so 2.5 panels fit on screen
-    let pw = panel_total_width(panels_area.width);
+    // Distribute available width evenly; at least 2 slots so 1 panel = half screen
+    let slots = (actual_visible as u32).max(2);
     let constraints: Vec<Constraint> = (0..actual_visible)
-        .map(|_| Constraint::Length(pw))
+        .map(|_| Constraint::Ratio(1, slots))
         .collect();
     let panel_areas = Layout::horizontal(constraints).split(panels_area);
 
