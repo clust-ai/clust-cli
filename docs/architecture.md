@@ -124,6 +124,7 @@ CLI -> Hub:
   DeleteRemoteBranch { working_dir: Option<String>, repo_name: Option<String>, branch_name: String }
   PurgeRepo { path: String }
   CleanStaleRefs { working_dir: Option<String>, repo_name: Option<String> }
+  PullBranch { repo_path: String, branch_name: String }
 
 Hub -> CLI:
   Ok
@@ -151,6 +152,7 @@ Hub -> CLI:
   RemoteBranchDeleted { branch_name: String }
   RepoPurged { path: String, stopped_agents: usize, removed_worktrees: usize, deleted_branches: usize }
   StaleRefsCleaned { path: String }
+  BranchPulled { branch_name: String, summary: String }
 ```
 
 ### Connection Lifecycle

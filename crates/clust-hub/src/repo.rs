@@ -536,6 +536,67 @@ pub fn delete_local_branch(
     Ok(())
 }
 
+/// Pull latest changes for a branch.
+///
+/// Strategy depends on where the branch is checked out:
+/// - Repo HEAD: `git pull` in repo root
+/// - Worktree: `git pull` in worktree directory
+/// - Not checked out: `git fetch origin <branch>:<branch>` (fast-forward only)
+pub fn pull_branch(repo_root: &Path, branch: &str) -> Result<String, String> {
+    // Determine head branch of the main worktree
+    let repo = git2::Repository::open(repo_root)
+        .map_err(|e| format!("failed to open repo: {e}"))?;
+    let head_branch = repo
+        .head()
+        .ok()
+        .and_then(|h| h.shorthand().map(|s| s.to_string()));
+
+    if head_branch.as_deref() == Some(branch) {
+        // Branch is checked out in the main worktree — git pull in repo root
+        let output = std::process::Command::new("git")
+            .current_dir(repo_root)
+            .args(["pull"])
+            .output()
+            .map_err(|e| format!("failed to run git: {e}"))?;
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return Err(format!("git pull failed: {}", stderr.trim()));
+        }
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        return Ok(stdout.trim().to_string());
+    }
+
+    // Check if branch is in a linked worktree
+    let wt_path = worktree_path(repo_root, branch);
+    if wt_path.exists() {
+        let output = std::process::Command::new("git")
+            .current_dir(&wt_path)
+            .args(["pull"])
+            .output()
+            .map_err(|e| format!("failed to run git: {e}"))?;
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return Err(format!("git pull failed: {}", stderr.trim()));
+        }
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        return Ok(stdout.trim().to_string());
+    }
+
+    // Branch not checked out anywhere — fast-forward fetch
+    let refspec = format!("{branch}:{branch}");
+    let output = std::process::Command::new("git")
+        .current_dir(repo_root)
+        .args(["fetch", "origin", &refspec])
+        .output()
+        .map_err(|e| format!("failed to run git: {e}"))?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(format!("git fetch failed: {}", stderr.trim()));
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    Ok(stdout.trim().to_string())
+}
+
 /// Delete a remote branch (e.g. "origin/feature-x").
 pub fn delete_remote_branch(
     repo_root: &Path,
