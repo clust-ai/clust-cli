@@ -57,6 +57,7 @@ pub struct AgentPanel {
     pub agent_binary: String,
     pub branch_name: Option<String>,
     pub repo_path: Option<String>,
+    pub is_worktree: bool,
     pub vterm: TerminalEmulator,
     pub command_tx: mpsc::Sender<PanelCommand>,
     pub exited: bool,
@@ -395,6 +396,7 @@ impl OverviewState {
             agent_binary: binary,
             branch_name: agent.branch_name.clone(),
             repo_path: agent.repo_path.clone(),
+            is_worktree: agent.is_worktree,
             vterm: TerminalEmulator::new(cols as usize, rows as usize),
             command_tx,
             exited: false,
@@ -947,6 +949,7 @@ pub struct FocusModeState {
     diff_task: Option<JoinHandle<()>>,
     pub working_dir: Option<String>,
     pub repo_path: Option<String>,
+    pub branch_name: Option<String>,
 }
 
 impl FocusModeState {
@@ -970,6 +973,7 @@ impl FocusModeState {
             diff_task: None,
             working_dir: None,
             repo_path: None,
+            branch_name: None,
         }
     }
 
@@ -984,6 +988,7 @@ impl FocusModeState {
         working_dir: &str,
         repo_path: Option<&str>,
         branch_name: Option<&str>,
+        is_worktree: bool,
     ) {
         self.close_panel();
 
@@ -996,6 +1001,7 @@ impl FocusModeState {
         self.diff_error = None;
         self.working_dir = Some(working_dir.to_string());
         self.repo_path = repo_path.map(|s| s.to_string());
+        self.branch_name = branch_name.map(|s| s.to_string());
 
         let id = agent_id.to_string();
         let binary = agent_binary.to_string();
@@ -1012,6 +1018,7 @@ impl FocusModeState {
             agent_binary: binary,
             branch_name: branch_name.map(|s| s.to_string()),
             repo_path: repo_path.map(|s| s.to_string()),
+            is_worktree,
             vterm: TerminalEmulator::new(cols as usize, rows as usize),
             command_tx,
             exited: false,

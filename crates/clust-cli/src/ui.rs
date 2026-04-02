@@ -225,6 +225,12 @@ enum ActiveMenu {
         action: ConfirmedAction,
         menu: ContextMenu,
     },
+    /// Worktree cleanup dialog shown after stopping agents in a worktree.
+    WorktreeCleanup {
+        repo_path: String,
+        branch_name: String,
+        menu: ContextMenu,
+    },
 }
 
 // ---------------------------------------------------------------------------
@@ -671,6 +677,7 @@ pub fn run(hub_name: &str) -> io::Result<()> {
     let mut hub_stopped = false;
     let mut hub_count: usize = 1;
     let mut worktree_cleanups: Vec<crate::worktree::WorktreeCleanup> = vec![];
+    let mut pending_worktree_cleanups: Vec<crate::worktree::WorktreeCleanup> = vec![];
     let mut show_help = false;
     let mut overview_state = OverviewState::new();
     let mut focus_mode_state = overview::FocusModeState::new();
@@ -719,6 +726,7 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                         &working_dir,
                         repo_path.as_deref(),
                         branch_name.as_deref(),
+                        true, // WorktreeAgentStarted → always a worktree
                     );
                     in_focus_mode = true;
                     let branch_label = branch_name.as_deref().unwrap_or("unknown");
@@ -924,6 +932,7 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                     ActiveMenu::ColorPicker { ref menu, .. } => menu,
                     ActiveMenu::BranchActions { ref menu, .. } => menu,
                     ActiveMenu::ConfirmAction { ref menu, .. } => menu,
+                    ActiveMenu::WorktreeCleanup { ref menu, .. } => menu,
                 };
                 let (modal_rect, inner_rect) = menu.render(frame, content_area);
                 click_map.menu_modal_rect = modal_rect;
@@ -952,6 +961,7 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                             ActiveMenu::ColorPicker { ref mut menu, .. } => menu.handle_key(key.code),
                             ActiveMenu::BranchActions { ref mut menu, .. } => menu.handle_key(key.code),
                             ActiveMenu::ConfirmAction { ref mut menu, .. } => menu.handle_key(key.code),
+                            ActiveMenu::WorktreeCleanup { ref mut menu, .. } => menu.handle_key(key.code),
                         };
                         match result {
                             MenuResult::Selected(idx) => {
@@ -976,6 +986,7 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                                 &working_dir,
                                                 agent.repo_path.as_deref(),
                                                 agent.branch_name.as_deref(),
+                                                agent.is_worktree,
                                             );
                                             in_focus_mode = true;
                                         }
@@ -1011,11 +1022,24 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                             }
                                             3 => {
                                                 // "Stop All Agents"
+                                                // Collect worktree agents for this repo before stopping
+                                                let repo_agents: Vec<_> = agents
+                                                    .iter()
+                                                    .filter(|a| a.repo_path.as_deref() == Some(&*repo_path))
+                                                    .cloned()
+                                                    .collect();
                                                 stop_repo_agents_ipc(&repo_path);
                                                 last_repo_fetch =
                                                     Instant::now() - Duration::from_secs(10);
                                                 last_agent_fetch =
                                                     Instant::now() - Duration::from_secs(10);
+                                                let cleanups = crate::worktree::collect_worktree_cleanups(
+                                                    &repo_agents, &agents,
+                                                );
+                                                if !cleanups.is_empty() {
+                                                    pending_worktree_cleanups = cleanups;
+                                                    active_menu = pop_worktree_cleanup_menu(&mut pending_worktree_cleanups);
+                                                }
                                             }
                                             4 => {
                                                 // "Unregister"
@@ -1320,6 +1344,14 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                                         Instant::now() - Duration::from_secs(10);
                                                     last_agent_fetch =
                                                         Instant::now() - Duration::from_secs(10);
+                                                    // Queue worktree cleanup if applicable
+                                                    let cleanups = crate::worktree::collect_worktree_cleanups(
+                                                        &branch_agents, &agents,
+                                                    );
+                                                    if !cleanups.is_empty() {
+                                                        pending_worktree_cleanups = cleanups;
+                                                        active_menu = pop_worktree_cleanup_menu(&mut pending_worktree_cleanups);
+                                                    }
                                                 }
                                                 BranchAction::OpenAgent => {
                                                     if branch_agents.len() == 1 {
@@ -1340,6 +1372,7 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                                             &agent.working_dir,
                                                             agent.repo_path.as_deref(),
                                                             agent.branch_name.as_deref(),
+                                                            agent.is_worktree,
                                                         );
                                                         in_focus_mode = true;
                                                     } else if branch_agents.len() > 1 {
@@ -1366,6 +1399,8 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                                     remove_worktree_ipc(
                                                         &repo_path,
                                                         &branch_name,
+                                                        false,
+                                                        false,
                                                     );
                                                     last_repo_fetch =
                                                         Instant::now() - Duration::from_secs(10);
@@ -1514,10 +1549,35 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                             }
                                         }
                                     }
+                                    ActiveMenu::WorktreeCleanup { repo_path, branch_name, .. } => {
+                                        match idx {
+                                            1 => {
+                                                // Discard worktree
+                                                remove_worktree_ipc(&repo_path, &branch_name, false, true);
+                                                last_repo_fetch = Instant::now() - Duration::from_secs(10);
+                                                last_agent_fetch = Instant::now() - Duration::from_secs(10);
+                                            }
+                                            2 => {
+                                                // Discard worktree + branch
+                                                remove_worktree_ipc(&repo_path, &branch_name, true, true);
+                                                last_repo_fetch = Instant::now() - Duration::from_secs(10);
+                                                last_agent_fetch = Instant::now() - Duration::from_secs(10);
+                                            }
+                                            _ => {} // Keep
+                                        }
+                                        // Show next pending cleanup if any
+                                        if let Some(m) = pop_worktree_cleanup_menu(&mut pending_worktree_cleanups) {
+                                            active_menu = Some(m);
+                                        }
+                                    }
                                 }
                             }
                             MenuResult::Dismissed => {
                                 active_menu = None;
+                                // If dismissed during worktree cleanup, show next if any
+                                if let Some(m) = pop_worktree_cleanup_menu(&mut pending_worktree_cleanups) {
+                                    active_menu = Some(m);
+                                }
                             }
                             MenuResult::None => {}
                         }
@@ -1647,12 +1707,26 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                             focus_mode_state.left_tab.next();
                                     }
                                     KeyCode::Esc => {
+                                        // Check for worktree cleanup before shutdown
+                                        if let Some(panel) = &focus_mode_state.panel {
+                                            if panel.exited && panel.is_worktree {
+                                                if let (Some(rp), Some(bn)) = (&panel.repo_path, &panel.branch_name) {
+                                                    pending_worktree_cleanups = vec![crate::worktree::WorktreeCleanup {
+                                                        repo_path: rp.clone(),
+                                                        branch_name: bn.clone(),
+                                                    }];
+                                                }
+                                            }
+                                        }
                                         focus_mode_state.shutdown();
                                         in_focus_mode = false;
                                         if active_tab == ActiveTab::Overview
                                             && overview_state.initialized
                                         {
                                             overview_state.force_resize_all();
+                                        }
+                                        if let Some(m) = pop_worktree_cleanup_menu(&mut pending_worktree_cleanups) {
+                                            active_menu = Some(m);
                                         }
                                     }
                                     _ => {}
@@ -1699,12 +1773,26 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                     }
                                 }
                             } else if key.code == KeyCode::Esc {
+                                // Check for worktree cleanup before shutdown
+                                if let Some(panel) = &focus_mode_state.panel {
+                                    if panel.exited && panel.is_worktree {
+                                        if let (Some(rp), Some(bn)) = (&panel.repo_path, &panel.branch_name) {
+                                            pending_worktree_cleanups = vec![crate::worktree::WorktreeCleanup {
+                                                repo_path: rp.clone(),
+                                                branch_name: bn.clone(),
+                                            }];
+                                        }
+                                    }
+                                }
                                 focus_mode_state.shutdown();
                                 in_focus_mode = false;
                                 if active_tab == ActiveTab::Overview
                                     && overview_state.initialized
                                 {
                                     overview_state.force_resize_all();
+                                }
+                                if let Some(m) = pop_worktree_cleanup_menu(&mut pending_worktree_cleanups) {
+                                    active_menu = Some(m);
                                 }
                             } else if let Some(bytes) =
                                 overview::input::key_event_to_bytes(&key)
@@ -1743,6 +1831,9 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                                 .and_then(|a| a.repo_path.clone());
                                             let branch_name = found
                                                 .and_then(|a| a.branch_name.clone());
+                                            let is_wt = found
+                                                .map(|a| a.is_worktree)
+                                                .unwrap_or(false);
                                             let fm_cols = (last_content_area.width
                                                 * 40
                                                 / 100)
@@ -1760,6 +1851,7 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                                 &working_dir,
                                                 repo_path.as_deref(),
                                                 branch_name.as_deref(),
+                                                is_wt,
                                             );
                                             in_focus_mode = true;
                                         }
@@ -2001,6 +2093,7 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                                     agent.working_dir.clone();
                                                 let agent_repo_path = agent.repo_path.clone();
                                                 let agent_branch = agent.branch_name.clone();
+                                                let agent_is_wt = agent.is_worktree;
                                                 let fm_cols = (last_content_area.width
                                                     * 40
                                                     / 100)
@@ -2018,6 +2111,7 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                                     &working_dir,
                                                     agent_repo_path.as_deref(),
                                                     agent_branch.as_deref(),
+                                                    agent_is_wt,
                                                 );
                                                 in_focus_mode = true;
                                             }
@@ -2157,6 +2251,7 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                 ActiveMenu::ColorPicker { menu, .. } => menu.items.len(),
                                 ActiveMenu::BranchActions { menu, .. } => menu.items.len(),
                                 ActiveMenu::ConfirmAction { menu, .. } => menu.items.len(),
+                                ActiveMenu::WorktreeCleanup { menu, .. } => menu.items.len(),
                             };
                             if idx < item_count {
                                 // Highlight the clicked item then select it
@@ -2166,6 +2261,7 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                     ActiveMenu::ColorPicker { menu, .. } => menu.selected_idx = idx,
                                     ActiveMenu::BranchActions { menu, .. } => menu.selected_idx = idx,
                                     ActiveMenu::ConfirmAction { menu, .. } => menu.selected_idx = idx,
+                                    ActiveMenu::WorktreeCleanup { menu, .. } => menu.selected_idx = idx,
                                 }
                                 let taken = active_menu.take().unwrap();
                                 match taken {
@@ -2187,6 +2283,7 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                                 &working_dir,
                                                 agent.repo_path.as_deref(),
                                                 agent.branch_name.as_deref(),
+                                                agent.is_worktree,
                                             );
                                             in_focus_mode = true;
                                         }
@@ -2218,11 +2315,24 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                                 open_in_terminal(&repo_path);
                                             }
                                             3 => {
+                                                // Collect worktree agents for this repo before stopping
+                                                let repo_agents: Vec<_> = agents
+                                                    .iter()
+                                                    .filter(|a| a.repo_path.as_deref() == Some(&*repo_path))
+                                                    .cloned()
+                                                    .collect();
                                                 stop_repo_agents_ipc(&repo_path);
                                                 last_repo_fetch =
                                                     Instant::now() - Duration::from_secs(10);
                                                 last_agent_fetch =
                                                     Instant::now() - Duration::from_secs(10);
+                                                let cleanups = crate::worktree::collect_worktree_cleanups(
+                                                    &repo_agents, &agents,
+                                                );
+                                                if !cleanups.is_empty() {
+                                                    pending_worktree_cleanups = cleanups;
+                                                    active_menu = pop_worktree_cleanup_menu(&mut pending_worktree_cleanups);
+                                                }
                                             }
                                             4 => {
                                                 unregister_repo_ipc(&repo_path);
@@ -2523,6 +2633,14 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                                         Instant::now() - Duration::from_secs(10);
                                                     last_agent_fetch =
                                                         Instant::now() - Duration::from_secs(10);
+                                                    // Queue worktree cleanup if applicable
+                                                    let cleanups = crate::worktree::collect_worktree_cleanups(
+                                                        &branch_agents, &agents,
+                                                    );
+                                                    if !cleanups.is_empty() {
+                                                        pending_worktree_cleanups = cleanups;
+                                                        active_menu = pop_worktree_cleanup_menu(&mut pending_worktree_cleanups);
+                                                    }
                                                 }
                                                 BranchAction::OpenAgent => {
                                                     if branch_agents.len() == 1 {
@@ -2543,6 +2661,7 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                                             &agent.working_dir,
                                                             agent.repo_path.as_deref(),
                                                             agent.branch_name.as_deref(),
+                                                            agent.is_worktree,
                                                         );
                                                         in_focus_mode = true;
                                                     } else if branch_agents.len() > 1 {
@@ -2569,6 +2688,8 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                                     remove_worktree_ipc(
                                                         &repo_path,
                                                         &branch_name,
+                                                        false,
+                                                        false,
                                                     );
                                                     last_repo_fetch =
                                                         Instant::now() - Duration::from_secs(10);
@@ -2717,6 +2838,38 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                             }
                                         }
                                     }
+                                    ActiveMenu::WorktreeCleanup { repo_path, branch_name, .. } => {
+                                        match idx {
+                                            1 => {
+                                                remove_worktree_ipc(&repo_path, &branch_name, false, true);
+                                                last_repo_fetch = Instant::now() - Duration::from_secs(10);
+                                                last_agent_fetch = Instant::now() - Duration::from_secs(10);
+                                            }
+                                            2 => {
+                                                remove_worktree_ipc(&repo_path, &branch_name, true, true);
+                                                last_repo_fetch = Instant::now() - Duration::from_secs(10);
+                                                last_agent_fetch = Instant::now() - Duration::from_secs(10);
+                                            }
+                                            _ => {}
+                                        }
+                                        if let Some(next) = pending_worktree_cleanups.pop() {
+                                            let dirty = crate::worktree::is_worktree_dirty(&next.repo_path, &next.branch_name);
+                                            let title = if dirty {
+                                                format!("Worktree '{}' (uncommitted changes)", next.branch_name)
+                                            } else {
+                                                format!("Worktree '{}'", next.branch_name)
+                                            };
+                                            active_menu = Some(ActiveMenu::WorktreeCleanup {
+                                                repo_path: next.repo_path,
+                                                branch_name: next.branch_name,
+                                                menu: ContextMenu::new(&title, vec![
+                                                    "Keep".to_string(),
+                                                    "Discard worktree".to_string(),
+                                                    "Discard worktree + branch".to_string(),
+                                                ]),
+                                            });
+                                        }
+                                    }
                                 }
                             }
                         } else if !click_map.menu_modal_rect.contains(pos) {
@@ -2820,7 +2973,8 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                             | ActiveMenu::RepoActions { menu, .. }
                             | ActiveMenu::ColorPicker { menu, .. }
                             | ActiveMenu::BranchActions { menu, .. }
-                            | ActiveMenu::ConfirmAction { menu, .. } => {
+                            | ActiveMenu::ConfirmAction { menu, .. }
+                            | ActiveMenu::WorktreeCleanup { menu, .. } => {
                                 menu.selected_idx = menu.selected_idx.saturating_sub(1);
                             }
                         }
@@ -2851,7 +3005,8 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                             | ActiveMenu::RepoActions { menu, .. }
                             | ActiveMenu::ColorPicker { menu, .. }
                             | ActiveMenu::BranchActions { menu, .. }
-                            | ActiveMenu::ConfirmAction { menu, .. } => {
+                            | ActiveMenu::ConfirmAction { menu, .. }
+                            | ActiveMenu::WorktreeCleanup { menu, .. } => {
                                 if !menu.items.is_empty() {
                                     menu.selected_idx = (menu.selected_idx + 1).min(menu.items.len() - 1);
                                 }
@@ -4329,7 +4484,7 @@ fn stop_agents_ipc(agent_ids: &[String]) {
     }
 }
 
-fn remove_worktree_ipc(repo_path: &str, branch_name: &str) {
+fn remove_worktree_ipc(repo_path: &str, branch_name: &str, delete_branch: bool, force: bool) {
     let working_dir = repo_path.to_string();
     let branch_name = branch_name.to_string();
     block_on_async(async {
@@ -4342,13 +4497,35 @@ fn remove_worktree_ipc(repo_path: &str, branch_name: &str) {
                 working_dir: Some(working_dir),
                 repo_name: None,
                 branch_name,
-                delete_local_branch: false,
-                force: false,
+                delete_local_branch: delete_branch,
+                force,
             },
         )
         .await;
         let _ = clust_ipc::recv_message::<HubMessage>(&mut stream).await;
     });
+}
+
+/// Pop the first pending worktree cleanup and return the corresponding `ActiveMenu`, if any.
+fn pop_worktree_cleanup_menu(
+    pending: &mut Vec<crate::worktree::WorktreeCleanup>,
+) -> Option<ActiveMenu> {
+    let next = pending.pop()?;
+    let dirty = crate::worktree::is_worktree_dirty(&next.repo_path, &next.branch_name);
+    let title = if dirty {
+        format!("Worktree '{}' (uncommitted changes)", next.branch_name)
+    } else {
+        format!("Worktree '{}'", next.branch_name)
+    };
+    Some(ActiveMenu::WorktreeCleanup {
+        repo_path: next.repo_path,
+        branch_name: next.branch_name,
+        menu: ContextMenu::new(&title, vec![
+            "Keep".to_string(),
+            "Discard worktree".to_string(),
+            "Discard worktree + branch".to_string(),
+        ]),
+    })
 }
 
 fn delete_local_branch_ipc(repo_path: &str, branch_name: &str) {
