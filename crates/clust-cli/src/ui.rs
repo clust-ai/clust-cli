@@ -182,6 +182,10 @@ enum BranchAction {
     StopAgents,
     OpenAgent,
     RemoveWorktree,
+    DeleteBranch,
+    RemoteStartAgent,
+    RemoteCreateWorktree,
+    DeleteRemoteBranch,
 }
 
 /// Tracks which context menu is currently open.
@@ -1147,6 +1151,112 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                                     last_agent_fetch =
                                                         Instant::now() - Duration::from_secs(10);
                                                 }
+                                                BranchAction::DeleteBranch => {
+                                                    delete_local_branch_ipc(
+                                                        &repo_path,
+                                                        &branch_name,
+                                                    );
+                                                    last_repo_fetch =
+                                                        Instant::now() - Duration::from_secs(10);
+                                                    last_agent_fetch =
+                                                        Instant::now() - Duration::from_secs(10);
+                                                }
+                                                BranchAction::RemoteStartAgent => {
+                                                    if let Some(local) =
+                                                        branch_name.splitn(2, '/').nth(1)
+                                                    {
+                                                        let tx = agent_start_tx.clone();
+                                                        let hub = hub_name.to_string();
+                                                        let rp = repo_path.clone();
+                                                        let remote_ref = branch_name.clone();
+                                                        let local_name = local.to_string();
+                                                        let (cols, rows) =
+                                                            crossterm::terminal::size()
+                                                                .unwrap_or((80, 24));
+                                                        tokio::spawn(async move {
+                                                            let mut stream =
+                                                                match ipc::try_connect().await
+                                                                {
+                                                                    Ok(s) => s,
+                                                                    Err(_) => return,
+                                                                };
+                                                            let msg =
+                                                                CliMessage::CreateWorktreeAgent
+                                                                {
+                                                                    repo_path: rp,
+                                                                    target_branch: Some(
+                                                                        remote_ref,
+                                                                    ),
+                                                                    new_branch: Some(
+                                                                        local_name,
+                                                                    ),
+                                                                    prompt: None,
+                                                                    agent_binary: None,
+                                                                    cols,
+                                                                    rows: rows
+                                                                        .saturating_sub(2)
+                                                                        .max(1),
+                                                                    accept_edits: false,
+                                                                    hub,
+                                                                };
+                                                            if clust_ipc::send_message(
+                                                                &mut stream,
+                                                                &msg,
+                                                            )
+                                                            .await
+                                                            .is_err()
+                                                            {
+                                                                return;
+                                                            }
+                                                            if let Ok(
+                                                                HubMessage::WorktreeAgentStarted {
+                                                                    id,
+                                                                    agent_binary,
+                                                                    working_dir,
+                                                                    repo_path,
+                                                                    branch_name,
+                                                                },
+                                                            ) = clust_ipc::recv_message::<
+                                                                HubMessage,
+                                                            >(
+                                                                &mut stream
+                                                            )
+                                                            .await
+                                                            {
+                                                                let _ = tx
+                                                                    .send(AgentStartResult {
+                                                                        agent_id: id,
+                                                                        agent_binary,
+                                                                        working_dir,
+                                                                        repo_path,
+                                                                        branch_name,
+                                                                    })
+                                                                    .await;
+                                                            }
+                                                        });
+                                                    }
+                                                }
+                                                BranchAction::RemoteCreateWorktree => {
+                                                    if let Some(local) =
+                                                        branch_name.splitn(2, '/').nth(1)
+                                                    {
+                                                        add_worktree_ipc(
+                                                            &repo_path,
+                                                            local,
+                                                            &branch_name,
+                                                        );
+                                                        last_repo_fetch = Instant::now()
+                                                            - Duration::from_secs(10);
+                                                    }
+                                                }
+                                                BranchAction::DeleteRemoteBranch => {
+                                                    delete_remote_branch_ipc(
+                                                        &repo_path,
+                                                        &branch_name,
+                                                    );
+                                                    last_repo_fetch =
+                                                        Instant::now() - Duration::from_secs(10);
+                                                }
                                             }
                                         }
                                     }
@@ -1550,40 +1660,64 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                                     // No action on Enter for categories (use Space)
                                                 }
                                                 TreeLevel::Branch => {
-                                                    // Open context menu for local branches only
+                                                    // Open context menu for branches
                                                     if let Some(repo) = display_repos.get(selection.repo_idx) {
-                                                        if repo.path.is_empty() || selection.category_idx != 0 {
-                                                            // Skip "No Repository" and remote branches
-                                                        } else if let Some(branch) = repo.local_branches.get(selection.branch_idx) {
-                                                            let matching: Vec<AgentInfo> = agents
-                                                                .iter()
-                                                                .filter(|a| {
-                                                                    a.repo_path.as_deref() == Some(&*repo.path)
-                                                                        && a.branch_name.as_deref() == Some(&*branch.name)
-                                                                })
-                                                                .cloned()
-                                                                .collect();
-                                                            let mut labels = Vec::new();
-                                                            let mut actions = Vec::new();
-                                                            labels.push("Start Agent".to_string());
-                                                            actions.push(BranchAction::StartAgent);
-                                                            if branch.active_agent_count > 0 {
-                                                                labels.push("Stop Agents".to_string());
-                                                                actions.push(BranchAction::StopAgents);
-                                                                labels.push("Open Agent".to_string());
-                                                                actions.push(BranchAction::OpenAgent);
+                                                        if repo.path.is_empty() {
+                                                            // Skip "No Repository"
+                                                        } else if selection.category_idx == 0 {
+                                                            // Local branch context menu
+                                                            if let Some(branch) = repo.local_branches.get(selection.branch_idx) {
+                                                                let matching: Vec<AgentInfo> = agents
+                                                                    .iter()
+                                                                    .filter(|a| {
+                                                                        a.repo_path.as_deref() == Some(&*repo.path)
+                                                                            && a.branch_name.as_deref() == Some(&*branch.name)
+                                                                    })
+                                                                    .cloned()
+                                                                    .collect();
+                                                                let mut labels = Vec::new();
+                                                                let mut actions = Vec::new();
+                                                                labels.push("Start Agent".to_string());
+                                                                actions.push(BranchAction::StartAgent);
+                                                                if branch.active_agent_count > 0 {
+                                                                    labels.push("Stop Agents".to_string());
+                                                                    actions.push(BranchAction::StopAgents);
+                                                                    labels.push("Open Agent".to_string());
+                                                                    actions.push(BranchAction::OpenAgent);
+                                                                }
+                                                                if branch.is_worktree {
+                                                                    labels.push("Remove Worktree".to_string());
+                                                                    actions.push(BranchAction::RemoveWorktree);
+                                                                }
+                                                                labels.push("Delete Branch".to_string());
+                                                                actions.push(BranchAction::DeleteBranch);
+                                                                active_menu = Some(ActiveMenu::BranchActions {
+                                                                    repo_path: repo.path.clone(),
+                                                                    branch_name: branch.name.clone(),
+                                                                    agents: matching,
+                                                                    actions,
+                                                                    menu: ContextMenu::new(&branch.name, labels),
+                                                                });
                                                             }
-                                                            if branch.is_worktree {
-                                                                labels.push("Remove Worktree".to_string());
-                                                                actions.push(BranchAction::RemoveWorktree);
+                                                        } else if selection.category_idx == 1 {
+                                                            // Remote branch context menu
+                                                            if let Some(branch) = repo.remote_branches.get(selection.branch_idx) {
+                                                                let mut labels = Vec::new();
+                                                                let mut actions = Vec::new();
+                                                                labels.push("Start Agent".to_string());
+                                                                actions.push(BranchAction::RemoteStartAgent);
+                                                                labels.push("Create Worktree".to_string());
+                                                                actions.push(BranchAction::RemoteCreateWorktree);
+                                                                labels.push("Delete Remote Branch".to_string());
+                                                                actions.push(BranchAction::DeleteRemoteBranch);
+                                                                active_menu = Some(ActiveMenu::BranchActions {
+                                                                    repo_path: repo.path.clone(),
+                                                                    branch_name: branch.name.clone(),
+                                                                    agents: vec![],
+                                                                    actions,
+                                                                    menu: ContextMenu::new(&branch.name, labels),
+                                                                });
                                                             }
-                                                            active_menu = Some(ActiveMenu::BranchActions {
-                                                                repo_path: repo.path.clone(),
-                                                                branch_name: branch.name.clone(),
-                                                                agents: matching,
-                                                                actions,
-                                                                menu: ContextMenu::new(&branch.name, labels),
-                                                            });
                                                         }
                                                     }
                                                 }
@@ -1974,6 +2108,112 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                                     last_repo_fetch =
                                                         Instant::now() - Duration::from_secs(10);
                                                     last_agent_fetch =
+                                                        Instant::now() - Duration::from_secs(10);
+                                                }
+                                                BranchAction::DeleteBranch => {
+                                                    delete_local_branch_ipc(
+                                                        &repo_path,
+                                                        &branch_name,
+                                                    );
+                                                    last_repo_fetch =
+                                                        Instant::now() - Duration::from_secs(10);
+                                                    last_agent_fetch =
+                                                        Instant::now() - Duration::from_secs(10);
+                                                }
+                                                BranchAction::RemoteStartAgent => {
+                                                    if let Some(local) =
+                                                        branch_name.splitn(2, '/').nth(1)
+                                                    {
+                                                        let tx = agent_start_tx.clone();
+                                                        let hub = hub_name.to_string();
+                                                        let rp = repo_path.clone();
+                                                        let remote_ref = branch_name.clone();
+                                                        let local_name = local.to_string();
+                                                        let (cols, rows) =
+                                                            crossterm::terminal::size()
+                                                                .unwrap_or((80, 24));
+                                                        tokio::spawn(async move {
+                                                            let mut stream =
+                                                                match ipc::try_connect().await
+                                                                {
+                                                                    Ok(s) => s,
+                                                                    Err(_) => return,
+                                                                };
+                                                            let msg =
+                                                                CliMessage::CreateWorktreeAgent
+                                                                {
+                                                                    repo_path: rp,
+                                                                    target_branch: Some(
+                                                                        remote_ref,
+                                                                    ),
+                                                                    new_branch: Some(
+                                                                        local_name,
+                                                                    ),
+                                                                    prompt: None,
+                                                                    agent_binary: None,
+                                                                    cols,
+                                                                    rows: rows
+                                                                        .saturating_sub(2)
+                                                                        .max(1),
+                                                                    accept_edits: false,
+                                                                    hub,
+                                                                };
+                                                            if clust_ipc::send_message(
+                                                                &mut stream,
+                                                                &msg,
+                                                            )
+                                                            .await
+                                                            .is_err()
+                                                            {
+                                                                return;
+                                                            }
+                                                            if let Ok(
+                                                                HubMessage::WorktreeAgentStarted {
+                                                                    id,
+                                                                    agent_binary,
+                                                                    working_dir,
+                                                                    repo_path,
+                                                                    branch_name,
+                                                                },
+                                                            ) = clust_ipc::recv_message::<
+                                                                HubMessage,
+                                                            >(
+                                                                &mut stream
+                                                            )
+                                                            .await
+                                                            {
+                                                                let _ = tx
+                                                                    .send(AgentStartResult {
+                                                                        agent_id: id,
+                                                                        agent_binary,
+                                                                        working_dir,
+                                                                        repo_path,
+                                                                        branch_name,
+                                                                    })
+                                                                    .await;
+                                                            }
+                                                        });
+                                                    }
+                                                }
+                                                BranchAction::RemoteCreateWorktree => {
+                                                    if let Some(local) =
+                                                        branch_name.splitn(2, '/').nth(1)
+                                                    {
+                                                        add_worktree_ipc(
+                                                            &repo_path,
+                                                            local,
+                                                            &branch_name,
+                                                        );
+                                                        last_repo_fetch = Instant::now()
+                                                            - Duration::from_secs(10);
+                                                    }
+                                                }
+                                                BranchAction::DeleteRemoteBranch => {
+                                                    delete_remote_branch_ipc(
+                                                        &repo_path,
+                                                        &branch_name,
+                                                    );
+                                                    last_repo_fetch =
                                                         Instant::now() - Duration::from_secs(10);
                                                 }
                                             }
@@ -3603,6 +3843,70 @@ fn remove_worktree_ipc(repo_path: &str, branch_name: &str) {
                 branch_name,
                 delete_local_branch: false,
                 force: false,
+            },
+        )
+        .await;
+        let _ = clust_ipc::recv_message::<HubMessage>(&mut stream).await;
+    });
+}
+
+fn delete_local_branch_ipc(repo_path: &str, branch_name: &str) {
+    let working_dir = repo_path.to_string();
+    let branch_name = branch_name.to_string();
+    block_on_async(async {
+        let Ok(mut stream) = ipc::try_connect().await else {
+            return;
+        };
+        let _ = clust_ipc::send_message(
+            &mut stream,
+            &CliMessage::DeleteLocalBranch {
+                working_dir: Some(working_dir),
+                repo_name: None,
+                branch_name,
+                force: true,
+            },
+        )
+        .await;
+        let _ = clust_ipc::recv_message::<HubMessage>(&mut stream).await;
+    });
+}
+
+fn delete_remote_branch_ipc(repo_path: &str, branch_name: &str) {
+    let working_dir = repo_path.to_string();
+    let branch_name = branch_name.to_string();
+    block_on_async(async {
+        let Ok(mut stream) = ipc::try_connect().await else {
+            return;
+        };
+        let _ = clust_ipc::send_message(
+            &mut stream,
+            &CliMessage::DeleteRemoteBranch {
+                working_dir: Some(working_dir),
+                repo_name: None,
+                branch_name,
+            },
+        )
+        .await;
+        let _ = clust_ipc::recv_message::<HubMessage>(&mut stream).await;
+    });
+}
+
+fn add_worktree_ipc(repo_path: &str, branch_name: &str, base_branch: &str) {
+    let working_dir = repo_path.to_string();
+    let branch_name = branch_name.to_string();
+    let base_branch = base_branch.to_string();
+    block_on_async(async {
+        let Ok(mut stream) = ipc::try_connect().await else {
+            return;
+        };
+        let _ = clust_ipc::send_message(
+            &mut stream,
+            &CliMessage::AddWorktree {
+                working_dir: Some(working_dir),
+                repo_name: None,
+                branch_name,
+                base_branch: Some(base_branch),
+                checkout_existing: false,
             },
         )
         .await;

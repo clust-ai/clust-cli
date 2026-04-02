@@ -941,6 +941,118 @@ async fn handle_connection(
                 }
             }
         }
+        CliMessage::DeleteLocalBranch {
+            working_dir,
+            repo_name,
+            branch_name,
+            force,
+        } => {
+            let repo_root = {
+                let hub_state = state.lock().await;
+                crate::repo::resolve_repo(
+                    working_dir.as_deref(),
+                    repo_name.as_deref(),
+                    hub_state.db.as_ref(),
+                )
+            };
+            match repo_root {
+                Ok(root) => {
+                    // Stop agents running on this branch
+                    let root_str = root.to_string_lossy().into_owned();
+                    let agent_ids = {
+                        let hub_state = state.lock().await;
+                        hub_state
+                            .agents
+                            .values()
+                            .filter(|e| {
+                                e.repo_path.as_deref() == Some(root_str.as_str())
+                                    && e.branch_name.as_deref()
+                                        == Some(branch_name.as_str())
+                            })
+                            .map(|e| e.id.clone())
+                            .collect::<Vec<_>>()
+                    };
+                    let stopped_count = agent_ids.len();
+
+                    for id in &agent_ids {
+                        let state = state.clone();
+                        let id = id.clone();
+                        tokio::spawn(async move {
+                            let _ = agent::stop_agent(&state, &id).await;
+                        });
+                    }
+
+                    match crate::repo::delete_local_branch(&root, &branch_name, force)
+                    {
+                        Ok(()) => {
+                            clust_ipc::send_message_write(
+                                &mut writer,
+                                &HubMessage::LocalBranchDeleted {
+                                    branch_name,
+                                    stopped_agents: stopped_count,
+                                },
+                            )
+                            .await?;
+                        }
+                        Err(e) => {
+                            clust_ipc::send_message_write(
+                                &mut writer,
+                                &HubMessage::Error { message: e },
+                            )
+                            .await?;
+                        }
+                    }
+                }
+                Err(e) => {
+                    clust_ipc::send_message_write(
+                        &mut writer,
+                        &HubMessage::Error { message: e },
+                    )
+                    .await?;
+                }
+            }
+        }
+        CliMessage::DeleteRemoteBranch {
+            working_dir,
+            repo_name,
+            branch_name,
+        } => {
+            let repo_root = {
+                let hub_state = state.lock().await;
+                crate::repo::resolve_repo(
+                    working_dir.as_deref(),
+                    repo_name.as_deref(),
+                    hub_state.db.as_ref(),
+                )
+            };
+            match repo_root {
+                Ok(root) => {
+                    match crate::repo::delete_remote_branch(&root, &branch_name) {
+                        Ok(()) => {
+                            clust_ipc::send_message_write(
+                                &mut writer,
+                                &HubMessage::RemoteBranchDeleted { branch_name },
+                            )
+                            .await?;
+                        }
+                        Err(e) => {
+                            clust_ipc::send_message_write(
+                                &mut writer,
+                                &HubMessage::Error { message: e },
+                            )
+                            .await?;
+                        }
+                    }
+                }
+                Err(e) => {
+                    clust_ipc::send_message_write(
+                        &mut writer,
+                        &HubMessage::Error { message: e },
+                    )
+                    .await?;
+                }
+            }
+        }
         _ => {
             clust_ipc::send_message_write(
                 &mut writer,

@@ -495,6 +495,65 @@ pub fn remove_worktree(
     Ok(())
 }
 
+/// Delete a local branch, removing its worktree first if one exists.
+pub fn delete_local_branch(
+    repo_root: &Path,
+    branch: &str,
+    force: bool,
+) -> Result<(), String> {
+    let wt_path = worktree_path(repo_root, branch);
+    if wt_path.exists() {
+        // remove_worktree with delete_branch=true handles both
+        return remove_worktree(repo_root, branch, true, force);
+    }
+
+    // No worktree – just delete the branch
+    let mut cmd = std::process::Command::new("git");
+    cmd.current_dir(repo_root);
+    if force {
+        cmd.args(["branch", "-D", branch]);
+    } else {
+        cmd.args(["branch", "-d", branch]);
+    }
+    let output = cmd
+        .output()
+        .map_err(|e| format!("failed to run git: {e}"))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(format!("git branch delete failed: {}", stderr.trim()));
+    }
+
+    Ok(())
+}
+
+/// Delete a remote branch (e.g. "origin/feature-x").
+pub fn delete_remote_branch(
+    repo_root: &Path,
+    remote_branch: &str,
+) -> Result<(), String> {
+    let mut parts = remote_branch.splitn(2, '/');
+    let remote = parts
+        .next()
+        .ok_or_else(|| format!("invalid remote branch name: {remote_branch}"))?;
+    let branch = parts
+        .next()
+        .ok_or_else(|| format!("invalid remote branch name: {remote_branch}"))?;
+
+    let output = std::process::Command::new("git")
+        .current_dir(repo_root)
+        .args(["push", remote, "--delete", branch])
+        .output()
+        .map_err(|e| format!("failed to run git: {e}"))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(format!("git push --delete failed: {}", stderr.trim()));
+    }
+
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
