@@ -674,6 +674,9 @@ pub fn purge_repo(repo_root: &Path) -> Result<PurgeResult, String> {
         }
     }
 
+    // Remove the .clust/worktrees/ directory itself (may contain leftover files)
+    let _ = std::fs::remove_dir_all(repo_root.join(".clust").join("worktrees"));
+
     // 2. Delete all non-HEAD local branches
     let repo = git2::Repository::open(repo_root)
         .map_err(|e| format!("failed to open repo: {e}"))?;

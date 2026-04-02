@@ -59,6 +59,8 @@ pub struct CreateAgentModal {
 
     // Whether new branch input is required (no branches exist)
     new_branch_required: bool,
+    // Whether the modal was opened with repo+branch pre-selected (e.g. "Base Worktree Off")
+    pre_selected: bool,
 
     matcher: SkimMatcherV2,
 }
@@ -76,6 +78,24 @@ impl CreateAgentModal {
             target_branch: None,
             new_branch_name: None,
             new_branch_required: false,
+            pre_selected: false,
+            matcher: SkimMatcherV2::default(),
+        }
+    }
+
+    pub fn new_with_branch(repos: Vec<RepoInfo>, repo: RepoInfo, branch_name: String) -> Self {
+        Self {
+            step: ModalStep::NewBranch,
+            input: String::new(),
+            cursor_pos: 0,
+            selected_idx: 0,
+            repos,
+            branches: Vec::new(),
+            selected_repo: Some(repo),
+            target_branch: Some(branch_name),
+            new_branch_name: None,
+            new_branch_required: true,
+            pre_selected: true,
             matcher: SkimMatcherV2::default(),
         }
     }
@@ -95,7 +115,9 @@ impl CreateAgentModal {
                         self.branches.clear();
                     }
                     ModalStep::NewBranch => {
-                        if self.new_branch_required {
+                        if self.pre_selected {
+                            return ModalResult::Cancelled;
+                        } else if self.new_branch_required {
                             self.step = ModalStep::SelectRepo;
                             self.selected_repo = None;
                         } else {
@@ -542,11 +564,19 @@ impl CreateAgentModal {
     }
 
     fn step_title(&self) -> &'static str {
-        match self.step {
-            ModalStep::SelectRepo => "Step 1/4 \u{2014} Select repository",
-            ModalStep::SelectBranch => "Step 2/4 \u{2014} Select target branch",
-            ModalStep::NewBranch => "Step 3/4 \u{2014} New branch",
-            ModalStep::EnterPrompt => "Step 4/4 \u{2014} Enter prompt",
+        if self.pre_selected {
+            match self.step {
+                ModalStep::NewBranch => "Step 1/2 \u{2014} New branch",
+                ModalStep::EnterPrompt => "Step 2/2 \u{2014} Enter prompt",
+                _ => unreachable!(),
+            }
+        } else {
+            match self.step {
+                ModalStep::SelectRepo => "Step 1/4 \u{2014} Select repository",
+                ModalStep::SelectBranch => "Step 2/4 \u{2014} Select target branch",
+                ModalStep::NewBranch => "Step 3/4 \u{2014} New branch",
+                ModalStep::EnterPrompt => "Step 4/4 \u{2014} Enter prompt",
+            }
         }
     }
 
@@ -554,7 +584,13 @@ impl CreateAgentModal {
         match self.step {
             ModalStep::SelectRepo => "Type to filter, Enter to select, Esc to cancel",
             ModalStep::SelectBranch => "Type to filter, Enter to select, Esc to go back",
-            ModalStep::NewBranch => "Type branch name and press Enter, Esc to go back",
+            ModalStep::NewBranch => {
+                if self.pre_selected {
+                    "Type branch name and press Enter, Esc to cancel"
+                } else {
+                    "Type branch name and press Enter, Esc to go back"
+                }
+            }
             ModalStep::EnterPrompt => "Type a prompt for the agent, Enter to start",
         }
     }
