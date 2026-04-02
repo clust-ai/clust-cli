@@ -218,9 +218,10 @@ When the hub receives a `PurgeRepo` message:
 1. Detect the git root from the provided path.
 2. Stop all agents associated with the repository.
 3. Remove all non-main worktrees using `git worktree remove --force`.
-4. Delete all non-HEAD local branches using `git branch -D`.
-5. Clean stale remote refs (same as `CleanStaleRefs`).
-6. Return `RepoPurged { path, stopped_agents, removed_worktrees, deleted_branches }`.
+4. Remove the `.clust/worktrees/` directory entirely to catch any leftover files from worktrees that were not cleanly removed.
+5. Delete all non-HEAD local branches using `git branch -D`.
+6. Clean stale remote refs (same as `CleanStaleRefs`).
+7. Return `RepoPurged { path, stopped_agents, removed_worktrees, deleted_branches }`.
 
 ## In-Memory State
 
