@@ -484,50 +484,178 @@ impl TreeSelection {
         }
     }
 
+    /// Returns the branch count for a specific category index within the given repo.
+    fn branch_count_for(&self, repos: &[RepoInfo], cat_idx: usize) -> usize {
+        let Some(repo) = repos.get(self.repo_idx) else {
+            return 0;
+        };
+        match cat_idx {
+            0 => repo.local_branches.len(),
+            1 => repo.remote_branches.len(),
+            _ => 0,
+        }
+    }
+
+    /// Move to the last visible descendant of a repo (for move_up into previous repo).
+    fn go_to_last_visible_of_repo(&mut self, repos: &[RepoInfo]) {
+        if self.is_unlinked_repo(repos) {
+            let bc = repos.get(self.repo_idx).map_or(0, |r| r.local_branches.len());
+            if bc > 0 && !self.is_repo_collapsed(self.repo_idx) {
+                self.level = TreeLevel::Branch;
+                self.category_idx = 0;
+                self.branch_idx = bc - 1;
+            }
+            return;
+        }
+        if self.is_repo_collapsed(self.repo_idx) {
+            return; // stay at Repo level
+        }
+        let cats = self.visible_categories(repos);
+        if cats.is_empty() {
+            return;
+        }
+        // Pick the last visible category and land on its deepest visible item
+        if let Some(&cat) = cats.last() {
+            if !self.is_category_collapsed(self.repo_idx, cat) {
+                let bc = self.branch_count_for(repos, cat);
+                if bc > 0 {
+                    self.level = TreeLevel::Branch;
+                    self.category_idx = cat;
+                    self.branch_idx = bc - 1;
+                    return;
+                }
+            }
+            // Category collapsed or empty — land on its header
+            self.level = TreeLevel::Category;
+            self.category_idx = cat;
+        }
+    }
+
+    /// Flat tree navigation: move to previous visible item.
     fn move_up(&mut self, repos: &[RepoInfo]) {
         if repos.is_empty() {
             return;
         }
         match self.level {
             TreeLevel::Repo => {
-                self.repo_idx = self.repo_idx.saturating_sub(1);
+                if self.repo_idx > 0 {
+                    self.repo_idx -= 1;
+                    self.go_to_last_visible_of_repo(repos);
+                }
             }
             TreeLevel::Category => {
                 let cats = self.visible_categories(repos);
                 if let Some(pos) = cats.iter().position(|&c| c == self.category_idx) {
                     if pos > 0 {
-                        self.category_idx = cats[pos - 1];
-                        self.branch_idx = 0;
+                        // Previous category: go to its last branch if expanded, else its header
+                        let prev_cat = cats[pos - 1];
+                        if !self.is_category_collapsed(self.repo_idx, prev_cat) {
+                            let bc = self.branch_count_for(repos, prev_cat);
+                            if bc > 0 {
+                                self.level = TreeLevel::Branch;
+                                self.category_idx = prev_cat;
+                                self.branch_idx = bc - 1;
+                                return;
+                            }
+                        }
+                        self.category_idx = prev_cat;
+                    } else {
+                        // First category → go to repo header
+                        self.level = TreeLevel::Repo;
                     }
                 }
             }
             TreeLevel::Branch => {
-                self.branch_idx = self.branch_idx.saturating_sub(1);
+                if self.branch_idx > 0 {
+                    self.branch_idx -= 1;
+                } else if self.is_unlinked_repo(repos) {
+                    // "No Repository" has no categories — go to repo header
+                    self.level = TreeLevel::Repo;
+                } else {
+                    // First branch → go to category header
+                    self.level = TreeLevel::Category;
+                }
             }
         }
     }
 
+    /// Flat tree navigation: move to next visible item.
     fn move_down(&mut self, repos: &[RepoInfo]) {
         if repos.is_empty() {
             return;
         }
         match self.level {
             TreeLevel::Repo => {
-                self.repo_idx = (self.repo_idx + 1).min(repos.len() - 1);
+                if self.is_repo_collapsed(self.repo_idx) {
+                    // Collapsed repo → next repo
+                    if self.repo_idx + 1 < repos.len() {
+                        self.repo_idx += 1;
+                    }
+                } else if self.is_unlinked_repo(repos) {
+                    // "No Repository" — go to first branch or next repo
+                    let bc = repos.get(self.repo_idx).map_or(0, |r| r.local_branches.len());
+                    if bc > 0 {
+                        self.level = TreeLevel::Branch;
+                        self.category_idx = 0;
+                        self.branch_idx = 0;
+                    } else if self.repo_idx + 1 < repos.len() {
+                        self.repo_idx += 1;
+                    }
+                } else {
+                    let cats = self.visible_categories(repos);
+                    if !cats.is_empty() {
+                        self.level = TreeLevel::Category;
+                        self.category_idx = cats[0];
+                        self.branch_idx = 0;
+                    } else if self.repo_idx + 1 < repos.len() {
+                        self.repo_idx += 1;
+                    }
+                }
             }
             TreeLevel::Category => {
                 let cats = self.visible_categories(repos);
-                if let Some(pos) = cats.iter().position(|&c| c == self.category_idx) {
-                    if pos + 1 < cats.len() {
-                        self.category_idx = cats[pos + 1];
+                let pos = cats.iter().position(|&c| c == self.category_idx);
+                if !self.is_category_collapsed(self.repo_idx, self.category_idx)
+                    && self.branch_count(repos) > 0
+                {
+                    // Expanded with branches → descend to first branch
+                    self.level = TreeLevel::Branch;
+                    self.branch_idx = 0;
+                } else if let Some(p) = pos {
+                    if p + 1 < cats.len() {
+                        // Next category
+                        self.category_idx = cats[p + 1];
                         self.branch_idx = 0;
+                    } else if self.repo_idx + 1 < repos.len() {
+                        // Last category → next repo
+                        self.repo_idx += 1;
+                        self.level = TreeLevel::Repo;
                     }
                 }
             }
             TreeLevel::Branch => {
                 let bc = self.branch_count(repos);
-                if bc > 0 {
-                    self.branch_idx = (self.branch_idx + 1).min(bc - 1);
+                if self.branch_idx + 1 < bc {
+                    self.branch_idx += 1;
+                } else if self.is_unlinked_repo(repos) {
+                    // "No Repository" last branch → next repo
+                    if self.repo_idx + 1 < repos.len() {
+                        self.repo_idx += 1;
+                        self.level = TreeLevel::Repo;
+                    }
+                } else {
+                    // Last branch in category → next category or next repo
+                    let cats = self.visible_categories(repos);
+                    if let Some(pos) = cats.iter().position(|&c| c == self.category_idx) {
+                        if pos + 1 < cats.len() {
+                            self.category_idx = cats[pos + 1];
+                            self.level = TreeLevel::Category;
+                            self.branch_idx = 0;
+                        } else if self.repo_idx + 1 < repos.len() {
+                            self.repo_idx += 1;
+                            self.level = TreeLevel::Repo;
+                        }
+                    }
                 }
             }
         }
@@ -4860,11 +4988,11 @@ mod tests {
     fn selection_move_down_repos() {
         let repos = sample_repos();
         let mut sel = TreeSelection::default();
+        // Flat nav: move_down from expanded repo descends into first category
         sel.move_down(&repos);
-        assert_eq!(sel.repo_idx, 1);
-        // Cannot go past last
-        sel.move_down(&repos);
-        assert_eq!(sel.repo_idx, 1);
+        assert_eq!(sel.level, TreeLevel::Category);
+        assert_eq!(sel.repo_idx, 0);
+        assert_eq!(sel.category_idx, 0);
     }
 
     #[test]
@@ -4916,13 +5044,17 @@ mod tests {
         // alpha has both local (0) and remote (1)
         sel.descend(&repos); // -> Category, idx 0
         assert_eq!(sel.category_idx, 0);
+        // Flat nav: move_down from expanded category descends into first branch
         sel.move_down(&repos);
-        assert_eq!(sel.category_idx, 1);
-        // Can't go past remote
-        sel.move_down(&repos);
-        assert_eq!(sel.category_idx, 1);
+        assert_eq!(sel.level, TreeLevel::Branch);
+        assert_eq!(sel.branch_idx, 0);
+        // Go back up to category header
         sel.move_up(&repos);
+        assert_eq!(sel.level, TreeLevel::Category);
         assert_eq!(sel.category_idx, 0);
+        // Go up again to repo
+        sel.move_up(&repos);
+        assert_eq!(sel.level, TreeLevel::Repo);
     }
 
     #[test]
@@ -4934,10 +5066,15 @@ mod tests {
         assert_eq!(sel.branch_idx, 0);
         sel.move_down(&repos); // alpha has 2 local branches
         assert_eq!(sel.branch_idx, 1);
-        sel.move_down(&repos); // saturates
-        assert_eq!(sel.branch_idx, 1);
+        // Flat nav: last local branch -> crosses to remote category
+        // (remote is collapsed by default, so lands on category header)
+        sel.move_down(&repos);
+        assert_eq!(sel.level, TreeLevel::Category);
+        assert_eq!(sel.category_idx, 1);
         sel.move_up(&repos);
-        assert_eq!(sel.branch_idx, 0);
+        assert_eq!(sel.level, TreeLevel::Branch);
+        assert_eq!(sel.category_idx, 0);
+        assert_eq!(sel.branch_idx, 1); // last local branch
     }
 
     #[test]
