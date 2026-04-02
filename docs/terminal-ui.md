@@ -181,8 +181,12 @@ On startup, `clust ui` automatically connects to the hub daemon, starting it if 
 | Status dot | Green `●` when connected, dim when disconnected |
 | Status label | `connected` or `disconnected` |
 | Focused agent | When an agent has keyboard focus (in Overview terminal focus or focus mode), shows the repo name in the repo's assigned color followed by `/branch` in secondary text color |
-| Shortcuts | Context-aware hints: on Repositories tab shows `q quit`, `Q stop+quit`, navigation hints; on Overview tab shows focus-dependent hints (e.g., `Shift+↓ enter terminal` or `Shift+↑ options`); in focus mode shows `Shift+←/→ switch panel`, `Shift+↑/↓ jump file`, `Esc exit` |
+| Status message / Shortcuts | Either a temporary status message or context-aware keybinding hints (see below) |
 | Version | Right-aligned, e.g. `v0.0.10` |
+
+**Status messages:** Temporary status messages override the keybinding hints area. Messages are displayed for 5 seconds before auto-dismissing, after which the keybinding hints reappear. Two severity levels exist: `Error` (displayed in `R_ERROR` color) and `Success` (displayed in `R_SUCCESS` color). Status messages are used to surface feedback from async operations such as agent creation -- both success confirmations (e.g., "Agent started on feature-branch") and error details (e.g., "Agent create failed: hub connect error: ..."). The `StatusMessage` struct tracks the message text, level, and creation `Instant` for auto-dismissal timing.
+
+**Keybinding hints (when no status message is active):** Context-aware hints: on Repositories tab shows `q quit`, `Q stop+quit`, navigation hints; on Overview tab shows focus-dependent hints (e.g., `Shift+↓ enter terminal` or `Shift+↑ options`); in focus mode shows `Shift+←/→ switch panel`, `Shift+↑/↓ jump file`, `Esc exit`.
 
 ### Keyboard Shortcuts
 
@@ -278,6 +282,7 @@ The left panel has a tab bar at the top with three tabs: `Changes`, `Panel 2`, `
 - The diff is refreshed every 2 seconds via a background tokio task that runs `git diff HEAD` in a `spawn_blocking` call
 - Scrolling is supported with `↑` / `↓` keys when the left panel is focused
 - File jumping with `Shift+↑` / `Shift+↓` navigates directly to the previous/next file header
+- Error state shows the error message in `R_ERROR` color with word wrapping enabled (`.wrap(Wrap { trim: false })`) so long error messages do not overflow the terminal width
 - Empty state shows "No uncommitted changes"; loading state shows "Loading diff..."
 
 **Panel focus:**
@@ -359,7 +364,7 @@ A multi-step modal for creating new agents on git worktrees, opened globally wit
 
 **Branch name sanitization:** In step 3 (New branch), user input is sanitized via `clust_ipc::branch::sanitize_branch_name()` before being sent to the hub. This converts spaces to hyphens, slashes to double underscores, strips git-invalid characters, collapses sequences, and handles edge cases. The sanitized name is what gets used as the actual git branch name.
 
-**Completion:** On completing step 4, the modal sends a `CreateWorktreeAgent` IPC message to the hub. The hub creates the worktree (via the existing `add_worktree()` logic), spawns an agent in it, and returns `WorktreeAgentStarted`. The TUI then opens the new agent in focus mode.
+**Completion:** On completing step 4, the modal sends a `CreateWorktreeAgent` IPC message to the hub. The hub creates the worktree (via the existing `add_worktree()` logic), spawns an agent in it, and returns `WorktreeAgentStarted`. The TUI then opens the new agent in focus mode. On success, a status bar message confirms the agent started (e.g., "Agent started on feature-branch"). On failure (hub connection error, send error, unexpected response, or hub-reported error), the error is surfaced as a status bar error message instead of being lost to stderr. The `AgentStartResult` enum has `Started` and `Failed(String)` variants to communicate the outcome from the background tokio task to the main event loop.
 
 **Rendering:** The modal is rendered as a centered overlay (60 columns wide, 60% of terminal height) with a titled border, input field with visible cursor, and a scrollable list with fuzzy-matched results. The selected item is indicated with a `>` prefix and bold text.
 
