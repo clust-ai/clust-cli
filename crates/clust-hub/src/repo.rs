@@ -680,10 +680,8 @@ pub struct PurgeResult {
     pub deleted_branches: usize,
 }
 
-/// Purge a repository: remove all worktrees, delete all non-HEAD local branches,
-/// and clean stale remote refs.
-pub fn purge_repo(repo_root: &Path) -> Result<PurgeResult, String> {
-    // 1. Remove all non-main worktrees
+/// Remove all non-main worktrees and the `.clust/worktrees/` directory.
+pub fn purge_worktrees(repo_root: &Path) -> Result<usize, String> {
     let wt_output = std::process::Command::new("git")
         .current_dir(repo_root)
         .args(["worktree", "list", "--porcelain"])
@@ -727,7 +725,11 @@ pub fn purge_repo(repo_root: &Path) -> Result<PurgeResult, String> {
     // Remove the .clust/worktrees/ directory itself (may contain leftover files)
     let _ = std::fs::remove_dir_all(repo_root.join(".clust").join("worktrees"));
 
-    // 2. Delete all non-HEAD local branches
+    Ok(removed_worktrees)
+}
+
+/// Delete all non-HEAD local branches.
+pub fn purge_branches(repo_root: &Path) -> Result<usize, String> {
     let repo = git2::Repository::open(repo_root)
         .map_err(|e| format!("failed to open repo: {e}"))?;
     let head_name = repo.head().ok().and_then(|h| h.shorthand().map(String::from));
@@ -751,7 +753,14 @@ pub fn purge_repo(repo_root: &Path) -> Result<PurgeResult, String> {
         }
     }
 
-    // 3. Clean stale remote refs
+    Ok(deleted_branches)
+}
+
+/// Purge a repository: remove all worktrees, delete all non-HEAD local branches,
+/// and clean stale remote refs.
+pub fn purge_repo(repo_root: &Path) -> Result<PurgeResult, String> {
+    let removed_worktrees = purge_worktrees(repo_root)?;
+    let deleted_branches = purge_branches(repo_root)?;
     let _ = clean_stale_refs(repo_root);
 
     Ok(PurgeResult {
