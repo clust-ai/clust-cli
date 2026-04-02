@@ -28,6 +28,18 @@ use crate::{
     theme, version,
 };
 
+/// Maximum interval between two Esc presses to count as a "double-tap".
+const DOUBLE_ESC_THRESHOLD: Duration = Duration::from_millis(400);
+
+/// Returns `true` when two Esc presses arrive within [`DOUBLE_ESC_THRESHOLD`].
+/// Always records the current instant so the next call can compare.
+fn is_double_esc(last: &mut Option<Instant>) -> bool {
+    let now = Instant::now();
+    let double = last.is_some_and(|t| now.duration_since(t) < DOUBLE_ESC_THRESHOLD);
+    *last = Some(now);
+    double
+}
+
 enum AgentStartResult {
     Started {
         agent_id: String,
@@ -683,6 +695,7 @@ pub fn run(hub_name: &str) -> io::Result<()> {
     let mut focus_mode_state = overview::FocusModeState::new();
     let mut in_focus_mode = false;
     let mut status_message: Option<StatusMessage> = None;
+    let mut last_esc_press: Option<Instant> = None;
     let (init_cols, init_rows) = crossterm::terminal::size().unwrap_or((80, 24));
     let mut last_content_area = Rect {
         x: 0,
@@ -1707,23 +1720,25 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                             focus_mode_state.left_tab.next();
                                     }
                                     KeyCode::Esc => {
-                                        // Check for worktree cleanup before shutdown
-                                        if let Some(panel) = &focus_mode_state.panel {
-                                            if panel.exited && panel.is_worktree {
-                                                if let (Some(rp), Some(bn)) = (&panel.repo_path, &panel.branch_name) {
-                                                    pending_worktree_cleanups = vec![crate::worktree::WorktreeCleanup {
-                                                        repo_path: rp.clone(),
-                                                        branch_name: bn.clone(),
-                                                    }];
+                                        if is_double_esc(&mut last_esc_press) {
+                                            // Check for worktree cleanup before shutdown
+                                            if let Some(panel) = &focus_mode_state.panel {
+                                                if panel.exited && panel.is_worktree {
+                                                    if let (Some(rp), Some(bn)) = (&panel.repo_path, &panel.branch_name) {
+                                                        pending_worktree_cleanups = vec![crate::worktree::WorktreeCleanup {
+                                                            repo_path: rp.clone(),
+                                                            branch_name: bn.clone(),
+                                                        }];
+                                                    }
                                                 }
                                             }
-                                        }
-                                        focus_mode_state.shutdown();
-                                        in_focus_mode = false;
-                                        if active_tab == ActiveTab::Overview
-                                            && overview_state.initialized
-                                        {
-                                            overview_state.force_resize_all();
+                                            focus_mode_state.shutdown();
+                                            in_focus_mode = false;
+                                            if active_tab == ActiveTab::Overview
+                                                && overview_state.initialized
+                                            {
+                                                overview_state.force_resize_all();
+                                            }
                                         }
                                         if let Some(m) = pop_worktree_cleanup_menu(&mut pending_worktree_cleanups) {
                                             active_menu = Some(m);
@@ -1773,23 +1788,28 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                     }
                                 }
                             } else if key.code == KeyCode::Esc {
-                                // Check for worktree cleanup before shutdown
-                                if let Some(panel) = &focus_mode_state.panel {
-                                    if panel.exited && panel.is_worktree {
-                                        if let (Some(rp), Some(bn)) = (&panel.repo_path, &panel.branch_name) {
-                                            pending_worktree_cleanups = vec![crate::worktree::WorktreeCleanup {
-                                                repo_path: rp.clone(),
-                                                branch_name: bn.clone(),
-                                            }];
+                                if is_double_esc(&mut last_esc_press) {
+                                    // Check for worktree cleanup before shutdown
+                                    if let Some(panel) = &focus_mode_state.panel {
+                                        if panel.exited && panel.is_worktree {
+                                            if let (Some(rp), Some(bn)) = (&panel.repo_path, &panel.branch_name) {
+                                                pending_worktree_cleanups = vec![crate::worktree::WorktreeCleanup {
+                                                    repo_path: rp.clone(),
+                                                    branch_name: bn.clone(),
+                                                }];
+                                            }
                                         }
                                     }
-                                }
-                                focus_mode_state.shutdown();
-                                in_focus_mode = false;
-                                if active_tab == ActiveTab::Overview
-                                    && overview_state.initialized
-                                {
-                                    overview_state.force_resize_all();
+                                    focus_mode_state.shutdown();
+                                    in_focus_mode = false;
+                                    if active_tab == ActiveTab::Overview
+                                        && overview_state.initialized
+                                    {
+                                        overview_state.force_resize_all();
+                                    }
+                                } else {
+                                    // Single Esc — forward to agent process
+                                    focus_mode_state.send_input(vec![0x1b]);
                                 }
                                 if let Some(m) = pop_worktree_cleanup_menu(&mut pending_worktree_cleanups) {
                                     active_menu = Some(m);
@@ -1882,7 +1902,14 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                             }
                         } else {
                             match key.code {
-                                KeyCode::Esc => overview_state.exit_terminal(),
+                                KeyCode::Esc => {
+                                    if is_double_esc(&mut last_esc_press) {
+                                        overview_state.exit_terminal();
+                                    } else {
+                                        // Single Esc — forward to agent process
+                                        overview_state.send_input(vec![0x1b]);
+                                    }
+                                }
                                 KeyCode::PageUp => overview_state.panel_scroll_up(),
                                 KeyCode::PageDown => overview_state.panel_scroll_down(),
                                 _ => {
@@ -1897,7 +1924,12 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                     } else {
                         // Normal key handling (options bar, other tabs)
                         match key.code {
-                            KeyCode::Char('q') | KeyCode::Esc => break,
+                            KeyCode::Char('q') => break,
+                            KeyCode::Esc => {
+                                if is_double_esc(&mut last_esc_press) {
+                                    break;
+                                }
+                            }
                             KeyCode::Char('c')
                                 if key.modifiers.contains(KeyModifiers::CONTROL) =>
                             {
@@ -3183,7 +3215,7 @@ fn render_focus_back_bar(
             .bg(theme::R_BG_RAISED),
     ));
     spans.push(Span::styled(
-        "Esc",
+        "Esc\u{00d7}2",
         Style::default()
             .fg(theme::R_TEXT_PRIMARY)
             .bg(theme::R_BG_RAISED)
@@ -4216,7 +4248,7 @@ fn render_status_bar(
     } else {
         let mod_key = if cfg!(target_os = "macos") { "Opt" } else { "Alt" };
         let hint_text = if in_focus_mode {
-            format!("Shift+\u{2190}/\u{2192} switch panel  Shift+\u{2191}/\u{2193} jump file  Esc exit  {mod_key}+E new agent")
+            format!("Shift+\u{2190}/\u{2192} switch panel  Shift+\u{2191}/\u{2193} jump file  Esc\u{00d7}2 exit  {mod_key}+E new agent")
         } else if active_tab == ActiveTab::Overview {
             match overview_focus {
                 OverviewFocus::Terminal(_) => {
@@ -4309,7 +4341,7 @@ fn render_help_overlay(frame: &mut Frame, area: Rect, active_tab: ActiveTab, in_
     };
 
     // -- Global --
-    lines.push(binding_line("q / Esc", "Quit"));
+    lines.push(binding_line("q / Esc\u{00d7}2", "Quit"));
     lines.push(binding_line("Q", "Quit and stop hub"));
     lines.push(binding_line("Ctrl+C", "Quit"));
     lines.push(binding_line("Tab", "Next tab"));
@@ -4345,7 +4377,7 @@ fn render_help_overlay(frame: &mut Frame, area: Rect, active_tab: ActiveTab, in_
     if in_focus_mode {
         lines.push(Line::from(""));
         lines.push(header_line("Focus Mode"));
-        lines.push(binding_line("Esc", "Exit focus mode"));
+        lines.push(binding_line("Esc\u{00d7}2", "Exit focus mode"));
         lines.push(binding_line("Shift+\u{2190}/\u{2192}", "Switch panel"));
         lines.push(binding_line("Shift+PgUp/PgDn", "Scroll terminal"));
         lines.push(sub_label_line("Left panel:"));
