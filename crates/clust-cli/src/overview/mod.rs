@@ -18,7 +18,7 @@ use clust_ipc::{AgentInfo, CliMessage, HubMessage};
 use crate::{ipc, terminal_emulator::TerminalEmulator, theme, ui::ClickMap};
 
 /// Minimum width in columns for a single agent panel.
-const MIN_PANEL_WIDTH: u16 = 40;
+const MIN_PANEL_WIDTH: u16 = 60;
 
 /// Maximum number of panels that fit side-by-side at MIN_PANEL_WIDTH.
 fn max_panels_for_width(available_width: u16) -> usize {
