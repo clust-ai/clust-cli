@@ -114,6 +114,7 @@ The prompt includes a dirty-state warning when the worktree has uncommitted chan
 - `clust repo -s` (stop repo agents): queries repo agents before stopping, prompts after
 - Session exit (start/attach): prompts when the agent exits (not on detach), checking if other agents remain in the worktree
 - TUI `Q` (stop hub): collects worktree info from in-memory agents, prompts after TUI cleanup
+- TUI context menus: "Stop All Agents" (repo menu), "Stop Agents" (branch menu), and exiting focus mode when the agent has exited all trigger a worktree cleanup dialog within the TUI
 
 The worktree removal is performed locally using git commands, independent of the hub. This ensures cleanup works even after the hub has shut down.
 
