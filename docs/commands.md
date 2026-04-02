@@ -315,7 +315,8 @@ These shortcuts are active in the `clust ui` dashboard. They are displayed in th
 
 | Shortcut | Action |
 |----------|--------|
-| `q` / `Esc` | Quit the UI (hub keeps running) |
+| `q` | Quit the UI (hub keeps running) |
+| `Esc×2` (double-tap) | Quit the UI (hub keeps running) |
 | `Q` | Quit the UI and stop the hub (prompts for worktree cleanup) |
 | `Tab` | Switch to next tab |
 | `Shift+Tab` | Switch to previous tab |
@@ -345,6 +346,8 @@ These shortcuts are active in the `clust ui` dashboard. They are displayed in th
 
 | Shortcut | Action |
 |----------|--------|
+| `Esc` (single) | Forward Esc to agent process |
+| `Esc×2` (double-tap) | Deselect terminal, return to options bar |
 | `Shift+↑` | Exit terminal, return to options bar |
 | `Shift+↓` | Enter focus mode for the focused agent |
 | `Shift+←` / `Shift+→` | Switch to previous/next agent panel |
@@ -354,7 +357,8 @@ These shortcuts are active in the `clust ui` dashboard. They are displayed in th
 
 | Shortcut | Action |
 |----------|--------|
-| `Esc` | Exit focus mode, return to originating tab |
+| `Esc` (single) | Forward Esc to agent process |
+| `Esc×2` (double-tap) | Exit focus mode, return to originating tab |
 | `Shift+←` | Switch focus to left panel |
 | `Shift+PageUp` | Scroll up through scrollback history |
 | `Shift+PageDown` | Scroll down through scrollback history |
@@ -364,7 +368,7 @@ These shortcuts are active in the `clust ui` dashboard. They are displayed in th
 
 | Shortcut | Action |
 |----------|--------|
-| `Esc` | Exit focus mode, return to originating tab |
+| `Esc×2` (double-tap) | Exit focus mode, return to originating tab |
 | `↑` / `↓` | Scroll diff up/down |
 | `Shift+↑` | Jump to previous file header |
 | `Shift+↓` | Jump to next file header |

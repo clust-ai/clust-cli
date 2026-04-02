@@ -147,7 +147,8 @@ A multi-agent terminal overview that displays all active agents side-by-side wit
 |---------|----------|--------|
 | Options Bar | `Shift+↓` | Enter terminal focus (returns to last focused panel) |
 | Options Bar | `Shift+←` / `Shift+→` | Scroll viewport left/right |
-| Terminal | `Esc` | Deselect terminal, return to options bar |
+| Terminal | `Esc` (single) | Forward Esc to agent process |
+| Terminal | `Esc×2` (double-tap) | Deselect terminal, return to options bar |
 | Terminal | `Shift+↑` | Return to options bar |
 | Terminal | `Shift+←` / `Shift+→` | Switch focus to previous/next agent panel (wraps around) |
 | Terminal | `PageUp` / `PageDown` | Scroll focused panel through scrollback history |
@@ -187,7 +188,7 @@ On startup, `clust ui` automatically connects to the hub daemon, starting it if 
 
 **Status messages:** Temporary status messages override the keybinding hints area. Messages are displayed for 5 seconds before auto-dismissing, after which the keybinding hints reappear. Two severity levels exist: `Error` (displayed in `R_ERROR` color) and `Success` (displayed in `R_SUCCESS` color). Status messages are used to surface feedback from async operations such as agent creation and branch pulls -- both success confirmations (e.g., "Agent started on feature-branch", "Pulled main: Already up to date.") and error details (e.g., "Agent create failed: hub connect error: ...", "Pull failed: ..."). The `StatusMessage` struct tracks the message text, level, and creation `Instant` for auto-dismissal timing. Status messages are delivered from background tokio tasks to the main event loop via a dedicated `mpsc` channel (`status_tx` / `status_rx`), separate from the `AgentStartResult` channel used for agent creation results.
 
-**Keybinding hints (when no status message is active):** Context-aware hints: on Repositories tab shows `q quit`, `Q stop+quit`, navigation hints; on Overview tab shows focus-dependent hints (e.g., `Shift+↓ enter terminal` or `Shift+↑ options`); in focus mode shows `Shift+←/→ switch panel`, `Shift+↑/↓ jump file`, `Esc exit`.
+**Keybinding hints (when no status message is active):** Context-aware hints: on Repositories tab shows `q quit`, `Q stop+quit`, navigation hints; on Overview tab shows focus-dependent hints (e.g., `Shift+↓ enter terminal` or `Shift+↑ options`); in focus mode shows `Shift+←/→ switch panel`, `Shift+↑/↓ jump file`, `Esc×2 exit`.
 
 ### Keyboard Shortcuts
 
@@ -195,7 +196,8 @@ On startup, `clust ui` automatically connects to the hub daemon, starting it if 
 
 | Shortcut | Action |
 |----------|--------|
-| `q` / `Esc` | Quit the UI (hub keeps running) |
+| `q` | Quit the UI (hub keeps running) |
+| `Esc×2` (double-tap) | Quit the UI (hub keeps running) |
 | `Q` | Quit the UI and stop the hub |
 | `Tab` | Switch to next tab |
 | `Shift+Tab` | Switch to previous tab |
@@ -241,7 +243,8 @@ Context menus appear as centered modal overlays. They support arrow key navigati
 
 | Shortcut | Action |
 |----------|--------|
-| `Esc` | Deselect terminal, return to options bar |
+| `Esc` (single) | Forward Esc to agent process |
+| `Esc×2` (double-tap) | Deselect terminal, return to options bar |
 | `Shift+↑` | Exit terminal, return to options bar |
 | `Shift+↓` | Enter focus mode for the focused agent |
 | `Shift+←` / `Shift+→` | Switch to previous/next agent panel |
@@ -255,11 +258,11 @@ Focus mode is an overlay state (tracked by an `in_focus_mode` boolean), not a ta
 
 **Back-bar header:**
 
-When focus mode is active, the 1-row tab bar is replaced by a back-bar that shows: `<- Esc  Back to [tab name]  agent-id . binary . repo/branch  Shift+<-/-> panels  Shift+up/down jump file`. The left side shows the escape hint and origin tab name; the center shows the agent identity followed by the repo name (in the repo's assigned color) and branch name; the right side shows keyboard hints.
+When focus mode is active, the 1-row tab bar is replaced by a back-bar that shows: `<- Esc×2  Back to [tab name]  agent-id . binary . repo/branch  Shift+<-/-> panels  Shift+up/down jump file`. The left side shows the double-tap escape hint and origin tab name; the center shows the agent identity followed by the repo name (in the repo's assigned color) and branch name; the right side shows keyboard hints.
 
 ```
 ┌─────────────────────────────────────────────────────┐
-│ ← Esc  Back to Overview  a3f8c1 · claude · myrepo/main  Shift+←/→ panels  Shift+↑/↓ jump file │
+│ ← Esc×2  Back to Overview  a3f8c1 · claude · myrepo/main  Shift+←/→ panels  Shift+↑/↓ jump file │
 │ Changes │ Panel 2 │ Panel 3 │┌────────────────────┐│
 │                               ││ a3f8c1 · claude ●  ││
 │      1      1│fn main() {     ││                    ││
@@ -292,7 +295,7 @@ The left panel has a tab bar at the top with three tabs: `Changes`, `Panel 2`, `
 
 **Panel focus:**
 
-The focus view has a concept of which side (left or right) has keyboard focus. The focused side is indicated by visual cues (tab bar highlight, panel border accent). `Shift+←` and `Shift+→` switch focus between the left and right panels. `Esc` exits focus mode from either panel (left or right).
+The focus view has a concept of which side (left or right) has keyboard focus. The focused side is indicated by visual cues (tab bar highlight, panel border accent). `Shift+←` and `Shift+→` switch focus between the left and right panels. `Esc×2` (double-tap) exits focus mode from either panel. When the right panel is focused, a single `Esc` press is forwarded to the agent process instead of exiting.
 
 **Entry points:**
 
@@ -301,7 +304,7 @@ The focus view has a concept of which side (left or right) has keyboard focus. T
 
 The agent's `working_dir`, `repo_path`, and `branch_name` are passed to `open_agent()` to determine the git repository for the diff viewer and to display repo/branch identity in the back-bar and status bar.
 
-**Exit:** Press `Esc` from either panel to exit focus mode and return to the originating tab. The `in_focus_mode` flag is set back to `false`. If the focused agent has exited and was running in a worktree, a worktree cleanup dialog is shown before returning to the originating tab.
+**Exit:** Double-tap `Esc` (two presses within 400ms) from either panel to exit focus mode and return to the originating tab. The `in_focus_mode` flag is set back to `false`. When the right panel is focused, a single `Esc` is forwarded to the agent process (e.g., to dismiss an agent's own UI element). If the focused agent has exited and was running in a worktree, a worktree cleanup dialog is shown before returning to the originating tab.
 
 **Implementation:**
 
@@ -322,7 +325,8 @@ The agent's `working_dir`, `repo_path`, and `branch_name` are passed to `open_ag
 
 | Shortcut | Action |
 |----------|--------|
-| `Esc` | Exit focus mode, return to originating tab |
+| `Esc` (single) | Forward Esc to agent process |
+| `Esc×2` (double-tap) | Exit focus mode, return to originating tab |
 | `Shift+←` | Switch focus to left panel |
 | `Shift+PageUp` | Scroll up through scrollback history |
 | `Shift+PageDown` | Scroll down through scrollback history |
@@ -337,16 +341,16 @@ The agent's `working_dir`, `repo_path`, and `branch_name` are passed to `open_ag
 | `Shift+↓` | Jump to next file header |
 | `Shift+→` | Switch focus to right panel |
 | `Tab` | Cycle to next left panel tab |
-| `Esc` | Exit focus mode, return to originating tab |
+| `Esc×2` (double-tap) | Exit focus mode, return to originating tab |
 
 ### Help Overlay (`?`)
 
 The `?` key toggles a keyboard shortcut overlay rendered as a centered modal (44 columns wide) anchored to the bottom of the content area. The modal is organized into sections with bold secondary-colored headers and context-aware visibility:
 
-- **Global section (always shown):** `q / Esc`, `Q`, `Ctrl+C`, `Tab`, `Shift+Tab`, `?`.
+- **Global section (always shown):** `q / Esc×2`, `Q`, `Ctrl+C`, `Tab`, `Shift+Tab`, `?`.
 - **Repositories section (shown when Repositories tab is active):** `↑/↓` navigate, `←/→` navigate tree, `Shift+←/→` switch panel, `Enter` open menu/focus agent, `Space` collapse/expand, `v` toggle grouping.
 - **Overview section (shown when Overview tab is active):** `Shift+←/→` scroll panels, `Shift+↓` enter terminal, plus an "In terminal:" sub-context label followed by `Shift+↑` back to options bar, `Shift+↓` enter focus mode, `Shift+←/→` switch agent, `PgUp/PgDn` scroll terminal.
-- **Focus Mode section (shown when in focus mode):** `Esc` exit, `Shift+←/→` switch panel, `Shift+PgUp/PgDn` scroll terminal, plus a "Left panel:" sub-context label followed by `Tab` cycle tabs, `↑/↓` scroll diff, `Shift+↑/↓` jump file.
+- **Focus Mode section (shown when in focus mode):** `Esc×2` exit, `Shift+←/→` switch panel, `Shift+PgUp/PgDn` scroll terminal, plus a "Left panel:" sub-context label followed by `Tab` cycle tabs, `↑/↓` scroll diff, `Shift+↑/↓` jump file.
 
 Key names are displayed in accent color (left-aligned, 16 chars wide); descriptions use primary text color. Section headers use secondary text color with bold modifier. Sub-context labels use tertiary text color and are indented.
 
