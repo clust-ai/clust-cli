@@ -586,6 +586,12 @@ async fn handle_connection(
             base_branch,
             checkout_existing,
         } => {
+            // Sanitize new branch names; existing branches are already valid.
+            let branch_name = if checkout_existing {
+                branch_name
+            } else {
+                clust_ipc::branch::sanitize_branch_name(&branch_name)
+            };
             let repo_root = {
                 let hub_state = state.lock().await;
                 crate::repo::resolve_repo(
@@ -812,8 +818,12 @@ async fn handle_connection(
             accept_edits,
             hub,
         } => {
-            // Determine branch name and whether to create or checkout
-            let branch_name = new_branch
+            // Determine branch name and whether to create or checkout.
+            // Sanitize new_branch (user input) but not target_branch (from git).
+            let sanitized_new = new_branch
+                .as_deref()
+                .map(clust_ipc::branch::sanitize_branch_name);
+            let branch_name = sanitized_new
                 .as_deref()
                 .or(target_branch.as_deref())
                 .ok_or("either target_branch or new_branch must be provided");

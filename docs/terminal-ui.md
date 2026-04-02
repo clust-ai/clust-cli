@@ -357,6 +357,8 @@ A multi-step modal for creating new agents on git worktrees, opened globally wit
 - `Esc` -- go back to previous step, or cancel from step 1
 - Type to filter -- fuzzy matching via `fuzzy-matcher` (SkimV2 algorithm)
 
+**Branch name sanitization:** In step 3 (New branch), user input is sanitized via `clust_ipc::branch::sanitize_branch_name()` before being sent to the hub. This converts spaces to hyphens, slashes to double underscores, strips git-invalid characters, collapses sequences, and handles edge cases. The sanitized name is what gets used as the actual git branch name.
+
 **Completion:** On completing step 4, the modal sends a `CreateWorktreeAgent` IPC message to the hub. The hub creates the worktree (via the existing `add_worktree()` logic), spawns an agent in it, and returns `WorktreeAgentStarted`. The TUI then opens the new agent in focus mode.
 
 **Rendering:** The modal is rendered as a centered overlay (60 columns wide, 60% of terminal height) with a titled border, input field with visible cursor, and a scrollable list with fuzzy-matched results. The selected item is indicated with a `>` prefix and bold text.
