@@ -140,3 +140,20 @@ pub async fn send_stop_repo_agents(
         _ => Err(io::Error::other("unexpected response")),
     }
 }
+
+/// Fetch the full agent list from the hub. Returns empty vec if hub is unreachable.
+pub async fn fetch_agent_list() -> Vec<clust_ipc::AgentInfo> {
+    let Ok(mut stream) = try_connect().await else {
+        return vec![];
+    };
+    if clust_ipc::send_message(&mut stream, &CliMessage::ListAgents { hub: None })
+        .await
+        .is_err()
+    {
+        return vec![];
+    }
+    match clust_ipc::recv_message::<HubMessage>(&mut stream).await {
+        Ok(HubMessage::AgentList { agents }) => agents,
+        _ => vec![],
+    }
+}

@@ -32,7 +32,7 @@ clust [OPTIONS] [PROMPT]
 |------|------|-------------|
 | `-b` | `--background` | Start agent without attaching. Returns the agent ID. |
 | `-a` | `--attach <ID>` | Attach to an existing agent by its 6-char ID. |
-| `-s` | `--stop [ID]` | Without a value: stop the hub daemon and all agents. With a 6-char ID: stop that specific agent. |
+| `-s` | `--stop [ID]` | Without a value: stop the hub daemon and all agents. With a 6-char ID: stop that specific agent. When agents in worktrees are stopped, prompts with an interactive selector to keep, discard the worktree, or discard the worktree and branch. |
 | `-d` | `--default` | Interactive picker to set the global default agent binary. Persisted in SQLite. |
 | `-u` | `--use <AGENT>` | Use a specific agent binary for this session only (does not change the default). |
 | `-e` | `--accept-edits` | Auto-accept edits. Agent-specific: for Claude, passes `--permission-mode acceptEdits`. Ignored for agents that don't support it. |
@@ -191,7 +191,7 @@ clust repo [OPTIONS]
 |------|------|-------------|
 | `-a` | `--add` | Register the current directory's git repository for tracking in the TUI. |
 | `-r` | `--remove` | Remove a repository from clust tracking. Stops all agents first. Prompts for confirmation. |
-| `-s` | `--stop` | Stop all agents running on the current repository (keeps repo tracked). |
+| `-s` | `--stop` | Stop all agents running on the current repository (keeps repo tracked). Prompts for worktree cleanup if stopped agents were in worktrees. |
 
 ---
 
@@ -316,7 +316,7 @@ These shortcuts are active in the `clust ui` dashboard. They are displayed in th
 | Shortcut | Action |
 |----------|--------|
 | `q` / `Esc` | Quit the UI (hub keeps running) |
-| `Q` | Quit the UI and stop the hub |
+| `Q` | Quit the UI and stop the hub (prompts for worktree cleanup) |
 | `Tab` | Switch to next tab |
 | `Shift+Tab` | Switch to previous tab |
 | `?` | Toggle keyboard shortcut overlay |

@@ -103,6 +103,7 @@ pub struct AgentInfo {
     pub working_dir: String,
     pub repo_path: Option<String>,
     pub branch_name: Option<String>,
+    pub is_worktree: bool,
 }
 
 /// Info about a registered repository, returned in RepoList.
@@ -138,8 +139,20 @@ pub struct WorktreeEntry {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum HubMessage {
     Ok,
-    AgentStarted { id: String, agent_binary: String },
-    AgentAttached { id: String, agent_binary: String },
+    AgentStarted {
+        id: String,
+        agent_binary: String,
+        is_worktree: bool,
+        repo_path: Option<String>,
+        branch_name: Option<String>,
+    },
+    AgentAttached {
+        id: String,
+        agent_binary: String,
+        is_worktree: bool,
+        repo_path: Option<String>,
+        branch_name: Option<String>,
+    },
     AgentOutput { id: String, data: Vec<u8> },
     AgentExited { id: String, exit_code: i32 },
     AgentList { agents: Vec<AgentInfo> },
@@ -409,6 +422,9 @@ mod tests {
         assert_hub_round_trip(HubMessage::AgentStarted {
             id: "a1b2c3".into(),
             agent_binary: "claude".into(),
+            is_worktree: false,
+            repo_path: None,
+            branch_name: None,
         })
         .await;
     }
@@ -418,6 +434,9 @@ mod tests {
         assert_hub_round_trip(HubMessage::AgentAttached {
             id: "a1b2c3".into(),
             agent_binary: "claude".into(),
+            is_worktree: false,
+            repo_path: None,
+            branch_name: None,
         })
         .await;
     }
@@ -453,6 +472,7 @@ mod tests {
                     working_dir: "/tmp/project".into(),
                     repo_path: Some("/tmp/project".into()),
                     branch_name: Some("main".into()),
+                    is_worktree: false,
                 },
                 AgentInfo {
                     id: "bbb222".into(),
@@ -463,6 +483,7 @@ mod tests {
                     working_dir: "/home/user/code".into(),
                     repo_path: None,
                     branch_name: None,
+                    is_worktree: false,
                 },
             ],
         })
@@ -954,6 +975,7 @@ mod tests {
                         working_dir: "/home/user/project/.clust/worktrees/feature__auth".into(),
                         repo_path: Some("/home/user/project".into()),
                         branch_name: Some("feature/auth".into()),
+                        is_worktree: true,
                     }],
                 },
             ],

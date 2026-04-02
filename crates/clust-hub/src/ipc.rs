@@ -122,11 +122,20 @@ async fn handle_connection(
                             }
                         }
                     }
+                    let (ag_is_worktree, ag_repo_path, ag_branch_name) = {
+                        let hub_state = state.lock().await;
+                        hub_state.agents.get(&id).map(|e| {
+                            (e.is_worktree, e.repo_path.clone(), e.branch_name.clone())
+                        }).unwrap_or((false, None, None))
+                    };
                     clust_ipc::send_message_write(
                         &mut writer,
                         &HubMessage::AgentStarted {
                             id: id.clone(),
                             agent_binary: binary,
+                            is_worktree: ag_is_worktree,
+                            repo_path: ag_repo_path,
+                            branch_name: ag_branch_name,
                         },
                     )
                     .await?;
@@ -144,15 +153,20 @@ async fn handle_connection(
         CliMessage::AttachAgent { id } => {
             let agent_info = {
                 let hub = state.lock().await;
-                hub.agents.get(&id).map(|e| e.agent_binary.clone())
+                hub.agents.get(&id).map(|e| {
+                    (e.agent_binary.clone(), e.is_worktree, e.repo_path.clone(), e.branch_name.clone())
+                })
             };
             match agent_info {
-                Some(binary) => {
+                Some((binary, ag_is_worktree, ag_repo_path, ag_branch_name)) => {
                     clust_ipc::send_message_write(
                         &mut writer,
                         &HubMessage::AgentAttached {
                             id: id.clone(),
                             agent_binary: binary,
+                            is_worktree: ag_is_worktree,
+                            repo_path: ag_repo_path,
+                            branch_name: ag_branch_name,
                         },
                     )
                     .await?;
@@ -187,6 +201,7 @@ async fn handle_connection(
                         working_dir: e.working_dir.clone(),
                         repo_path: e.repo_path.clone(),
                         branch_name: e.branch_name.clone(),
+                        is_worktree: e.is_worktree,
                     })
                     .collect()
             };
@@ -336,6 +351,7 @@ async fn handle_connection(
                                 working_dir: v.working_dir.clone(),
                                 repo_path: v.repo_path.clone(),
                                 branch_name: v.branch_name.clone(),
+                                is_worktree: v.is_worktree,
                             },
                         )
                     })
@@ -540,6 +556,7 @@ async fn handle_connection(
                                         working_dir: v.working_dir.clone(),
                                         repo_path: v.repo_path.clone(),
                                         branch_name: v.branch_name.clone(),
+                                        is_worktree: v.is_worktree,
                                     },
                                 )
                             })
@@ -761,6 +778,7 @@ async fn handle_connection(
                                         working_dir: v.working_dir.clone(),
                                         repo_path: v.repo_path.clone(),
                                         branch_name: v.branch_name.clone(),
+                                        is_worktree: v.is_worktree,
                                     },
                                 )
                             })

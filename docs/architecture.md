@@ -50,6 +50,7 @@
 - TUI dashboard (`clust ui`) with repo tree, agent cards, and multi-agent overview via `ratatui`
 - Default agent picker with known agent detection
 - Version update check (via Git)
+- Worktree cleanup prompts when agents in worktrees are stopped or exit
 
 The CLI is a thin client. It does NOT manage agent processes directly.
 
@@ -126,8 +127,8 @@ CLI -> Hub:
 
 Hub -> CLI:
   Ok
-  AgentStarted { id: String, agent_binary: String }
-  AgentAttached { id: String, agent_binary: String }
+  AgentStarted { id: String, agent_binary: String, is_worktree: bool, repo_path: Option<String>, branch_name: Option<String> }
+  AgentAttached { id: String, agent_binary: String, is_worktree: bool, repo_path: Option<String>, branch_name: Option<String> }
   AgentOutput { id: String, data: Vec<u8> }
   AgentExited { id: String, exit_code: i32 }
   AgentList { agents: Vec<AgentInfo> }
