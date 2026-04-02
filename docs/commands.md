@@ -57,20 +57,20 @@ Output (no filter — grouped by hub):
 
 ```
   default_hub
-  ID       AGENT        STATUS     STARTED        ATTACHED
-  a3f8c1   claude       running    14:32          1 terminal
-  b7e2d9   claude       running    14:17          0 terminals
+  ID       AGENT        REPO             BRANCH               STATUS     STARTED        ATTACHED
+  a3f8c1   claude       my-project       main                 running    14:32          1 terminal
+  b7e2d9   claude       my-project       feature/auth         running    14:17          0 terminals
 
   my_feature
-  ID       AGENT        STATUS     STARTED        ATTACHED
-  c4d5e6   aider        running    15:01          1 terminal
+  ID       AGENT        REPO             BRANCH               STATUS     STARTED        ATTACHED
+  c4d5e6   aider        other-repo       develop              running    15:01          1 terminal
 ```
 
 Output (with `-H` filter — flat list):
 
 ```
-  ID       AGENT        STATUS     STARTED        ATTACHED
-  c4d5e6   aider        running    15:01          1 terminal
+  ID       AGENT        REPO             BRANCH               STATUS     STARTED        ATTACHED
+  c4d5e6   aider        other-repo       develop              running    15:01          1 terminal
 ```
 
 ### `clust ui`
@@ -169,7 +169,7 @@ clust wt rm --force
 
 #### `clust wt info`
 
-Show detailed information about a specific worktree, including path, dirty status, and active agents.
+Show detailed information about a specific worktree, including path, dirty status, active agents, and their attached terminal counts.
 
 ```
 clust wt info <NAME>
