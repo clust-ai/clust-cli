@@ -637,7 +637,9 @@ pub fn render_overview(frame: &mut Frame, area: Rect, state: &mut OverviewState,
         let panel_color = panel.repo_path.as_ref()
             .and_then(|rp| repo_colors.get(rp.as_str()))
             .map(|cn| theme::repo_color(cn));
-        render_agent_panel(frame, panel_areas[i], panel, is_focused, false, panel_color);
+        if let Some(content_area) = render_agent_panel(frame, panel_areas[i], panel, is_focused, false, panel_color) {
+            click_map.overview_content_areas.push((content_area, global_idx));
+        }
     }
 
     // Scroll indicators
@@ -703,9 +705,9 @@ fn render_agent_panel(
     focused: bool,
     in_focus_mode: bool,
     repo_color: Option<Color>,
-) {
+) -> Option<Rect> {
     if area.height < 3 {
-        return;
+        return None;
     }
 
     // Border color: use repo color when available, accent as fallback
@@ -738,7 +740,7 @@ fn render_agent_panel(
     frame.render_widget(block, area);
 
     if inner.height < 1 {
-        return;
+        return None;
     }
 
     // Split inner area into header (1 row) + terminal content
@@ -870,6 +872,7 @@ fn render_agent_panel(
     };
     let paragraph = Paragraph::new(lines).style(Style::default().bg(theme::R_BG_BASE));
     frame.render_widget(paragraph, content_area);
+    Some(content_area)
 }
 
 fn render_empty_state(frame: &mut Frame, area: Rect) {
@@ -1191,7 +1194,11 @@ pub fn render_focus_mode(frame: &mut Frame, area: Rect, state: &mut FocusModeSta
         .and_then(|rp| repo_colors.get(rp.as_str()))
         .map(|cn| theme::repo_color(cn));
     match &mut state.panel {
-        Some(panel) => render_agent_panel(frame, right_area, panel, right_focused, true, panel_color),
+        Some(panel) => {
+            if let Some(content_area) = render_agent_panel(frame, right_area, panel, right_focused, true, panel_color) {
+                click_map.focus_right_content_area = content_area;
+            }
+        }
         None => render_empty_state(frame, right_area),
     }
 }
