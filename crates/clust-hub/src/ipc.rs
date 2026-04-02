@@ -876,9 +876,18 @@ async fn handle_connection(
             ) {
                 Ok(path) => path,
                 Err(e) => {
+                    let message = if e.contains("already checked out") {
+                        format!(
+                            "Branch '{}' is already checked out and cannot be used as a worktree. \
+                             Use 'Start Agent (in place)' from the context menu, or create a new branch.",
+                            branch_name
+                        )
+                    } else {
+                        e
+                    };
                     clust_ipc::send_message_write(
                         &mut writer,
-                        &HubMessage::Error { message: e },
+                        &HubMessage::Error { message },
                     )
                     .await?;
                     return Ok(());
@@ -1163,6 +1172,31 @@ async fn handle_connection(
                             .await?;
                         }
                     }
+                }
+                Err(e) => {
+                    clust_ipc::send_message_write(
+                        &mut writer,
+                        &HubMessage::Error { message: e },
+                    )
+                    .await?;
+                }
+            }
+        }
+        CliMessage::PullBranch {
+            repo_path,
+            branch_name,
+        } => {
+            let repo_root = std::path::Path::new(&repo_path);
+            match crate::repo::pull_branch(repo_root, &branch_name) {
+                Ok(summary) => {
+                    clust_ipc::send_message_write(
+                        &mut writer,
+                        &HubMessage::BranchPulled {
+                            branch_name,
+                            summary,
+                        },
+                    )
+                    .await?;
                 }
                 Err(e) => {
                     clust_ipc::send_message_write(

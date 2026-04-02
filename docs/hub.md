@@ -151,6 +151,7 @@ When the hub receives a `CreateWorktreeAgent` message (sent from the TUI create-
 2. Create or check out a worktree using the existing `add_worktree()` logic:
    - If `new_branch` is provided, create a new worktree with that branch (using `target_branch` as the base branch if specified).
    - If `new_branch` is not provided, check out the `target_branch` as a worktree.
+   - If worktree creation fails because the branch is already checked out, the raw git error is replaced with a user-friendly message suggesting to use "Start Agent (in place)" from the context menu or to create a new branch.
 2. Spawn an agent in the new worktree directory (same logic as `StartAgent`).
 3. Return `WorktreeAgentStarted { id, agent_binary, working_dir, repo_path, branch_name }` to the CLI.
 
@@ -186,6 +187,17 @@ When the hub receives a `DeleteRemoteBranch` message:
 2. Parse the remote name and branch from the full ref (e.g., `origin/feature` -> remote `origin`, branch `feature`).
 3. Delete the remote branch using `git push <remote> --delete <branch>`.
 4. Return `RemoteBranchDeleted { branch_name }`.
+
+### Pull Branch
+
+When the hub receives a `PullBranch` message:
+
+1. Resolve the target repository from `repo_path`.
+2. Determine how the branch is checked out:
+   - **Repo HEAD:** Run `git pull` in the repo root directory.
+   - **Worktree:** Run `git pull` in the worktree directory.
+   - **Not checked out anywhere:** Run `git fetch origin <branch>:<branch>` for a fast-forward-only update.
+3. Return `BranchPulled { branch_name, summary }` with the git output, or `Error` on failure.
 
 ## Repository Maintenance
 

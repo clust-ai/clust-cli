@@ -179,6 +179,8 @@ pub(crate) struct ClickMap {
 #[derive(Clone, Copy)]
 enum BranchAction {
     StartAgent,
+    StartAgentInPlace,
+    Pull,
     StopAgents,
     OpenAgent,
     RemoveWorktree,
@@ -686,6 +688,8 @@ pub fn run(hub_name: &str) -> io::Result<()> {
     let mut create_modal: Option<CreateAgentModal> = None;
     let (agent_start_tx, mut agent_start_rx) =
         tokio::sync::mpsc::channel::<AgentStartResult>(4);
+    let (status_tx, mut status_rx) =
+        tokio::sync::mpsc::channel::<StatusMessage>(4);
 
     loop {
         // Drain output events (non-blocking, runs regardless of tab)
@@ -732,6 +736,11 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                     });
                 }
             }
+        }
+
+        // Check for async status messages (e.g. pull results)
+        if let Ok(msg) = status_rx.try_recv() {
+            status_message = Some(msg);
         }
 
         // Auto-dismiss status messages after 5 seconds
@@ -1074,7 +1083,12 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                                         let mut stream =
                                                             match ipc::try_connect().await {
                                                                 Ok(s) => s,
-                                                                Err(_) => return,
+                                                                Err(e) => {
+                                                                    let _ = tx.send(AgentStartResult::Failed(
+                                                                        format!("Agent create failed: hub connect error: {e}")
+                                                                    )).await;
+                                                                    return;
+                                                                }
                                                             };
                                                         let msg =
                                                             CliMessage::CreateWorktreeAgent {
@@ -1090,41 +1104,211 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                                                 accept_edits: false,
                                                                 hub,
                                                             };
-                                                        if clust_ipc::send_message(
+                                                        if let Err(e) = clust_ipc::send_message(
                                                             &mut stream,
                                                             &msg,
                                                         )
                                                         .await
-                                                        .is_err()
                                                         {
+                                                            let _ = tx.send(AgentStartResult::Failed(
+                                                                format!("Agent create failed: send error: {e}")
+                                                            )).await;
                                                             return;
                                                         }
-                                                        if let Ok(
-                                                            HubMessage::WorktreeAgentStarted {
+                                                        match clust_ipc::recv_message::<HubMessage>(
+                                                            &mut stream,
+                                                        )
+                                                        .await
+                                                        {
+                                                            Ok(HubMessage::WorktreeAgentStarted {
                                                                 id,
                                                                 agent_binary,
                                                                 working_dir,
                                                                 repo_path,
                                                                 branch_name,
-                                                            },
-                                                        ) = clust_ipc::recv_message::<
-                                                            HubMessage,
-                                                        >(
-                                                            &mut stream
+                                                            }) => {
+                                                                let _ = tx
+                                                                    .send(AgentStartResult::Started {
+                                                                        agent_id: id,
+                                                                        agent_binary,
+                                                                        working_dir,
+                                                                        repo_path,
+                                                                        branch_name,
+                                                                    })
+                                                                    .await;
+                                                            }
+                                                            Ok(HubMessage::Error { message }) => {
+                                                                let _ = tx.send(AgentStartResult::Failed(
+                                                                    format!("Agent create failed: {message}")
+                                                                )).await;
+                                                            }
+                                                            Ok(_) => {
+                                                                let _ = tx.send(AgentStartResult::Failed(
+                                                                    "Agent create failed: unexpected hub response".to_string()
+                                                                )).await;
+                                                            }
+                                                            Err(e) => {
+                                                                let _ = tx.send(AgentStartResult::Failed(
+                                                                    format!("Agent create failed: recv error: {e}")
+                                                                )).await;
+                                                            }
+                                                        }
+                                                    });
+                                                }
+                                                BranchAction::StartAgentInPlace => {
+                                                    let tx = agent_start_tx.clone();
+                                                    let hub = hub_name.to_string();
+                                                    let rp = repo_path.clone();
+                                                    let (cols, rows) =
+                                                        crossterm::terminal::size()
+                                                            .unwrap_or((80, 24));
+                                                    tokio::spawn(async move {
+                                                        let mut stream =
+                                                            match ipc::try_connect().await {
+                                                                Ok(s) => s,
+                                                                Err(e) => {
+                                                                    let _ = tx.send(AgentStartResult::Failed(
+                                                                        format!("Agent create failed: hub connect error: {e}")
+                                                                    )).await;
+                                                                    return;
+                                                                }
+                                                            };
+                                                        let msg = CliMessage::StartAgent {
+                                                            prompt: None,
+                                                            agent_binary: None,
+                                                            working_dir: rp,
+                                                            cols,
+                                                            rows: rows
+                                                                .saturating_sub(2)
+                                                                .max(1),
+                                                            accept_edits: false,
+                                                            hub,
+                                                        };
+                                                        if let Err(e) = clust_ipc::send_message(
+                                                            &mut stream,
+                                                            &msg,
                                                         )
                                                         .await
                                                         {
-                                                            let _ = tx
-                                                                .send(AgentStartResult::Started {
-                                                                    agent_id: id,
-                                                                    agent_binary,
-                                                                    working_dir,
-                                                                    repo_path,
-                                                                    branch_name,
-                                                                })
-                                                                .await;
+                                                            let _ = tx.send(AgentStartResult::Failed(
+                                                                format!("Agent create failed: send error: {e}")
+                                                            )).await;
+                                                            return;
+                                                        }
+                                                        match clust_ipc::recv_message::<HubMessage>(
+                                                            &mut stream,
+                                                        )
+                                                        .await
+                                                        {
+                                                            Ok(HubMessage::AgentStarted {
+                                                                id,
+                                                                agent_binary,
+                                                                repo_path,
+                                                                branch_name,
+                                                                ..
+                                                            }) => {
+                                                                let working_dir = repo_path
+                                                                    .clone()
+                                                                    .unwrap_or_default();
+                                                                let _ = tx
+                                                                    .send(AgentStartResult::Started {
+                                                                        agent_id: id,
+                                                                        agent_binary,
+                                                                        working_dir,
+                                                                        repo_path,
+                                                                        branch_name,
+                                                                    })
+                                                                    .await;
+                                                            }
+                                                            Ok(HubMessage::Error { message }) => {
+                                                                let _ = tx.send(AgentStartResult::Failed(
+                                                                    format!("Agent create failed: {message}")
+                                                                )).await;
+                                                            }
+                                                            Ok(_) => {
+                                                                let _ = tx.send(AgentStartResult::Failed(
+                                                                    "Agent create failed: unexpected hub response".to_string()
+                                                                )).await;
+                                                            }
+                                                            Err(e) => {
+                                                                let _ = tx.send(AgentStartResult::Failed(
+                                                                    format!("Agent create failed: recv error: {e}")
+                                                                )).await;
+                                                            }
                                                         }
                                                     });
+                                                }
+                                                BranchAction::Pull => {
+                                                    let tx = status_tx.clone();
+                                                    let rp = repo_path.clone();
+                                                    let bn = branch_name.clone();
+                                                    tokio::spawn(async move {
+                                                        let mut stream =
+                                                            match ipc::try_connect().await {
+                                                                Ok(s) => s,
+                                                                Err(e) => {
+                                                                    let _ = tx.send(StatusMessage {
+                                                                        text: format!("Pull failed: hub connect error: {e}"),
+                                                                        level: StatusLevel::Error,
+                                                                        created: Instant::now(),
+                                                                    }).await;
+                                                                    return;
+                                                                }
+                                                            };
+                                                        let msg = CliMessage::PullBranch {
+                                                            repo_path: rp,
+                                                            branch_name: bn.clone(),
+                                                        };
+                                                        if let Err(e) = clust_ipc::send_message(
+                                                            &mut stream,
+                                                            &msg,
+                                                        )
+                                                        .await
+                                                        {
+                                                            let _ = tx.send(StatusMessage {
+                                                                text: format!("Pull failed: send error: {e}"),
+                                                                level: StatusLevel::Error,
+                                                                created: Instant::now(),
+                                                            }).await;
+                                                            return;
+                                                        }
+                                                        match clust_ipc::recv_message::<HubMessage>(
+                                                            &mut stream,
+                                                        )
+                                                        .await
+                                                        {
+                                                            Ok(HubMessage::BranchPulled { branch_name, .. }) => {
+                                                                let _ = tx.send(StatusMessage {
+                                                                    text: format!("Pulled {branch_name}"),
+                                                                    level: StatusLevel::Success,
+                                                                    created: Instant::now(),
+                                                                }).await;
+                                                            }
+                                                            Ok(HubMessage::Error { message }) => {
+                                                                let _ = tx.send(StatusMessage {
+                                                                    text: format!("Pull failed: {message}"),
+                                                                    level: StatusLevel::Error,
+                                                                    created: Instant::now(),
+                                                                }).await;
+                                                            }
+                                                            Ok(_) => {
+                                                                let _ = tx.send(StatusMessage {
+                                                                    text: "Pull failed: unexpected hub response".to_string(),
+                                                                    level: StatusLevel::Error,
+                                                                    created: Instant::now(),
+                                                                }).await;
+                                                            }
+                                                            Err(e) => {
+                                                                let _ = tx.send(StatusMessage {
+                                                                    text: format!("Pull failed: recv error: {e}"),
+                                                                    level: StatusLevel::Error,
+                                                                    created: Instant::now(),
+                                                                }).await;
+                                                            }
+                                                        }
+                                                    });
+                                                    last_repo_fetch =
+                                                        Instant::now() - Duration::from_secs(10);
                                                 }
                                                 BranchAction::StopAgents => {
                                                     let ids: Vec<String> = branch_agents
@@ -1215,7 +1399,12 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                                                 match ipc::try_connect().await
                                                                 {
                                                                     Ok(s) => s,
-                                                                    Err(_) => return,
+                                                                    Err(e) => {
+                                                                        let _ = tx.send(AgentStartResult::Failed(
+                                                                            format!("Agent create failed: hub connect error: {e}")
+                                                                        )).await;
+                                                                        return;
+                                                                    }
                                                                 };
                                                             let msg =
                                                                 CliMessage::CreateWorktreeAgent
@@ -1236,39 +1425,54 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                                                     accept_edits: false,
                                                                     hub,
                                                                 };
-                                                            if clust_ipc::send_message(
+                                                            if let Err(e) = clust_ipc::send_message(
                                                                 &mut stream,
                                                                 &msg,
                                                             )
                                                             .await
-                                                            .is_err()
                                                             {
+                                                                let _ = tx.send(AgentStartResult::Failed(
+                                                                    format!("Agent create failed: send error: {e}")
+                                                                )).await;
                                                                 return;
                                                             }
-                                                            if let Ok(
-                                                                HubMessage::WorktreeAgentStarted {
+                                                            match clust_ipc::recv_message::<HubMessage>(
+                                                                &mut stream,
+                                                            )
+                                                            .await
+                                                            {
+                                                                Ok(HubMessage::WorktreeAgentStarted {
                                                                     id,
                                                                     agent_binary,
                                                                     working_dir,
                                                                     repo_path,
                                                                     branch_name,
-                                                                },
-                                                            ) = clust_ipc::recv_message::<
-                                                                HubMessage,
-                                                            >(
-                                                                &mut stream
-                                                            )
-                                                            .await
-                                                            {
-                                                                let _ = tx
-                                                                    .send(AgentStartResult::Started {
-                                                                        agent_id: id,
-                                                                        agent_binary,
-                                                                        working_dir,
-                                                                        repo_path,
-                                                                        branch_name,
-                                                                    })
-                                                                    .await;
+                                                                }) => {
+                                                                    let _ = tx
+                                                                        .send(AgentStartResult::Started {
+                                                                            agent_id: id,
+                                                                            agent_binary,
+                                                                            working_dir,
+                                                                            repo_path,
+                                                                            branch_name,
+                                                                        })
+                                                                        .await;
+                                                                }
+                                                                Ok(HubMessage::Error { message }) => {
+                                                                    let _ = tx.send(AgentStartResult::Failed(
+                                                                        format!("Agent create failed: {message}")
+                                                                    )).await;
+                                                                }
+                                                                Ok(_) => {
+                                                                    let _ = tx.send(AgentStartResult::Failed(
+                                                                        "Agent create failed: unexpected hub response".to_string()
+                                                                    )).await;
+                                                                }
+                                                                Err(e) => {
+                                                                    let _ = tx.send(AgentStartResult::Failed(
+                                                                        format!("Agent create failed: recv error: {e}")
+                                                                    )).await;
+                                                                }
                                                             }
                                                         });
                                                     }
@@ -1735,6 +1939,12 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                                                 let mut actions = Vec::new();
                                                                 labels.push("Start Agent".to_string());
                                                                 actions.push(BranchAction::StartAgent);
+                                                                if branch.is_head {
+                                                                    labels.push("Start Agent (in place)".to_string());
+                                                                    actions.push(BranchAction::StartAgentInPlace);
+                                                                }
+                                                                labels.push("Pull".to_string());
+                                                                actions.push(BranchAction::Pull);
                                                                 if branch.active_agent_count > 0 {
                                                                     labels.push("Stop Agents".to_string());
                                                                     actions.push(BranchAction::StopAgents);
@@ -2076,7 +2286,12 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                                         let mut stream =
                                                             match ipc::try_connect().await {
                                                                 Ok(s) => s,
-                                                                Err(_) => return,
+                                                                Err(e) => {
+                                                                    let _ = tx.send(AgentStartResult::Failed(
+                                                                        format!("Agent create failed: hub connect error: {e}")
+                                                                    )).await;
+                                                                    return;
+                                                                }
                                                             };
                                                         let msg =
                                                             CliMessage::CreateWorktreeAgent {
@@ -2092,41 +2307,211 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                                                 accept_edits: false,
                                                                 hub,
                                                             };
-                                                        if clust_ipc::send_message(
+                                                        if let Err(e) = clust_ipc::send_message(
                                                             &mut stream,
                                                             &msg,
                                                         )
                                                         .await
-                                                        .is_err()
                                                         {
+                                                            let _ = tx.send(AgentStartResult::Failed(
+                                                                format!("Agent create failed: send error: {e}")
+                                                            )).await;
                                                             return;
                                                         }
-                                                        if let Ok(
-                                                            HubMessage::WorktreeAgentStarted {
+                                                        match clust_ipc::recv_message::<HubMessage>(
+                                                            &mut stream,
+                                                        )
+                                                        .await
+                                                        {
+                                                            Ok(HubMessage::WorktreeAgentStarted {
                                                                 id,
                                                                 agent_binary,
                                                                 working_dir,
                                                                 repo_path,
                                                                 branch_name,
-                                                            },
-                                                        ) = clust_ipc::recv_message::<
-                                                            HubMessage,
-                                                        >(
-                                                            &mut stream
+                                                            }) => {
+                                                                let _ = tx
+                                                                    .send(AgentStartResult::Started {
+                                                                        agent_id: id,
+                                                                        agent_binary,
+                                                                        working_dir,
+                                                                        repo_path,
+                                                                        branch_name,
+                                                                    })
+                                                                    .await;
+                                                            }
+                                                            Ok(HubMessage::Error { message }) => {
+                                                                let _ = tx.send(AgentStartResult::Failed(
+                                                                    format!("Agent create failed: {message}")
+                                                                )).await;
+                                                            }
+                                                            Ok(_) => {
+                                                                let _ = tx.send(AgentStartResult::Failed(
+                                                                    "Agent create failed: unexpected hub response".to_string()
+                                                                )).await;
+                                                            }
+                                                            Err(e) => {
+                                                                let _ = tx.send(AgentStartResult::Failed(
+                                                                    format!("Agent create failed: recv error: {e}")
+                                                                )).await;
+                                                            }
+                                                        }
+                                                    });
+                                                }
+                                                BranchAction::StartAgentInPlace => {
+                                                    let tx = agent_start_tx.clone();
+                                                    let hub = hub_name.to_string();
+                                                    let rp = repo_path.clone();
+                                                    let (cols, rows) =
+                                                        crossterm::terminal::size()
+                                                            .unwrap_or((80, 24));
+                                                    tokio::spawn(async move {
+                                                        let mut stream =
+                                                            match ipc::try_connect().await {
+                                                                Ok(s) => s,
+                                                                Err(e) => {
+                                                                    let _ = tx.send(AgentStartResult::Failed(
+                                                                        format!("Agent create failed: hub connect error: {e}")
+                                                                    )).await;
+                                                                    return;
+                                                                }
+                                                            };
+                                                        let msg = CliMessage::StartAgent {
+                                                            prompt: None,
+                                                            agent_binary: None,
+                                                            working_dir: rp,
+                                                            cols,
+                                                            rows: rows
+                                                                .saturating_sub(2)
+                                                                .max(1),
+                                                            accept_edits: false,
+                                                            hub,
+                                                        };
+                                                        if let Err(e) = clust_ipc::send_message(
+                                                            &mut stream,
+                                                            &msg,
                                                         )
                                                         .await
                                                         {
-                                                            let _ = tx
-                                                                .send(AgentStartResult::Started {
-                                                                    agent_id: id,
-                                                                    agent_binary,
-                                                                    working_dir,
-                                                                    repo_path,
-                                                                    branch_name,
-                                                                })
-                                                                .await;
+                                                            let _ = tx.send(AgentStartResult::Failed(
+                                                                format!("Agent create failed: send error: {e}")
+                                                            )).await;
+                                                            return;
+                                                        }
+                                                        match clust_ipc::recv_message::<HubMessage>(
+                                                            &mut stream,
+                                                        )
+                                                        .await
+                                                        {
+                                                            Ok(HubMessage::AgentStarted {
+                                                                id,
+                                                                agent_binary,
+                                                                repo_path,
+                                                                branch_name,
+                                                                ..
+                                                            }) => {
+                                                                let working_dir = repo_path
+                                                                    .clone()
+                                                                    .unwrap_or_default();
+                                                                let _ = tx
+                                                                    .send(AgentStartResult::Started {
+                                                                        agent_id: id,
+                                                                        agent_binary,
+                                                                        working_dir,
+                                                                        repo_path,
+                                                                        branch_name,
+                                                                    })
+                                                                    .await;
+                                                            }
+                                                            Ok(HubMessage::Error { message }) => {
+                                                                let _ = tx.send(AgentStartResult::Failed(
+                                                                    format!("Agent create failed: {message}")
+                                                                )).await;
+                                                            }
+                                                            Ok(_) => {
+                                                                let _ = tx.send(AgentStartResult::Failed(
+                                                                    "Agent create failed: unexpected hub response".to_string()
+                                                                )).await;
+                                                            }
+                                                            Err(e) => {
+                                                                let _ = tx.send(AgentStartResult::Failed(
+                                                                    format!("Agent create failed: recv error: {e}")
+                                                                )).await;
+                                                            }
                                                         }
                                                     });
+                                                }
+                                                BranchAction::Pull => {
+                                                    let tx = status_tx.clone();
+                                                    let rp = repo_path.clone();
+                                                    let bn = branch_name.clone();
+                                                    tokio::spawn(async move {
+                                                        let mut stream =
+                                                            match ipc::try_connect().await {
+                                                                Ok(s) => s,
+                                                                Err(e) => {
+                                                                    let _ = tx.send(StatusMessage {
+                                                                        text: format!("Pull failed: hub connect error: {e}"),
+                                                                        level: StatusLevel::Error,
+                                                                        created: Instant::now(),
+                                                                    }).await;
+                                                                    return;
+                                                                }
+                                                            };
+                                                        let msg = CliMessage::PullBranch {
+                                                            repo_path: rp,
+                                                            branch_name: bn.clone(),
+                                                        };
+                                                        if let Err(e) = clust_ipc::send_message(
+                                                            &mut stream,
+                                                            &msg,
+                                                        )
+                                                        .await
+                                                        {
+                                                            let _ = tx.send(StatusMessage {
+                                                                text: format!("Pull failed: send error: {e}"),
+                                                                level: StatusLevel::Error,
+                                                                created: Instant::now(),
+                                                            }).await;
+                                                            return;
+                                                        }
+                                                        match clust_ipc::recv_message::<HubMessage>(
+                                                            &mut stream,
+                                                        )
+                                                        .await
+                                                        {
+                                                            Ok(HubMessage::BranchPulled { branch_name, .. }) => {
+                                                                let _ = tx.send(StatusMessage {
+                                                                    text: format!("Pulled {branch_name}"),
+                                                                    level: StatusLevel::Success,
+                                                                    created: Instant::now(),
+                                                                }).await;
+                                                            }
+                                                            Ok(HubMessage::Error { message }) => {
+                                                                let _ = tx.send(StatusMessage {
+                                                                    text: format!("Pull failed: {message}"),
+                                                                    level: StatusLevel::Error,
+                                                                    created: Instant::now(),
+                                                                }).await;
+                                                            }
+                                                            Ok(_) => {
+                                                                let _ = tx.send(StatusMessage {
+                                                                    text: "Pull failed: unexpected hub response".to_string(),
+                                                                    level: StatusLevel::Error,
+                                                                    created: Instant::now(),
+                                                                }).await;
+                                                            }
+                                                            Err(e) => {
+                                                                let _ = tx.send(StatusMessage {
+                                                                    text: format!("Pull failed: recv error: {e}"),
+                                                                    level: StatusLevel::Error,
+                                                                    created: Instant::now(),
+                                                                }).await;
+                                                            }
+                                                        }
+                                                    });
+                                                    last_repo_fetch =
+                                                        Instant::now() - Duration::from_secs(10);
                                                 }
                                                 BranchAction::StopAgents => {
                                                     let ids: Vec<String> = branch_agents
@@ -2217,7 +2602,12 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                                                 match ipc::try_connect().await
                                                                 {
                                                                     Ok(s) => s,
-                                                                    Err(_) => return,
+                                                                    Err(e) => {
+                                                                        let _ = tx.send(AgentStartResult::Failed(
+                                                                            format!("Agent create failed: hub connect error: {e}")
+                                                                        )).await;
+                                                                        return;
+                                                                    }
                                                                 };
                                                             let msg =
                                                                 CliMessage::CreateWorktreeAgent
@@ -2238,39 +2628,54 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                                                     accept_edits: false,
                                                                     hub,
                                                                 };
-                                                            if clust_ipc::send_message(
+                                                            if let Err(e) = clust_ipc::send_message(
                                                                 &mut stream,
                                                                 &msg,
                                                             )
                                                             .await
-                                                            .is_err()
                                                             {
+                                                                let _ = tx.send(AgentStartResult::Failed(
+                                                                    format!("Agent create failed: send error: {e}")
+                                                                )).await;
                                                                 return;
                                                             }
-                                                            if let Ok(
-                                                                HubMessage::WorktreeAgentStarted {
+                                                            match clust_ipc::recv_message::<HubMessage>(
+                                                                &mut stream,
+                                                            )
+                                                            .await
+                                                            {
+                                                                Ok(HubMessage::WorktreeAgentStarted {
                                                                     id,
                                                                     agent_binary,
                                                                     working_dir,
                                                                     repo_path,
                                                                     branch_name,
-                                                                },
-                                                            ) = clust_ipc::recv_message::<
-                                                                HubMessage,
-                                                            >(
-                                                                &mut stream
-                                                            )
-                                                            .await
-                                                            {
-                                                                let _ = tx
-                                                                    .send(AgentStartResult::Started {
-                                                                        agent_id: id,
-                                                                        agent_binary,
-                                                                        working_dir,
-                                                                        repo_path,
-                                                                        branch_name,
-                                                                    })
-                                                                    .await;
+                                                                }) => {
+                                                                    let _ = tx
+                                                                        .send(AgentStartResult::Started {
+                                                                            agent_id: id,
+                                                                            agent_binary,
+                                                                            working_dir,
+                                                                            repo_path,
+                                                                            branch_name,
+                                                                        })
+                                                                        .await;
+                                                                }
+                                                                Ok(HubMessage::Error { message }) => {
+                                                                    let _ = tx.send(AgentStartResult::Failed(
+                                                                        format!("Agent create failed: {message}")
+                                                                    )).await;
+                                                                }
+                                                                Ok(_) => {
+                                                                    let _ = tx.send(AgentStartResult::Failed(
+                                                                        "Agent create failed: unexpected hub response".to_string()
+                                                                    )).await;
+                                                                }
+                                                                Err(e) => {
+                                                                    let _ = tx.send(AgentStartResult::Failed(
+                                                                        format!("Agent create failed: recv error: {e}")
+                                                                    )).await;
+                                                                }
                                                             }
                                                         });
                                                     }
