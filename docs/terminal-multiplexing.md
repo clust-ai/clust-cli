@@ -89,5 +89,6 @@ When entering scrollback mode, the current `total_lines` is recorded as an ancho
 ## Status Bar
 
 - Drawn on the bottom row, outside the DECSTBM scroll region.
+- Shows: `clust` branding, agent ID, agent binary name, repo/branch context (when the agent is running in a git repository), and the `Ctrl+Q detach` hint. The repo name is displayed as the basename of the repo path (e.g., `my-project/feature-branch`).
 - Redrawn on: initial attach, terminal resize (SIGWINCH), scrollback mode enter/exit, and after every agent output write (to guard against agent escape sequences that reset the scroll region).
 - The `draw_status_bar` function handles standalone redraws (saves/restores cursor, flushes). The `write_status_bar_content` helper writes only the bar content to a provided writer, used by both `draw_status_bar` and the output processing loop to avoid duplicating rendering logic.

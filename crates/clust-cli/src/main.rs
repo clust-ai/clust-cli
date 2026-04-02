@@ -18,7 +18,7 @@ use clap::Parser;
 use std::io::{self, Write};
 
 use clust_ipc::{CliMessage, HubMessage};
-use format::{format_attached, format_started};
+use format::{format_attached, format_repo_display, format_started};
 
 const SPINNER: &[char] = &['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
 
@@ -452,7 +452,14 @@ async fn handle_start(
             }
             // Attach to the new agent
             let (reader, writer) = stream.into_split();
-            let session = terminal::AttachedSession::new(id, agent_binary, reader, writer);
+            let session = terminal::AttachedSession::new(
+                id,
+                agent_binary,
+                ag_repo_path.clone(),
+                ag_branch_name.clone(),
+                reader,
+                writer,
+            );
             let session_end = session.run().await;
             match &session_end {
                 Ok(terminal::SessionEnd::AgentExited(_)) if ag_is_worktree => {
@@ -549,7 +556,14 @@ async fn handle_attach(id: String) {
             branch_name: ag_branch_name,
         } => {
             let (reader, writer) = stream.into_split();
-            let session = terminal::AttachedSession::new(id, agent_binary, reader, writer);
+            let session = terminal::AttachedSession::new(
+                id,
+                agent_binary,
+                ag_repo_path.clone(),
+                ag_branch_name.clone(),
+                reader,
+                writer,
+            );
             let session_end = session.run().await;
             match &session_end {
                 Ok(terminal::SessionEnd::AgentExited(_)) if ag_is_worktree => {
@@ -684,10 +698,12 @@ async fn handle_ls(select: bool, hub: Option<String>) {
 
 fn print_agent_header() {
     println!(
-        "  {}{:<8} {:<12} {:<10} {:<14} ATTACHED{}",
+        "  {}{:<8} {:<12} {:<16} {:<20} {:<10} {:<14} ATTACHED{}",
         theme::TEXT_TERTIARY,
         "ID",
         "AGENT",
+        "REPO",
+        "BRANCH",
         "STATUS",
         "STARTED",
         theme::RESET,
@@ -697,13 +713,29 @@ fn print_agent_header() {
 fn print_agent_row(agent: &clust_ipc::AgentInfo) {
     let started = format_started(&agent.started_at);
     let attached = format_attached(agent.attached_clients);
+    let repo = agent
+        .repo_path
+        .as_deref()
+        .map(format_repo_display)
+        .unwrap_or_else(|| "—".to_string());
+    let branch = agent
+        .branch_name
+        .as_deref()
+        .unwrap_or("—")
+        .to_string();
     println!(
-        "  {}{:<8}{} {}{:<12}{} {}{:<10}{} {}{:<14}{} {}{}{}",
+        "  {}{:<8}{} {}{:<12}{} {}{:<16}{} {}{:<20}{} {}{:<10}{} {}{:<14}{} {}{}{}",
         theme::ACCENT,
         agent.id,
         theme::RESET,
         theme::TEXT_PRIMARY,
         agent.agent_binary,
+        theme::RESET,
+        theme::TEXT_SECONDARY,
+        repo,
+        theme::RESET,
+        theme::TEXT_SECONDARY,
+        branch,
         theme::RESET,
         theme::SUCCESS,
         "running",
@@ -880,18 +912,34 @@ fn render_selector(
             let agent = &agents[i - 1];
             let started = format_started(&agent.started_at);
             let attached = format_attached(agent.attached_clients);
+            let repo = agent
+                .repo_path
+                .as_deref()
+                .map(format_repo_display)
+                .unwrap_or_else(|| "—".to_string());
+            let branch = agent
+                .branch_name
+                .as_deref()
+                .unwrap_or("—")
+                .to_string();
             let (text_color, status_color) = if is_selected {
                 (theme::TEXT_PRIMARY, theme::SUCCESS)
             } else {
                 (theme::TEXT_TERTIARY, theme::TEXT_TERTIARY)
             };
             format!(
-                "{}{:<8}{} {}{:<12}{} {}{:<10}{} {}{:<14}{} {}{}{}",
+                "{}{:<8}{} {}{:<12}{} {}{:<16}{} {}{:<20}{} {}{:<10}{} {}{:<14}{} {}{}{}",
                 theme::ACCENT,
                 agent.id,
                 theme::RESET,
                 text_color,
                 agent.agent_binary,
+                theme::RESET,
+                text_color,
+                repo,
+                theme::RESET,
+                text_color,
+                branch,
                 theme::RESET,
                 status_color,
                 "running",
@@ -1552,8 +1600,9 @@ async fn handle_wt_info(repo_name: Option<String>, name: String) {
             );
 
             for agent in &info.active_agents {
+                let attached = format_attached(agent.attached_clients);
                 println!(
-                    "               {}{}{}  {}{}{}  {}{}{}",
+                    "               {}{}{}  {}{}{}  {}{}{}  {}{}{}",
                     theme::ACCENT,
                     agent.id,
                     theme::RESET,
@@ -1562,6 +1611,9 @@ async fn handle_wt_info(repo_name: Option<String>, name: String) {
                     theme::RESET,
                     theme::TEXT_SECONDARY,
                     format_started(&agent.started_at),
+                    theme::RESET,
+                    theme::TEXT_SECONDARY,
+                    attached,
                     theme::RESET,
                 );
             }

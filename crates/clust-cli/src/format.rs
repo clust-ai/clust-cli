@@ -1,4 +1,5 @@
 use chrono::{DateTime, Local, Utc};
+use std::path::Path;
 
 /// Format an attachment count into a human-readable string.
 pub fn format_attached(count: usize) -> String {
@@ -21,6 +22,15 @@ pub fn format_started(rfc3339: &str) -> String {
     } else {
         local.format("%b %d %H:%M").to_string()
     }
+}
+
+/// Extract the basename of a repo path for display.
+pub fn format_repo_display(repo_path: &str) -> String {
+    Path::new(repo_path)
+        .file_name()
+        .unwrap_or_default()
+        .to_string_lossy()
+        .to_string()
 }
 
 #[cfg(test)]
