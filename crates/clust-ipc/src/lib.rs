@@ -72,6 +72,17 @@ pub enum CliMessage {
         accept_edits: bool,
         hub: String,
     },
+    DeleteLocalBranch {
+        working_dir: Option<String>,
+        repo_name: Option<String>,
+        branch_name: String,
+        force: bool,
+    },
+    DeleteRemoteBranch {
+        working_dir: Option<String>,
+        repo_name: Option<String>,
+        branch_name: String,
+    },
 }
 
 /// Info about a running agent, returned in AgentList.
@@ -157,6 +168,13 @@ pub enum HubMessage {
         working_dir: String,
         repo_path: Option<String>,
         branch_name: Option<String>,
+    },
+    LocalBranchDeleted {
+        branch_name: String,
+        stopped_agents: usize,
+    },
+    RemoteBranchDeleted {
+        branch_name: String,
     },
 }
 
@@ -835,6 +853,38 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn cli_delete_local_branch() {
+        assert_cli_round_trip(CliMessage::DeleteLocalBranch {
+            working_dir: Some("/home/user/project".into()),
+            repo_name: None,
+            branch_name: "feature/auth".into(),
+            force: false,
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn cli_delete_local_branch_force() {
+        assert_cli_round_trip(CliMessage::DeleteLocalBranch {
+            working_dir: None,
+            repo_name: Some("my-project".into()),
+            branch_name: "dirty-branch".into(),
+            force: true,
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn cli_delete_remote_branch() {
+        assert_cli_round_trip(CliMessage::DeleteRemoteBranch {
+            working_dir: Some("/home/user/project".into()),
+            repo_name: None,
+            branch_name: "origin/feature/auth".into(),
+        })
+        .await;
+    }
+
+    #[tokio::test]
     async fn cli_get_worktree_info() {
         assert_cli_round_trip(CliMessage::GetWorktreeInfo {
             working_dir: Some("/home/user/project".into()),
@@ -911,6 +961,23 @@ mod tests {
         assert_hub_round_trip(HubMessage::WorktreeRemoved {
             branch_name: "clean-branch".into(),
             stopped_agents: 0,
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn hub_local_branch_deleted() {
+        assert_hub_round_trip(HubMessage::LocalBranchDeleted {
+            branch_name: "feature/auth".into(),
+            stopped_agents: 2,
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn hub_remote_branch_deleted() {
+        assert_hub_round_trip(HubMessage::RemoteBranchDeleted {
+            branch_name: "origin/feature/auth".into(),
         })
         .await;
     }
