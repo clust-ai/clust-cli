@@ -50,6 +50,8 @@ enum ScrollCommand {
 pub struct AttachedSession {
     agent_id: String,
     agent_binary: String,
+    repo_path: Option<String>,
+    branch_name: Option<String>,
     reader: OwnedReadHalf,
     writer: OwnedWriteHalf,
 }
@@ -58,12 +60,16 @@ impl AttachedSession {
     pub fn new(
         agent_id: String,
         agent_binary: String,
+        repo_path: Option<String>,
+        branch_name: Option<String>,
         reader: OwnedReadHalf,
         writer: OwnedWriteHalf,
     ) -> Self {
         Self {
             agent_id,
             agent_binary,
+            repo_path,
+            branch_name,
             reader,
             writer,
         }
@@ -120,7 +126,13 @@ impl AttachedSession {
 
         // Set scroll region to exclude bottom row (status bar)
         set_scroll_region(rows - 1);
-        draw_status_bar(&self.agent_id, &self.agent_binary, rows);
+        draw_status_bar(
+            &self.agent_id,
+            &self.agent_binary,
+            self.repo_path.as_deref(),
+            self.branch_name.as_deref(),
+            rows,
+        );
 
         // Send initial resize so the agent knows the available size
         let mut writer = self.writer;
@@ -136,6 +148,8 @@ impl AttachedSession {
 
         let agent_id = self.agent_id;
         let agent_binary = self.agent_binary;
+        let repo_path = self.repo_path;
+        let branch_name = self.branch_name;
         let mut reader = self.reader;
 
         // Shared state for scrollback — a shadow TerminalEmulator processes all
@@ -161,6 +175,8 @@ impl AttachedSession {
         let scrollback_out = Arc::clone(&scrollback);
         let agent_id_for_bar = agent_id.clone();
         let agent_binary_for_bar = agent_binary.clone();
+        let repo_path_for_bar = repo_path.clone();
+        let branch_name_for_bar = branch_name.clone();
         let output_task = tokio::spawn(async move {
             let mut filter_chain = FilterChain::new();
             filter_chain.push(Box::new(EscapeSequenceAssembler::new()));
@@ -213,6 +229,8 @@ impl AttachedSession {
                                             &mut stdout,
                                             &agent_id_for_bar,
                                             &agent_binary_for_bar,
+                                            repo_path_for_bar.as_deref(),
+                                            branch_name_for_bar.as_deref(),
                                             total_rows,
                                         );
                                         let _ = write!(stdout, "\x1b8");
@@ -255,6 +273,8 @@ impl AttachedSession {
                                 draw_status_bar(
                                     &agent_id_for_bar,
                                     &agent_binary_for_bar,
+                                    repo_path_for_bar.as_deref(),
+                                    branch_name_for_bar.as_deref(),
                                     total_rows,
                                 );
                             }
@@ -288,6 +308,8 @@ impl AttachedSession {
         let scrollback_in = Arc::clone(&scrollback);
         let agent_id_for_input = agent_id.clone();
         let agent_binary_for_input = agent_binary.clone();
+        let repo_path_for_input = repo_path.clone();
+        let branch_name_for_input = branch_name.clone();
         let input_task = tokio::spawn(async move {
             let mut stdin = tokio::io::stdin();
             let mut sigwinch = match tokio::signal::unix::signal(
@@ -540,6 +562,8 @@ impl AttachedSession {
                         draw_status_bar(
                             &agent_id_for_input,
                             &agent_binary_for_input,
+                            repo_path_for_input.as_deref(),
+                            branch_name_for_input.as_deref(),
                             rows,
                         );
                         let _ = clust_ipc::send_message_write(
@@ -631,7 +655,14 @@ fn set_scroll_region(bottom_row: u16) {
 }
 
 /// Write status bar content at the given row. Does not save/restore cursor.
-fn write_status_bar_content(w: &mut impl Write, agent_id: &str, agent_binary: &str, total_rows: u16) {
+fn write_status_bar_content(
+    w: &mut impl Write,
+    agent_id: &str,
+    agent_binary: &str,
+    repo_path: Option<&str>,
+    branch_name: Option<&str>,
+    total_rows: u16,
+) {
     let _ = write!(w, "\x1b[{total_rows};1H");
     let _ = write!(w, "{}", theme::BG_RAISED);
     let _ = write!(w, "\x1b[2K");
@@ -639,12 +670,35 @@ fn write_status_bar_content(w: &mut impl Write, agent_id: &str, agent_binary: &s
         w,
         " {ACCENT}clust{RESET_FG}  {TEXT_PRIMARY}{agent_id}{RESET_FG} \
          {TEXT_TERTIARY}│{RESET_FG} \
-         {TEXT_SECONDARY}{agent_binary}{RESET_FG} \
-         {TEXT_TERTIARY}│{RESET_FG} \
-         {TEXT_TERTIARY}Ctrl+Q detach{RESET_FG}",
+         {TEXT_SECONDARY}{agent_binary}{RESET_FG}",
         ACCENT = theme::ACCENT,
         TEXT_PRIMARY = theme::TEXT_PRIMARY,
         TEXT_SECONDARY = theme::TEXT_SECONDARY,
+        TEXT_TERTIARY = theme::TEXT_TERTIARY,
+        RESET_FG = theme::RESET_FG,
+    );
+    if let Some(rp) = repo_path {
+        let repo_display = crate::format::format_repo_display(rp);
+        let _ = write!(
+            w,
+            " {TEXT_TERTIARY}│{RESET_FG} {TEXT_SECONDARY}{repo_display}",
+            TEXT_TERTIARY = theme::TEXT_TERTIARY,
+            TEXT_SECONDARY = theme::TEXT_SECONDARY,
+            RESET_FG = theme::RESET_FG,
+        );
+        if let Some(branch) = branch_name {
+            let _ = write!(
+                w,
+                "{TEXT_TERTIARY}/{TEXT_SECONDARY}{branch}",
+                TEXT_TERTIARY = theme::TEXT_TERTIARY,
+                TEXT_SECONDARY = theme::TEXT_SECONDARY,
+            );
+        }
+        let _ = write!(w, "{RESET_FG}", RESET_FG = theme::RESET_FG);
+    }
+    let _ = write!(
+        w,
+        " {TEXT_TERTIARY}│{RESET_FG} {TEXT_TERTIARY}Ctrl+Q detach{RESET_FG}",
         TEXT_TERTIARY = theme::TEXT_TERTIARY,
         RESET_FG = theme::RESET_FG,
     );
@@ -652,10 +706,16 @@ fn write_status_bar_content(w: &mut impl Write, agent_id: &str, agent_binary: &s
 }
 
 /// Draw the status bar on the bottom row of the terminal.
-fn draw_status_bar(agent_id: &str, agent_binary: &str, total_rows: u16) {
+fn draw_status_bar(
+    agent_id: &str,
+    agent_binary: &str,
+    repo_path: Option<&str>,
+    branch_name: Option<&str>,
+    total_rows: u16,
+) {
     let mut stdout = io::stdout().lock();
     let _ = write!(stdout, "\x1b7");
-    write_status_bar_content(&mut stdout, agent_id, agent_binary, total_rows);
+    write_status_bar_content(&mut stdout, agent_id, agent_binary, repo_path, branch_name, total_rows);
     let _ = write!(stdout, "\x1b8");
     let _ = stdout.flush();
 }

@@ -45,7 +45,7 @@
 - Ensure `clust-hub` is running (auto-start if not)
 - Send commands to hub over IPC
 - Render agent output to the terminal (raw byte forwarding with output filter chain)
-- Draw the bottom status bar (agent ID, shortcuts)
+- Draw the bottom status bar (agent ID, agent binary, repo/branch context, shortcuts)
 - Handle attach/detach lifecycle
 - TUI dashboard (`clust ui`) with repo tree, agent cards, and multi-agent overview via `ratatui`
 - Default agent picker with known agent detection
