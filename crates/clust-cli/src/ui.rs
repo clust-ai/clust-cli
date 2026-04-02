@@ -1114,7 +1114,7 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                                         .await
                                                         {
                                                             let _ = tx
-                                                                .send(AgentStartResult {
+                                                                .send(AgentStartResult::Started {
                                                                     agent_id: id,
                                                                     agent_binary,
                                                                     working_dir,
@@ -1260,7 +1260,7 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                                             .await
                                                             {
                                                                 let _ = tx
-                                                                    .send(AgentStartResult {
+                                                                    .send(AgentStartResult::Started {
                                                                         agent_id: id,
                                                                         agent_binary,
                                                                         working_dir,
@@ -2112,7 +2112,7 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                                         .await
                                                         {
                                                             let _ = tx
-                                                                .send(AgentStartResult {
+                                                                .send(AgentStartResult::Started {
                                                                     agent_id: id,
                                                                     agent_binary,
                                                                     working_dir,
@@ -2258,7 +2258,7 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                                             .await
                                                             {
                                                                 let _ = tx
-                                                                    .send(AgentStartResult {
+                                                                    .send(AgentStartResult::Started {
                                                                         agent_id: id,
                                                                         agent_binary,
                                                                         working_dir,
