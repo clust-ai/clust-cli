@@ -278,7 +278,7 @@ The left panel has a tab bar at the top with three tabs: `Changes`, `Panel 2`, `
 
 - Displays the output of `git diff HEAD` for the agent's working directory
 - Unified inline format with dual-column line numbers (old and new)
-- Line-by-line color coding: additions use a green-tinted background (`R_DIFF_ADD_BG`), deletions use a red-tinted background (`R_DIFF_DEL_BG`), file headers use reverse-video styling (`R_ACCENT` background, `R_BG_BASE` foreground, bold) for visual prominence, hunk headers use the accent color, context lines use the base background
+- Line-by-line color coding: additions use a green-tinted background (`R_DIFF_ADD_BG`), deletions use a red-tinted background (`R_DIFF_DEL_BG`), file headers use reverse-video styling (repo color background, `R_BG_BASE` foreground, bold) for visual prominence, hunk headers use the repo color as foreground, context lines use the base background. The repo's assigned color is used for file and hunk headers, falling back to `R_ACCENT` when no repo color is available.
 - Blank separator lines are inserted between different files for visual spacing
 - File headers display clean file paths (e.g., `src/main.rs`) instead of raw `diff --git a/... b/...` lines
 - A gutter column (9 chars wide) shows old/new line numbers separated by a `│` divider; file headers and hunk headers suppress line numbers
