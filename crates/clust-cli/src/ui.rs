@@ -175,6 +175,15 @@ pub(crate) struct ClickMap {
 // Active menu overlay
 // ---------------------------------------------------------------------------
 
+/// Possible actions in a branch context menu.
+#[derive(Clone, Copy)]
+enum BranchAction {
+    StartAgent,
+    StopAgents,
+    OpenAgent,
+    RemoveWorktree,
+}
+
 /// Tracks which context menu is currently open.
 enum ActiveMenu {
     /// Pick an agent to open in focus mode (from a branch with multiple agents).
@@ -190,6 +199,14 @@ enum ActiveMenu {
     /// Color picker sub-menu for a repo.
     ColorPicker {
         repo_path: String,
+        menu: ContextMenu,
+    },
+    /// Branch-level context menu (local branches only).
+    BranchActions {
+        repo_path: String,
+        branch_name: String,
+        agents: Vec<AgentInfo>,
+        actions: Vec<BranchAction>,
         menu: ContextMenu,
     },
 }
@@ -881,6 +898,7 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                     ActiveMenu::AgentPicker { ref menu, .. } => menu,
                     ActiveMenu::RepoActions { ref menu, .. } => menu,
                     ActiveMenu::ColorPicker { ref menu, .. } => menu,
+                    ActiveMenu::BranchActions { ref menu, .. } => menu,
                 };
                 let (modal_rect, inner_rect) = menu.render(frame, content_area);
                 click_map.menu_modal_rect = modal_rect;
@@ -907,6 +925,7 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                             ActiveMenu::AgentPicker { ref mut menu, .. } => menu.handle_key(key.code),
                             ActiveMenu::RepoActions { ref mut menu, .. } => menu.handle_key(key.code),
                             ActiveMenu::ColorPicker { ref mut menu, .. } => menu.handle_key(key.code),
+                            ActiveMenu::BranchActions { ref mut menu, .. } => menu.handle_key(key.code),
                         };
                         match result {
                             MenuResult::Selected(idx) => {
@@ -936,24 +955,51 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                         }
                                     }
                                     ActiveMenu::RepoActions { repo_path, .. } => {
-                                        if idx == 0 {
-                                            // "Change Color" selected → open color picker
-                                            let items: Vec<ContextMenuItem> =
-                                                theme::REPO_COLOR_NAMES
-                                                    .iter()
-                                                    .map(|&name| ContextMenuItem {
-                                                        label: name[0..1].to_uppercase()
-                                                            + &name[1..],
-                                                        color: Some(theme::repo_color(name)),
-                                                    })
-                                                    .collect();
-                                            active_menu = Some(ActiveMenu::ColorPicker {
-                                                repo_path,
-                                                menu: ContextMenu::with_colors(
-                                                    "Choose Color",
-                                                    items,
-                                                ),
-                                            });
+                                        match idx {
+                                            0 => {
+                                                // "Change Color" → open color picker
+                                                let items: Vec<ContextMenuItem> =
+                                                    theme::REPO_COLOR_NAMES
+                                                        .iter()
+                                                        .map(|&name| ContextMenuItem {
+                                                            label: name[0..1].to_uppercase()
+                                                                + &name[1..],
+                                                            color: Some(theme::repo_color(name)),
+                                                        })
+                                                        .collect();
+                                                active_menu = Some(ActiveMenu::ColorPicker {
+                                                    repo_path,
+                                                    menu: ContextMenu::with_colors(
+                                                        "Choose Color",
+                                                        items,
+                                                    ),
+                                                });
+                                            }
+                                            1 => {
+                                                // "Open in File System"
+                                                open_in_file_system(&repo_path);
+                                            }
+                                            2 => {
+                                                // "Open in Terminal"
+                                                open_in_terminal(&repo_path);
+                                            }
+                                            3 => {
+                                                // "Stop All Agents"
+                                                stop_repo_agents_ipc(&repo_path);
+                                                last_repo_fetch =
+                                                    Instant::now() - Duration::from_secs(10);
+                                                last_agent_fetch =
+                                                    Instant::now() - Duration::from_secs(10);
+                                            }
+                                            4 => {
+                                                // "Unregister"
+                                                unregister_repo_ipc(&repo_path);
+                                                last_repo_fetch =
+                                                    Instant::now() - Duration::from_secs(10);
+                                                last_agent_fetch =
+                                                    Instant::now() - Duration::from_secs(10);
+                                            }
+                                            _ => {}
                                         }
                                     }
                                     ActiveMenu::ColorPicker { repo_path, .. } => {
@@ -964,6 +1010,144 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                             // Force repo refresh
                                             last_repo_fetch =
                                                 Instant::now() - Duration::from_secs(10);
+                                        }
+                                    }
+                                    ActiveMenu::BranchActions {
+                                        repo_path,
+                                        branch_name,
+                                        agents: branch_agents,
+                                        actions,
+                                        ..
+                                    } => {
+                                        if let Some(&action) = actions.get(idx) {
+                                            match action {
+                                                BranchAction::StartAgent => {
+                                                    let tx = agent_start_tx.clone();
+                                                    let hub = hub_name.to_string();
+                                                    let rp = repo_path.clone();
+                                                    let bn = branch_name.clone();
+                                                    let (cols, rows) =
+                                                        crossterm::terminal::size()
+                                                            .unwrap_or((80, 24));
+                                                    tokio::spawn(async move {
+                                                        let mut stream =
+                                                            match ipc::try_connect().await {
+                                                                Ok(s) => s,
+                                                                Err(_) => return,
+                                                            };
+                                                        let msg =
+                                                            CliMessage::CreateWorktreeAgent {
+                                                                repo_path: rp,
+                                                                target_branch: Some(bn),
+                                                                new_branch: None,
+                                                                prompt: None,
+                                                                agent_binary: None,
+                                                                cols,
+                                                                rows: rows
+                                                                    .saturating_sub(2)
+                                                                    .max(1),
+                                                                accept_edits: false,
+                                                                hub,
+                                                            };
+                                                        if clust_ipc::send_message(
+                                                            &mut stream,
+                                                            &msg,
+                                                        )
+                                                        .await
+                                                        .is_err()
+                                                        {
+                                                            return;
+                                                        }
+                                                        if let Ok(
+                                                            HubMessage::WorktreeAgentStarted {
+                                                                id,
+                                                                agent_binary,
+                                                                working_dir,
+                                                                repo_path,
+                                                                branch_name,
+                                                            },
+                                                        ) = clust_ipc::recv_message::<
+                                                            HubMessage,
+                                                        >(
+                                                            &mut stream
+                                                        )
+                                                        .await
+                                                        {
+                                                            let _ = tx
+                                                                .send(AgentStartResult {
+                                                                    agent_id: id,
+                                                                    agent_binary,
+                                                                    working_dir,
+                                                                    repo_path,
+                                                                    branch_name,
+                                                                })
+                                                                .await;
+                                                        }
+                                                    });
+                                                }
+                                                BranchAction::StopAgents => {
+                                                    let ids: Vec<String> = branch_agents
+                                                        .iter()
+                                                        .map(|a| a.id.clone())
+                                                        .collect();
+                                                    stop_agents_ipc(&ids);
+                                                    last_repo_fetch =
+                                                        Instant::now() - Duration::from_secs(10);
+                                                    last_agent_fetch =
+                                                        Instant::now() - Duration::from_secs(10);
+                                                }
+                                                BranchAction::OpenAgent => {
+                                                    if branch_agents.len() == 1 {
+                                                        let agent = &branch_agents[0];
+                                                        let fm_cols =
+                                                            (last_content_area.width * 40 / 100)
+                                                                .saturating_sub(2)
+                                                                .max(1);
+                                                        let fm_rows = last_content_area
+                                                            .height
+                                                            .saturating_sub(3)
+                                                            .max(1);
+                                                        focus_mode_state.open_agent(
+                                                            &agent.id,
+                                                            &agent.agent_binary,
+                                                            fm_cols,
+                                                            fm_rows,
+                                                            &agent.working_dir,
+                                                            agent.repo_path.as_deref(),
+                                                            agent.branch_name.as_deref(),
+                                                        );
+                                                        in_focus_mode = true;
+                                                    } else if branch_agents.len() > 1 {
+                                                        let labels: Vec<String> = branch_agents
+                                                            .iter()
+                                                            .map(|a| {
+                                                                format!(
+                                                                    "{} ({})",
+                                                                    a.agent_binary, a.id
+                                                                )
+                                                            })
+                                                            .collect();
+                                                        active_menu =
+                                                            Some(ActiveMenu::AgentPicker {
+                                                                menu: ContextMenu::new(
+                                                                    "Open Agent",
+                                                                    labels,
+                                                                ),
+                                                                agents: branch_agents,
+                                                            });
+                                                    }
+                                                }
+                                                BranchAction::RemoveWorktree => {
+                                                    remove_worktree_ipc(
+                                                        &repo_path,
+                                                        &branch_name,
+                                                    );
+                                                    last_repo_fetch =
+                                                        Instant::now() - Duration::from_secs(10);
+                                                    last_agent_fetch =
+                                                        Instant::now() - Duration::from_secs(10);
+                                                }
+                                            }
                                         }
                                     }
                                 }
@@ -1350,7 +1534,13 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                                                 repo_path: repo.path.clone(),
                                                                 menu: ContextMenu::new(
                                                                     &repo.name,
-                                                                    vec!["Change Color".to_string()],
+                                                                    vec![
+                                                                        "Change Color".to_string(),
+                                                                        "Open in File System".to_string(),
+                                                                        "Open in Terminal".to_string(),
+                                                                        "Stop All Agents".to_string(),
+                                                                        "Unregister".to_string(),
+                                                                    ],
                                                                 ),
                                                             });
                                                         }
@@ -1360,14 +1550,11 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                                     // No action on Enter for categories (use Space)
                                                 }
                                                 TreeLevel::Branch => {
-                                                    // Open agent(s) in focus mode from this branch
+                                                    // Open context menu for local branches only
                                                     if let Some(repo) = display_repos.get(selection.repo_idx) {
-                                                        let branches = if selection.category_idx == 0 {
-                                                            &repo.local_branches
-                                                        } else {
-                                                            &repo.remote_branches
-                                                        };
-                                                        if let Some(branch) = branches.get(selection.branch_idx) {
+                                                        if repo.path.is_empty() || selection.category_idx != 0 {
+                                                            // Skip "No Repository" and remote branches
+                                                        } else if let Some(branch) = repo.local_branches.get(selection.branch_idx) {
                                                             let matching: Vec<AgentInfo> = agents
                                                                 .iter()
                                                                 .filter(|a| {
@@ -1376,35 +1563,27 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                                                 })
                                                                 .cloned()
                                                                 .collect();
-                                                            if matching.len() == 1 {
-                                                                let agent = &matching[0];
-                                                                let fm_cols = (last_content_area.width * 40 / 100)
-                                                                    .saturating_sub(2)
-                                                                    .max(1);
-                                                                let fm_rows = last_content_area
-                                                                    .height
-                                                                    .saturating_sub(3)
-                                                                    .max(1);
-                                                                focus_mode_state.open_agent(
-                                                                    &agent.id,
-                                                                    &agent.agent_binary,
-                                                                    fm_cols,
-                                                                    fm_rows,
-                                                                    &agent.working_dir,
-                                                                    agent.repo_path.as_deref(),
-                                                                    agent.branch_name.as_deref(),
-                                                                );
-                                                                in_focus_mode = true;
-                                                            } else if matching.len() > 1 {
-                                                                let labels: Vec<String> = matching
-                                                                    .iter()
-                                                                    .map(|a| format!("{} ({})", a.agent_binary, a.id))
-                                                                    .collect();
-                                                                active_menu = Some(ActiveMenu::AgentPicker {
-                                                                    menu: ContextMenu::new("Open Agent", labels),
-                                                                    agents: matching,
-                                                                });
+                                                            let mut labels = Vec::new();
+                                                            let mut actions = Vec::new();
+                                                            labels.push("Start Agent".to_string());
+                                                            actions.push(BranchAction::StartAgent);
+                                                            if branch.active_agent_count > 0 {
+                                                                labels.push("Stop Agents".to_string());
+                                                                actions.push(BranchAction::StopAgents);
+                                                                labels.push("Open Agent".to_string());
+                                                                actions.push(BranchAction::OpenAgent);
                                                             }
+                                                            if branch.is_worktree {
+                                                                labels.push("Remove Worktree".to_string());
+                                                                actions.push(BranchAction::RemoveWorktree);
+                                                            }
+                                                            active_menu = Some(ActiveMenu::BranchActions {
+                                                                repo_path: repo.path.clone(),
+                                                                branch_name: branch.name.clone(),
+                                                                agents: matching,
+                                                                actions,
+                                                                menu: ContextMenu::new(&branch.name, labels),
+                                                            });
                                                         }
                                                     }
                                                 }
@@ -1576,6 +1755,7 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                 ActiveMenu::AgentPicker { menu, .. } => menu.items.len(),
                                 ActiveMenu::RepoActions { menu, .. } => menu.items.len(),
                                 ActiveMenu::ColorPicker { menu, .. } => menu.items.len(),
+                                ActiveMenu::BranchActions { menu, .. } => menu.items.len(),
                             };
                             if idx < item_count {
                                 // Highlight the clicked item then select it
@@ -1583,6 +1763,7 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                     ActiveMenu::AgentPicker { menu, .. } => menu.selected_idx = idx,
                                     ActiveMenu::RepoActions { menu, .. } => menu.selected_idx = idx,
                                     ActiveMenu::ColorPicker { menu, .. } => menu.selected_idx = idx,
+                                    ActiveMenu::BranchActions { menu, .. } => menu.selected_idx = idx,
                                 }
                                 let taken = active_menu.take().unwrap();
                                 match taken {
@@ -1609,23 +1790,46 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                         }
                                     }
                                     ActiveMenu::RepoActions { repo_path, .. } => {
-                                        if idx == 0 {
-                                            let items: Vec<ContextMenuItem> =
-                                                theme::REPO_COLOR_NAMES
-                                                    .iter()
-                                                    .map(|&name| ContextMenuItem {
-                                                        label: name[0..1].to_uppercase()
-                                                            + &name[1..],
-                                                        color: Some(theme::repo_color(name)),
-                                                    })
-                                                    .collect();
-                                            active_menu = Some(ActiveMenu::ColorPicker {
-                                                repo_path,
-                                                menu: ContextMenu::with_colors(
-                                                    "Choose Color",
-                                                    items,
-                                                ),
-                                            });
+                                        match idx {
+                                            0 => {
+                                                let items: Vec<ContextMenuItem> =
+                                                    theme::REPO_COLOR_NAMES
+                                                        .iter()
+                                                        .map(|&name| ContextMenuItem {
+                                                            label: name[0..1].to_uppercase()
+                                                                + &name[1..],
+                                                            color: Some(theme::repo_color(name)),
+                                                        })
+                                                        .collect();
+                                                active_menu = Some(ActiveMenu::ColorPicker {
+                                                    repo_path,
+                                                    menu: ContextMenu::with_colors(
+                                                        "Choose Color",
+                                                        items,
+                                                    ),
+                                                });
+                                            }
+                                            1 => {
+                                                open_in_file_system(&repo_path);
+                                            }
+                                            2 => {
+                                                open_in_terminal(&repo_path);
+                                            }
+                                            3 => {
+                                                stop_repo_agents_ipc(&repo_path);
+                                                last_repo_fetch =
+                                                    Instant::now() - Duration::from_secs(10);
+                                                last_agent_fetch =
+                                                    Instant::now() - Duration::from_secs(10);
+                                            }
+                                            4 => {
+                                                unregister_repo_ipc(&repo_path);
+                                                last_repo_fetch =
+                                                    Instant::now() - Duration::from_secs(10);
+                                                last_agent_fetch =
+                                                    Instant::now() - Duration::from_secs(10);
+                                            }
+                                            _ => {}
                                         }
                                     }
                                     ActiveMenu::ColorPicker { repo_path, .. } => {
@@ -1635,6 +1839,144 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                             set_repo_color_ipc(&repo_path, color_name);
                                             last_repo_fetch =
                                                 Instant::now() - Duration::from_secs(10);
+                                        }
+                                    }
+                                    ActiveMenu::BranchActions {
+                                        repo_path,
+                                        branch_name,
+                                        agents: branch_agents,
+                                        actions,
+                                        ..
+                                    } => {
+                                        if let Some(&action) = actions.get(idx) {
+                                            match action {
+                                                BranchAction::StartAgent => {
+                                                    let tx = agent_start_tx.clone();
+                                                    let hub = hub_name.to_string();
+                                                    let rp = repo_path.clone();
+                                                    let bn = branch_name.clone();
+                                                    let (cols, rows) =
+                                                        crossterm::terminal::size()
+                                                            .unwrap_or((80, 24));
+                                                    tokio::spawn(async move {
+                                                        let mut stream =
+                                                            match ipc::try_connect().await {
+                                                                Ok(s) => s,
+                                                                Err(_) => return,
+                                                            };
+                                                        let msg =
+                                                            CliMessage::CreateWorktreeAgent {
+                                                                repo_path: rp,
+                                                                target_branch: Some(bn),
+                                                                new_branch: None,
+                                                                prompt: None,
+                                                                agent_binary: None,
+                                                                cols,
+                                                                rows: rows
+                                                                    .saturating_sub(2)
+                                                                    .max(1),
+                                                                accept_edits: false,
+                                                                hub,
+                                                            };
+                                                        if clust_ipc::send_message(
+                                                            &mut stream,
+                                                            &msg,
+                                                        )
+                                                        .await
+                                                        .is_err()
+                                                        {
+                                                            return;
+                                                        }
+                                                        if let Ok(
+                                                            HubMessage::WorktreeAgentStarted {
+                                                                id,
+                                                                agent_binary,
+                                                                working_dir,
+                                                                repo_path,
+                                                                branch_name,
+                                                            },
+                                                        ) = clust_ipc::recv_message::<
+                                                            HubMessage,
+                                                        >(
+                                                            &mut stream
+                                                        )
+                                                        .await
+                                                        {
+                                                            let _ = tx
+                                                                .send(AgentStartResult {
+                                                                    agent_id: id,
+                                                                    agent_binary,
+                                                                    working_dir,
+                                                                    repo_path,
+                                                                    branch_name,
+                                                                })
+                                                                .await;
+                                                        }
+                                                    });
+                                                }
+                                                BranchAction::StopAgents => {
+                                                    let ids: Vec<String> = branch_agents
+                                                        .iter()
+                                                        .map(|a| a.id.clone())
+                                                        .collect();
+                                                    stop_agents_ipc(&ids);
+                                                    last_repo_fetch =
+                                                        Instant::now() - Duration::from_secs(10);
+                                                    last_agent_fetch =
+                                                        Instant::now() - Duration::from_secs(10);
+                                                }
+                                                BranchAction::OpenAgent => {
+                                                    if branch_agents.len() == 1 {
+                                                        let agent = &branch_agents[0];
+                                                        let fm_cols =
+                                                            (last_content_area.width * 40 / 100)
+                                                                .saturating_sub(2)
+                                                                .max(1);
+                                                        let fm_rows = last_content_area
+                                                            .height
+                                                            .saturating_sub(3)
+                                                            .max(1);
+                                                        focus_mode_state.open_agent(
+                                                            &agent.id,
+                                                            &agent.agent_binary,
+                                                            fm_cols,
+                                                            fm_rows,
+                                                            &agent.working_dir,
+                                                            agent.repo_path.as_deref(),
+                                                            agent.branch_name.as_deref(),
+                                                        );
+                                                        in_focus_mode = true;
+                                                    } else if branch_agents.len() > 1 {
+                                                        let labels: Vec<String> = branch_agents
+                                                            .iter()
+                                                            .map(|a| {
+                                                                format!(
+                                                                    "{} ({})",
+                                                                    a.agent_binary, a.id
+                                                                )
+                                                            })
+                                                            .collect();
+                                                        active_menu =
+                                                            Some(ActiveMenu::AgentPicker {
+                                                                menu: ContextMenu::new(
+                                                                    "Open Agent",
+                                                                    labels,
+                                                                ),
+                                                                agents: branch_agents,
+                                                            });
+                                                    }
+                                                }
+                                                BranchAction::RemoveWorktree => {
+                                                    remove_worktree_ipc(
+                                                        &repo_path,
+                                                        &branch_name,
+                                                    );
+                                                    last_repo_fetch =
+                                                        Instant::now() - Duration::from_secs(10);
+                                                    last_agent_fetch =
+                                                        Instant::now() - Duration::from_secs(10);
+                                                }
+                                            }
                                         }
                                     }
                                 }
@@ -1738,7 +2080,8 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                         match menu_variant {
                             ActiveMenu::AgentPicker { menu, .. }
                             | ActiveMenu::RepoActions { menu, .. }
-                            | ActiveMenu::ColorPicker { menu, .. } => {
+                            | ActiveMenu::ColorPicker { menu, .. }
+                            | ActiveMenu::BranchActions { menu, .. } => {
                                 menu.selected_idx = menu.selected_idx.saturating_sub(1);
                             }
                         }
@@ -1767,7 +2110,8 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                         match menu_variant {
                             ActiveMenu::AgentPicker { menu, .. }
                             | ActiveMenu::RepoActions { menu, .. }
-                            | ActiveMenu::ColorPicker { menu, .. } => {
+                            | ActiveMenu::ColorPicker { menu, .. }
+                            | ActiveMenu::BranchActions { menu, .. } => {
                                 if !menu.items.is_empty() {
                                     menu.selected_idx = (menu.selected_idx + 1).min(menu.items.len() - 1);
                                 }
@@ -3195,6 +3539,116 @@ fn set_repo_color_ipc(path: &str, color: &str) {
         .await;
         let _ = clust_ipc::recv_message::<HubMessage>(&mut stream).await;
     });
+}
+
+fn stop_repo_agents_ipc(path: &str) {
+    let path = path.to_string();
+    block_on_async(async {
+        let Ok(mut stream) = ipc::try_connect().await else {
+            return;
+        };
+        let _ = clust_ipc::send_message(
+            &mut stream,
+            &CliMessage::StopRepoAgents { path },
+        )
+        .await;
+        let _ = clust_ipc::recv_message::<HubMessage>(&mut stream).await;
+    });
+}
+
+fn unregister_repo_ipc(path: &str) {
+    let path = path.to_string();
+    block_on_async(async {
+        let Ok(mut stream) = ipc::try_connect().await else {
+            return;
+        };
+        let _ = clust_ipc::send_message(
+            &mut stream,
+            &CliMessage::UnregisterRepo { path },
+        )
+        .await;
+        let _ = clust_ipc::recv_message::<HubMessage>(&mut stream).await;
+    });
+}
+
+fn stop_agents_ipc(agent_ids: &[String]) {
+    for id in agent_ids {
+        let id = id.clone();
+        block_on_async(async {
+            let Ok(mut stream) = ipc::try_connect().await else {
+                return;
+            };
+            let _ = clust_ipc::send_message(
+                &mut stream,
+                &CliMessage::StopAgent { id },
+            )
+            .await;
+            let _ = clust_ipc::recv_message::<HubMessage>(&mut stream).await;
+        });
+    }
+}
+
+fn remove_worktree_ipc(repo_path: &str, branch_name: &str) {
+    let working_dir = repo_path.to_string();
+    let branch_name = branch_name.to_string();
+    block_on_async(async {
+        let Ok(mut stream) = ipc::try_connect().await else {
+            return;
+        };
+        let _ = clust_ipc::send_message(
+            &mut stream,
+            &CliMessage::RemoveWorktree {
+                working_dir: Some(working_dir),
+                repo_name: None,
+                branch_name,
+                delete_local_branch: false,
+                force: false,
+            },
+        )
+        .await;
+        let _ = clust_ipc::recv_message::<HubMessage>(&mut stream).await;
+    });
+}
+
+fn open_in_file_system(path: &str) {
+    let path = path.to_string();
+    #[cfg(target_os = "macos")]
+    {
+        let _ = std::process::Command::new("open").arg(&path).spawn();
+    }
+    #[cfg(target_os = "linux")]
+    {
+        let _ = std::process::Command::new("xdg-open").arg(&path).spawn();
+    }
+}
+
+fn open_in_terminal(path: &str) {
+    let path = path.to_string();
+    #[cfg(target_os = "macos")]
+    {
+        let _ = std::process::Command::new("open")
+            .args(["-a", "Terminal", &path])
+            .spawn();
+    }
+    #[cfg(target_os = "linux")]
+    {
+        let terminals: &[(&str, &[&str])] = &[
+            ("x-terminal-emulator", &["--working-directory"]),
+            ("gnome-terminal", &["--working-directory"]),
+            ("konsole", &["--workdir"]),
+            ("xfce4-terminal", &["--working-directory"]),
+        ];
+        for &(bin, args) in terminals {
+            let mut cmd = std::process::Command::new(bin);
+            for arg in args {
+                cmd.arg(arg);
+            }
+            cmd.arg(&path);
+            if cmd.spawn().is_ok() {
+                return;
+            }
+        }
+    }
 }
 
 /// Run an async future from the synchronous UI loop.
