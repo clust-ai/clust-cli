@@ -1089,8 +1089,9 @@ async fn handle_connection(
             let git_root = crate::repo::detect_git_root(&path);
             match git_root {
                 Some(root) => {
-                    // Stop all repo agents
                     let root_str = root.to_string_lossy().into_owned();
+
+                    // Phase 1: Stop all repo agents
                     let agent_ids = {
                         let hub_state = state.lock().await;
                         hub_state
@@ -1104,35 +1105,72 @@ async fn handle_connection(
                     };
                     let stopped_agents = agent_ids.len();
 
-                    for id in &agent_ids {
-                        let state = state.clone();
-                        let id = id.clone();
-                        tokio::spawn(async move {
-                            let _ = agent::stop_agent(&state, &id).await;
-                        });
+                    if stopped_agents > 0 {
+                        let label = if stopped_agents == 1 { "agent" } else { "agents" };
+                        clust_ipc::send_message_write(
+                            &mut writer,
+                            &HubMessage::PurgeProgress {
+                                step: format!("Stopping {stopped_agents} {label}"),
+                            },
+                        )
+                        .await?;
+
+                        let mut handles = Vec::new();
+                        for id in &agent_ids {
+                            let state = state.clone();
+                            let id = id.clone();
+                            handles.push(tokio::spawn(async move {
+                                let _ = agent::stop_agent(&state, &id).await;
+                            }));
+                        }
+                        for handle in handles {
+                            let _ = handle.await;
+                        }
                     }
 
-                    match crate::repo::purge_repo(&root) {
-                        Ok(result) => {
-                            clust_ipc::send_message_write(
-                                &mut writer,
-                                &HubMessage::RepoPurged {
-                                    path: root_str,
-                                    stopped_agents,
-                                    removed_worktrees: result.removed_worktrees,
-                                    deleted_branches: result.deleted_branches,
-                                },
-                            )
-                            .await?;
-                        }
-                        Err(e) => {
-                            clust_ipc::send_message_write(
-                                &mut writer,
-                                &HubMessage::Error { message: e },
-                            )
-                            .await?;
-                        }
-                    }
+                    // Phase 2: Remove worktrees
+                    clust_ipc::send_message_write(
+                        &mut writer,
+                        &HubMessage::PurgeProgress {
+                            step: "Removing worktrees".to_string(),
+                        },
+                    )
+                    .await?;
+                    let removed_worktrees =
+                        crate::repo::purge_worktrees(&root).unwrap_or(0);
+
+                    // Phase 3: Delete local branches
+                    clust_ipc::send_message_write(
+                        &mut writer,
+                        &HubMessage::PurgeProgress {
+                            step: "Deleting local branches".to_string(),
+                        },
+                    )
+                    .await?;
+                    let deleted_branches =
+                        crate::repo::purge_branches(&root).unwrap_or(0);
+
+                    // Phase 4: Clean stale refs
+                    clust_ipc::send_message_write(
+                        &mut writer,
+                        &HubMessage::PurgeProgress {
+                            step: "Cleaning stale refs".to_string(),
+                        },
+                    )
+                    .await?;
+                    let _ = crate::repo::clean_stale_refs(&root);
+
+                    // Done
+                    clust_ipc::send_message_write(
+                        &mut writer,
+                        &HubMessage::RepoPurged {
+                            path: root_str,
+                            stopped_agents,
+                            removed_worktrees,
+                            deleted_branches,
+                        },
+                    )
+                    .await?;
                 }
                 None => {
                     clust_ipc::send_message_write(

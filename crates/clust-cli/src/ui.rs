@@ -62,6 +62,28 @@ struct StatusMessage {
     created: Instant,
 }
 
+// ---------------------------------------------------------------------------
+// Purge progress modal
+// ---------------------------------------------------------------------------
+
+enum PurgeEvent {
+    Step(String),
+    Done,
+    Error(String),
+}
+
+struct PurgeProgress {
+    repo_name: String,
+    steps: Vec<String>,
+    done: bool,
+    error: Option<String>,
+    rx: tokio::sync::mpsc::UnboundedReceiver<PurgeEvent>,
+    started: Instant,
+}
+
+const SPINNER_CHARS: &[char] = &['\u{2839}', '\u{2838}', '\u{283c}', '\u{2834}',
+                                  '\u{2826}', '\u{2827}', '\u{2807}', '\u{280f}'];
+
 const LOGO_LINES: &[&str] = &[
     "██████╗ ██╗     ██╗   ██╗███████╗████████╗",
     "██╔═══╝ ██║     ██║   ██║██╔════╝╚══██╔══╝",
@@ -835,6 +857,8 @@ pub fn run(hub_name: &str) -> io::Result<()> {
 
     // Create-agent modal state
     let mut create_modal: Option<CreateAgentModal> = None;
+    // Purge progress modal state
+    let mut purge_progress: Option<PurgeProgress> = None;
     let (agent_start_tx, mut agent_start_rx) =
         tokio::sync::mpsc::channel::<AgentStartResult>(4);
     let (status_tx, mut status_rx) =
@@ -897,6 +921,20 @@ pub fn run(hub_name: &str) -> io::Result<()> {
         if let Some(ref msg) = status_message {
             if msg.created.elapsed() >= Duration::from_secs(5) {
                 status_message = None;
+            }
+        }
+
+        // Drain purge progress events
+        if let Some(ref mut pp) = purge_progress {
+            while let Ok(event) = pp.rx.try_recv() {
+                match event {
+                    PurgeEvent::Step(step) => pp.steps.push(step),
+                    PurgeEvent::Done => pp.done = true,
+                    PurgeEvent::Error(msg) => {
+                        pp.error = Some(msg);
+                        pp.done = true;
+                    }
+                }
             }
         }
 
@@ -966,6 +1004,7 @@ pub fn run(hub_name: &str) -> io::Result<()> {
 
         let mut click_map = ClickMap::default();
         let show_modal = create_modal.is_some();
+        let purge_ref = &purge_progress;
 
         terminal.draw(|frame| {
             let area = frame.area();
@@ -1090,13 +1129,26 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                     modal.render(frame, content_area);
                 }
             }
+
+            if let Some(ref pp) = *purge_ref {
+                render_purge_progress(frame, content_area, pp);
+            }
         })?;
 
         if event::poll(Duration::from_millis(100))? {
             match event::read()? {
                 Event::Key(key) if key.kind == KeyEventKind::Press => {
+                    // Purge progress modal: block all input, Esc dismisses when done
+                    if purge_progress.is_some() {
+                        if key.code == KeyCode::Esc
+                            && purge_progress.as_ref().is_some_and(|pp| pp.done)
+                        {
+                            purge_progress = None;
+                            last_repo_fetch = Instant::now() - Duration::from_secs(10);
+                            last_agent_fetch = Instant::now() - Duration::from_secs(10);
+                        }
                     // Context menu overlay: intercept all keys when active
-                    if let Some(ref mut menu_state) = active_menu {
+                    } else if let Some(ref mut menu_state) = active_menu {
                         let result = match menu_state {
                             ActiveMenu::AgentPicker { ref mut menu, .. } => menu.handle_key(key.code),
                             ActiveMenu::RepoActions { ref mut menu, .. } => menu.handle_key(key.code),
@@ -1691,11 +1743,7 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                         if idx == 0 {
                                             match action {
                                                 ConfirmedAction::PurgeRepo { repo_path } => {
-                                                    purge_repo_ipc(&repo_path);
-                                                    last_repo_fetch = Instant::now()
-                                                        - Duration::from_secs(10);
-                                                    last_agent_fetch = Instant::now()
-                                                        - Duration::from_secs(10);
+                                                    purge_progress = Some(start_purge_async(&repo_path));
                                                 }
                                             }
                                         }
@@ -2402,8 +2450,10 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                 Event::Mouse(MouseEvent { kind: MouseEventKind::Down(MouseButton::Left), column, row, modifiers }) => {
                     let pos = Position { x: column, y: row };
 
-                    // Cmd+click (SUPER) on terminal content → open URL
-                    if modifiers.contains(KeyModifiers::SUPER) {
+                    // Ignore clicks while purge progress is shown
+                    if purge_progress.is_some() {
+                        // swallow
+                    } else if modifiers.contains(KeyModifiers::SUPER) {
                         if let Some(url) = find_url_at_click(
                             pos,
                             &click_map,
@@ -3010,11 +3060,7 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                         if idx == 0 {
                                             match action {
                                                 ConfirmedAction::PurgeRepo { repo_path } => {
-                                                    purge_repo_ipc(&repo_path);
-                                                    last_repo_fetch = Instant::now()
-                                                        - Duration::from_secs(10);
-                                                    last_agent_fetch = Instant::now()
-                                                        - Duration::from_secs(10);
+                                                    purge_progress = Some(start_purge_async(&repo_path));
                                                 }
                                             }
                                         }
@@ -4773,19 +4819,165 @@ fn add_worktree_ipc(repo_path: &str, branch_name: &str, base_branch: &str) {
     });
 }
 
-fn purge_repo_ipc(path: &str) {
-    let path = path.to_string();
-    block_on_async(async {
+fn start_purge_async(repo_path: &str) -> PurgeProgress {
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+    let path = repo_path.to_string();
+    let repo_name = std::path::Path::new(repo_path)
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| repo_path.to_string());
+    tokio::spawn(async move {
         let Ok(mut stream) = ipc::try_connect().await else {
+            let _ = tx.send(PurgeEvent::Error("Failed to connect to hub".into()));
             return;
         };
-        let _ = clust_ipc::send_message(
-            &mut stream,
-            &CliMessage::PurgeRepo { path },
-        )
-        .await;
-        let _ = clust_ipc::recv_message::<HubMessage>(&mut stream).await;
+        if clust_ipc::send_message(&mut stream, &CliMessage::PurgeRepo { path })
+            .await
+            .is_err()
+        {
+            let _ = tx.send(PurgeEvent::Error("Failed to send purge request".into()));
+            return;
+        }
+        loop {
+            match clust_ipc::recv_message::<HubMessage>(&mut stream).await {
+                Ok(HubMessage::PurgeProgress { step }) => {
+                    let _ = tx.send(PurgeEvent::Step(step));
+                }
+                Ok(HubMessage::RepoPurged { .. }) => {
+                    let _ = tx.send(PurgeEvent::Done);
+                    return;
+                }
+                Ok(HubMessage::Error { message }) => {
+                    let _ = tx.send(PurgeEvent::Error(message));
+                    return;
+                }
+                Err(e) => {
+                    let _ = tx.send(PurgeEvent::Error(format!("Connection error: {e}")));
+                    return;
+                }
+                _ => {}
+            }
+        }
     });
+    PurgeProgress {
+        repo_name,
+        steps: Vec::new(),
+        done: false,
+        error: None,
+        rx,
+        started: Instant::now(),
+    }
+}
+
+fn render_purge_progress(frame: &mut Frame, area: Rect, progress: &PurgeProgress) {
+    let spinner_idx =
+        (progress.started.elapsed().as_millis() / 120) as usize % SPINNER_CHARS.len();
+    let spinner = SPINNER_CHARS[spinner_idx];
+
+    let mut lines: Vec<Line> = Vec::new();
+
+    for (i, step) in progress.steps.iter().enumerate() {
+        let is_last = i == progress.steps.len() - 1;
+        let (prefix, prefix_color) = if is_last && !progress.done {
+            (format!(" {spinner} "), theme::R_ACCENT)
+        } else {
+            (" \u{2713} ".to_string(), theme::R_SUCCESS)
+        };
+
+        lines.push(Line::from(vec![
+            Span::styled(
+                prefix,
+                Style::default().fg(prefix_color).bg(theme::R_BG_OVERLAY),
+            ),
+            Span::styled(
+                step.clone(),
+                Style::default()
+                    .fg(theme::R_TEXT_SECONDARY)
+                    .bg(theme::R_BG_OVERLAY),
+            ),
+        ]));
+    }
+
+    if progress.steps.is_empty() && !progress.done {
+        lines.push(Line::from(vec![
+            Span::styled(
+                format!(" {spinner} "),
+                Style::default().fg(theme::R_ACCENT).bg(theme::R_BG_OVERLAY),
+            ),
+            Span::styled(
+                "Starting purge\u{2026}",
+                Style::default()
+                    .fg(theme::R_TEXT_SECONDARY)
+                    .bg(theme::R_BG_OVERLAY),
+            ),
+        ]));
+    }
+
+    if let Some(ref error) = progress.error {
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled(
+            format!(" Error: {error}"),
+            Style::default().fg(theme::R_ERROR).bg(theme::R_BG_OVERLAY),
+        )));
+    }
+
+    if progress.done {
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled(
+            " Press Esc to close",
+            Style::default()
+                .fg(theme::R_TEXT_TERTIARY)
+                .bg(theme::R_BG_OVERLAY),
+        )));
+    }
+
+    let title = format!("Purging {}", progress.repo_name);
+    let content_max_width = lines
+        .iter()
+        .map(|l| {
+            l.spans
+                .iter()
+                .map(|s| s.content.chars().count())
+                .sum::<usize>()
+        })
+        .max()
+        .unwrap_or(0)
+        .max(title.chars().count() + 4);
+    let modal_width = (content_max_width + 4) as u16;
+    let modal_height = (lines.len() + 3) as u16;
+
+    let [horz_area] = Layout::horizontal([Constraint::Length(modal_width)])
+        .flex(Flex::Center)
+        .areas(area);
+
+    let modal_rect = Rect {
+        x: horz_area.x,
+        y: area.y + area.height.saturating_sub(modal_height) / 2,
+        width: modal_width.min(area.width),
+        height: modal_height.min(area.height),
+    };
+
+    frame.render_widget(Clear, modal_rect);
+
+    let block = Block::default()
+        .title(Line::from(vec![
+            Span::styled(" ", Style::default()),
+            Span::styled(
+                title,
+                Style::default()
+                    .fg(theme::R_TEXT_PRIMARY)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(" ", Style::default()),
+        ]))
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(theme::R_TEXT_TERTIARY))
+        .padding(Padding::new(1, 1, 0, 0))
+        .style(Style::default().bg(theme::R_BG_OVERLAY));
+
+    let inner = block.inner(modal_rect);
+    frame.render_widget(block, modal_rect);
+    frame.render_widget(Paragraph::new(lines), inner);
 }
 
 fn clean_stale_refs_ipc(path: &str) {
