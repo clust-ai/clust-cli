@@ -206,7 +206,7 @@ On startup, `clust ui` automatically connects to the hub daemon, starting it if 
 
 | Shortcut | Action |
 |----------|--------|
-| `↑` / `↓` | Move selection within current level |
+| `↑` / `↓` | Move selection in visual order (flat navigation across repos, categories, and branches) |
 | `→` | Descend into selected item (navigate tree) |
 | `←` | Ascend to parent level (navigate tree) |
 | `Enter` | Left panel: on repo opens repo context menu; on local branch opens local branch context menu; on remote branch opens remote branch context menu. Right panel: enter focus mode for selected agent. |
