@@ -1185,14 +1185,15 @@ pub fn render_focus_mode(frame: &mut Frame, area: Rect, state: &mut FocusModeSta
     click_map.focus_left_area = left_area;
     click_map.focus_right_area = right_area;
 
-    // Left side: tab bar + content
-    render_left_panel(frame, left_area, state, click_map);
-
-    // Right side: agent panel or empty state
-    let right_focused = state.focus_side == FocusSide::Right;
     let panel_color = state.repo_path.as_ref()
         .and_then(|rp| repo_colors.get(rp.as_str()))
         .map(|cn| theme::repo_color(cn));
+
+    // Left side: tab bar + content
+    render_left_panel(frame, left_area, state, click_map, panel_color);
+
+    // Right side: agent panel or empty state
+    let right_focused = state.focus_side == FocusSide::Right;
     match &mut state.panel {
         Some(panel) => {
             if let Some(content_area) = render_agent_panel(frame, right_area, panel, right_focused, true, panel_color) {
@@ -1203,7 +1204,7 @@ pub fn render_focus_mode(frame: &mut Frame, area: Rect, state: &mut FocusModeSta
     }
 }
 
-fn render_left_panel(frame: &mut Frame, area: Rect, state: &FocusModeState, click_map: &mut ClickMap) {
+fn render_left_panel(frame: &mut Frame, area: Rect, state: &FocusModeState, click_map: &mut ClickMap, repo_color: Option<Color>) {
     if area.height < 2 {
         frame.render_widget(
             Block::default().style(Style::default().bg(theme::R_BG_BASE)),
@@ -1224,7 +1225,7 @@ fn render_left_panel(frame: &mut Frame, area: Rect, state: &FocusModeState, clic
 
     // Render active tab content
     match state.left_tab {
-        LeftPanelTab::Changes => render_diff_viewer(frame, content_area, state),
+        LeftPanelTab::Changes => render_diff_viewer(frame, content_area, state, repo_color),
         _ => {
             // Empty placeholder for Panel 2 / Panel 3
             frame.render_widget(
@@ -1303,7 +1304,7 @@ fn render_left_tab_bar(
     frame.render_widget(Paragraph::new(Line::from(spans)), area);
 }
 
-fn render_diff_viewer(frame: &mut Frame, area: Rect, state: &FocusModeState) {
+fn render_diff_viewer(frame: &mut Frame, area: Rect, state: &FocusModeState, repo_color: Option<Color>) {
     let bg_style = Style::default().bg(theme::R_BG_BASE);
 
     // Error state
@@ -1369,10 +1370,11 @@ fn render_diff_viewer(frame: &mut Frame, area: Rect, state: &FocusModeState) {
             continue;
         }
 
+        let accent = repo_color.unwrap_or(theme::R_ACCENT);
         let (line_bg, content_fg) = match diff_line.kind {
-            gitdiff::DiffLineKind::FileHeader => (theme::R_ACCENT, theme::R_BG_BASE),
+            gitdiff::DiffLineKind::FileHeader => (accent, theme::R_BG_BASE),
             gitdiff::DiffLineKind::FileMetadata => (theme::R_BG_SURFACE, theme::R_TEXT_TERTIARY),
-            gitdiff::DiffLineKind::HunkHeader => (theme::R_BG_SURFACE, theme::R_ACCENT),
+            gitdiff::DiffLineKind::HunkHeader => (theme::R_BG_SURFACE, accent),
             gitdiff::DiffLineKind::Add => (theme::R_DIFF_ADD_BG, theme::R_TEXT_PRIMARY),
             gitdiff::DiffLineKind::Delete => (theme::R_DIFF_DEL_BG, theme::R_TEXT_PRIMARY),
             gitdiff::DiffLineKind::Context => (theme::R_BG_BASE, theme::R_TEXT_SECONDARY),
