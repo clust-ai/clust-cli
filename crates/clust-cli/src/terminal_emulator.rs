@@ -109,6 +109,33 @@ impl TerminalEmulator {
         lines
     }
 
+    /// Find a URL at the given terminal row and column.
+    /// Returns the full URL string if one is found at that position.
+    pub fn url_at_position(&self, row: u16, col: u16) -> Option<String> {
+        let screen = self.parser.screen();
+        let (text, col_to_byte) = row_text_from_screen(screen, row, self.cols as u16);
+        let byte_offset = col_to_byte.get(col as usize).copied()?;
+        find_url_at_offset(&text, byte_offset)
+    }
+
+    /// Find a URL at the given terminal row and column, accounting for
+    /// scrollback offset (same pattern as `to_ratatui_lines_scrolled`).
+    pub fn url_at_position_scrolled(
+        &mut self,
+        row: u16,
+        col: u16,
+        scroll_offset: usize,
+    ) -> Option<String> {
+        if scroll_offset == 0 {
+            return self.url_at_position(row, col);
+        }
+        let prev = self.parser.screen().scrollback();
+        self.parser.set_scrollback(scroll_offset);
+        let result = self.url_at_position(row, col);
+        self.parser.set_scrollback(prev);
+        result
+    }
+
     /// Render lines from scrollback + screen as ANSI strings.
     /// Used by the non-TUI attached terminal for scrollback display.
     pub fn to_ansi_lines_scrolled(&mut self, offset: usize) -> Vec<String> {
@@ -213,6 +240,94 @@ fn vt100_color_to_ratatui(color: vt100::Color) -> Option<Color> {
         vt100::Color::Default => None,
         vt100::Color::Idx(n) => Some(Color::Indexed(n)),
         vt100::Color::Rgb(r, g, b) => Some(Color::Rgb(r, g, b)),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// URL detection helpers
+// ---------------------------------------------------------------------------
+
+/// Extract the plain text for a screen row with a column-to-byte-offset mapping.
+///
+/// Returns `(text, col_to_byte)` where `col_to_byte[screen_col]` gives the byte
+/// offset into `text` for that column. Wide-continuation columns map to the same
+/// offset as the wide character's first column.
+fn row_text_from_screen(screen: &vt100::Screen, row: u16, cols: u16) -> (String, Vec<usize>) {
+    let mut text = String::new();
+    let mut col_to_byte: Vec<usize> = Vec::with_capacity(cols as usize);
+
+    for col in 0..cols {
+        let byte_offset = text.len();
+        let Some(cell) = screen.cell(row, col) else {
+            col_to_byte.push(byte_offset);
+            text.push(' ');
+            continue;
+        };
+        if cell.is_wide_continuation() {
+            // Map to the same byte as the wide char's first column.
+            let prev = if col_to_byte.is_empty() { 0 } else { col_to_byte[col_to_byte.len() - 1] };
+            col_to_byte.push(prev);
+            continue;
+        }
+        col_to_byte.push(byte_offset);
+        let contents = cell.contents();
+        if contents.is_empty() {
+            text.push(' ');
+        } else {
+            text.push_str(&contents);
+        }
+    }
+    (text, col_to_byte)
+}
+
+/// Find a URL at the given byte offset within a line of text.
+fn find_url_at_offset(text: &str, byte_offset: usize) -> Option<String> {
+    for scheme in ["https://", "http://"] {
+        let mut search_start = 0;
+        while let Some(rel_pos) = text[search_start..].find(scheme) {
+            let url_start = search_start + rel_pos;
+            let url_end = find_url_end(text, url_start);
+            if byte_offset >= url_start && byte_offset < url_end {
+                return Some(text[url_start..url_end].to_string());
+            }
+            search_start = url_end;
+        }
+    }
+    None
+}
+
+/// Find the end byte offset of a URL starting at `start`.
+fn find_url_end(text: &str, start: usize) -> usize {
+    let rest = &text[start..];
+    let mut end = rest.len();
+    for (i, ch) in rest.char_indices() {
+        if ch.is_whitespace() || ch == '\0' {
+            end = i;
+            break;
+        }
+    }
+    let url = &rest[..end];
+    // Strip trailing punctuation that is usually not part of the URL.
+    let trimmed = url.trim_end_matches(['.', ',', ';', ':', '!', '?', '"', '\'', '>', ']']);
+    // Only strip trailing ')' when there is no matching '(' inside the URL
+    // (preserves Wikipedia-style URLs).
+    let trimmed = if !trimmed.contains('(') {
+        trimmed.trim_end_matches(')')
+    } else {
+        trimmed
+    };
+    start + trimmed.len()
+}
+
+/// Open a URL in the system's default browser (fire-and-forget).
+pub fn open_url(url: &str) {
+    #[cfg(target_os = "macos")]
+    {
+        let _ = std::process::Command::new("open").arg(url).spawn();
+    }
+    #[cfg(target_os = "linux")]
+    {
+        let _ = std::process::Command::new("xdg-open").arg(url).spawn();
     }
 }
 
@@ -387,5 +502,75 @@ mod tests {
         te.resize(5, 3); // same dimensions — no-op
         let lines = screen_text(&te);
         assert_eq!(&lines[0], "Hello");
+    }
+
+    // URL detection tests
+
+    #[test]
+    fn test_find_url_at_offset_basic() {
+        let text = "visit https://example.com for info";
+        assert_eq!(
+            find_url_at_offset(text, 6),
+            Some("https://example.com".to_string())
+        );
+        assert_eq!(
+            find_url_at_offset(text, 24),
+            Some("https://example.com".to_string())
+        );
+        // Before URL
+        assert_eq!(find_url_at_offset(text, 0), None);
+        // After URL
+        assert_eq!(find_url_at_offset(text, 26), None);
+    }
+
+    #[test]
+    fn test_find_url_at_offset_trailing_punctuation() {
+        let text = "see https://example.com/path.";
+        assert_eq!(
+            find_url_at_offset(text, 4),
+            Some("https://example.com/path".to_string())
+        );
+    }
+
+    #[test]
+    fn test_find_url_at_offset_parens() {
+        // Wikipedia-style URL with parens
+        let text = "https://en.wikipedia.org/wiki/Rust_(language) done";
+        assert_eq!(
+            find_url_at_offset(text, 0),
+            Some("https://en.wikipedia.org/wiki/Rust_(language)".to_string())
+        );
+        // Trailing paren without opener should be stripped
+        let text2 = "(https://example.com)";
+        assert_eq!(
+            find_url_at_offset(text2, 1),
+            Some("https://example.com".to_string())
+        );
+    }
+
+    #[test]
+    fn test_find_url_at_offset_http() {
+        let text = "http://localhost:3000/api";
+        assert_eq!(
+            find_url_at_offset(text, 0),
+            Some("http://localhost:3000/api".to_string())
+        );
+    }
+
+    #[test]
+    fn test_find_url_at_offset_no_url() {
+        assert_eq!(find_url_at_offset("no urls here", 5), None);
+    }
+
+    #[test]
+    fn test_url_at_position_in_terminal() {
+        let mut te = TerminalEmulator::new(60, 3);
+        te.process(b"Check https://example.com/path for details");
+        assert_eq!(
+            te.url_at_position(0, 6),
+            Some("https://example.com/path".to_string())
+        );
+        assert_eq!(te.url_at_position(0, 0), None);
+        assert_eq!(te.url_at_position(1, 0), None);
     }
 }
