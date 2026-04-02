@@ -5,7 +5,7 @@ use ratatui::{
     layout::{Constraint, Layout, Rect},
     style::{Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Clear, Padding, Paragraph},
+    widgets::{Block, Borders, Clear, Padding, Paragraph, Wrap},
     Frame,
 };
 
@@ -323,11 +323,12 @@ impl CreateAgentModal {
         let inner = block.inner(modal_area);
         frame.render_widget(block, modal_area);
 
+        let is_prompt_step = self.step == ModalStep::EnterPrompt;
         let [hint_area, input_area, _gap, list_area] = Layout::vertical([
             Constraint::Length(1),
-            Constraint::Length(1),
-            Constraint::Length(1),
-            Constraint::Min(0),
+            if is_prompt_step { Constraint::Min(3) } else { Constraint::Length(1) },
+            if is_prompt_step { Constraint::Length(0) } else { Constraint::Length(1) },
+            if is_prompt_step { Constraint::Length(0) } else { Constraint::Min(0) },
         ])
         .areas(inner);
 
@@ -380,8 +381,24 @@ impl CreateAgentModal {
             ),
             Span::styled(after_cursor, Style::default().fg(theme::R_TEXT_PRIMARY)),
         ]);
+        let width = area.width as usize;
+        let scroll = if width > 0 {
+            let cursor_line = (2 + self.cursor_pos) / width;
+            let visible = area.height as usize;
+            if cursor_line >= visible {
+                (cursor_line - visible + 1) as u16
+            } else {
+                0
+            }
+        } else {
+            0
+        };
+
         frame.render_widget(
-            Paragraph::new(line).style(Style::default().bg(theme::R_BG_INPUT)),
+            Paragraph::new(line)
+                .style(Style::default().bg(theme::R_BG_INPUT))
+                .wrap(Wrap { trim: false })
+                .scroll((scroll, 0)),
             area,
         );
     }
