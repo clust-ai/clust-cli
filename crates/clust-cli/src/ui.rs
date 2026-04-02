@@ -4,8 +4,8 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use crossterm::{
-    event::{self, Event, KeyCode, KeyEventKind, KeyModifiers, MouseButton, MouseEvent, MouseEventKind, EnableMouseCapture, DisableMouseCapture, EnableFocusChange, DisableFocusChange},
-    terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
+    event::{self, Event, KeyCode, KeyEventKind, KeyModifiers, KeyboardEnhancementFlags, MouseButton, MouseEvent, MouseEventKind, EnableMouseCapture, DisableMouseCapture, EnableFocusChange, DisableFocusChange, PushKeyboardEnhancementFlags, PopKeyboardEnhancementFlags},
+    terminal::{disable_raw_mode, enable_raw_mode, supports_keyboard_enhancement, EnterAlternateScreen, LeaveAlternateScreen},
     ExecutableCommand,
 };
 use ratatui::{
@@ -24,6 +24,7 @@ use crate::{
     format::{format_attached, format_started},
     ipc,
     overview::{self, OverviewFocus, OverviewState},
+    terminal_emulator,
     theme, version,
 };
 
@@ -146,6 +147,10 @@ pub(crate) struct ClickMap {
     pub(crate) focus_right_area: Rect,
     pub(crate) focus_left_tabs: Vec<(Rect, overview::LeftPanelTab)>,
     focus_back_button: Rect,
+
+    // Terminal content areas (inner area excluding borders/header) for URL click
+    pub(crate) overview_content_areas: Vec<(Rect, usize)>, // (content_area, panel_idx)
+    pub(crate) focus_right_content_area: Rect,
 
     // Context menu overlay
     menu_modal_rect: Rect,
@@ -569,8 +574,21 @@ pub fn run(hub_name: &str) -> io::Result<()> {
     io::stdout().execute(EnableMouseCapture)?;
     io::stdout().execute(EnableFocusChange)?;
 
+    // Enable Kitty keyboard protocol so crossterm reports SUPER (Cmd) modifier
+    // on mouse events. Gracefully degrades: terminals that don't support it
+    // will simply not report the modifier.
+    let kbd_enhanced = supports_keyboard_enhancement().unwrap_or(false);
+    if kbd_enhanced {
+        let _ = io::stdout().execute(PushKeyboardEnhancementFlags(
+            KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES,
+        ));
+    }
+
     let hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
+        if kbd_enhanced {
+            let _ = io::stdout().execute(PopKeyboardEnhancementFlags);
+        }
         let _ = io::stdout().execute(DisableFocusChange);
         let _ = io::stdout().execute(DisableMouseCapture);
         let _ = disable_raw_mode();
@@ -1479,10 +1497,22 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                         }
                     }
                 }
-                Event::Mouse(MouseEvent { kind: MouseEventKind::Down(MouseButton::Left), column, row, .. }) => {
+                Event::Mouse(MouseEvent { kind: MouseEventKind::Down(MouseButton::Left), column, row, modifiers }) => {
                     let pos = Position { x: column, y: row };
 
-                    if active_menu.is_some() {
+                    // Cmd+click (SUPER) on terminal content → open URL
+                    if modifiers.contains(KeyModifiers::SUPER) {
+                        if let Some(url) = find_url_at_click(
+                            pos,
+                            &click_map,
+                            &mut overview_state,
+                            &mut focus_mode_state,
+                            in_focus_mode,
+                            active_tab,
+                        ) {
+                            terminal_emulator::open_url(&url);
+                        }
+                    } else if active_menu.is_some() {
                         if click_map.menu_inner_rect.contains(pos) {
                             let idx = (row - click_map.menu_inner_rect.y) as usize;
                             let item_count = match active_menu.as_ref().unwrap() {
@@ -1713,6 +1743,9 @@ pub fn run(hub_name: &str) -> io::Result<()> {
     overview_state.shutdown();
     focus_mode_state.shutdown();
 
+    if kbd_enhanced {
+        let _ = io::stdout().execute(PopKeyboardEnhancementFlags);
+    }
     io::stdout().execute(DisableFocusChange)?;
     io::stdout().execute(DisableMouseCapture)?;
     disable_raw_mode()?;
@@ -1733,6 +1766,43 @@ pub fn run(hub_name: &str) -> io::Result<()> {
     }
 
     Ok(())
+}
+
+/// Check whether a click position falls on a URL inside a terminal panel.
+fn find_url_at_click(
+    pos: Position,
+    click_map: &ClickMap,
+    overview_state: &mut OverviewState,
+    focus_mode_state: &mut overview::FocusModeState,
+    in_focus_mode: bool,
+    active_tab: ActiveTab,
+) -> Option<String> {
+    if in_focus_mode {
+        if click_map.focus_right_content_area.contains(pos) {
+            let panel = focus_mode_state.panel.as_mut()?;
+            let term_row = pos.y.checked_sub(click_map.focus_right_content_area.y)?;
+            let term_col = pos.x.checked_sub(click_map.focus_right_content_area.x)?;
+            return panel.vterm.url_at_position_scrolled(
+                term_row,
+                term_col,
+                panel.panel_scroll_offset,
+            );
+        }
+    } else if active_tab == ActiveTab::Overview {
+        for &(area, idx) in &click_map.overview_content_areas {
+            if area.contains(pos) {
+                let panel = overview_state.panels.get_mut(idx)?;
+                let term_row = pos.y.checked_sub(area.y)?;
+                let term_col = pos.x.checked_sub(area.x)?;
+                return panel.vterm.url_at_position_scrolled(
+                    term_row,
+                    term_col,
+                    panel.panel_scroll_offset,
+                );
+            }
+        }
+    }
+    None
 }
 
 // ---------------------------------------------------------------------------

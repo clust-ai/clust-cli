@@ -157,7 +157,7 @@ A multi-agent terminal overview that displays all active agents side-by-side wit
 
 - Each agent panel runs a **background tokio task** that maintains its own IPC streaming connection to the hub (attach, receive output, forward input).
 - Output events are sent to the UI thread via an `mpsc` channel and drained each frame.
-- `TerminalEmulator` wraps a `vt100::Parser` (`vt100 = 0.15`) for full ANSI escape sequence handling, including alternate screen buffer support (private mode sequences like `?1049h`/`?1049l`), cursor visibility, scroll regions, and all standard SGR attributes. The `vt100` crate maintains scrollback internally (default 2,000 lines, configurable via `with_scrollback_capacity()`). The `TerminalEmulator` provides conversion to ratatui `Line`/`Span` types for TUI rendering (`to_ratatui_lines()`, `to_ratatui_lines_scrolled()`) and to ANSI-escaped strings for direct stdout output (`to_ansi_lines_scrolled()`). It is also used as a shadow terminal in the attached session for scrollback (with 5,000-line capacity).
+- `TerminalEmulator` wraps a `vt100::Parser` (`vt100 = 0.15`) for full ANSI escape sequence handling, including alternate screen buffer support (private mode sequences like `?1049h`/`?1049l`), cursor visibility, scroll regions, and all standard SGR attributes. The `vt100` crate maintains scrollback internally (default 2,000 lines, configurable via `with_scrollback_capacity()`). The `TerminalEmulator` provides conversion to ratatui `Line`/`Span` types for TUI rendering (`to_ratatui_lines()`, `to_ratatui_lines_scrolled()`), to ANSI-escaped strings for direct stdout output (`to_ansi_lines_scrolled()`), and URL detection at screen coordinates (`url_at_position()`, `url_at_position_scrolled()`). It is also used as a shadow terminal in the attached session for scrollback (with 5,000-line capacity).
 - `key_event_to_bytes()` converts `crossterm::KeyEvent` to raw terminal byte sequences for agent input forwarding.
 - Lazy initialization: overview connections are only established on first switch to the Overview tab.
 - On connect, each panel's background task consumes the hub's replay buffer before entering the main output loop, so panels show recent history immediately.
@@ -367,7 +367,7 @@ The `Opt+E` / `Alt+E` hint is shown in the status bar (platform-aware).
 
 ### Mouse Support
 
-Mouse capture is enabled via `crossterm::EnableMouseCapture` on TUI startup and disabled on exit. All mouse interactions use `MouseEventKind::Down(MouseButton::Left)` for clicks and `MouseEventKind::ScrollUp`/`ScrollDown` for scroll wheel.
+Mouse capture is enabled via `crossterm::EnableMouseCapture` on TUI startup and disabled on exit. The Kitty keyboard protocol (`PushKeyboardEnhancementFlags` with `DISAMBIGUATE_ESCAPE_CODES`) is also enabled when the terminal supports it, allowing detection of the SUPER (Cmd) modifier on mouse events. Terminals that do not support the Kitty protocol gracefully degrade (the modifier is simply not reported). All mouse interactions use `MouseEventKind::Down(MouseButton::Left)` for clicks and `MouseEventKind::ScrollUp`/`ScrollDown` for scroll wheel.
 
 #### Click Map Architecture
 
@@ -382,6 +382,8 @@ A `ClickMap` struct is populated during each render pass and consumed during mou
 - `overview_panels` -- Overview tab panel regions mapped to global panel indices
 - `focus_left_area` / `focus_right_area` -- Focus mode panel areas for focus switching
 - `focus_left_tabs` -- Focus mode left panel tab regions mapped to `LeftPanelTab` values
+- `overview_content_areas` -- Overview tab terminal content areas (inner area excluding borders/header) mapped to global panel indices, used for Cmd+click URL detection
+- `focus_right_content_area` -- Focus mode right panel terminal content area (inner area excluding borders/header), used for Cmd+click URL detection
 
 #### Mouse Click Behavior
 
@@ -418,6 +420,19 @@ Clicking anywhere in the tree area (including empty space) sets keyboard focus t
 | Left panel tab (Changes/Panel 2/Panel 3) | Switch to that tab and focus the left panel |
 | Left panel area | Switch keyboard focus to left panel |
 | Right panel area | Switch keyboard focus to right panel |
+
+#### Cmd+Click URL Opening
+
+Holding Cmd (SUPER modifier) while clicking on a URL in a terminal panel opens the URL in the system's default browser. This works in both overview mode and focus mode.
+
+| Context | Click Target | Action |
+|---------|--------------|--------|
+| Overview tab | URL in terminal content area | Open URL in default browser |
+| Focus mode | URL in right panel terminal content area | Open URL in default browser |
+
+URL detection is handled by `TerminalEmulator::url_at_position_scrolled()`, which extracts the plain text for the clicked row, maps the click column to a byte offset, and searches for `https://` or `http://` URLs containing that offset. Trailing punctuation (`.`, `,`, `;`, `:`, `!`, `?`, `"`, `'`, `>`, `]`) is stripped from URL endings. Trailing `)` is only stripped when the URL does not contain a matching `(` (preserving Wikipedia-style URLs like `https://en.wikipedia.org/wiki/Rust_(language)`).
+
+The `open_url()` helper uses `open` on macOS and `xdg-open` on Linux (fire-and-forget).
 
 #### Cursor-Aware Scroll Wheel
 
