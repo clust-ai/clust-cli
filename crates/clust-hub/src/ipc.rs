@@ -36,6 +36,11 @@ async fn run(
         }
     }
 
+    // Ensure .clust/worktrees is in the global git exclude file
+    if let Err(e) = crate::repo::ensure_global_worktree_exclude() {
+        eprintln!("global git exclude setup failed: {e}");
+    }
+
     let sock_path = clust_ipc::socket_path();
 
     // Remove stale socket file if it exists (crash recovery per docs/hub.md)

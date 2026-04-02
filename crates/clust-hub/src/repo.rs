@@ -242,6 +242,56 @@ pub fn worktree_path(repo_root: &Path, branch: &str) -> PathBuf {
         .join(serialize_branch_name(branch))
 }
 
+/// Ensure `.clust/worktrees` is in the global git exclude file so worktree
+/// directories are ignored across all repositories without touching `.gitignore`.
+pub fn ensure_global_worktree_exclude() -> Result<(), String> {
+    let exclude_entry = ".clust/worktrees";
+
+    // Use git2 to find the configured global excludes file, falling back to
+    // the XDG default (~/.config/git/ignore).
+    let exclude_path = git2::Config::open_default()
+        .ok()
+        .and_then(|cfg| cfg.get_path("core.excludesFile").ok())
+        .unwrap_or_else(|| {
+            // Default per git docs: $XDG_CONFIG_HOME/git/ignore or ~/.config/git/ignore
+            let config_home = std::env::var("XDG_CONFIG_HOME")
+                .map(PathBuf::from)
+                .unwrap_or_else(|_| {
+                    clust_ipc::clust_dir()
+                        .parent()
+                        .expect("could not determine home directory")
+                        .join(".config")
+                });
+            config_home.join("git").join("ignore")
+        });
+
+    let content = std::fs::read_to_string(&exclude_path).unwrap_or_default();
+
+    if content.lines().any(|line| line.trim() == exclude_entry) {
+        return Ok(());
+    }
+
+    if let Some(parent) = exclude_path.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| format!("failed to create global git ignore dir: {e}"))?;
+    }
+
+    use std::io::Write;
+    let mut file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&exclude_path)
+        .map_err(|e| format!("failed to open global git exclude: {e}"))?;
+
+    if !content.is_empty() && !content.ends_with('\n') {
+        writeln!(file).map_err(|e| format!("failed to write exclude: {e}"))?;
+    }
+    writeln!(file, "{exclude_entry}")
+        .map_err(|e| format!("failed to write exclude entry: {e}"))?;
+
+    Ok(())
+}
+
 /// Ensure `.clust/` is listed in `.git/info/exclude` so git ignores it.
 fn ensure_clust_dir_excluded(repo_root: &Path) -> Result<(), String> {
     let exclude_path = repo_root.join(".git").join("info").join("exclude");

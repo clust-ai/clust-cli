@@ -20,10 +20,12 @@ The hub starts automatically when any `clust` command is run and no hub is alrea
 
 **Hub startup:**
 
-1. Check for stale socket file at `~/.clust/clust.sock` → remove if exists
-2. Create and bind Unix domain socket
-3. Open/create SQLite database at `~/.clust/clust.db`
-4. Enter main event loop (accept connections, manage agents)
+1. Create `~/.clust/` directory if it doesn't exist
+2. Open/create SQLite database at `~/.clust/clust.db`
+3. Ensure `.clust/worktrees` is in the global git exclude file (see Git Exclusion below)
+4. Check for stale socket file at `~/.clust/clust.sock` → remove if exists
+5. Create and bind Unix domain socket
+6. Enter main event loop (accept connections, manage agents)
 
 ### Shutdown
 
@@ -135,7 +137,7 @@ Any attached client can send input. The hub writes it directly to the agent's PT
 
 ## Worktree Management
 
-The hub handles Git worktree operations on behalf of CLI clients. Worktrees are stored in a `.zm-worktrees/` directory at the repository root. Each worktree directory is named using a serialized form of the branch name (slashes are replaced with double underscores, e.g., `feature/auth` becomes `feature__auth`).
+The hub handles Git worktree operations on behalf of CLI clients. Worktrees are stored in a `.clust/worktrees/` directory at the repository root. Each worktree directory is named using a serialized form of the branch name (slashes are replaced with double underscores, e.g., `feature/auth` becomes `feature__auth`).
 
 ### Operations
 
@@ -166,6 +168,12 @@ When the CLI sends a worktree command, the hub resolves the target repository vi
 2. **By working directory**: Uses the `working_dir` from the CLI request and resolves the git root via `git2`.
 
 The hub also ensures the `.clust/` directory is added to `.git/info/exclude` so it does not pollute the repository.
+
+### Git Exclusion
+
+On startup, the hub adds `.clust/worktrees` to the global git exclude file so that worktree directories are ignored across all repositories without needing per-repo `.gitignore` entries. The global exclude file is located via `core.excludesFile` in the git config, falling back to `$XDG_CONFIG_HOME/git/ignore` (or `~/.config/git/ignore`). This operation is idempotent -- it checks whether the entry already exists before appending.
+
+Additionally, when a repository is first used (worktree creation, branch detection), the hub adds `.clust/` to that repository's `.git/info/exclude` to keep the per-repo `.clust/` directory hidden from git status.
 
 ## Branch Management
 
