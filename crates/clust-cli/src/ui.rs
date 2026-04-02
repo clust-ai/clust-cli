@@ -188,6 +188,7 @@ enum BranchAction {
     RemoteStartAgent,
     RemoteCreateWorktree,
     DeleteRemoteBranch,
+    BaseWorktreeOff,
 }
 
 /// Action to execute after user confirms in a confirmation dialog.
@@ -1417,6 +1418,15 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                                     last_agent_fetch =
                                                         Instant::now() - Duration::from_secs(10);
                                                 }
+                                                BranchAction::BaseWorktreeOff => {
+                                                    if let Some(repo_info) = repos.iter().find(|r| r.path == repo_path).cloned() {
+                                                        create_modal = Some(CreateAgentModal::new_with_branch(
+                                                            repos.clone(),
+                                                            repo_info,
+                                                            branch_name.clone(),
+                                                        ));
+                                                    }
+                                                }
                                                 BranchAction::RemoteStartAgent => {
                                                     if let Some(local) =
                                                         branch_name.split_once('/').map(|x| x.1)
@@ -2029,12 +2039,14 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                                                     .collect();
                                                                 let mut labels = Vec::new();
                                                                 let mut actions = Vec::new();
-                                                                labels.push("Start Agent".to_string());
+                                                                labels.push("Start Agent (worktree)".to_string());
                                                                 actions.push(BranchAction::StartAgent);
                                                                 if branch.is_head {
                                                                     labels.push("Start Agent (in place)".to_string());
                                                                     actions.push(BranchAction::StartAgentInPlace);
                                                                 }
+                                                                labels.push("Base Worktree Off".to_string());
+                                                                actions.push(BranchAction::BaseWorktreeOff);
                                                                 labels.push("Pull".to_string());
                                                                 actions.push(BranchAction::Pull);
                                                                 if branch.active_agent_count > 0 {
@@ -2062,7 +2074,7 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                                             if let Some(branch) = repo.remote_branches.get(selection.branch_idx) {
                                                                 let mut labels = Vec::new();
                                                                 let mut actions = Vec::new();
-                                                                labels.push("Start Agent".to_string());
+                                                                labels.push("Start Agent (checkout)".to_string());
                                                                 actions.push(BranchAction::RemoteStartAgent);
                                                                 labels.push("Create Worktree".to_string());
                                                                 actions.push(BranchAction::RemoteCreateWorktree);
@@ -2705,6 +2717,15 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                                         Instant::now() - Duration::from_secs(10);
                                                     last_agent_fetch =
                                                         Instant::now() - Duration::from_secs(10);
+                                                }
+                                                BranchAction::BaseWorktreeOff => {
+                                                    if let Some(repo_info) = repos.iter().find(|r| r.path == repo_path).cloned() {
+                                                        create_modal = Some(CreateAgentModal::new_with_branch(
+                                                            repos.clone(),
+                                                            repo_info,
+                                                            branch_name.clone(),
+                                                        ));
+                                                    }
                                                 }
                                                 BranchAction::RemoteStartAgent => {
                                                     if let Some(local) =
