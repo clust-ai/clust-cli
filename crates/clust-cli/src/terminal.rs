@@ -72,7 +72,7 @@ impl AttachedSession {
     /// Run the attached session, taking over the terminal.
     ///
     /// Returns when the user detaches (Ctrl+Q) or the agent exits.
-    pub async fn run(self) -> io::Result<()> {
+    pub async fn run(self) -> io::Result<SessionEnd> {
         // Check for updates in background
         let update_notice: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
         let notice_clone = update_notice.clone();
@@ -115,7 +115,7 @@ impl AttachedSession {
         result
     }
 
-    async fn run_inner(self) -> io::Result<()> {
+    async fn run_inner(self) -> io::Result<SessionEnd> {
         let (cols, rows) = terminal::size()?;
 
         // Set scroll region to exclude bottom row (status bar)
@@ -556,17 +556,21 @@ impl AttachedSession {
         });
 
         // Wait for either task to finish
-        tokio::select! {
-            _ = output_task => {}
-            _ = input_task => {}
-        }
+        let end = tokio::select! {
+            result = output_task => {
+                result.unwrap_or(SessionEnd::ConnectionLost)
+            }
+            result = input_task => {
+                result.unwrap_or(SessionEnd::ConnectionLost)
+            }
+        };
 
-        Ok(())
+        Ok(end)
     }
 }
 
 #[allow(dead_code)]
-enum SessionEnd {
+pub enum SessionEnd {
     Detached,
     AgentExited(i32),
     HubShutdown,

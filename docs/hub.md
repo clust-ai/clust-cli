@@ -88,7 +88,7 @@ When the hub receives a `StartAgent` message:
 5. Store agent metadata in memory:
    - ID, agent binary, PID, PTY master handle, start time, attached clients
 6. Begin reading from PTY master → buffer output, forward to attached clients
-7. Return `AgentStarted { id }` to the requesting CLI
+7. Return `AgentStarted { id, agent_binary, is_worktree, repo_path, branch_name }` to the requesting CLI
 
 ### Agent Exit
 
@@ -98,6 +98,24 @@ When the hub detects an agent process has exited:
 2. Notify all attached CLI clients with `AgentExited { id, exit_code }`
 3. Close PTY
 4. Remove agent from the in-memory agent map
+
+#### Worktree Cleanup on Agent Stop
+
+When agents running in git worktrees are stopped or exit, the CLI prompts the user with an interactive arrow-key selector offering three options:
+
+- **keep** — Leave the worktree and branch as-is
+- **discard worktree** — Remove the worktree directory (`git worktree remove --force`)
+- **discard worktree + branch** — Remove the worktree and delete the local branch (`git branch -D`)
+
+The prompt includes a dirty-state warning when the worktree has uncommitted changes. This flow is triggered in all stop paths:
+
+- `clust -s` (stop hub): queries all agents before stopping, prompts after hub shutdown
+- `clust -s <id>` (stop agent): queries agents, prompts only if the stopped agent was the last one in its worktree
+- `clust repo -s` (stop repo agents): queries repo agents before stopping, prompts after
+- Session exit (start/attach): prompts when the agent exits (not on detach), checking if other agents remain in the worktree
+- TUI `Q` (stop hub): collects worktree info from in-memory agents, prompts after TUI cleanup
+
+The worktree removal is performed locally using git commands, independent of the hub. This ensures cleanup works even after the hub has shut down.
 
 ### Output Multiplexing
 

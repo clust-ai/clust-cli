@@ -12,6 +12,7 @@ pub mod terminal_emulator;
 mod theme;
 mod ui;
 mod version;
+mod worktree;
 
 use clap::Parser;
 use std::io::{self, Write};
@@ -135,6 +136,10 @@ async fn main() {
         println!();
         if id_or_empty.is_empty() {
             // No ID → stop the hub
+            // Query agents BEFORE stopping to collect worktree info
+            let all_agents = ipc::fetch_agent_list().await;
+            let cleanups = worktree::collect_worktree_cleanups(&all_agents, &all_agents);
+
             let spinner = spin("stopping clust hub");
             // Count unique hubs for pluralization
             let hub_count = ipc::count_hubs().await;
@@ -157,8 +162,18 @@ async fn main() {
                     stop_spin(spinner, "clust hub is not running");
                 }
             }
+            worktree::prompt_worktree_cleanup(&cleanups);
         } else {
             // ID provided → stop specific agent
+            // Query agents BEFORE stopping to collect worktree info
+            let all_agents = ipc::fetch_agent_list().await;
+            let stopped: Vec<_> = all_agents
+                .iter()
+                .filter(|a| a.id == *id_or_empty)
+                .cloned()
+                .collect();
+            let cleanups = worktree::collect_worktree_cleanups(&stopped, &all_agents);
+
             let spinner = spin(&format!("stopping agent {id_or_empty}"));
             match ipc::try_connect().await {
                 Ok(mut stream) => match ipc::send_stop_agent(&mut stream, id_or_empty).await {
@@ -172,6 +187,7 @@ async fn main() {
                     stop_spin(spinner, "clust hub is not running");
                 }
             }
+            worktree::prompt_worktree_cleanup(&cleanups);
         }
         return;
     }
@@ -421,7 +437,13 @@ async fn handle_start(
         });
 
     match response {
-        HubMessage::AgentStarted { id, agent_binary } => {
+        HubMessage::AgentStarted {
+            id,
+            agent_binary,
+            is_worktree: ag_is_worktree,
+            repo_path: ag_repo_path,
+            branch_name: ag_branch_name,
+        } => {
             if background {
                 if let Some(s) = spinner {
                     stop_spin(s, &format!("agent {id} started"));
@@ -431,7 +453,20 @@ async fn handle_start(
             // Attach to the new agent
             let (reader, writer) = stream.into_split();
             let session = terminal::AttachedSession::new(id, agent_binary, reader, writer);
-            if let Err(e) = session.run().await {
+            let session_end = session.run().await;
+            match &session_end {
+                Ok(terminal::SessionEnd::AgentExited(_)) if ag_is_worktree => {
+                    if let (Some(repo_path), Some(branch_name)) = (&ag_repo_path, &ag_branch_name) {
+                        // Check if other agents remain in this worktree
+                        let cleanups = worktree::query_and_collect_worktree_cleanups_for_agent(
+                            repo_path, branch_name,
+                        ).await;
+                        worktree::prompt_worktree_cleanup(&cleanups);
+                    }
+                }
+                _ => {}
+            }
+            if let Err(e) = session_end {
                 eprintln!(
                     "\n  {}✘{} {}session error: {e}{}\n",
                     theme::ERROR,
@@ -506,10 +541,28 @@ async fn handle_attach(id: String) {
         });
 
     match response {
-        HubMessage::AgentAttached { id, agent_binary } => {
+        HubMessage::AgentAttached {
+            id,
+            agent_binary,
+            is_worktree: ag_is_worktree,
+            repo_path: ag_repo_path,
+            branch_name: ag_branch_name,
+        } => {
             let (reader, writer) = stream.into_split();
             let session = terminal::AttachedSession::new(id, agent_binary, reader, writer);
-            if let Err(e) = session.run().await {
+            let session_end = session.run().await;
+            match &session_end {
+                Ok(terminal::SessionEnd::AgentExited(_)) if ag_is_worktree => {
+                    if let (Some(repo_path), Some(branch_name)) = (&ag_repo_path, &ag_branch_name) {
+                        let cleanups = worktree::query_and_collect_worktree_cleanups_for_agent(
+                            repo_path, branch_name,
+                        ).await;
+                        worktree::prompt_worktree_cleanup(&cleanups);
+                    }
+                }
+                _ => {}
+            }
+            if let Err(e) = session_end {
                 eprintln!(
                     "\n  {}✘{} {}session error: {e}{}\n",
                     theme::ERROR,
@@ -1071,6 +1124,28 @@ async fn handle_repo_stop() {
         .map(|p| p.to_string_lossy().into_owned())
         .unwrap_or_else(|_| ".".into());
 
+    // Query agents BEFORE stopping to collect worktree info
+    let all_agents = ipc::fetch_agent_list().await;
+    // Identify which agents belong to this repo (match by repo_path prefix)
+    let repo_root = all_agents
+        .iter()
+        .find(|a| {
+            a.repo_path
+                .as_ref()
+                .is_some_and(|rp| working_dir.starts_with(rp.as_str()))
+        })
+        .and_then(|a| a.repo_path.clone());
+    let stopped: Vec<_> = if let Some(ref root) = repo_root {
+        all_agents
+            .iter()
+            .filter(|a| a.repo_path.as_deref() == Some(root.as_str()))
+            .cloned()
+            .collect()
+    } else {
+        vec![]
+    };
+    let cleanups = worktree::collect_worktree_cleanups(&stopped, &all_agents);
+
     let spinner = spin("stopping repo agents");
     let mut stream = match ipc::connect_to_hub().await {
         Ok(s) => s,
@@ -1096,6 +1171,7 @@ async fn handle_repo_stop() {
             std::process::exit(1);
         }
     }
+    worktree::prompt_worktree_cleanup(&cleanups);
     println!();
 }
 
