@@ -329,7 +329,7 @@ These shortcuts are active in the `clust ui` dashboard. They are displayed in th
 | `↑` / `↓` | Move selection within current level |
 | `→` | Descend into selected item (navigate tree) |
 | `←` | Ascend to parent level (navigate tree) |
-| `Enter` | Left panel: on repo opens context menu (Change Color); on branch with 1 agent opens focus mode, with multiple agents opens agent picker. Right panel: enter focus mode for selected agent. |
+| `Enter` | Left panel: on repo opens repo context menu; on local branch opens local branch context menu; on remote branch opens remote branch context menu. Right panel: enter focus mode for selected agent. |
 | `Space` | Left panel: toggle collapse/expand on repo or category level |
 | `Shift+←` / `Shift+→` | Switch focus between left and right panels |
 | `v` | Toggle agent grouping between by-hub and by-repo (right panel) |
