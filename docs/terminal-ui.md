@@ -127,7 +127,7 @@ A multi-agent terminal overview that displays all active agents side-by-side wit
 
 **Layout:**
 
-- **Options bar (1 row):** Top row, reserved for future filter buttons. Background changes based on focus.
+- **Options bar (1 row):** Top row containing repository filter chips. Each chip displays a colored `●` dot (using the repo's assigned color) followed by the repo name. Clicking a chip or pressing Enter/Space when the chip is selected toggles that repo's visibility -- hidden repos are dimmed (dot uses `dim_color()`, text uses `R_TEXT_DISABLED`) and their agent panels are filtered out of the viewport. The active chip (cursor position) is highlighted with `R_BG_ACTIVE` background when the options bar is focused. When no repos exist, the bar is rendered as an empty row. Background changes based on focus (`R_BG_OVERLAY` when focused, `R_BG_RAISED` when unfocused).
 - **Agent panels (horizontal):** Dynamically sized columns distributed evenly across the available width. The number of visible panels is determined by how many fit at the minimum width of 60 columns. Panels use ratio-based constraints so they fill the screen evenly (1 panel = half screen, 2 panels = half each, 3 panels = one-third each, etc.). A single panel never exceeds half the screen width. When more agents exist than fit on screen, horizontal scrolling is enabled with `◀ N` / `N ▶` indicators.
 - Each panel has **box-drawing borders** (top, bottom, left, right). When a panel's agent is associated with a repository, the border color uses the repo's assigned color (bright when focused, dimmed to 60% brightness when unfocused via `dim_color()`). Panels without a repo fall back to accent blue when focused and subtle gray when unfocused.
 - The **focused panel** displays a centered `Shift+↓ focus` hint in its bottom border (rendered via `Block::title_bottom()`). The shortcut text uses the bright accent color and the label uses secondary text color. This hint only appears when a terminal panel is focused in overview mode (not in focus mode).
@@ -138,7 +138,7 @@ A multi-agent terminal overview that displays all active agents side-by-side wit
 
 | Focus | Description |
 |-------|-------------|
-| Options Bar | Default. Navigation keys scroll viewport or enter terminal. |
+| Options Bar | Default. Left/Right navigate filter chips, Enter/Space toggle repo visibility, Shift+arrows scroll viewport or enter terminal. |
 | Terminal(N) | All keyboard input is forwarded directly to the focused agent, except Shift+arrow keys. Focused panel has accent-blue borders; unfocused panels have subtle gray borders. |
 
 **Keyboard shortcuts (Overview tab):**
@@ -147,6 +147,8 @@ A multi-agent terminal overview that displays all active agents side-by-side wit
 |---------|----------|--------|
 | Options Bar | `Shift+↓` | Enter terminal focus (returns to last focused panel) |
 | Options Bar | `Shift+←` / `Shift+→` | Scroll viewport left/right |
+| Options Bar | `←` / `→` | Navigate filter chips |
+| Options Bar | `Enter` / `Space` | Toggle visibility of selected repo |
 | Terminal | `Esc` (single) | Forward Esc to agent process |
 | Terminal | `Esc×2` (double-tap) | Deselect terminal, return to options bar |
 | Terminal | `Shift+↑` | Return to options bar |
@@ -242,6 +244,8 @@ Context menus appear as centered modal overlays. They support arrow key navigati
 |----------|--------|
 | `Shift+↓` | Enter terminal focus |
 | `Shift+←` / `Shift+→` | Scroll viewport left/right |
+| `←` / `→` | Navigate filter chips (move cursor left/right) |
+| `Enter` / `Space` | Toggle visibility of the selected filter chip's repo |
 
 **Overview tab (Terminal focused):**
 
@@ -419,6 +423,7 @@ A `ClickMap` struct is populated during each render pass and consumed during mou
 - `agent_cards` -- right panel agent card regions mapped to (group_idx, agent_idx) pairs
 - `mode_label_area` -- right panel mode label region (the "by repo / by hub" line) for click-to-toggle view mode
 - `overview_panels` -- Overview tab panel regions mapped to global panel indices
+- `overview_filter_chips` -- Overview tab filter chip regions mapped to repo path strings
 - `focus_left_area` / `focus_right_area` -- Focus mode panel areas for focus switching
 - `focus_left_tabs` -- Focus mode left panel tab regions mapped to `LeftPanelTab` values
 - `overview_content_areas` -- Overview tab terminal content areas (inner area excluding borders/header) mapped to global panel indices, used for Cmd+click URL detection
@@ -450,6 +455,7 @@ Clicking anywhere in the tree area (including empty space) sets keyboard focus t
 
 | Click Target | Action |
 |--------------|--------|
+| Filter chip | Toggle that repo's visibility (hidden repos are dimmed and their panels are filtered out) |
 | Agent panel | Focus that terminal panel (`OverviewFocus::Terminal(idx)`) |
 
 **Focus mode:**

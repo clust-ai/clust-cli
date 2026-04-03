@@ -341,6 +341,8 @@ These shortcuts are active in the `clust ui` dashboard. They are displayed in th
 |----------|--------|
 | `Shift+↓` | Enter terminal focus |
 | `Shift+←` / `Shift+→` | Scroll viewport left/right |
+| `←` / `→` | Navigate filter chips |
+| `Enter` / `Space` | Toggle visibility of selected repo |
 
 **Overview tab (Terminal focused):**
 

@@ -1,7 +1,7 @@
 pub mod gitdiff;
 pub mod input;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use ratatui::{
     layout::{Constraint, Layout, Rect},
@@ -13,7 +13,7 @@ use ratatui::{
 use tokio::sync::{mpsc, watch};
 use tokio::task::JoinHandle;
 
-use clust_ipc::{AgentInfo, CliMessage, HubMessage};
+use clust_ipc::{AgentInfo, CliMessage, HubMessage, RepoInfo};
 
 use crate::{ipc, terminal_emulator::TerminalEmulator, theme, ui::ClickMap};
 
@@ -87,6 +87,10 @@ pub struct OverviewState {
     panel_rows: u16,
     viewport_width: u16,
     pub initialized: bool,
+    /// Repo paths that are currently hidden by the filter bar.
+    pub hidden_repos: HashSet<String>,
+    /// Cursor position within the filter chips (when OptionsBar is focused).
+    pub filter_cursor: usize,
 }
 
 impl OverviewState {
@@ -103,6 +107,8 @@ impl OverviewState {
             panel_rows: 24,
             viewport_width: 0,
             initialized: false,
+            hidden_repos: HashSet::new(),
+            filter_cursor: 0,
         }
     }
 
@@ -614,7 +620,7 @@ async fn agent_connection_task(
 // Rendering
 // ---------------------------------------------------------------------------
 
-pub fn render_overview(frame: &mut Frame, area: Rect, state: &mut OverviewState, click_map: &mut ClickMap, repo_colors: &HashMap<String, String>) {
+pub fn render_overview(frame: &mut Frame, area: Rect, state: &mut OverviewState, click_map: &mut ClickMap, repo_colors: &HashMap<String, String>, repos: &[RepoInfo]) {
     // Split into options bar (1 row) + panels area
     let [options_area, panels_area] = Layout::vertical([
         Constraint::Length(1),
@@ -622,13 +628,32 @@ pub fn render_overview(frame: &mut Frame, area: Rect, state: &mut OverviewState,
     ])
     .areas(area);
 
+    let focused = matches!(state.focus, OverviewFocus::OptionsBar);
     render_options_bar(
         frame,
         options_area,
-        matches!(state.focus, OverviewFocus::OptionsBar),
+        focused,
+        repos,
+        &state.hidden_repos,
+        state.filter_cursor,
+        click_map,
     );
 
-    if state.panels.is_empty() {
+    // Build list of panel indices that pass the repo filter
+    let filtered_indices: Vec<usize> = state
+        .panels
+        .iter()
+        .enumerate()
+        .filter(|(_, p)| {
+            match &p.repo_path {
+                Some(rp) => !state.hidden_repos.contains(rp),
+                None => true, // always show agents with no repo
+            }
+        })
+        .map(|(i, _)| i)
+        .collect();
+
+    if filtered_indices.is_empty() {
         render_empty_state(frame, panels_area);
         return;
     }
@@ -639,8 +664,10 @@ pub fn render_overview(frame: &mut Frame, area: Rect, state: &mut OverviewState,
         return;
     }
 
-    let end = (state.scroll_offset + visible_count).min(state.panels.len());
-    let actual_visible = end - state.scroll_offset;
+    // Clamp scroll offset to filtered list bounds
+    let scroll = state.scroll_offset.min(filtered_indices.len().saturating_sub(1));
+    let end = (scroll + visible_count).min(filtered_indices.len());
+    let actual_visible = end - scroll;
 
     // Distribute available width evenly; at least 2 slots so 1 panel = half screen
     let slots = (actual_visible as u32).max(2);
@@ -649,10 +676,9 @@ pub fn render_overview(frame: &mut Frame, area: Rect, state: &mut OverviewState,
         .collect();
     let panel_areas = Layout::horizontal(constraints).split(panels_area);
 
-    let scroll_offset = state.scroll_offset;
     let focus = state.focus;
-    for (i, panel) in state.panels[scroll_offset..end].iter_mut().enumerate() {
-        let global_idx = scroll_offset + i;
+    for (i, &global_idx) in filtered_indices[scroll..end].iter().enumerate() {
+        let panel = &mut state.panels[global_idx];
         let is_focused = matches!(focus, OverviewFocus::Terminal(idx) if idx == global_idx);
         click_map.overview_panels.push((panel_areas[i], global_idx));
         let panel_color = panel.repo_path.as_ref()
@@ -664,8 +690,8 @@ pub fn render_overview(frame: &mut Frame, area: Rect, state: &mut OverviewState,
     }
 
     // Scroll indicators
-    if state.scroll_offset > 0 {
-        let left_count = state.scroll_offset;
+    if scroll > 0 {
+        let left_count = scroll;
         let indicator = Span::styled(
             format!(" ◀ {left_count} "),
             Style::default()
@@ -681,8 +707,8 @@ pub fn render_overview(frame: &mut Frame, area: Rect, state: &mut OverviewState,
         frame.render_widget(Paragraph::new(Line::from(indicator)), indicator_area);
     }
 
-    if end < state.panels.len() {
-        let right_count = state.panels.len() - end;
+    if end < filtered_indices.len() {
+        let right_count = filtered_indices.len() - end;
         let text = format!(" {right_count} ▶ ");
         let text_len = text.chars().count() as u16;
         let indicator = Span::styled(
@@ -702,21 +728,92 @@ pub fn render_overview(frame: &mut Frame, area: Rect, state: &mut OverviewState,
     }
 }
 
-fn render_options_bar(frame: &mut Frame, area: Rect, focused: bool) {
-    let bg = if focused {
+fn render_options_bar(
+    frame: &mut Frame,
+    area: Rect,
+    focused: bool,
+    repos: &[RepoInfo],
+    hidden_repos: &HashSet<String>,
+    filter_cursor: usize,
+    click_map: &mut ClickMap,
+) {
+    let bar_bg = if focused {
         theme::R_BG_OVERLAY
     } else {
         theme::R_BG_RAISED
     };
-    // Empty options bar for now — future filter buttons go here
-    let fill = " ".repeat(area.width as usize);
-    frame.render_widget(
-        Paragraph::new(Line::from(Span::styled(
-            fill,
-            Style::default().bg(bg),
-        ))),
-        area,
-    );
+
+    if repos.is_empty() {
+        let fill = " ".repeat(area.width as usize);
+        frame.render_widget(
+            Paragraph::new(Line::from(Span::styled(fill, Style::default().bg(bar_bg)))),
+            area,
+        );
+        return;
+    }
+
+    let mut spans: Vec<Span> = Vec::new();
+    let mut chip_x = area.x;
+
+    for (i, repo) in repos.iter().enumerate() {
+        let is_hidden = hidden_repos.contains(&repo.path);
+        let is_cursor = focused && i == filter_cursor;
+
+        let color = repo
+            .color
+            .as_ref()
+            .map(|c| theme::repo_color(c))
+            .unwrap_or(theme::R_ACCENT);
+
+        let chip_bg = if is_cursor {
+            theme::R_BG_ACTIVE
+        } else {
+            bar_bg
+        };
+
+        let (dot_color, text_color) = if is_hidden {
+            (theme::dim_color(color), theme::R_TEXT_DISABLED)
+        } else {
+            (color, theme::R_TEXT_PRIMARY)
+        };
+
+        // Build chip: " ● name "
+        let dot_span = Span::styled(" ● ", Style::default().fg(dot_color).bg(chip_bg));
+        let name_span = Span::styled(
+            format!("{} ", repo.name),
+            Style::default().fg(text_color).bg(chip_bg),
+        );
+
+        let chip_width = 3 + repo.name.len() as u16 + 1; // " ● " + name + " "
+
+        // Register click target
+        if chip_x + chip_width <= area.x + area.width {
+            let chip_rect = Rect {
+                x: chip_x,
+                y: area.y,
+                width: chip_width,
+                height: 1,
+            };
+            click_map
+                .overview_filter_chips
+                .push((chip_rect, repo.path.clone()));
+        }
+
+        spans.push(dot_span);
+        spans.push(name_span);
+        chip_x += chip_width;
+    }
+
+    // Fill remaining width with bar background
+    let used = chip_x.saturating_sub(area.x);
+    if used < area.width {
+        spans.push(Span::styled(
+            " ".repeat((area.width - used) as usize),
+            Style::default().bg(bar_bg),
+        ));
+    }
+
+    frame.render_widget(Paragraph::new(Line::from(spans)), area);
 }
 
 fn render_agent_panel(
