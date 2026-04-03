@@ -211,5 +211,5 @@ clust "do something"
 | `tray-icon` | System tray icon and menu |
 | `git2` | Git repository/branch/worktree detection |
 | `vt100` | Terminal emulator (overview panels, focus mode, attached scrollback) |
-| `fuzzy-matcher` | Fuzzy string matching (create-agent modal search) |
+| `fuzzy-matcher` | Fuzzy string matching (create-agent and search-agent modal filtering) |
 | `which` | Locate agent binaries on PATH (default agent discovery) |
