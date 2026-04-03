@@ -2000,10 +2000,27 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                             if shift {
                                 match key.code {
                                     KeyCode::Up => {
-                                        focus_mode_state.diff_jump_prev_file()
-                                    }
-                                    KeyCode::Down => {
-                                        focus_mode_state.diff_jump_next_file()
+                                        // Exit focus mode
+                                        if let Some(panel) = &focus_mode_state.panel {
+                                            if panel.exited && panel.is_worktree {
+                                                if let (Some(rp), Some(bn)) = (&panel.repo_path, &panel.branch_name) {
+                                                    pending_worktree_cleanups = vec![crate::worktree::WorktreeCleanup {
+                                                        repo_path: rp.clone(),
+                                                        branch_name: bn.clone(),
+                                                    }];
+                                                }
+                                            }
+                                        }
+                                        focus_mode_state.shutdown();
+                                        in_focus_mode = false;
+                                        if active_tab == ActiveTab::Overview
+                                            && overview_state.initialized
+                                        {
+                                            overview_state.force_resize_all();
+                                        }
+                                        if let Some(m) = pop_worktree_cleanup_menu(&mut pending_worktree_cleanups) {
+                                            active_menu = Some(m);
+                                        }
                                     }
                                     KeyCode::Right => {
                                         focus_mode_state.focus_side =
@@ -2023,31 +2040,6 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                         focus_mode_state.left_tab =
                                             focus_mode_state.left_tab.next();
                                     }
-                                    KeyCode::Esc => {
-                                        if is_double_esc(&mut last_esc_press) {
-                                            // Check for worktree cleanup before shutdown
-                                            if let Some(panel) = &focus_mode_state.panel {
-                                                if panel.exited && panel.is_worktree {
-                                                    if let (Some(rp), Some(bn)) = (&panel.repo_path, &panel.branch_name) {
-                                                        pending_worktree_cleanups = vec![crate::worktree::WorktreeCleanup {
-                                                            repo_path: rp.clone(),
-                                                            branch_name: bn.clone(),
-                                                        }];
-                                                    }
-                                                }
-                                            }
-                                            focus_mode_state.shutdown();
-                                            in_focus_mode = false;
-                                            if active_tab == ActiveTab::Overview
-                                                && overview_state.initialized
-                                            {
-                                                overview_state.force_resize_all();
-                                            }
-                                        }
-                                        if let Some(m) = pop_worktree_cleanup_menu(&mut pending_worktree_cleanups) {
-                                            active_menu = Some(m);
-                                        }
-                                    }
                                     _ => {}
                                 }
                             }
@@ -2055,6 +2047,29 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                             // Right panel focused
                             if shift {
                                 match key.code {
+                                    KeyCode::Up => {
+                                        // Exit focus mode
+                                        if let Some(panel) = &focus_mode_state.panel {
+                                            if panel.exited && panel.is_worktree {
+                                                if let (Some(rp), Some(bn)) = (&panel.repo_path, &panel.branch_name) {
+                                                    pending_worktree_cleanups = vec![crate::worktree::WorktreeCleanup {
+                                                        repo_path: rp.clone(),
+                                                        branch_name: bn.clone(),
+                                                    }];
+                                                }
+                                            }
+                                        }
+                                        focus_mode_state.shutdown();
+                                        in_focus_mode = false;
+                                        if active_tab == ActiveTab::Overview
+                                            && overview_state.initialized
+                                        {
+                                            overview_state.force_resize_all();
+                                        }
+                                        if let Some(m) = pop_worktree_cleanup_menu(&mut pending_worktree_cleanups) {
+                                            active_menu = Some(m);
+                                        }
+                                    }
                                     KeyCode::Left => {
                                         focus_mode_state.focus_side =
                                             overview::FocusSide::Left;
@@ -2092,32 +2107,8 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                     }
                                 }
                             } else if key.code == KeyCode::Esc {
-                                if is_double_esc(&mut last_esc_press) {
-                                    // Check for worktree cleanup before shutdown
-                                    if let Some(panel) = &focus_mode_state.panel {
-                                        if panel.exited && panel.is_worktree {
-                                            if let (Some(rp), Some(bn)) = (&panel.repo_path, &panel.branch_name) {
-                                                pending_worktree_cleanups = vec![crate::worktree::WorktreeCleanup {
-                                                    repo_path: rp.clone(),
-                                                    branch_name: bn.clone(),
-                                                }];
-                                            }
-                                        }
-                                    }
-                                    focus_mode_state.shutdown();
-                                    in_focus_mode = false;
-                                    if active_tab == ActiveTab::Overview
-                                        && overview_state.initialized
-                                    {
-                                        overview_state.force_resize_all();
-                                    }
-                                } else {
-                                    // Single Esc — forward to agent process
-                                    focus_mode_state.send_input(vec![0x1b]);
-                                }
-                                if let Some(m) = pop_worktree_cleanup_menu(&mut pending_worktree_cleanups) {
-                                    active_menu = Some(m);
-                                }
+                                // Forward Esc to agent process
+                                focus_mode_state.send_input(vec![0x1b]);
                             } else if let Some(bytes) =
                                 overview::input::key_event_to_bytes(&key)
                             {
@@ -3632,7 +3623,7 @@ fn render_focus_back_bar(
             .bg(theme::R_BG_RAISED),
     ));
     spans.push(Span::styled(
-        "Esc\u{00d7}2",
+        "Shift+\u{2191}",
         Style::default()
             .fg(theme::R_TEXT_PRIMARY)
             .bg(theme::R_BG_RAISED)
@@ -4677,7 +4668,7 @@ fn render_status_bar(
     } else {
         let mod_key = if cfg!(target_os = "macos") { "Opt" } else { "Alt" };
         let hint_text = if in_focus_mode {
-            format!("Shift+\u{2190}/\u{2192} switch panel  Shift+\u{2191}/\u{2193} jump file  Esc\u{00d7}2 exit  {mod_key}+E new agent")
+            format!("Shift+\u{2190}/\u{2192} switch panel  Shift+\u{2191} exit  {mod_key}+E new agent")
         } else if active_tab == ActiveTab::Overview {
             match overview_focus {
                 OverviewFocus::Terminal(_) => {
@@ -4807,13 +4798,12 @@ fn render_help_overlay(frame: &mut Frame, area: Rect, active_tab: ActiveTab, in_
     if in_focus_mode {
         lines.push(Line::from(""));
         lines.push(header_line("Focus Mode"));
-        lines.push(binding_line("Esc\u{00d7}2", "Exit focus mode"));
+        lines.push(binding_line("Shift+\u{2191}", "Exit focus mode"));
         lines.push(binding_line("Shift+\u{2190}/\u{2192}", "Switch panel"));
         lines.push(binding_line("Shift+PgUp/PgDn", "Scroll terminal"));
         lines.push(sub_label_line("Left panel:"));
         lines.push(binding_line("Tab", "Cycle tabs"));
         lines.push(binding_line("\u{2191} / \u{2193}", "Scroll diff"));
-        lines.push(binding_line("Shift+\u{2191}/\u{2193}", "Jump file"));
     }
 
     let modal_width: u16 = 44;
