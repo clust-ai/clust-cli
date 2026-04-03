@@ -206,6 +206,7 @@ On startup, `clust ui` automatically connects to the hub daemon, starting it if 
 | `?` | Toggle keyboard shortcut overlay |
 | `F2` | Toggle mouse capture (allows text selection and link clicking when off) |
 | `Opt+R` (macOS) / `Alt+R` | Open the create-agent modal |
+| `Opt+D` (macOS) / `Alt+D` | Open the detached agent modal (any directory) |
 | `Opt+F` (macOS) / `Alt+F` | Open the search-agent modal (only when agents are running) |
 
 **Repositories tab:**
@@ -352,7 +353,7 @@ The agent's `working_dir`, `repo_path`, and `branch_name` are passed to `open_ag
 
 The `?` key toggles a keyboard shortcut overlay rendered as a centered modal (44 columns wide) anchored to the bottom of the content area. The modal is organized into sections with bold secondary-colored headers and context-aware visibility:
 
-- **Global section (always shown):** `q / Esc×2`, `Q`, `Ctrl+C`, `Tab`, `Shift+Tab`, `?`, `F2`, `Alt+E`, `Alt+F`.
+- **Global section (always shown):** `q / Esc×2`, `Q`, `Ctrl+C`, `Tab`, `Shift+Tab`, `?`, `F2`, `Alt+R`, `Alt+D`, `Alt+F`.
 - **Repositories section (shown when Repositories tab is active):** `↑/↓` navigate, `←/→` navigate tree, `Shift+←/→` switch panel, `Enter` open menu/focus agent, `Space` collapse/expand, `v` toggle grouping.
 - **Overview section (shown when Overview tab is active):** `Shift+←/→` scroll panels, `Shift+↓` enter terminal, plus an "In terminal:" sub-context label followed by `Shift+↑` back to options bar, `Shift+↓` enter focus mode, `Shift+←/→` switch agent, `PgUp/PgDn` scroll terminal.
 - **Focus Mode section (shown when in focus mode):** `Shift+↑` exit, `Shift+←/→` switch panel, `Shift+PgUp/PgDn` scroll terminal, plus a "Left panel:" sub-context label followed by `Tab` cycle tabs, `↑/↓` scroll diff.
@@ -403,6 +404,31 @@ A fuzzy search modal for quickly finding and opening running agents, opened glob
 **Rendering:** The modal is rendered as a centered overlay (70 columns wide, 60% of terminal height) with a titled border ("Search Agents"), a hint line, an input field with a visible block cursor, and a scrollable list of matching agents. The selected item is indicated with a `>` prefix and bold text. Each agent line shows: binary name, branch name (if present, in info color when selected), repo name (last path component), and a short ID suffix. The list scrolls automatically to keep the selection visible.
 
 **Completion:** On selecting an agent with Enter, the modal closes and the agent is opened in focus mode (same behavior as entering focus mode from the Repositories or Overview tabs).
+
+### Detached Agent Modal
+
+A two-step modal for spawning agents in any directory (not limited to git repositories), opened globally with `Opt+D` (macOS) / `Alt+D`. Unlike the Create Agent Modal which operates on git worktrees, this modal allows starting agents in arbitrary filesystem directories.
+
+| Step | Title | Description |
+|------|-------|-------------|
+| 1/2 | Select directory | Browse and select a working directory. Starts at the user's home directory. Fuzzy search filters subdirectories by name. Hidden directories (starting with `.`) are excluded. |
+| 2/2 | Enter prompt | Type an initial prompt for the agent. Optional -- press Enter to start with no prompt. |
+
+**Navigation (directory step):**
+- `Up` / `Down` -- move selection in directory list
+- `Tab` -- autocomplete: enter the selected directory and show its subdirectories
+- `Enter` -- if filter text matches a directory, enter it first, then confirm the current path as the working directory and advance to the prompt step
+- `Backspace` (when input is empty) -- navigate up one directory level
+- `Esc` -- cancel the modal
+- Type to filter -- fuzzy matching via `fuzzy-matcher` (SkimV2 algorithm)
+
+**Navigation (prompt step):**
+- `Enter` -- start the agent
+- `Esc` -- go back to the directory selection step
+
+**Completion:** On completing step 2, the modal sends a `CliMessage::StartAgent` IPC message to the hub (reusing the existing agent start path). The hub auto-detects git repository information if the selected directory is inside a git repo. The `AgentStartResult::Started` variant includes an `is_worktree: bool` field to properly propagate whether the agent is running in a worktree. On success, the TUI opens the new agent in focus mode with a status message (e.g., "Agent started in /path/to/dir"). On failure, the error is surfaced as a status bar error message.
+
+**Rendering:** The modal is rendered as a centered overlay (60 columns wide, 60% of terminal height) with the same visual style as the Create Agent Modal. The directory step shows the current base path above the input field, with a scrollable list of filtered subdirectories below. The selected item is indicated with a `>` prefix and bold text. In the prompt step, the input area expands to fill remaining modal space with text wrapping.
 
 ### Mouse Support
 
