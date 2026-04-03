@@ -321,7 +321,7 @@ These shortcuts are active in the `clust ui` dashboard. They are displayed in th
 | `Tab` | Switch to next tab |
 | `Shift+Tab` | Switch to previous tab |
 | `?` | Toggle keyboard shortcut overlay |
-| `Opt+E` (macOS) / `Alt+E` | Open the create-agent modal (multi-step builder for creating agents on worktrees) |
+| `Opt+R` (macOS) / `Alt+R` | Open the create-agent modal (multi-step builder for creating agents on worktrees) |
 
 **Repositories tab:**
 

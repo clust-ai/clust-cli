@@ -203,7 +203,7 @@ On startup, `clust ui` automatically connects to the hub daemon, starting it if 
 | `Shift+Tab` | Switch to previous tab |
 | `?` | Toggle keyboard shortcut overlay |
 | `F2` | Toggle mouse capture (allows text selection and link clicking when off) |
-| `Opt+E` (macOS) / `Alt+E` | Open the create-agent modal |
+| `Opt+R` (macOS) / `Alt+R` | Open the create-agent modal |
 | `Opt+F` (macOS) / `Alt+F` | Open the search-agent modal (only when agents are running) |
 
 **Repositories tab:**
@@ -357,7 +357,7 @@ Key names are displayed in accent color (left-aligned, 16 chars wide); descripti
 
 ### Create Agent Modal
 
-A multi-step modal for creating new agents on git worktrees, opened globally with `Opt+E` (macOS) / `Alt+E`. The modal guides the user through 4 sequential steps:
+A multi-step modal for creating new agents on git worktrees, opened globally with `Opt+R` (macOS) / `Alt+R`. The modal guides the user through 4 sequential steps:
 
 | Step | Title | Description |
 |------|-------|-------------|
@@ -376,11 +376,11 @@ A multi-step modal for creating new agents on git worktrees, opened globally wit
 
 **Branch name sanitization:** In step 3 (New branch), user input is sanitized via `clust_ipc::branch::sanitize_branch_name()` before being sent to the hub. This converts spaces to hyphens, slashes to double underscores, strips git-invalid characters, collapses sequences, and handles edge cases. The sanitized name is what gets used as the actual git branch name.
 
-**Completion:** On completing step 4, the modal sends a `CreateWorktreeAgent` IPC message to the hub. The hub creates the worktree (via the existing `add_worktree()` logic), spawns an agent in it, and returns `WorktreeAgentStarted`. The TUI then opens the new agent in focus mode. On success, a status bar message confirms the agent started (e.g., "Agent started on feature-branch"). On failure (hub connection error, send error, unexpected response, or hub-reported error), the error is surfaced as a status bar error message instead of being lost to stderr. The `AgentStartResult` enum has `Started` and `Failed(String)` variants to communicate the outcome from the background tokio task to the main event loop.
+**Completion:** On completing step 4, the modal sends a `CreateWorktreeAgent` IPC message to the hub. The hub creates the worktree (via the existing `add_worktree()` logic), spawns an agent in it, and returns `WorktreeAgentStarted`. The behavior depends on the active tab: when on the **Overview tab**, the TUI stays in overview mode and selects the newly created agent's panel after the next agent sync (via `pending_overview_select` and `OverviewState::select_agent_by_id()`); when on the **Repositories tab**, the TUI opens the new agent in focus mode as before. On success, a status bar message confirms the agent started (e.g., "Agent started on feature-branch"). On failure (hub connection error, send error, unexpected response, or hub-reported error), the error is surfaced as a status bar error message instead of being lost to stderr. The `AgentStartResult` enum has `Started` and `Failed(String)` variants to communicate the outcome from the background tokio task to the main event loop.
 
 **Rendering:** The modal is rendered as a centered overlay (60 columns wide, 60% of terminal height) with a titled border, input field with visible cursor, and a scrollable list with fuzzy-matched results. The selected item is indicated with a `>` prefix and bold text. In the prompt step (4/4), the input area expands to fill remaining modal space and text wraps within the field (`.wrap(Wrap { trim: false })`) with automatic scrolling to keep the cursor visible.
 
-The `Opt+E` / `Alt+E` hint is shown in the status bar (platform-aware).
+The `Opt+R` / `Alt+R` hint is shown in the status bar (platform-aware).
 
 ### Search Agent Modal
 
