@@ -67,6 +67,8 @@ pub struct AgentPanel {
     pub vterm: TerminalEmulator,
     pub command_tx: mpsc::Sender<PanelCommand>,
     pub exited: bool,
+    /// Whether the worktree cleanup dialog has already been shown for this panel.
+    pub worktree_cleanup_shown: bool,
     /// Vertical scroll offset for scrollback (0 = live, >0 = scrolled back).
     pub panel_scroll_offset: usize,
     task_handle: JoinHandle<()>,
@@ -407,6 +409,7 @@ impl OverviewState {
             vterm: TerminalEmulator::new(cols as usize, rows as usize),
             command_tx,
             exited: false,
+            worktree_cleanup_shown: false,
             panel_scroll_offset: 0,
             task_handle: handle,
         });
@@ -1029,6 +1032,7 @@ impl FocusModeState {
             vterm: TerminalEmulator::new(cols as usize, rows as usize),
             command_tx,
             exited: false,
+            worktree_cleanup_shown: false,
             panel_scroll_offset: 0,
             task_handle: handle,
         });
