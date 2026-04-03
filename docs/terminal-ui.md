@@ -204,6 +204,7 @@ On startup, `clust ui` automatically connects to the hub daemon, starting it if 
 | `?` | Toggle keyboard shortcut overlay |
 | `F2` | Toggle mouse capture (allows text selection and link clicking when off) |
 | `Opt+E` (macOS) / `Alt+E` | Open the create-agent modal |
+| `Opt+F` (macOS) / `Alt+F` | Open the search-agent modal (only when agents are running) |
 
 **Repositories tab:**
 
@@ -347,7 +348,7 @@ The agent's `working_dir`, `repo_path`, and `branch_name` are passed to `open_ag
 
 The `?` key toggles a keyboard shortcut overlay rendered as a centered modal (44 columns wide) anchored to the bottom of the content area. The modal is organized into sections with bold secondary-colored headers and context-aware visibility:
 
-- **Global section (always shown):** `q / Esc×2`, `Q`, `Ctrl+C`, `Tab`, `Shift+Tab`, `?`, `F2`.
+- **Global section (always shown):** `q / Esc×2`, `Q`, `Ctrl+C`, `Tab`, `Shift+Tab`, `?`, `F2`, `Alt+E`, `Alt+F`.
 - **Repositories section (shown when Repositories tab is active):** `↑/↓` navigate, `←/→` navigate tree, `Shift+←/→` switch panel, `Enter` open menu/focus agent, `Space` collapse/expand, `v` toggle grouping.
 - **Overview section (shown when Overview tab is active):** `Shift+←/→` scroll panels, `Shift+↓` enter terminal, plus an "In terminal:" sub-context label followed by `Shift+↑` back to options bar, `Shift+↓` enter focus mode, `Shift+←/→` switch agent, `PgUp/PgDn` scroll terminal.
 - **Focus Mode section (shown when in focus mode):** `Shift+↑` exit, `Shift+←/→` switch panel, `Shift+PgUp/PgDn` scroll terminal, plus a "Left panel:" sub-context label followed by `Tab` cycle tabs, `↑/↓` scroll diff.
@@ -380,6 +381,24 @@ A multi-step modal for creating new agents on git worktrees, opened globally wit
 **Rendering:** The modal is rendered as a centered overlay (60 columns wide, 60% of terminal height) with a titled border, input field with visible cursor, and a scrollable list with fuzzy-matched results. The selected item is indicated with a `>` prefix and bold text. In the prompt step (4/4), the input area expands to fill remaining modal space and text wraps within the field (`.wrap(Wrap { trim: false })`) with automatic scrolling to keep the cursor visible.
 
 The `Opt+E` / `Alt+E` hint is shown in the status bar (platform-aware).
+
+### Search Agent Modal
+
+A fuzzy search modal for quickly finding and opening running agents, opened globally with `Opt+F` (macOS) / `Alt+F`. The modal is only available when at least one agent is running.
+
+**Search fields:** The fuzzy matcher (SkimV2 algorithm via `fuzzy-matcher`) searches across all agent fields: ID, agent binary name, branch name, repo path, repo name (last path component), working directory, and hub name. Results are ranked by best match score.
+
+**Navigation:**
+- Type to filter -- fuzzy matching narrows the agent list in real time
+- `Up` / `Down` -- move selection through filtered results
+- `Left` / `Right` -- move cursor within the input field
+- `Backspace` -- delete character before cursor
+- `Enter` -- open the selected agent in focus mode
+- `Esc` -- cancel and close the modal
+
+**Rendering:** The modal is rendered as a centered overlay (70 columns wide, 60% of terminal height) with a titled border ("Search Agents"), a hint line, an input field with a visible block cursor, and a scrollable list of matching agents. The selected item is indicated with a `>` prefix and bold text. Each agent line shows: binary name, branch name (if present, in info color when selected), repo name (last path component), and a short ID suffix. The list scrolls automatically to keep the selection visible.
+
+**Completion:** On selecting an agent with Enter, the modal closes and the agent is opened in focus mode (same behavior as entering focus mode from the Repositories or Overview tabs).
 
 ### Mouse Support
 

@@ -7,6 +7,7 @@ mod output_filter;
 mod overview;
 mod hub_launcher;
 mod scroll_break;
+mod search_modal;
 mod terminal;
 pub mod terminal_emulator;
 mod theme;
