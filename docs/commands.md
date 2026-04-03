@@ -321,7 +321,10 @@ These shortcuts are active in the `clust ui` dashboard. They are displayed in th
 | `Tab` | Switch to next tab |
 | `Shift+Tab` | Switch to previous tab |
 | `?` | Toggle keyboard shortcut overlay |
+| `F2` | Toggle mouse capture (allows text selection and link clicking when off) |
 | `Opt+R` (macOS) / `Alt+R` | Open the create-agent modal (multi-step builder for creating agents on worktrees) |
+| `Opt+D` (macOS) / `Alt+D` | Open the detached agent modal (start agent in any directory) |
+| `Opt+F` (macOS) / `Alt+F` | Open the search-agent modal (only when agents are running) |
 
 **Repositories tab:**
 
@@ -353,6 +356,8 @@ These shortcuts are active in the `clust ui` dashboard. They are displayed in th
 | `Shift+↑` | Exit terminal, return to options bar |
 | `Shift+↓` | Enter focus mode for the focused agent |
 | `Shift+←` / `Shift+→` | Switch to previous/next agent panel |
+| `PageUp` / `PageDown` | Scroll focused panel through scrollback history |
+| `Shift+PageUp` / `Shift+PageDown` | Scroll focused panel through scrollback history |
 | All other keys | Forwarded to the focused agent's PTY |
 
 **Focus mode (right panel focused):**

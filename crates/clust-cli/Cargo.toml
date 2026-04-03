@@ -17,6 +17,7 @@ crossterm = "0.28"
 which = "7"
 vt100 = "0.15"
 fuzzy-matcher = "0.3"
+dirs = "6"
 
 [dev-dependencies]
 assert_cmd = "2"

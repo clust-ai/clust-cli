@@ -333,6 +333,7 @@ dependencies = [
  "clap",
  "clust-ipc",
  "crossterm",
+ "dirs",
  "fuzzy-matcher",
  "predicates",
  "ratatui",
