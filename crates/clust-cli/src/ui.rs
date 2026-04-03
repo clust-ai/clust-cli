@@ -21,6 +21,7 @@ use clust_ipc::{AgentInfo, CliMessage, HubMessage, RepoInfo, DEFAULT_HUB};
 use crate::{
     context_menu::{ContextMenu, ContextMenuItem, MenuResult},
     create_agent_modal::{CreateAgentModal, ModalResult},
+    detached_agent_modal::{DetachedAgentModal, DetachedModalResult},
     format::{format_attached, format_started},
     ipc,
     overview::{self, OverviewFocus, OverviewState},
@@ -48,6 +49,7 @@ enum AgentStartResult {
         working_dir: String,
         repo_path: Option<String>,
         branch_name: Option<String>,
+        is_worktree: bool,
     },
     Failed(String),
 }
@@ -866,6 +868,8 @@ pub fn run(hub_name: &str) -> io::Result<()> {
     let mut search_modal: Option<SearchModal> = None;
     // Agent ID to select in overview after next sync
     let mut pending_overview_select: Option<String> = None;
+    // Detached (directory) agent modal state
+    let mut detached_modal: Option<DetachedAgentModal> = None;
     // Purge progress modal state
     let mut purge_progress: Option<PurgeProgress> = None;
     let (agent_start_tx, mut agent_start_rx) =
@@ -904,6 +908,7 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                     working_dir,
                     repo_path,
                     branch_name,
+                    is_worktree,
                 } => {
                     if active_tab == ActiveTab::Overview {
                         // Stay in overview mode; select the agent after next sync
@@ -921,13 +926,13 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                             &working_dir,
                             repo_path.as_deref(),
                             branch_name.as_deref(),
-                            true, // WorktreeAgentStarted → always a worktree
+                            is_worktree,
                         );
                         in_focus_mode = true;
                     }
-                    let branch_label = branch_name.as_deref().unwrap_or("unknown");
+                    let label = branch_name.as_deref().unwrap_or(&working_dir);
                     status_message = Some(StatusMessage {
-                        text: format!("Agent started on {branch_label}"),
+                        text: format!("Agent started in {label}"),
                         level: StatusLevel::Success,
                         created: Instant::now(),
                     });
@@ -1037,7 +1042,7 @@ pub fn run(hub_name: &str) -> io::Result<()> {
             .collect();
 
         let mut click_map = ClickMap::default();
-        let show_modal = create_modal.is_some();
+        let show_modal = create_modal.is_some() || detached_modal.is_some();
         let show_search = search_modal.is_some();
         let purge_ref = &purge_progress;
 
@@ -1162,6 +1167,9 @@ pub fn run(hub_name: &str) -> io::Result<()> {
 
             if show_modal {
                 if let Some(ref modal) = create_modal {
+                    modal.render(frame, content_area);
+                }
+                if let Some(ref modal) = detached_modal {
                     modal.render(frame, content_area);
                 }
             }
@@ -1425,6 +1433,7 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                                                         working_dir,
                                                                         repo_path,
                                                                         branch_name,
+                                                                        is_worktree: true,
                                                                     })
                                                                     .await;
                                                             }
@@ -1494,9 +1503,9 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                                             Ok(HubMessage::AgentStarted {
                                                                 id,
                                                                 agent_binary,
+                                                                is_worktree,
                                                                 repo_path,
                                                                 branch_name,
-                                                                ..
                                                             }) => {
                                                                 let working_dir = repo_path
                                                                     .clone()
@@ -1508,6 +1517,7 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                                                         working_dir,
                                                                         repo_path,
                                                                         branch_name,
+                                                                        is_worktree,
                                                                     })
                                                                     .await;
                                                             }
@@ -1766,6 +1776,7 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                                                             working_dir,
                                                                             repo_path,
                                                                             branch_name,
+                                                                            is_worktree: true,
                                                                         })
                                                                         .await;
                                                                 }
@@ -1879,6 +1890,7 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                                                         working_dir,
                                                                         repo_path,
                                                                         branch_name,
+                                                                        is_worktree: true,
                                                                     })
                                                                     .await;
                                                             }
@@ -1993,6 +2005,7 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                                     working_dir,
                                                     repo_path,
                                                     branch_name,
+                                                    is_worktree: true,
                                                 })
                                                 .await;
                                         }
@@ -2044,6 +2057,87 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                             }
                             SearchResult::Pending => {}
                         }
+                    // Detached (directory) agent modal takes priority
+                    } else if let Some(ref mut modal) = detached_modal {
+                        match modal.handle_key(key) {
+                            DetachedModalResult::Cancelled => {
+                                detached_modal = None;
+                            }
+                            DetachedModalResult::Completed(output) => {
+                                detached_modal = None;
+                                let tx = agent_start_tx.clone();
+                                let hub = hub_name.to_string();
+                                let (cols, rows) =
+                                    crossterm::terminal::size().unwrap_or((80, 24));
+                                let wd = output.working_dir.clone();
+                                tokio::spawn(async move {
+                                    let mut stream = match ipc::try_connect().await {
+                                        Ok(s) => s,
+                                        Err(e) => {
+                                            let _ = tx.send(AgentStartResult::Failed(
+                                                format!("Agent start failed: hub connect error: {e}")
+                                            )).await;
+                                            return;
+                                        }
+                                    };
+                                    let msg = CliMessage::StartAgent {
+                                        prompt: output.prompt,
+                                        agent_binary: None,
+                                        working_dir: wd.clone(),
+                                        cols,
+                                        rows: rows.saturating_sub(2).max(1),
+                                        accept_edits: false,
+                                        hub,
+                                    };
+                                    if let Err(e) =
+                                        clust_ipc::send_message(&mut stream, &msg).await
+                                    {
+                                        let _ = tx.send(AgentStartResult::Failed(
+                                            format!("Agent start failed: send error: {e}")
+                                        )).await;
+                                        return;
+                                    }
+                                    match clust_ipc::recv_message::<HubMessage>(&mut stream)
+                                        .await
+                                    {
+                                        Ok(HubMessage::AgentStarted {
+                                            id,
+                                            agent_binary,
+                                            is_worktree,
+                                            repo_path,
+                                            branch_name,
+                                        }) => {
+                                            let _ = tx
+                                                .send(AgentStartResult::Started {
+                                                    agent_id: id,
+                                                    agent_binary,
+                                                    working_dir: wd,
+                                                    repo_path,
+                                                    branch_name,
+                                                    is_worktree,
+                                                })
+                                                .await;
+                                        }
+                                        Ok(HubMessage::Error { message }) => {
+                                            let _ = tx.send(AgentStartResult::Failed(
+                                                format!("Agent start failed: {message}")
+                                            )).await;
+                                        }
+                                        Ok(_) => {
+                                            let _ = tx.send(AgentStartResult::Failed(
+                                                "Agent start failed: unexpected hub response".to_string()
+                                            )).await;
+                                        }
+                                        Err(e) => {
+                                            let _ = tx.send(AgentStartResult::Failed(
+                                                format!("Agent start failed: recv error: {e}")
+                                            )).await;
+                                        }
+                                    }
+                                });
+                            }
+                            DetachedModalResult::Pending => {}
+                        }
                     } else if key.code == KeyCode::Char('r')
                         && key.modifiers.contains(KeyModifiers::ALT)
                     {
@@ -2052,6 +2146,12 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                             create_modal = Some(CreateAgentModal::new(repos.clone()));
                             show_help = false;
                         }
+                    } else if key.code == KeyCode::Char('d')
+                        && key.modifiers.contains(KeyModifiers::ALT)
+                    {
+                        // Global shortcut: Alt+D opens detached agent modal
+                        detached_modal = Some(DetachedAgentModal::new());
+                        show_help = false;
                     } else if key.code == KeyCode::Char('f')
                         && key.modifiers.contains(KeyModifiers::ALT)
                     {
@@ -2886,6 +2986,7 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                                                         working_dir,
                                                                         repo_path,
                                                                         branch_name,
+                                                                        is_worktree: true,
                                                                     })
                                                                     .await;
                                                             }
@@ -2955,9 +3056,9 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                                             Ok(HubMessage::AgentStarted {
                                                                 id,
                                                                 agent_binary,
+                                                                is_worktree,
                                                                 repo_path,
                                                                 branch_name,
-                                                                ..
                                                             }) => {
                                                                 let working_dir = repo_path
                                                                     .clone()
@@ -2969,6 +3070,7 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                                                         working_dir,
                                                                         repo_path,
                                                                         branch_name,
+                                                                        is_worktree,
                                                                     })
                                                                     .await;
                                                             }
@@ -3227,6 +3329,7 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                                                             working_dir,
                                                                             repo_path,
                                                                             branch_name,
+                                                                            is_worktree: true,
                                                                         })
                                                                         .await;
                                                                 }
@@ -3340,6 +3443,7 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                                                         working_dir,
                                                                         repo_path,
                                                                         branch_name,
+                                                                        is_worktree: true,
                                                                     })
                                                                     .await;
                                                             }
@@ -4864,7 +4968,8 @@ fn render_help_overlay(frame: &mut Frame, area: Rect, active_tab: ActiveTab, in_
     lines.push(binding_line("Shift+Tab", "Previous tab"));
     lines.push(binding_line("?", "Toggle this help"));
     lines.push(binding_line("F2", "Toggle mouse capture"));
-    lines.push(binding_line("Alt+E", "Create agent"));
+    lines.push(binding_line("Alt+R", "Create agent"));
+    lines.push(binding_line("Alt+D", "New directory agent"));
     lines.push(binding_line("Alt+F", "Search agents"));
 
     // -- Repositories --

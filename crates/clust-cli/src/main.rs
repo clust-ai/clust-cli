@@ -1,6 +1,7 @@
 mod cli;
 mod context_menu;
 mod create_agent_modal;
+mod detached_agent_modal;
 mod format;
 mod ipc;
 mod output_filter;
