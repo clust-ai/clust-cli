@@ -2138,10 +2138,10 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                             }
                             DetachedModalResult::Pending => {}
                         }
-                    } else if key.code == KeyCode::Char('r')
+                    } else if key.code == KeyCode::Char('e')
                         && key.modifiers.contains(KeyModifiers::ALT)
                     {
-                        // Global shortcut: Alt+R opens create-agent modal
+                        // Global shortcut: Alt+E opens create-agent modal
                         if !repos.is_empty() {
                             create_modal = Some(CreateAgentModal::new(repos.clone()));
                             show_help = false;
@@ -4968,7 +4968,7 @@ fn render_help_overlay(frame: &mut Frame, area: Rect, active_tab: ActiveTab, in_
     lines.push(binding_line("Shift+Tab", "Previous tab"));
     lines.push(binding_line("?", "Toggle this help"));
     lines.push(binding_line("F2", "Toggle mouse capture"));
-    lines.push(binding_line("Alt+R", "Create agent"));
+    lines.push(binding_line("Alt+E", "Create agent"));
     lines.push(binding_line("Alt+D", "New directory agent"));
     lines.push(binding_line("Alt+F", "Search agents"));
 
