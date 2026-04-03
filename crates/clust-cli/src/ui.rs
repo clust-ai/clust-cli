@@ -190,6 +190,7 @@ pub(crate) struct ClickMap {
 
     // Overview tab
     pub(crate) overview_panels: Vec<(Rect, usize)>, // (area, global_panel_idx)
+    pub(crate) overview_filter_chips: Vec<(Rect, String)>, // (area, repo_path)
 
     // Focus mode
     pub(crate) focus_left_area: Rect,
@@ -1101,7 +1102,7 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                         );
                     }
                     ActiveTab::Overview => {
-                        overview::render_overview(frame, content_area, &mut overview_state, &mut click_map, &repo_colors);
+                        overview::render_overview(frame, content_area, &mut overview_state, &mut click_map, &repo_colors, &repos);
                     }
                 }
             }
@@ -2353,6 +2354,26 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                         overview_state
                                             .scroll_right(last_content_area.width);
                                     }
+                                    // Filter chip navigation
+                                    KeyCode::Left if !shift && !repos.is_empty() => {
+                                        if overview_state.filter_cursor > 0 {
+                                            overview_state.filter_cursor -= 1;
+                                        }
+                                    }
+                                    KeyCode::Right if !shift && !repos.is_empty() => {
+                                        if overview_state.filter_cursor + 1 < repos.len() {
+                                            overview_state.filter_cursor += 1;
+                                        }
+                                    }
+                                    KeyCode::Enter | KeyCode::Char(' ') if !repos.is_empty() => {
+                                        if let Some(repo) = repos.get(overview_state.filter_cursor) {
+                                            if overview_state.hidden_repos.contains(&repo.path) {
+                                                overview_state.hidden_repos.remove(&repo.path);
+                                            } else {
+                                                overview_state.hidden_repos.insert(repo.path.clone());
+                                            }
+                                        }
+                                    }
                                     _ => {}
                                 }
                             }
@@ -3461,7 +3482,17 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                 }
                             }
                             ActiveTab::Overview => {
-                                if let Some((_, idx)) = click_map.overview_panels.iter().find(|(r, _)| r.contains(pos)) {
+                                // Filter chip clicks
+                                if let Some((_, repo_path)) = click_map.overview_filter_chips.iter().find(|(r, _)| r.contains(pos)) {
+                                    let rp = repo_path.clone();
+                                    if overview_state.hidden_repos.contains(&rp) {
+                                        overview_state.hidden_repos.remove(&rp);
+                                    } else {
+                                        overview_state.hidden_repos.insert(rp);
+                                    }
+                                }
+                                // Panel clicks
+                                else if let Some((_, idx)) = click_map.overview_panels.iter().find(|(r, _)| r.contains(pos)) {
                                     overview_state.focus = overview::OverviewFocus::Terminal(*idx);
                                 }
                             }
