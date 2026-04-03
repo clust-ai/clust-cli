@@ -471,6 +471,11 @@ pub fn add_worktree(
 
     let wt_path = worktree_path(repo_root, branch);
 
+    // If the worktree already exists, reuse it.
+    if wt_path.join(".git").exists() {
+        return Ok(wt_path);
+    }
+
     if let Some(parent) = wt_path.parent() {
         std::fs::create_dir_all(parent)
             .map_err(|e| format!("failed to create worktree directory: {e}"))?;
