@@ -228,6 +228,7 @@ enum BranchAction {
 /// Action to execute after user confirms in a confirmation dialog.
 enum ConfirmedAction {
     PurgeRepo { repo_path: String },
+    StartAgentDetach { repo_path: String, branch_name: String },
 }
 
 /// Tracks which context menu is currently open.
@@ -251,6 +252,7 @@ enum ActiveMenu {
     BranchActions {
         repo_path: String,
         branch_name: String,
+        is_head: bool,
         agents: Vec<AgentInfo>,
         actions: Vec<BranchAction>,
         menu: ContextMenu,
@@ -1297,12 +1299,32 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                     ActiveMenu::BranchActions {
                                         repo_path,
                                         branch_name,
+                                        is_head,
                                         agents: branch_agents,
                                         actions,
                                         ..
                                     } => {
                                         if let Some(&action) = actions.get(idx) {
                                             match action {
+                                                BranchAction::StartAgent if is_head => {
+                                                    active_menu = Some(ActiveMenu::ConfirmAction {
+                                                        action: ConfirmedAction::StartAgentDetach {
+                                                            repo_path,
+                                                            branch_name,
+                                                        },
+                                                        menu: ContextMenu::new(
+                                                            "Detach HEAD",
+                                                            vec![
+                                                                "Confirm".to_string(),
+                                                                "Cancel".to_string(),
+                                                            ],
+                                                        )
+                                                        .with_description(
+                                                            "This will detach HEAD in your repo.\nThe branch will be moved to a worktree for the agent.".to_string(),
+                                                        ),
+                                                    });
+                                                    continue;
+                                                }
                                                 BranchAction::StartAgent => {
                                                     let tx = agent_start_tx.clone();
                                                     let hub = hub_name.to_string();
@@ -1758,6 +1780,88 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                             match action {
                                                 ConfirmedAction::PurgeRepo { repo_path } => {
                                                     purge_progress = Some(start_purge_async(&repo_path));
+                                                }
+                                                ConfirmedAction::StartAgentDetach { repo_path, branch_name } => {
+                                                    let tx = agent_start_tx.clone();
+                                                    let hub = hub_name.to_string();
+                                                    let (cols, rows) =
+                                                        crossterm::terminal::size()
+                                                            .unwrap_or((80, 24));
+                                                    tokio::spawn(async move {
+                                                        let mut stream =
+                                                            match ipc::try_connect().await {
+                                                                Ok(s) => s,
+                                                                Err(e) => {
+                                                                    let _ = tx.send(AgentStartResult::Failed(
+                                                                        format!("Agent create failed: hub connect error: {e}")
+                                                                    )).await;
+                                                                    return;
+                                                                }
+                                                            };
+                                                        let msg =
+                                                            CliMessage::CreateWorktreeAgent {
+                                                                repo_path,
+                                                                target_branch: Some(branch_name),
+                                                                new_branch: None,
+                                                                prompt: None,
+                                                                agent_binary: None,
+                                                                cols,
+                                                                rows: rows
+                                                                    .saturating_sub(2)
+                                                                    .max(1),
+                                                                accept_edits: false,
+                                                                hub,
+                                                            };
+                                                        if let Err(e) = clust_ipc::send_message(
+                                                            &mut stream,
+                                                            &msg,
+                                                        )
+                                                        .await
+                                                        {
+                                                            let _ = tx.send(AgentStartResult::Failed(
+                                                                format!("Agent create failed: send error: {e}")
+                                                            )).await;
+                                                            return;
+                                                        }
+                                                        match clust_ipc::recv_message::<HubMessage>(
+                                                            &mut stream,
+                                                        )
+                                                        .await
+                                                        {
+                                                            Ok(HubMessage::WorktreeAgentStarted {
+                                                                id,
+                                                                agent_binary,
+                                                                working_dir,
+                                                                repo_path,
+                                                                branch_name,
+                                                            }) => {
+                                                                let _ = tx
+                                                                    .send(AgentStartResult::Started {
+                                                                        agent_id: id,
+                                                                        agent_binary,
+                                                                        working_dir,
+                                                                        repo_path,
+                                                                        branch_name,
+                                                                    })
+                                                                    .await;
+                                                            }
+                                                            Ok(HubMessage::Error { message }) => {
+                                                                let _ = tx.send(AgentStartResult::Failed(
+                                                                    format!("Agent create failed: {message}")
+                                                                )).await;
+                                                            }
+                                                            Ok(_) => {
+                                                                let _ = tx.send(AgentStartResult::Failed(
+                                                                    "Agent create failed: unexpected hub response".to_string()
+                                                                )).await;
+                                                            }
+                                                            Err(e) => {
+                                                                let _ = tx.send(AgentStartResult::Failed(
+                                                                    format!("Agent create failed: recv error: {e}")
+                                                                )).await;
+                                                            }
+                                                        }
+                                                    });
                                                 }
                                             }
                                         }
@@ -2286,6 +2390,7 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                                                 active_menu = Some(ActiveMenu::BranchActions {
                                                                     repo_path: repo.path.clone(),
                                                                     branch_name: branch.name.clone(),
+                                                                    is_head: branch.is_head,
                                                                     agents: matching,
                                                                     actions,
                                                                     menu: ContextMenu::new(&branch.name, labels),
@@ -2305,6 +2410,7 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                                                 active_menu = Some(ActiveMenu::BranchActions {
                                                                     repo_path: repo.path.clone(),
                                                                     branch_name: branch.name.clone(),
+                                                                    is_head: false,
                                                                     agents: vec![],
                                                                     actions,
                                                                     menu: ContextMenu::new(&branch.name, labels),
@@ -2614,12 +2720,32 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                     ActiveMenu::BranchActions {
                                         repo_path,
                                         branch_name,
+                                        is_head,
                                         agents: branch_agents,
                                         actions,
                                         ..
                                     } => {
                                         if let Some(&action) = actions.get(idx) {
                                             match action {
+                                                BranchAction::StartAgent if is_head => {
+                                                    active_menu = Some(ActiveMenu::ConfirmAction {
+                                                        action: ConfirmedAction::StartAgentDetach {
+                                                            repo_path,
+                                                            branch_name,
+                                                        },
+                                                        menu: ContextMenu::new(
+                                                            "Detach HEAD",
+                                                            vec![
+                                                                "Confirm".to_string(),
+                                                                "Cancel".to_string(),
+                                                            ],
+                                                        )
+                                                        .with_description(
+                                                            "This will detach HEAD in your repo.\nThe branch will be moved to a worktree for the agent.".to_string(),
+                                                        ),
+                                                    });
+                                                    continue;
+                                                }
                                                 BranchAction::StartAgent => {
                                                     let tx = agent_start_tx.clone();
                                                     let hub = hub_name.to_string();
@@ -3075,6 +3201,88 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                             match action {
                                                 ConfirmedAction::PurgeRepo { repo_path } => {
                                                     purge_progress = Some(start_purge_async(&repo_path));
+                                                }
+                                                ConfirmedAction::StartAgentDetach { repo_path, branch_name } => {
+                                                    let tx = agent_start_tx.clone();
+                                                    let hub = hub_name.to_string();
+                                                    let (cols, rows) =
+                                                        crossterm::terminal::size()
+                                                            .unwrap_or((80, 24));
+                                                    tokio::spawn(async move {
+                                                        let mut stream =
+                                                            match ipc::try_connect().await {
+                                                                Ok(s) => s,
+                                                                Err(e) => {
+                                                                    let _ = tx.send(AgentStartResult::Failed(
+                                                                        format!("Agent create failed: hub connect error: {e}")
+                                                                    )).await;
+                                                                    return;
+                                                                }
+                                                            };
+                                                        let msg =
+                                                            CliMessage::CreateWorktreeAgent {
+                                                                repo_path,
+                                                                target_branch: Some(branch_name),
+                                                                new_branch: None,
+                                                                prompt: None,
+                                                                agent_binary: None,
+                                                                cols,
+                                                                rows: rows
+                                                                    .saturating_sub(2)
+                                                                    .max(1),
+                                                                accept_edits: false,
+                                                                hub,
+                                                            };
+                                                        if let Err(e) = clust_ipc::send_message(
+                                                            &mut stream,
+                                                            &msg,
+                                                        )
+                                                        .await
+                                                        {
+                                                            let _ = tx.send(AgentStartResult::Failed(
+                                                                format!("Agent create failed: send error: {e}")
+                                                            )).await;
+                                                            return;
+                                                        }
+                                                        match clust_ipc::recv_message::<HubMessage>(
+                                                            &mut stream,
+                                                        )
+                                                        .await
+                                                        {
+                                                            Ok(HubMessage::WorktreeAgentStarted {
+                                                                id,
+                                                                agent_binary,
+                                                                working_dir,
+                                                                repo_path,
+                                                                branch_name,
+                                                            }) => {
+                                                                let _ = tx
+                                                                    .send(AgentStartResult::Started {
+                                                                        agent_id: id,
+                                                                        agent_binary,
+                                                                        working_dir,
+                                                                        repo_path,
+                                                                        branch_name,
+                                                                    })
+                                                                    .await;
+                                                            }
+                                                            Ok(HubMessage::Error { message }) => {
+                                                                let _ = tx.send(AgentStartResult::Failed(
+                                                                    format!("Agent create failed: {message}")
+                                                                )).await;
+                                                            }
+                                                            Ok(_) => {
+                                                                let _ = tx.send(AgentStartResult::Failed(
+                                                                    "Agent create failed: unexpected hub response".to_string()
+                                                                )).await;
+                                                            }
+                                                            Err(e) => {
+                                                                let _ = tx.send(AgentStartResult::Failed(
+                                                                    format!("Agent create failed: recv error: {e}")
+                                                                )).await;
+                                                            }
+                                                        }
+                                                    });
                                                 }
                                             }
                                         }
