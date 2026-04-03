@@ -24,6 +24,7 @@ use crate::{
     format::{format_attached, format_started},
     ipc,
     overview::{self, OverviewFocus, OverviewState},
+    search_modal::{SearchModal, SearchResult},
     terminal_emulator,
     theme, version,
 };
@@ -860,6 +861,8 @@ pub fn run(hub_name: &str) -> io::Result<()> {
 
     // Create-agent modal state
     let mut create_modal: Option<CreateAgentModal> = None;
+    // Search-agent modal state
+    let mut search_modal: Option<SearchModal> = None;
     // Purge progress modal state
     let mut purge_progress: Option<PurgeProgress> = None;
     let (agent_start_tx, mut agent_start_rx) =
@@ -1024,6 +1027,7 @@ pub fn run(hub_name: &str) -> io::Result<()> {
 
         let mut click_map = ClickMap::default();
         let show_modal = create_modal.is_some();
+        let show_search = search_modal.is_some();
         let purge_ref = &purge_progress;
 
         terminal.draw(|frame| {
@@ -1147,6 +1151,12 @@ pub fn run(hub_name: &str) -> io::Result<()> {
 
             if show_modal {
                 if let Some(ref modal) = create_modal {
+                    modal.render(frame, content_area);
+                }
+            }
+
+            if show_search {
+                if let Some(ref modal) = search_modal {
                     modal.render(frame, content_area);
                 }
             }
@@ -1995,12 +2005,48 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                             }
                             ModalResult::Pending => {}
                         }
+                    // Search-agent modal takes priority over all other input
+                    } else if let Some(ref mut modal) = search_modal {
+                        match modal.handle_key(key) {
+                            SearchResult::Cancelled => {
+                                search_modal = None;
+                            }
+                            SearchResult::Selected(agent) => {
+                                search_modal = None;
+                                let fm_cols = (last_content_area.width * 40 / 100)
+                                    .saturating_sub(2)
+                                    .max(1);
+                                let fm_rows =
+                                    last_content_area.height.saturating_sub(3).max(1);
+                                focus_mode_state.open_agent(
+                                    &agent.id,
+                                    &agent.agent_binary,
+                                    fm_cols,
+                                    fm_rows,
+                                    &agent.working_dir,
+                                    agent.repo_path.as_deref(),
+                                    agent.branch_name.as_deref(),
+                                    agent.is_worktree,
+                                );
+                                in_focus_mode = true;
+                                active_tab = ActiveTab::Overview;
+                            }
+                            SearchResult::Pending => {}
+                        }
                     } else if key.code == KeyCode::Char('e')
                         && key.modifiers.contains(KeyModifiers::ALT)
                     {
                         // Global shortcut: Alt+E opens create-agent modal
                         if !repos.is_empty() {
                             create_modal = Some(CreateAgentModal::new(repos.clone()));
+                            show_help = false;
+                        }
+                    } else if key.code == KeyCode::Char('f')
+                        && key.modifiers.contains(KeyModifiers::ALT)
+                    {
+                        // Global shortcut: Alt+F opens search-agent modal
+                        if !agents.is_empty() {
+                            search_modal = Some(SearchModal::new(agents.clone()));
                             show_help = false;
                         }
                     } else
@@ -4775,6 +4821,8 @@ fn render_help_overlay(frame: &mut Frame, area: Rect, active_tab: ActiveTab, in_
     lines.push(binding_line("Shift+Tab", "Previous tab"));
     lines.push(binding_line("?", "Toggle this help"));
     lines.push(binding_line("F2", "Toggle mouse capture"));
+    lines.push(binding_line("Alt+E", "Create agent"));
+    lines.push(binding_line("Alt+F", "Search agents"));
 
     // -- Repositories --
     if active_tab == ActiveTab::Repositories {
