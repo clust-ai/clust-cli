@@ -2440,6 +2440,10 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                                                     .collect();
                                                                 let mut labels = Vec::new();
                                                                 let mut actions = Vec::new();
+                                                                if branch.active_agent_count > 0 {
+                                                                    labels.push("Open Agent".to_string());
+                                                                    actions.push(BranchAction::OpenAgent);
+                                                                }
                                                                 labels.push("Start Agent (worktree)".to_string());
                                                                 actions.push(BranchAction::StartAgent);
                                                                 if branch.is_head {
@@ -2453,8 +2457,6 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                                                 if branch.active_agent_count > 0 {
                                                                     labels.push("Stop Agents".to_string());
                                                                     actions.push(BranchAction::StopAgents);
-                                                                    labels.push("Open Agent".to_string());
-                                                                    actions.push(BranchAction::OpenAgent);
                                                                 }
                                                                 if branch.is_worktree {
                                                                     labels.push("Remove Worktree".to_string());
