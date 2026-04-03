@@ -846,6 +846,7 @@ pub fn run(hub_name: &str) -> io::Result<()> {
     let mut focus_mode_state = overview::FocusModeState::new();
     let mut in_focus_mode = false;
     let mut status_message: Option<StatusMessage> = None;
+    let mut mouse_captured = true;
     let mut last_esc_press: Option<Instant> = None;
     let (init_cols, init_rows) = crossterm::terminal::size().unwrap_or((80, 24));
     let mut last_content_area = Rect {
@@ -996,6 +997,7 @@ pub fn run(hub_name: &str) -> io::Result<()> {
         let overview_focus = overview_state.focus;
         let status_msg_ref = status_message.as_ref();
         let show_help_now = show_help;
+        let mouse_captured_now = mouse_captured;
         let menu_ref = &active_menu;
         let repo_colors: HashMap<String, String> = repos
             .iter()
@@ -1104,6 +1106,7 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                 overview_focus,
                 focused_agent_info.as_ref(),
                 status_msg_ref,
+                mouse_captured_now,
             );
 
             if let Some(ref menu_state) = menu_ref {
@@ -1138,6 +1141,17 @@ pub fn run(hub_name: &str) -> io::Result<()> {
         if event::poll(Duration::from_millis(100))? {
             match event::read()? {
                 Event::Key(key) if key.kind == KeyEventKind::Press => {
+                    // F2: toggle mouse capture (global, never forwarded)
+                    if key.code == KeyCode::F(2) {
+                        mouse_captured = !mouse_captured;
+                        if mouse_captured {
+                            io::stdout().execute(EnableMouseCapture)?;
+                        } else {
+                            io::stdout().execute(DisableMouseCapture)?;
+                        }
+                        continue;
+                    }
+
                     // Purge progress modal: block all input, Esc dismisses when done
                     if purge_progress.is_some() {
                         if key.code == KeyCode::Esc
@@ -2447,7 +2461,7 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                         }
                     }
                 }
-                Event::Mouse(MouseEvent { kind: MouseEventKind::Down(MouseButton::Left), column, row, modifiers }) => {
+                Event::Mouse(MouseEvent { kind: MouseEventKind::Down(MouseButton::Left), column, row, modifiers }) if mouse_captured => {
                     let pos = Position { x: column, y: row };
 
                     // Ignore clicks while purge progress is shown
@@ -3192,7 +3206,7 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                         }
                     }
                 }
-                Event::Mouse(MouseEvent { kind: MouseEventKind::ScrollUp, column, row, .. }) => {
+                Event::Mouse(MouseEvent { kind: MouseEventKind::ScrollUp, column, row, .. }) if mouse_captured => {
                     let pos = Position { x: column, y: row };
                     if let Some(ref mut menu_variant) = active_menu {
                         match menu_variant {
@@ -3224,7 +3238,7 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                         }
                     }
                 }
-                Event::Mouse(MouseEvent { kind: MouseEventKind::ScrollDown, column, row, .. }) => {
+                Event::Mouse(MouseEvent { kind: MouseEventKind::ScrollDown, column, row, .. }) if mouse_captured => {
                     let pos = Position { x: column, y: row };
                     if let Some(ref mut menu_variant) = active_menu {
                         match menu_variant {
@@ -4382,6 +4396,7 @@ fn render_status_bar(
     overview_focus: OverviewFocus,
     focused_agent_info: Option<&(String, ratatui::style::Color, String)>,
     status_message: Option<&StatusMessage>,
+    mouse_captured: bool,
 ) {
     let bg = Style::default().bg(theme::R_BG_RAISED);
 
@@ -4425,6 +4440,17 @@ fn render_status_bar(
                     .bg(theme::R_BG_RAISED),
             ));
         }
+    }
+
+    if !mouse_captured {
+        left_spans.push(Span::styled("  ", Style::default().bg(theme::R_BG_RAISED)));
+        left_spans.push(Span::styled(
+            "MOUSE OFF \u{00b7} F2",
+            Style::default()
+                .fg(theme::R_WARNING)
+                .bg(theme::R_BG_RAISED)
+                .add_modifier(Modifier::BOLD),
+        ));
     }
 
     // Status message overrides keybinding hints
@@ -4542,6 +4568,7 @@ fn render_help_overlay(frame: &mut Frame, area: Rect, active_tab: ActiveTab, in_
     lines.push(binding_line("Tab", "Next tab"));
     lines.push(binding_line("Shift+Tab", "Previous tab"));
     lines.push(binding_line("?", "Toggle this help"));
+    lines.push(binding_line("F2", "Toggle mouse capture"));
 
     // -- Repositories --
     if active_tab == ActiveTab::Repositories {

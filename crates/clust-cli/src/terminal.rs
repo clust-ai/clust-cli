@@ -1,4 +1,5 @@
 use std::io::{self, Write};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use crossterm::{
@@ -28,6 +29,10 @@ const PAGE_UP: &[u8] = b"\x1b[5~";
 
 /// PageDown escape sequence.
 const PAGE_DOWN: &[u8] = b"\x1b[6~";
+
+/// F2 escape sequences (SS3 variant and CSI variant).
+const F2_SS3: &[u8] = b"\x1bOQ";
+const F2_CSI: &[u8] = b"\x1b[12~";
 
 /// Scrollback navigation state shared between input and output tasks.
 struct ScrollState {
@@ -132,6 +137,7 @@ impl AttachedSession {
             self.repo_path.as_deref(),
             self.branch_name.as_deref(),
             rows,
+            true,
         );
 
         // Send initial resize so the agent knows the available size
@@ -167,12 +173,14 @@ impl AttachedSession {
             ),
         ));
         let (scroll_cmd_tx, mut scroll_cmd_rx) = mpsc::channel::<ScrollCommand>(16);
+        let mouse_tracking = Arc::new(AtomicBool::new(true));
 
         // Task 1: Read HubMessages (output/exit) and render to terminal.
         // Output passes through the filter chain to prevent split escape sequences.
         // All output is stored in the scrollback buffer for scroll-back viewing.
         let scroll_state_out = Arc::clone(&scroll_state);
         let scrollback_out = Arc::clone(&scrollback);
+        let mouse_tracking_out = Arc::clone(&mouse_tracking);
         let agent_id_for_bar = agent_id.clone();
         let agent_binary_for_bar = agent_binary.clone();
         let repo_path_for_bar = repo_path.clone();
@@ -232,6 +240,7 @@ impl AttachedSession {
                                             repo_path_for_bar.as_deref(),
                                             branch_name_for_bar.as_deref(),
                                             total_rows,
+                                            mouse_tracking_out.load(Ordering::Relaxed),
                                         );
                                         let _ = write!(stdout, "\x1b8");
                                         let _ = stdout.flush();
@@ -276,6 +285,7 @@ impl AttachedSession {
                                     repo_path_for_bar.as_deref(),
                                     branch_name_for_bar.as_deref(),
                                     total_rows,
+                                    mouse_tracking_out.load(Ordering::Relaxed),
                                 );
                             }
                             None => {
@@ -306,6 +316,7 @@ impl AttachedSession {
         // PageUp/PageDown navigate the buffer. Any other keypress exits scrollback.
         let scroll_state_in = Arc::clone(&scroll_state);
         let scrollback_in = Arc::clone(&scrollback);
+        let mouse_tracking_in = Arc::clone(&mouse_tracking);
         let agent_id_for_input = agent_id.clone();
         let agent_binary_for_input = agent_binary.clone();
         let repo_path_for_input = repo_path.clone();
@@ -359,6 +370,51 @@ impl AttachedSession {
                                         },
                                     ).await;
                                     return SessionEnd::Detached;
+                                }
+
+                                // F2 = toggle mouse tracking
+                                let f2_pos = find_sequence(data, F2_SS3)
+                                    .or_else(|| find_sequence(data, F2_CSI));
+                                if let Some(pos) = f2_pos {
+                                    let was_enabled = mouse_tracking_in.fetch_xor(true, Ordering::Relaxed);
+                                    if was_enabled {
+                                        disable_mouse_tracking();
+                                    } else {
+                                        enable_mouse_tracking();
+                                    }
+                                    let (_, total_rows) = terminal::size().unwrap_or((80, 24));
+                                    draw_status_bar(
+                                        &agent_id_for_input,
+                                        &agent_binary_for_input,
+                                        repo_path_for_input.as_deref(),
+                                        branch_name_for_input.as_deref(),
+                                        total_rows,
+                                        !was_enabled,
+                                    );
+                                    // Forward bytes before/after F2 to agent
+                                    let seq_len = if find_sequence(data, F2_SS3) == Some(pos) {
+                                        F2_SS3.len()
+                                    } else {
+                                        F2_CSI.len()
+                                    };
+                                    let mut remaining = Vec::new();
+                                    if pos > 0 {
+                                        remaining.extend_from_slice(&data[..pos]);
+                                    }
+                                    let after = pos + seq_len;
+                                    if after < data.len() {
+                                        remaining.extend_from_slice(&data[after..]);
+                                    }
+                                    if !remaining.is_empty() {
+                                        let _ = clust_ipc::send_message_write(
+                                            &mut writer,
+                                            &CliMessage::AgentInput {
+                                                id: agent_id_for_input.clone(),
+                                                data: remaining,
+                                            },
+                                        ).await;
+                                    }
+                                    continue;
                                 }
 
                                 let in_scrollback = scroll_state_in.lock().unwrap().offset > 0;
@@ -416,6 +472,16 @@ impl AttachedSession {
                                                 },
                                             ).await;
                                         }
+                                    } else if !mouse_tracking_in.load(Ordering::Relaxed) {
+                                        // Mouse tracking off — forward all bytes
+                                        // directly (no scroll interception).
+                                        let _ = clust_ipc::send_message_write(
+                                            &mut writer,
+                                            &CliMessage::AgentInput {
+                                                id: agent_id_for_input.clone(),
+                                                data: data.to_vec(),
+                                            },
+                                        ).await;
                                     } else {
                                         // Intercept scroll-up to enter scrollback;
                                         // non-scroll bytes forwarded to agent.
@@ -565,6 +631,7 @@ impl AttachedSession {
                             repo_path_for_input.as_deref(),
                             branch_name_for_input.as_deref(),
                             rows,
+                            mouse_tracking_in.load(Ordering::Relaxed),
                         );
                         let _ = clust_ipc::send_message_write(
                             &mut writer,
@@ -662,6 +729,7 @@ fn write_status_bar_content(
     repo_path: Option<&str>,
     branch_name: Option<&str>,
     total_rows: u16,
+    mouse_tracking: bool,
 ) {
     let _ = write!(w, "\x1b[{total_rows};1H");
     let _ = write!(w, "{}", theme::BG_RAISED);
@@ -696,6 +764,15 @@ fn write_status_bar_content(
         }
         let _ = write!(w, "{RESET_FG}", RESET_FG = theme::RESET_FG);
     }
+    if !mouse_tracking {
+        let _ = write!(
+            w,
+            " {TEXT_TERTIARY}│{RESET_FG} {WARNING}\x1b[1mMOUSE OFF \u{00b7} F2\x1b[22m{RESET_FG}",
+            TEXT_TERTIARY = theme::TEXT_TERTIARY,
+            WARNING = theme::WARNING,
+            RESET_FG = theme::RESET_FG,
+        );
+    }
     let _ = write!(
         w,
         " {TEXT_TERTIARY}│{RESET_FG} {TEXT_TERTIARY}Ctrl+Q detach{RESET_FG}",
@@ -712,10 +789,11 @@ fn draw_status_bar(
     repo_path: Option<&str>,
     branch_name: Option<&str>,
     total_rows: u16,
+    mouse_tracking: bool,
 ) {
     let mut stdout = io::stdout().lock();
     let _ = write!(stdout, "\x1b7");
-    write_status_bar_content(&mut stdout, agent_id, agent_binary, repo_path, branch_name, total_rows);
+    write_status_bar_content(&mut stdout, agent_id, agent_binary, repo_path, branch_name, total_rows, mouse_tracking);
     let _ = write!(stdout, "\x1b8");
     let _ = stdout.flush();
 }

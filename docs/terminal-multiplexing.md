@@ -64,9 +64,10 @@ Input uses **raw stdin byte forwarding** (not crossterm event conversion). This 
 ### Rules
 
 - **Forward raw bytes directly.** Do not convert between event representations. Raw forwarding preserves mouse events, terminal-specific protocols (kitty keyboard, sixel), alt+key, and all escape sequences without loss.
-- **Intercept Ctrl+Q, PageUp, and mouse scroll in live mode.** Ctrl+Q (byte 0x11) is the detach key. PageUp (`\x1b[5~`) enters scrollback mode one page up. Mouse scroll-up also enters scrollback mode (by `SCROLL_STEP` lines per tick). Non-scroll mouse events (clicks, releases) and all keyboard input other than the above are forwarded to the child PTY unchanged. The `filter_scroll_only()` method on `ScrollBreak` handles this selective interception.
+- **Intercept Ctrl+Q, F2, PageUp, and mouse scroll in live mode.** Ctrl+Q (byte 0x11) is the detach key. F2 (`\x1bOQ` SS3 variant or `\x1b[12~` CSI variant) toggles mouse tracking on/off. PageUp (`\x1b[5~`) enters scrollback mode one page up. Mouse scroll-up also enters scrollback mode (by `SCROLL_STEP` lines per tick). Non-scroll mouse events (clicks, releases) and all keyboard input other than the above are forwarded to the child PTY unchanged. The `filter_scroll_only()` method on `ScrollBreak` handles this selective interception.
 - **Use SIGWINCH for resize detection** (`tokio::signal::unix::SignalKind::window_change()`), not crossterm events.
 - **Mouse button tracking is enabled by clust.** The attached session enables `?1000h` (button press/release) and `?1006h` (SGR encoding) so that scroll wheel events arrive as parseable mouse escape sequences instead of being converted to arrow keys by the terminal emulator in alternate screen mode. Non-scroll mouse events (clicks, releases) are forwarded to the agent in live mode; scroll events are intercepted for scrollback navigation. Only button tracking is enabled; `?1003h` (all-motion) is deliberately omitted to avoid flooding stdin with motion events.
+- **F2 toggles mouse tracking.** Pressing F2 (detected as `\x1bOQ` SS3 variant or `\x1b[12~` CSI variant in the raw byte stream) toggles an `AtomicBool` shared between input and output tasks. When mouse tracking is disabled, the terminal's mouse tracking escape sequences are turned off (allowing native text selection), mouse scroll interception is bypassed (all bytes are forwarded directly to the agent), and the status bar shows a `MOUSE OFF . F2` indicator. When re-enabled, mouse tracking escape sequences are re-sent and normal scroll interception resumes. The F2 key bytes are consumed and not forwarded to the agent; any surrounding bytes in the same read are forwarded normally.
 
 ## Scrollback
 
@@ -89,6 +90,6 @@ When entering scrollback mode, the current `total_lines` is recorded as an ancho
 ## Status Bar
 
 - Drawn on the bottom row, outside the DECSTBM scroll region.
-- Shows: `clust` branding, agent ID, agent binary name, repo/branch context (when the agent is running in a git repository), and the `Ctrl+Q detach` hint. The repo name is displayed as the basename of the repo path (e.g., `my-project/feature-branch`).
+- Shows: `clust` branding, agent ID, agent binary name, repo/branch context (when the agent is running in a git repository), mouse tracking indicator (when mouse tracking is off, displays `MOUSE OFF . F2` in the warning color), and the `Ctrl+Q detach` hint. The repo name is displayed as the basename of the repo path (e.g., `my-project/feature-branch`).
 - Redrawn on: initial attach, terminal resize (SIGWINCH), scrollback mode enter/exit, and after every agent output write (to guard against agent escape sequences that reset the scroll region).
 - The `draw_status_bar` function handles standalone redraws (saves/restores cursor, flushes). The `write_status_bar_content` helper writes only the bar content to a provided writer, used by both `draw_status_bar` and the output processing loop to avoid duplicating rendering logic.

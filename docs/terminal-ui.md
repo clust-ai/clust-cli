@@ -121,7 +121,7 @@ A multi-agent terminal overview that displays all active agents side-by-side wit
 ││                    │││                │││         ││
 │└──── Shift+↓ focus──┘│└────────────────┘│└─────────┘│
 ├──────────────────────┴──────────────────┴───────────┤
-│ ● connected  Shift+↓ enter terminal  ...    v0.0.10 │
+│ ● connected  Shift+↓ enter terminal  ...    v0.0.11 │
 └─────────────────────────────────────────────────────┘
 ```
 
@@ -175,7 +175,7 @@ On startup, `clust ui` automatically connects to the hub daemon, starting it if 
 ### Bottom Status Bar
 
 ```
-● connected  q to quit  Q to quit and stop hub  ↑↓←→ navigate  Shift+←→ panels  v toggle agents          v0.0.10
+● connected  q to quit  Q to quit and stop hub  ↑↓←→ navigate  Shift+←→ panels  v toggle agents          v0.0.11
 ```
 
 | Section | Description |
@@ -184,7 +184,7 @@ On startup, `clust ui` automatically connects to the hub daemon, starting it if 
 | Status label | `connected` or `disconnected` |
 | Focused agent | When an agent has keyboard focus (in Overview terminal focus or focus mode), shows the repo name in the repo's assigned color followed by `/branch` in secondary text color |
 | Status message / Shortcuts | Either a temporary status message or context-aware keybinding hints (see below) |
-| Version | Right-aligned, e.g. `v0.0.10` |
+| Version | Right-aligned, e.g. `v0.0.11` |
 
 **Status messages:** Temporary status messages override the keybinding hints area. Messages are displayed for 5 seconds before auto-dismissing, after which the keybinding hints reappear. Two severity levels exist: `Error` (displayed in `R_ERROR` color) and `Success` (displayed in `R_SUCCESS` color). Status messages are used to surface feedback from async operations such as agent creation and branch pulls -- both success confirmations (e.g., "Agent started on feature-branch", "Pulled main: Already up to date.") and error details (e.g., "Agent create failed: hub connect error: ...", "Pull failed: ..."). The `StatusMessage` struct tracks the message text, level, and creation `Instant` for auto-dismissal timing. Status messages are delivered from background tokio tasks to the main event loop via a dedicated `mpsc` channel (`status_tx` / `status_rx`), separate from the `AgentStartResult` channel used for agent creation results.
 
@@ -202,6 +202,7 @@ On startup, `clust ui` automatically connects to the hub daemon, starting it if 
 | `Tab` | Switch to next tab |
 | `Shift+Tab` | Switch to previous tab |
 | `?` | Toggle keyboard shortcut overlay |
+| `F2` | Toggle mouse capture (allows text selection and link clicking when off) |
 | `Opt+E` (macOS) / `Alt+E` | Open the create-agent modal |
 
 **Repositories tab:**
@@ -272,7 +273,7 @@ When focus mode is active, the 1-row tab bar is replaced by a back-bar that show
 │      3      3│  let x = 1;   ││                    ││
 │                               │└────────────────────┘│
 ├─────────────────────────────────────────────────────┤
-│ ● connected  Shift+←/→ switch panel  ...     v0.0.10│
+│ ● connected  Shift+←/→ switch panel  ...     v0.0.11│
 └─────────────────────────────────────────────────────┘
 ```
 
@@ -348,7 +349,7 @@ The agent's `working_dir`, `repo_path`, and `branch_name` are passed to `open_ag
 
 The `?` key toggles a keyboard shortcut overlay rendered as a centered modal (44 columns wide) anchored to the bottom of the content area. The modal is organized into sections with bold secondary-colored headers and context-aware visibility:
 
-- **Global section (always shown):** `q / Esc×2`, `Q`, `Ctrl+C`, `Tab`, `Shift+Tab`, `?`.
+- **Global section (always shown):** `q / Esc×2`, `Q`, `Ctrl+C`, `Tab`, `Shift+Tab`, `?`, `F2`.
 - **Repositories section (shown when Repositories tab is active):** `↑/↓` navigate, `←/→` navigate tree, `Shift+←/→` switch panel, `Enter` open menu/focus agent, `Space` collapse/expand, `v` toggle grouping.
 - **Overview section (shown when Overview tab is active):** `Shift+←/→` scroll panels, `Shift+↓` enter terminal, plus an "In terminal:" sub-context label followed by `Shift+↑` back to options bar, `Shift+↓` enter focus mode, `Shift+←/→` switch agent, `PgUp/PgDn` scroll terminal.
 - **Focus Mode section (shown when in focus mode):** `Esc×2` exit, `Shift+←/→` switch panel, `Shift+PgUp/PgDn` scroll terminal, plus a "Left panel:" sub-context label followed by `Tab` cycle tabs, `↑/↓` scroll diff, `Shift+↑/↓` jump file.
@@ -385,6 +386,10 @@ The `Opt+E` / `Alt+E` hint is shown in the status bar (platform-aware).
 ### Mouse Support
 
 Mouse capture is enabled via `crossterm::EnableMouseCapture` on TUI startup and disabled on exit. The Kitty keyboard protocol (`PushKeyboardEnhancementFlags` with `DISAMBIGUATE_ESCAPE_CODES`) is also enabled when the terminal supports it, allowing detection of the SUPER (Cmd) modifier on mouse events. Terminals that do not support the Kitty protocol gracefully degrade (the modifier is simply not reported). All mouse interactions use `MouseEventKind::Down(MouseButton::Left)` for clicks and `MouseEventKind::ScrollUp`/`ScrollDown` for scroll wheel.
+
+#### F2 Mouse Capture Toggle
+
+Pressing `F2` toggles mouse capture on/off. When mouse capture is disabled, the terminal emulator regains control of mouse events, allowing native text selection, copy/paste, and link clicking. When mouse capture is off, all mouse events (clicks, scrolls) are ignored by the TUI. The status bar displays a `MOUSE OFF . F2` indicator in the warning color when mouse capture is disabled. Pressing `F2` again re-enables mouse capture and restores normal TUI mouse handling. The `mouse_captured` boolean state is tracked in the main event loop and passed to `render_status_bar()` for display.
 
 #### Click Map Architecture
 
