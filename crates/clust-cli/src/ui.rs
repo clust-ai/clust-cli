@@ -873,6 +873,22 @@ pub fn run(hub_name: &str) -> io::Result<()> {
         focus_mode_state.drain_output_events();
         focus_mode_state.drain_diff_events();
 
+        // Immediate worktree cleanup prompt when agent exits in focus mode
+        if in_focus_mode && active_menu.is_none() {
+            if let Some(panel) = focus_mode_state.panel.as_mut() {
+                if panel.exited && panel.is_worktree && !panel.worktree_cleanup_shown {
+                    panel.worktree_cleanup_shown = true;
+                    if let (Some(rp), Some(bn)) = (&panel.repo_path, &panel.branch_name) {
+                        pending_worktree_cleanups = vec![crate::worktree::WorktreeCleanup {
+                            repo_path: rp.clone(),
+                            branch_name: bn.clone(),
+                        }];
+                        active_menu = pop_worktree_cleanup_menu(&mut pending_worktree_cleanups);
+                    }
+                }
+            }
+        }
+
         // Check for completed agent start requests
         if let Ok(result) = agent_start_rx.try_recv() {
             match result {
@@ -2001,25 +2017,12 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                 match key.code {
                                     KeyCode::Up => {
                                         // Exit focus mode
-                                        if let Some(panel) = &focus_mode_state.panel {
-                                            if panel.exited && panel.is_worktree {
-                                                if let (Some(rp), Some(bn)) = (&panel.repo_path, &panel.branch_name) {
-                                                    pending_worktree_cleanups = vec![crate::worktree::WorktreeCleanup {
-                                                        repo_path: rp.clone(),
-                                                        branch_name: bn.clone(),
-                                                    }];
-                                                }
-                                            }
-                                        }
                                         focus_mode_state.shutdown();
                                         in_focus_mode = false;
                                         if active_tab == ActiveTab::Overview
                                             && overview_state.initialized
                                         {
                                             overview_state.force_resize_all();
-                                        }
-                                        if let Some(m) = pop_worktree_cleanup_menu(&mut pending_worktree_cleanups) {
-                                            active_menu = Some(m);
                                         }
                                     }
                                     KeyCode::Right => {
@@ -2049,25 +2052,12 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                 match key.code {
                                     KeyCode::Up => {
                                         // Exit focus mode
-                                        if let Some(panel) = &focus_mode_state.panel {
-                                            if panel.exited && panel.is_worktree {
-                                                if let (Some(rp), Some(bn)) = (&panel.repo_path, &panel.branch_name) {
-                                                    pending_worktree_cleanups = vec![crate::worktree::WorktreeCleanup {
-                                                        repo_path: rp.clone(),
-                                                        branch_name: bn.clone(),
-                                                    }];
-                                                }
-                                            }
-                                        }
                                         focus_mode_state.shutdown();
                                         in_focus_mode = false;
                                         if active_tab == ActiveTab::Overview
                                             && overview_state.initialized
                                         {
                                             overview_state.force_resize_all();
-                                        }
-                                        if let Some(m) = pop_worktree_cleanup_menu(&mut pending_worktree_cleanups) {
-                                            active_menu = Some(m);
                                         }
                                     }
                                     KeyCode::Left => {
@@ -2199,7 +2189,24 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                             match key.code {
                                 KeyCode::Esc => {
                                     if is_double_esc(&mut last_esc_press) {
+                                        // Check for worktree cleanup before exiting terminal
+                                        if let OverviewFocus::Terminal(idx) = overview_state.focus {
+                                            if let Some(panel) = overview_state.panels.get_mut(idx) {
+                                                if panel.exited && panel.is_worktree && !panel.worktree_cleanup_shown {
+                                                    panel.worktree_cleanup_shown = true;
+                                                    if let (Some(rp), Some(bn)) = (&panel.repo_path, &panel.branch_name) {
+                                                        pending_worktree_cleanups = vec![crate::worktree::WorktreeCleanup {
+                                                            repo_path: rp.clone(),
+                                                            branch_name: bn.clone(),
+                                                        }];
+                                                    }
+                                                }
+                                            }
+                                        }
                                         overview_state.exit_terminal();
+                                        if let Some(m) = pop_worktree_cleanup_menu(&mut pending_worktree_cleanups) {
+                                            active_menu = Some(m);
+                                        }
                                     } else {
                                         // Single Esc — forward to agent process
                                         overview_state.send_input(vec![0x1b]);
