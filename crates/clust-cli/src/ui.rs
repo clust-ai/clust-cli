@@ -863,6 +863,8 @@ pub fn run(hub_name: &str) -> io::Result<()> {
     let mut create_modal: Option<CreateAgentModal> = None;
     // Search-agent modal state
     let mut search_modal: Option<SearchModal> = None;
+    // Agent ID to select in overview after next sync
+    let mut pending_overview_select: Option<String> = None;
     // Purge progress modal state
     let mut purge_progress: Option<PurgeProgress> = None;
     let (agent_start_tx, mut agent_start_rx) =
@@ -902,21 +904,26 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                     repo_path,
                     branch_name,
                 } => {
-                    let fm_cols = (last_content_area.width * 40 / 100)
-                        .saturating_sub(2)
-                        .max(1);
-                    let fm_rows = last_content_area.height.saturating_sub(3).max(1);
-                    focus_mode_state.open_agent(
-                        &agent_id,
-                        &agent_binary,
-                        fm_cols,
-                        fm_rows,
-                        &working_dir,
-                        repo_path.as_deref(),
-                        branch_name.as_deref(),
-                        true, // WorktreeAgentStarted → always a worktree
-                    );
-                    in_focus_mode = true;
+                    if active_tab == ActiveTab::Overview {
+                        // Stay in overview mode; select the agent after next sync
+                        pending_overview_select = Some(agent_id.clone());
+                    } else {
+                        let fm_cols = (last_content_area.width * 40 / 100)
+                            .saturating_sub(2)
+                            .max(1);
+                        let fm_rows = last_content_area.height.saturating_sub(3).max(1);
+                        focus_mode_state.open_agent(
+                            &agent_id,
+                            &agent_binary,
+                            fm_cols,
+                            fm_rows,
+                            &working_dir,
+                            repo_path.as_deref(),
+                            branch_name.as_deref(),
+                            true, // WorktreeAgentStarted → always a worktree
+                        );
+                        in_focus_mode = true;
+                    }
                     let branch_label = branch_name.as_deref().unwrap_or("unknown");
                     status_message = Some(StatusMessage {
                         text: format!("Agent started on {branch_label}"),
@@ -1008,6 +1015,9 @@ pub fn run(hub_name: &str) -> io::Result<()> {
         // Sync overview agent connections when agents are refreshed
         if agents_refreshed && active_tab == ActiveTab::Overview {
             overview_state.sync_agents(&agents, last_content_area);
+            if let Some(id) = pending_overview_select.take() {
+                overview_state.select_agent_by_id(&id);
+            }
         }
 
         let hub_status = hub_running;
@@ -2033,10 +2043,10 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                             }
                             SearchResult::Pending => {}
                         }
-                    } else if key.code == KeyCode::Char('e')
+                    } else if key.code == KeyCode::Char('r')
                         && key.modifiers.contains(KeyModifiers::ALT)
                     {
-                        // Global shortcut: Alt+E opens create-agent modal
+                        // Global shortcut: Alt+R opens create-agent modal
                         if !repos.is_empty() {
                             create_modal = Some(CreateAgentModal::new(repos.clone()));
                             show_help = false;
@@ -4721,18 +4731,18 @@ fn render_status_bar(
     } else {
         let mod_key = if cfg!(target_os = "macos") { "Opt" } else { "Alt" };
         let hint_text = if in_focus_mode {
-            format!("Shift+\u{2190}/\u{2192} switch panel  Shift+\u{2191} exit  {mod_key}+E new agent")
+            format!("Shift+\u{2190}/\u{2192} switch panel  Shift+\u{2191} exit  {mod_key}+R new agent")
         } else if active_tab == ActiveTab::Overview {
             match overview_focus {
                 OverviewFocus::Terminal(_) => {
-                    format!("Shift+\u{2191} options  Shift+\u{2193} focus  Shift+\u{2190}/\u{2192} switch agent  {mod_key}+E new agent")
+                    format!("Shift+\u{2191} options  Shift+\u{2193} focus  Shift+\u{2190}/\u{2192} switch agent  {mod_key}+R new agent")
                 }
                 OverviewFocus::OptionsBar => {
-                    format!("Shift+\u{2193} enter terminal  Shift+\u{2190}/\u{2192} scroll  {mod_key}+E new agent  q quit  ? keys")
+                    format!("Shift+\u{2193} enter terminal  Shift+\u{2190}/\u{2192} scroll  {mod_key}+R new agent  q quit  ? keys")
                 }
             }
         } else {
-            format!("{mod_key}+E new agent  q quit  Q stop+quit  ? keys")
+            format!("{mod_key}+R new agent  q quit  Q stop+quit  ? keys")
         };
 
         left_spans.extend([

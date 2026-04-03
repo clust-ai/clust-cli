@@ -272,6 +272,15 @@ impl OverviewState {
         }
     }
 
+    /// Select and focus a specific agent by its ID.
+    pub fn select_agent_by_id(&mut self, agent_id: &str) {
+        if let Some(idx) = self.panels.iter().position(|p| p.id == agent_id) {
+            self.focus = OverviewFocus::Terminal(idx);
+            self.last_terminal_idx = idx;
+            self.ensure_visible(idx);
+        }
+    }
+
     /// Enter terminal focus from options bar.
     pub fn enter_terminal(&mut self) {
         if !self.panels.is_empty() {
