@@ -457,10 +457,40 @@ pub fn list_worktrees<A: AgentMatcher>(
     Ok(entries)
 }
 
+/// Check whether `branch` is the current HEAD of the main worktree.
+fn is_branch_head(repo_root: &Path, branch: &str) -> bool {
+    let Ok(repo) = git2::Repository::open(repo_root) else {
+        return false;
+    };
+    let Ok(head) = repo.head() else {
+        return false;
+    };
+    head.shorthand() == Some(branch)
+}
+
+/// Detach HEAD in the main worktree so a branch can be moved to a linked worktree.
+fn detach_head(repo_root: &Path) -> Result<(), String> {
+    let output = std::process::Command::new("git")
+        .current_dir(repo_root)
+        .args(["checkout", "--detach"])
+        .output()
+        .map_err(|e| format!("failed to run git checkout --detach: {e}"))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(format!("git checkout --detach failed: {}", stderr.trim()));
+    }
+    Ok(())
+}
+
 /// Create a new worktree.
 ///
 /// If `checkout_existing` is true, checks out an existing branch.
 /// Otherwise creates a new branch from `base` (or current HEAD).
+///
+/// When checking out an existing branch that is currently HEAD,
+/// HEAD is automatically detached first so the branch can be moved
+/// to the new worktree.
 pub fn add_worktree(
     repo_root: &Path,
     branch: &str,
@@ -468,6 +498,12 @@ pub fn add_worktree(
     checkout_existing: bool,
 ) -> Result<PathBuf, String> {
     ensure_clust_dir_excluded(repo_root)?;
+
+    // If the branch is currently checked out in the main worktree,
+    // detach HEAD first so `git worktree add` can claim it.
+    if checkout_existing && is_branch_head(repo_root, branch) {
+        detach_head(repo_root)?;
+    }
 
     let wt_path = worktree_path(repo_root, branch);
 
