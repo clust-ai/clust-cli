@@ -641,9 +641,18 @@ async fn handle_connection(
                             .await?;
                         }
                         Err(e) => {
+                            let message = if e.contains("already checked out") {
+                                format!(
+                                    "Branch '{}' is already checked out and cannot be used as a worktree. \
+                                     Use 'Start Agent (in place)' from the context menu, or create a new branch.",
+                                    branch_name
+                                )
+                            } else {
+                                e
+                            };
                             clust_ipc::send_message_write(
                                 &mut writer,
-                                &HubMessage::Error { message: e },
+                                &HubMessage::Error { message },
                             )
                             .await?;
                         }
