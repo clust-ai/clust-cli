@@ -142,7 +142,7 @@ The hub handles Git worktree operations on behalf of CLI clients. Worktrees are 
 ### Operations
 
 - **List**: Enumerates all worktrees (including main) via `git2`, checks dirty status, and matches active agents to each worktree by working directory.
-- **Add**: Creates a new worktree with either a new branch or an existing branch (`--checkout`). New branch names are sanitized via `sanitize_branch_name()` (existing branches checked out with `--checkout` are not sanitized). Optionally launches an agent in the new worktree.
+- **Add**: Creates a new worktree with either a new branch or an existing branch (`--checkout`). If the worktree already exists on disk (detected by the presence of a `.git` file in the worktree path), the existing worktree is reused and returned immediately without running `git worktree add`. New branch names are sanitized via `sanitize_branch_name()` (existing branches checked out with `--checkout` are not sanitized). Optionally launches an agent in the new worktree.
 - **Remove**: Prunes the worktree from git and removes its directory. Stops any agents running in the worktree. Refuses to remove dirty worktrees unless `--force` is specified. Optionally deletes the local branch (`--local`).
 - **Info**: Returns detailed information for a single worktree including path, dirty status, and active agents.
 
