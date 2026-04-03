@@ -1129,36 +1129,6 @@ impl FocusModeState {
         }
     }
 
-    /// Jump to the previous file header in the diff.
-    pub fn diff_jump_prev_file(&mut self) {
-        if let Some(diff) = &self.diff {
-            // Find the last file_start_index that is strictly before current scroll
-            let target = diff
-                .file_start_indices
-                .iter()
-                .rev()
-                .find(|&&idx| idx < self.diff_scroll);
-            if let Some(&idx) = target {
-                self.diff_scroll = idx;
-            } else {
-                self.diff_scroll = 0;
-            }
-        }
-    }
-
-    /// Jump to the next file header in the diff.
-    pub fn diff_jump_next_file(&mut self) {
-        if let Some(diff) = &self.diff {
-            let target = diff
-                .file_start_indices
-                .iter()
-                .find(|&&idx| idx > self.diff_scroll);
-            if let Some(&idx) = target {
-                self.diff_scroll = idx;
-            }
-        }
-    }
-
     /// Shut down the current panel and clean up.
     pub fn shutdown(&mut self) {
         self.close_panel();

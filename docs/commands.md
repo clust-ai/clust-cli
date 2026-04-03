@@ -357,8 +357,8 @@ These shortcuts are active in the `clust ui` dashboard. They are displayed in th
 
 | Shortcut | Action |
 |----------|--------|
-| `Esc` (single) | Forward Esc to agent process |
-| `Esc×2` (double-tap) | Exit focus mode, return to originating tab |
+| `Esc` | Forward Esc to agent process |
+| `Shift+↑` | Exit focus mode, return to originating tab |
 | `Shift+←` | Switch focus to left panel |
 | `Shift+PageUp` | Scroll up through scrollback history |
 | `Shift+PageDown` | Scroll down through scrollback history |
@@ -368,9 +368,7 @@ These shortcuts are active in the `clust ui` dashboard. They are displayed in th
 
 | Shortcut | Action |
 |----------|--------|
-| `Esc×2` (double-tap) | Exit focus mode, return to originating tab |
+| `Shift+↑` | Exit focus mode, return to originating tab |
 | `↑` / `↓` | Scroll diff up/down |
-| `Shift+↑` | Jump to previous file header |
-| `Shift+↓` | Jump to next file header |
 | `Shift+→` | Switch focus to right panel |
 | `Tab` | Cycle to next left panel tab |
