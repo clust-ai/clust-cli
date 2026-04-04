@@ -1300,6 +1300,151 @@ async fn handle_connection(
                 }
             }
         }
+        CliMessage::CreateRepo { parent_dir, name } => {
+            // git init runs outside the lock
+            match crate::repo::init_repo(std::path::Path::new(&parent_dir), &name) {
+                Ok(repo_path) => {
+                    let path_str = repo_path.to_string_lossy().into_owned();
+                    // Register in DB under lock
+                    {
+                        let hub = state.lock().await;
+                        if let Some(ref db) = hub.db {
+                            let color = crate::db::next_repo_color(db);
+                            let _ = crate::db::register_repo(db, &path_str, &name, color);
+                        }
+                    }
+                    clust_ipc::send_message_write(
+                        &mut writer,
+                        &HubMessage::RepoCreated {
+                            path: path_str,
+                            name,
+                        },
+                    )
+                    .await?;
+                }
+                Err(e) => {
+                    clust_ipc::send_message_write(
+                        &mut writer,
+                        &HubMessage::Error { message: e },
+                    )
+                    .await?;
+                }
+            }
+        }
+
+        CliMessage::CloneRepo {
+            url,
+            parent_dir,
+            name,
+        } => {
+            // Spawn child process outside the lock
+            match crate::repo::start_clone(&url, std::path::Path::new(&parent_dir), name.as_deref())
+            {
+                Ok((mut child, repo_path)) => {
+                    clust_ipc::send_message_write(
+                        &mut writer,
+                        &HubMessage::CloneProgress {
+                            step: format!("Cloning {url}..."),
+                        },
+                    )
+                    .await?;
+
+                    // Read stderr progress in a blocking task, bridge via channel
+                    let (tx, mut rx) =
+                        tokio::sync::mpsc::unbounded_channel::<Result<String, String>>();
+                    let stderr = child.stderr.take().unwrap();
+                    tokio::task::spawn_blocking(move || {
+                        use std::io::BufRead;
+                        let reader = std::io::BufReader::new(stderr);
+                        for line in reader.lines() {
+                            match line {
+                                Ok(l) if !l.is_empty() => {
+                                    if tx.send(Ok(l)).is_err() {
+                                        break;
+                                    }
+                                }
+                                Err(e) => {
+                                    let _ = tx.send(Err(e.to_string()));
+                                    break;
+                                }
+                                _ => {}
+                            }
+                        }
+                        match child.wait() {
+                            Ok(status) if status.success() => {
+                                let _ = tx.send(Ok("__CLONE_DONE__".into()));
+                            }
+                            Ok(status) => {
+                                let _ = tx.send(Err(format!(
+                                    "git clone exited with status {status}"
+                                )));
+                            }
+                            Err(e) => {
+                                let _ = tx.send(Err(format!("failed to wait for git: {e}")));
+                            }
+                        }
+                    });
+
+                    // Forward progress, then handle completion
+                    let mut clone_ok = false;
+                    while let Some(msg) = rx.recv().await {
+                        match msg {
+                            Ok(ref s) if s == "__CLONE_DONE__" => {
+                                clone_ok = true;
+                                break;
+                            }
+                            Ok(line) => {
+                                clust_ipc::send_message_write(
+                                    &mut writer,
+                                    &HubMessage::CloneProgress { step: line },
+                                )
+                                .await?;
+                            }
+                            Err(e) => {
+                                clust_ipc::send_message_write(
+                                    &mut writer,
+                                    &HubMessage::Error { message: e },
+                                )
+                                .await?;
+                                return Ok(());
+                            }
+                        }
+                    }
+
+                    if clone_ok {
+                        let path_str = repo_path.to_string_lossy().into_owned();
+                        let repo_name = repo_path
+                            .file_name()
+                            .map(|n| n.to_string_lossy().into_owned())
+                            .unwrap_or_else(|| path_str.clone());
+                        {
+                            let hub = state.lock().await;
+                            if let Some(ref db) = hub.db {
+                                let color = crate::db::next_repo_color(db);
+                                let _ =
+                                    crate::db::register_repo(db, &path_str, &repo_name, color);
+                            }
+                        }
+                        clust_ipc::send_message_write(
+                            &mut writer,
+                            &HubMessage::RepoCloned {
+                                path: path_str,
+                                name: repo_name,
+                            },
+                        )
+                        .await?;
+                    }
+                }
+                Err(e) => {
+                    clust_ipc::send_message_write(
+                        &mut writer,
+                        &HubMessage::Error { message: e },
+                    )
+                    .await?;
+                }
+            }
+        }
+
         _ => {
             clust_ipc::send_message_write(
                 &mut writer,

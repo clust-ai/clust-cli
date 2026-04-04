@@ -219,6 +219,29 @@ When the hub receives a `PullBranch` message:
    - **Not checked out anywhere:** Run `git fetch origin <branch>:<branch>` for a fast-forward-only update.
 3. Return `BranchPulled { branch_name, summary }` with the git output, or `Error` on failure.
 
+## Repository Creation
+
+### Create Repository
+
+When the hub receives a `CreateRepo` message:
+
+1. Validate the parent directory exists.
+2. Run `git init` in a new subdirectory named by `name` within `parent_dir`.
+3. Register the new repository in the SQLite database with an auto-assigned color.
+4. Return `RepoCreated { path, name }` on success, or `Error` on failure.
+
+### Clone Repository
+
+When the hub receives a `CloneRepo` message:
+
+1. Validate the parent directory exists.
+2. Determine the repository name: use the provided `name` if given, otherwise extract it from the URL via `repo_name_from_url()` (handles both HTTPS and SSH URL formats).
+3. Spawn `git clone --progress` as a child process with stderr piped for progress output.
+4. Send an initial `CloneProgress { step }` message to the client.
+5. Read stderr line-by-line in a `spawn_blocking` task, bridged to the async event loop via an unbounded channel. Each non-empty line is forwarded to the client as a `CloneProgress { step }` message, enabling real-time progress display.
+6. On successful completion, register the cloned repository in the SQLite database with an auto-assigned color.
+7. Return `RepoCloned { path, name }` on success, or `Error` on failure at any stage.
+
 ## Repository Maintenance
 
 ### Clean Stale Refs
