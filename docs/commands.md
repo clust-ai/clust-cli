@@ -366,7 +366,7 @@ These shortcuts are active in the `clust ui` dashboard. They are displayed in th
 |----------|--------|
 | `Esc` | Forward Esc to agent process |
 | `Shift+↑` | Exit focus mode, return to originating tab |
-| `Shift+←` | Switch focus to left panel |
+| `Shift+←` | Switch focus to left panel (only when agent has a repo) |
 | `Shift+PageUp` | Scroll up through scrollback history |
 | `Shift+PageDown` | Scroll down through scrollback history |
 | All other keys | Forwarded to the focused agent's PTY |
