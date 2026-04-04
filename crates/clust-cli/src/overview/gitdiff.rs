@@ -237,6 +237,73 @@ fn run_git_diff(working_dir: &str) -> Result<String, String> {
 }
 
 // ---------------------------------------------------------------------------
+// Branch comparison diff task
+// ---------------------------------------------------------------------------
+
+pub fn spawn_branch_diff_task(
+    working_dir: String,
+    base_branch: String,
+    head_branch: String,
+    tx: mpsc::Sender<DiffEvent>,
+    stop_rx: watch::Receiver<bool>,
+) -> JoinHandle<()> {
+    tokio::task::spawn(branch_diff_refresh_loop(
+        working_dir, base_branch, head_branch, tx, stop_rx,
+    ))
+}
+
+async fn branch_diff_refresh_loop(
+    working_dir: String,
+    base_branch: String,
+    head_branch: String,
+    tx: mpsc::Sender<DiffEvent>,
+    mut stop_rx: watch::Receiver<bool>,
+) {
+    let mut interval = time::interval(Duration::from_secs(2));
+    loop {
+        tokio::select! {
+            _ = interval.tick() => {}
+            _ = stop_rx.changed() => break,
+        }
+
+        let dir = working_dir.clone();
+        let base = base_branch.clone();
+        let head = head_branch.clone();
+        let result =
+            tokio::task::spawn_blocking(move || run_branch_diff(&dir, &base, &head)).await;
+
+        let event = match result {
+            Ok(Ok(raw)) => DiffEvent::Updated(parse_unified_diff(&raw)),
+            Ok(Err(e)) => DiffEvent::Error(e),
+            Err(e) => DiffEvent::Error(format!("task join error: {e}")),
+        };
+
+        if tx.send(event).await.is_err() {
+            break; // receiver dropped
+        }
+    }
+}
+
+fn run_branch_diff(
+    working_dir: &str,
+    base_branch: &str,
+    head_branch: &str,
+) -> Result<String, String> {
+    let output = Command::new("git")
+        .args(["diff", base_branch, head_branch])
+        .current_dir(working_dir)
+        .output()
+        .map_err(|e| format!("failed to run git diff: {e}"))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(format!("git diff failed: {stderr}"));
+    }
+
+    String::from_utf8(output.stdout).map_err(|e| format!("invalid utf8 in git output: {e}"))
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 

@@ -13,7 +13,11 @@ use ratatui::{
 use tokio::sync::{mpsc, watch};
 use tokio::task::JoinHandle;
 
-use clust_ipc::{AgentInfo, CliMessage, HubMessage, RepoInfo};
+use crossterm::event::{KeyCode, KeyEvent};
+use fuzzy_matcher::skim::SkimMatcherV2;
+use fuzzy_matcher::FuzzyMatcher;
+
+use clust_ipc::{AgentInfo, BranchInfo, CliMessage, HubMessage, RepoInfo};
 
 use crate::{ipc, terminal_emulator::TerminalEmulator, theme, ui::ClickMap};
 
@@ -1020,15 +1024,15 @@ pub enum FocusSide {
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum LeftPanelTab {
     Changes,
-    Panel2,
+    Compare,
     Panel3,
 }
 
 impl LeftPanelTab {
     pub fn next(self) -> Self {
         match self {
-            Self::Changes => Self::Panel2,
-            Self::Panel2 => Self::Panel3,
+            Self::Changes => Self::Compare,
+            Self::Compare => Self::Panel3,
             Self::Panel3 => Self::Changes,
         }
     }
@@ -1036,13 +1040,160 @@ impl LeftPanelTab {
     pub fn label(&self) -> &'static str {
         match self {
             Self::Changes => "Changes",
-            Self::Panel2 => "Panel 2",
+            Self::Compare => "Compare",
             Self::Panel3 => "Panel 3",
         }
     }
 
     fn all() -> &'static [LeftPanelTab] {
-        &[Self::Changes, Self::Panel2, Self::Panel3]
+        &[Self::Changes, Self::Compare, Self::Panel3]
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Branch picker for the Compare tab
+// ---------------------------------------------------------------------------
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum BranchPickerMode {
+    /// User is typing in the search field; branch list is visible.
+    Searching,
+    /// A branch has been selected; diff is shown below the label.
+    Selected,
+}
+
+pub struct BranchPicker {
+    pub mode: BranchPickerMode,
+    pub input: String,
+    pub cursor_pos: usize,
+    pub selected_idx: usize,
+    pub selected_branch: Option<String>,
+    pub branches: Vec<BranchInfo>,
+    matcher: SkimMatcherV2,
+}
+
+impl BranchPicker {
+    pub fn new() -> Self {
+        Self {
+            mode: BranchPickerMode::Selected,
+            input: String::new(),
+            cursor_pos: 0,
+            selected_idx: 0,
+            selected_branch: None,
+            branches: Vec::new(),
+            matcher: SkimMatcherV2::default(),
+        }
+    }
+
+    /// Update the branch list. Filters out the agent's own branch.
+    pub fn update_branches(&mut self, branches: Vec<BranchInfo>, agent_branch: Option<&str>) {
+        self.branches = branches
+            .into_iter()
+            .filter(|b| agent_branch.is_none_or(|ab| b.name != ab))
+            .collect();
+        // Clamp selection
+        let count = self.filtered_branches().len();
+        if count > 0 && self.selected_idx >= count {
+            self.selected_idx = count - 1;
+        }
+    }
+
+    /// Returns filtered branches as (original_index, score) sorted by score descending.
+    pub fn filtered_branches(&self) -> Vec<(usize, i64)> {
+        if self.input.is_empty() {
+            return self.branches.iter().enumerate().map(|(i, _)| (i, 0)).collect();
+        }
+        let mut results: Vec<(usize, i64)> = self
+            .branches
+            .iter()
+            .enumerate()
+            .filter_map(|(i, branch)| {
+                self.matcher
+                    .fuzzy_match(&branch.name, &self.input)
+                    .map(|score| (i, score))
+            })
+            .collect();
+        results.sort_by(|a, b| b.1.cmp(&a.1));
+        results
+    }
+
+    /// Enter searching mode, resetting the input.
+    pub fn enter_search(&mut self) {
+        self.mode = BranchPickerMode::Searching;
+        self.input.clear();
+        self.cursor_pos = 0;
+        self.selected_idx = 0;
+    }
+
+    /// Handle a key event while in Searching mode.
+    /// Returns `true` if a branch was selected (caller should start diff task).
+    pub fn handle_key(&mut self, key: KeyEvent) -> bool {
+        match key.code {
+            KeyCode::Enter => {
+                let filtered = self.filtered_branches();
+                if let Some(&(idx, _)) = filtered.get(self.selected_idx) {
+                    self.selected_branch = Some(self.branches[idx].name.clone());
+                    self.mode = BranchPickerMode::Selected;
+                    return true;
+                }
+                false
+            }
+            KeyCode::Esc => {
+                self.mode = BranchPickerMode::Selected;
+                false
+            }
+            KeyCode::Up => {
+                self.selected_idx = self.selected_idx.saturating_sub(1);
+                false
+            }
+            KeyCode::Down => {
+                let count = self.filtered_branches().len();
+                if count > 0 && self.selected_idx < count - 1 {
+                    self.selected_idx += 1;
+                }
+                false
+            }
+            KeyCode::Char(c) => {
+                self.input.insert(self.cursor_pos, c);
+                self.cursor_pos += 1;
+                self.selected_idx = 0;
+                false
+            }
+            KeyCode::Backspace => {
+                if self.cursor_pos > 0 {
+                    self.cursor_pos -= 1;
+                    self.input.remove(self.cursor_pos);
+                    self.selected_idx = 0;
+                }
+                false
+            }
+            KeyCode::Left => {
+                self.cursor_pos = self.cursor_pos.saturating_sub(1);
+                false
+            }
+            KeyCode::Right => {
+                if self.cursor_pos < self.input.len() {
+                    self.cursor_pos += 1;
+                }
+                false
+            }
+            _ => false,
+        }
+    }
+
+    /// Compute scroll offset to keep the selected item centered.
+    pub fn compute_scroll(&self, total: usize, visible: usize) -> usize {
+        if total <= visible {
+            return 0;
+        }
+        let half = visible / 2;
+        if self.selected_idx <= half {
+            0
+        } else if self.selected_idx + half >= total {
+            total.saturating_sub(visible)
+        } else {
+            self.selected_idx - half
+        }
     }
 }
 
@@ -1066,12 +1217,22 @@ pub struct FocusModeState {
     pub working_dir: Option<String>,
     pub repo_path: Option<String>,
     pub branch_name: Option<String>,
+    // Branch compare tab state
+    pub compare_picker: BranchPicker,
+    pub compare_diff: Option<gitdiff::ParsedDiff>,
+    pub compare_diff_scroll: usize,
+    pub compare_diff_error: Option<String>,
+    compare_diff_rx: mpsc::Receiver<gitdiff::DiffEvent>,
+    compare_diff_tx: mpsc::Sender<gitdiff::DiffEvent>,
+    compare_diff_stop_tx: Option<watch::Sender<bool>>,
+    compare_diff_task: Option<JoinHandle<()>>,
 }
 
 impl FocusModeState {
     pub fn new() -> Self {
         let (output_tx, output_rx) = mpsc::channel(512);
         let (diff_tx, diff_rx) = mpsc::channel(16);
+        let (compare_diff_tx, compare_diff_rx) = mpsc::channel(16);
         Self {
             panel: None,
             output_rx,
@@ -1090,6 +1251,14 @@ impl FocusModeState {
             working_dir: None,
             repo_path: None,
             branch_name: None,
+            compare_picker: BranchPicker::new(),
+            compare_diff: None,
+            compare_diff_scroll: 0,
+            compare_diff_error: None,
+            compare_diff_rx,
+            compare_diff_tx,
+            compare_diff_stop_tx: None,
+            compare_diff_task: None,
         }
     }
 
@@ -1118,6 +1287,10 @@ impl FocusModeState {
         self.working_dir = Some(working_dir.to_string());
         self.repo_path = repo_path.map(|s| s.to_string());
         self.branch_name = branch_name.map(|s| s.to_string());
+        self.compare_picker = BranchPicker::new();
+        self.compare_diff = None;
+        self.compare_diff_scroll = 0;
+        self.compare_diff_error = None;
 
         let id = agent_id.to_string();
         let binary = agent_binary.to_string();
@@ -1267,6 +1440,90 @@ impl FocusModeState {
         self.diff_error = None;
         self.working_dir = None;
         self.repo_path = None;
+        // Stop compare diff task
+        self.stop_compare_diff();
+    }
+
+    /// Stop the branch compare diff background task.
+    fn stop_compare_diff(&mut self) {
+        if let Some(stop_tx) = self.compare_diff_stop_tx.take() {
+            let _ = stop_tx.send(true);
+        }
+        if let Some(handle) = self.compare_diff_task.take() {
+            handle.abort();
+        }
+        self.compare_diff = None;
+        self.compare_diff_scroll = 0;
+        self.compare_diff_error = None;
+    }
+
+    /// Start the branch compare diff background task for the selected branch.
+    pub fn start_compare_diff(&mut self) {
+        self.stop_compare_diff();
+
+        let (Some(working_dir), Some(agent_branch), Some(compare_branch)) = (
+            self.working_dir.as_ref(),
+            self.branch_name.as_ref(),
+            self.compare_picker.selected_branch.as_ref(),
+        ) else {
+            return;
+        };
+
+        let (stop_tx, stop_rx) = watch::channel(false);
+        let tx = self.compare_diff_tx.clone();
+        let handle = gitdiff::spawn_branch_diff_task(
+            working_dir.clone(),
+            compare_branch.clone(),
+            agent_branch.clone(),
+            tx,
+            stop_rx,
+        );
+        self.compare_diff_stop_tx = Some(stop_tx);
+        self.compare_diff_task = Some(handle);
+    }
+
+    /// Drain branch compare diff events from the background task.
+    pub fn drain_compare_diff_events(&mut self) {
+        while let Ok(event) = self.compare_diff_rx.try_recv() {
+            match event {
+                gitdiff::DiffEvent::Updated(parsed) => {
+                    let max = parsed.lines.len().saturating_sub(1);
+                    self.compare_diff_scroll = self.compare_diff_scroll.min(max);
+                    self.compare_diff = Some(parsed);
+                    self.compare_diff_error = None;
+                }
+                gitdiff::DiffEvent::Error(msg) => {
+                    self.compare_diff_error = Some(msg);
+                }
+            }
+        }
+    }
+
+    /// Update the branch picker's branch list from the current repos data.
+    pub fn update_compare_branches(&mut self, repos: &[RepoInfo]) {
+        let branches = self
+            .repo_path
+            .as_ref()
+            .and_then(|rp| repos.iter().find(|r| r.path == *rp))
+            .map(|r| r.local_branches.clone())
+            .unwrap_or_default();
+        self.compare_picker
+            .update_branches(branches, self.branch_name.as_deref());
+    }
+
+    /// Scroll compare diff view up by one line.
+    pub fn compare_scroll_up(&mut self) {
+        self.compare_diff_scroll = self.compare_diff_scroll.saturating_sub(1);
+    }
+
+    /// Scroll compare diff view down by one line.
+    pub fn compare_scroll_down(&mut self) {
+        if let Some(diff) = &self.compare_diff {
+            let max = diff.lines.len().saturating_sub(1);
+            if self.compare_diff_scroll < max {
+                self.compare_diff_scroll += 1;
+            }
+        }
     }
 }
 
@@ -1325,9 +1582,17 @@ fn render_left_panel(frame: &mut Frame, area: Rect, state: &FocusModeState, clic
 
     // Render active tab content
     match state.left_tab {
-        LeftPanelTab::Changes => render_diff_viewer(frame, content_area, state, repo_color),
-        _ => {
-            // Empty placeholder for Panel 2 / Panel 3
+        LeftPanelTab::Changes => render_diff_viewer(
+            frame,
+            content_area,
+            state.diff.as_ref(),
+            state.diff_scroll,
+            state.diff_error.as_deref(),
+            "No uncommitted changes",
+            repo_color,
+        ),
+        LeftPanelTab::Compare => render_compare_tab(frame, content_area, state, repo_color),
+        LeftPanelTab::Panel3 => {
             frame.render_widget(
                 Paragraph::new(Line::from(Span::styled(
                     format!("{} (coming soon)", state.left_tab.label()),
@@ -1416,14 +1681,22 @@ fn render_left_tab_bar(
     frame.render_widget(Paragraph::new(Line::from(spans)), area);
 }
 
-fn render_diff_viewer(frame: &mut Frame, area: Rect, state: &FocusModeState, repo_color: Option<Color>) {
+fn render_diff_viewer(
+    frame: &mut Frame,
+    area: Rect,
+    diff: Option<&gitdiff::ParsedDiff>,
+    scroll: usize,
+    error: Option<&str>,
+    empty_message: &str,
+    repo_color: Option<Color>,
+) {
     let bg_style = Style::default().bg(theme::R_BG_BASE);
 
     // Error state
-    if let Some(ref err) = state.diff_error {
+    if let Some(err) = error {
         frame.render_widget(
             Paragraph::new(Line::from(Span::styled(
-                err.as_str(),
+                err.to_string(),
                 Style::default().fg(theme::R_ERROR),
             )))
             .wrap(Wrap { trim: false })
@@ -1434,12 +1707,12 @@ fn render_diff_viewer(frame: &mut Frame, area: Rect, state: &FocusModeState, rep
     }
 
     // No diff data yet
-    let diff = match &state.diff {
+    let diff = match diff {
         Some(d) if !d.lines.is_empty() => d,
         Some(_) => {
             frame.render_widget(
                 Paragraph::new(Line::from(Span::styled(
-                    "No uncommitted changes",
+                    empty_message,
                     Style::default().fg(theme::R_TEXT_TERTIARY),
                 )))
                 .alignment(ratatui::layout::Alignment::Center)
@@ -1463,7 +1736,7 @@ fn render_diff_viewer(frame: &mut Frame, area: Rect, state: &FocusModeState, rep
     };
 
     let visible_height = area.height as usize;
-    let start = state.diff_scroll;
+    let start = scroll;
     let end = (start + visible_height).min(diff.lines.len());
 
     // Gutter width: "  old | new │" = 4+4+1 = 9 chars
@@ -1552,4 +1825,243 @@ fn render_diff_viewer(frame: &mut Frame, area: Rect, state: &FocusModeState, rep
     }
 
     frame.render_widget(Paragraph::new(lines), area);
+}
+
+// ---------------------------------------------------------------------------
+// Compare tab rendering
+// ---------------------------------------------------------------------------
+
+fn render_compare_tab(
+    frame: &mut Frame,
+    area: Rect,
+    state: &FocusModeState,
+    repo_color: Option<Color>,
+) {
+    match state.compare_picker.mode {
+        BranchPickerMode::Searching => {
+            let [hint_area, input_area, _gap_area, list_area] = Layout::vertical([
+                Constraint::Length(1),
+                Constraint::Length(1),
+                Constraint::Length(1),
+                Constraint::Min(0),
+            ])
+            .areas(area);
+
+            render_picker_hint(frame, hint_area);
+            render_picker_input(frame, input_area, &state.compare_picker);
+            // gap renders as default bg
+            frame.render_widget(
+                Paragraph::new("").style(Style::default().bg(theme::R_BG_BASE)),
+                _gap_area,
+            );
+            render_picker_branch_list(frame, list_area, &state.compare_picker);
+        }
+        BranchPickerMode::Selected => {
+            let [label_area, diff_area] = Layout::vertical([
+                Constraint::Length(1),
+                Constraint::Min(0),
+            ])
+            .areas(area);
+
+            render_compare_label(frame, label_area, &state.compare_picker);
+
+            if state.compare_picker.selected_branch.is_some() {
+                render_diff_viewer(
+                    frame,
+                    diff_area,
+                    state.compare_diff.as_ref(),
+                    state.compare_diff_scroll,
+                    state.compare_diff_error.as_deref(),
+                    "No differences",
+                    repo_color,
+                );
+            } else {
+                frame.render_widget(
+                    Paragraph::new(Line::from(Span::styled(
+                        "Press Enter to select a branch to compare",
+                        Style::default().fg(theme::R_TEXT_TERTIARY),
+                    )))
+                    .alignment(ratatui::layout::Alignment::Center)
+                    .style(Style::default().bg(theme::R_BG_BASE)),
+                    diff_area,
+                );
+            }
+        }
+    }
+}
+
+fn render_compare_label(frame: &mut Frame, area: Rect, picker: &BranchPicker) {
+    let (label, hint) = match &picker.selected_branch {
+        Some(branch) => (
+            format!(" Comparing: {branch}"),
+            " [Enter] change ",
+        ),
+        None => (
+            " No branch selected".to_string(),
+            " [Enter] select ",
+        ),
+    };
+
+    let hint_width = hint.chars().count();
+    let label_width = (area.width as usize).saturating_sub(hint_width);
+
+    // Truncate label if needed
+    let display_label: String = if label.chars().count() > label_width {
+        label.chars().take(label_width.saturating_sub(1)).collect::<String>() + "…"
+    } else {
+        let pad = label_width.saturating_sub(label.chars().count());
+        format!("{}{}", label, " ".repeat(pad))
+    };
+
+    let line = Line::from(vec![
+        Span::styled(
+            display_label,
+            Style::default()
+                .fg(theme::R_TEXT_SECONDARY)
+                .bg(theme::R_BG_SURFACE),
+        ),
+        Span::styled(
+            hint,
+            Style::default()
+                .fg(theme::R_TEXT_TERTIARY)
+                .bg(theme::R_BG_SURFACE),
+        ),
+    ]);
+    frame.render_widget(Paragraph::new(line), area);
+}
+
+fn render_picker_hint(frame: &mut Frame, area: Rect) {
+    let line = Line::from(Span::styled(
+        " Select a branch to compare against",
+        Style::default()
+            .fg(theme::R_TEXT_SECONDARY)
+            .bg(theme::R_BG_BASE),
+    ));
+    let remaining = (area.width as usize).saturating_sub(35);
+    let mut spans = vec![line.spans[0].clone()];
+    if remaining > 0 {
+        spans.push(Span::styled(
+            " ".repeat(remaining),
+            Style::default().bg(theme::R_BG_BASE),
+        ));
+    }
+    frame.render_widget(Paragraph::new(Line::from(spans)), area);
+}
+
+fn render_picker_input(frame: &mut Frame, area: Rect, picker: &BranchPicker) {
+    let before_cursor = &picker.input[..picker.cursor_pos];
+    let cursor_char = picker
+        .input
+        .get(picker.cursor_pos..picker.cursor_pos + 1)
+        .unwrap_or(" ");
+    let after_cursor = if picker.cursor_pos < picker.input.len() {
+        &picker.input[picker.cursor_pos + 1..]
+    } else {
+        ""
+    };
+
+    let line = Line::from(vec![
+        Span::styled(
+            " > ",
+            Style::default()
+                .fg(theme::R_ACCENT_BRIGHT)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(before_cursor, Style::default().fg(theme::R_TEXT_PRIMARY)),
+        Span::styled(
+            cursor_char,
+            Style::default()
+                .fg(theme::R_BG_BASE)
+                .bg(theme::R_TEXT_PRIMARY),
+        ),
+        Span::styled(after_cursor, Style::default().fg(theme::R_TEXT_PRIMARY)),
+    ]);
+
+    frame.render_widget(
+        Paragraph::new(line).style(Style::default().bg(theme::R_BG_INPUT)),
+        area,
+    );
+}
+
+fn render_picker_branch_list(frame: &mut Frame, area: Rect, picker: &BranchPicker) {
+    let filtered = picker.filtered_branches();
+    let max_visible = area.height as usize;
+    let scroll = picker.compute_scroll(filtered.len(), max_visible);
+
+    let lines: Vec<Line> = filtered
+        .iter()
+        .skip(scroll)
+        .take(max_visible)
+        .enumerate()
+        .map(|(vis_idx, &(orig_idx, _))| {
+            let branch = &picker.branches[orig_idx];
+            let is_selected = vis_idx + scroll == picker.selected_idx;
+
+            // Build spans: indicator + name + badges
+            let mut spans = if is_selected {
+                vec![
+                    Span::styled(
+                        "  > ",
+                        Style::default()
+                            .fg(theme::R_ACCENT_BRIGHT)
+                            .add_modifier(Modifier::BOLD),
+                    ),
+                    Span::styled(
+                        branch.name.as_str(),
+                        Style::default()
+                            .fg(theme::R_TEXT_PRIMARY)
+                            .add_modifier(Modifier::BOLD),
+                    ),
+                ]
+            } else {
+                vec![
+                    Span::styled("    ", Style::default()),
+                    Span::styled(
+                        branch.name.as_str(),
+                        Style::default().fg(theme::R_TEXT_SECONDARY),
+                    ),
+                ]
+            };
+
+            // Badges (same as CreateAgentModal)
+            if branch.is_head {
+                spans.push(Span::styled(
+                    " HEAD",
+                    Style::default().fg(theme::R_SUCCESS),
+                ));
+            }
+            if branch.is_worktree {
+                spans.push(Span::styled(
+                    " [worktree]",
+                    Style::default().fg(theme::R_INFO),
+                ));
+            }
+            if branch.active_agent_count > 0 {
+                spans.push(Span::styled(
+                    format!(
+                        " ({} agent{})",
+                        branch.active_agent_count,
+                        if branch.active_agent_count == 1 { "" } else { "s" }
+                    ),
+                    Style::default().fg(theme::R_WARNING),
+                ));
+            }
+
+            Line::from(spans)
+        })
+        .collect();
+
+    // Fill remaining with empty lines
+    let mut all_lines = lines;
+    for _ in all_lines.len()..max_visible {
+        all_lines.push(Line::from(Span::styled(
+            " ".repeat(area.width as usize),
+            Style::default().bg(theme::R_BG_BASE),
+        )));
+    }
+
+    frame.render_widget(
+        Paragraph::new(all_lines).style(Style::default().bg(theme::R_BG_BASE)),
+        area,
+    );
 }
