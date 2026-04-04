@@ -199,6 +199,15 @@ When the hub receives a `DeleteRemoteBranch` message:
 3. Delete the remote branch using `git push <remote> --delete <branch>`.
 4. Return `RemoteBranchDeleted { branch_name }`.
 
+### Checkout Remote Branch
+
+When the hub receives a `CheckoutRemoteBranch` message:
+
+1. Resolve the target repository (by working directory or repo name).
+2. Parse the remote name and local branch name from the full ref (e.g., `origin/feature` -> local branch `feature`).
+3. Check out the remote branch as a local tracking branch using `git checkout --track <remote/branch>`.
+4. Return `RemoteBranchCheckedOut { branch_name }` with the local branch name.
+
 ### Pull Branch
 
 When the hub receives a `PullBranch` message:

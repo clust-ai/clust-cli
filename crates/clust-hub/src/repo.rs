@@ -715,6 +715,33 @@ pub fn delete_remote_branch(
     Ok(())
 }
 
+/// Checkout a remote branch locally with tracking (e.g. "origin/feature-x").
+pub fn checkout_remote_branch(
+    repo_root: &Path,
+    remote_branch: &str,
+) -> Result<String, String> {
+    let mut parts = remote_branch.splitn(2, '/');
+    let _remote = parts
+        .next()
+        .ok_or_else(|| format!("invalid remote branch name: {remote_branch}"))?;
+    let local_branch = parts
+        .next()
+        .ok_or_else(|| format!("invalid remote branch name: {remote_branch}"))?;
+
+    let output = std::process::Command::new("git")
+        .current_dir(repo_root)
+        .args(["checkout", "--track", remote_branch])
+        .output()
+        .map_err(|e| format!("failed to run git: {e}"))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(format!("git checkout --track failed: {}", stderr.trim()));
+    }
+
+    Ok(local_branch.to_string())
+}
+
 /// Result of a repository purge operation.
 pub struct PurgeResult {
     pub removed_worktrees: usize,

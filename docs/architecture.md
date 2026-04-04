@@ -122,6 +122,7 @@ CLI -> Hub:
   CreateWorktreeAgent { repo_path: String, target_branch: Option<String>, new_branch: Option<String>, prompt: Option<String>, agent_binary: Option<String>, cols: u16, rows: u16, accept_edits: bool, hub: String }
   DeleteLocalBranch { working_dir: Option<String>, repo_name: Option<String>, branch_name: String, force: bool }
   DeleteRemoteBranch { working_dir: Option<String>, repo_name: Option<String>, branch_name: String }
+  CheckoutRemoteBranch { working_dir: Option<String>, repo_name: Option<String>, remote_branch: String }
   PurgeRepo { path: String }
   CleanStaleRefs { working_dir: Option<String>, repo_name: Option<String> }
   PullBranch { repo_path: String, branch_name: String }
@@ -150,6 +151,7 @@ Hub -> CLI:
   WorktreeAgentStarted { id: String, agent_binary: String, working_dir: String, repo_path: Option<String>, branch_name: Option<String> }
   LocalBranchDeleted { branch_name: String, stopped_agents: usize }
   RemoteBranchDeleted { branch_name: String }
+  RemoteBranchCheckedOut { branch_name: String }
   RepoPurged { path: String, stopped_agents: usize, removed_worktrees: usize, deleted_branches: usize }
   PurgeProgress { step: String }
   StaleRefsCleaned { path: String }
