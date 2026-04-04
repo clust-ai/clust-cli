@@ -1208,6 +1208,33 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                             last_repo_fetch = Instant::now() - Duration::from_secs(10);
                             last_agent_fetch = Instant::now() - Duration::from_secs(10);
                         }
+                    // Cmd+1/Cmd+2: instant view switching (before menus/terminals)
+                    } else if key.modifiers.contains(KeyModifiers::SUPER) {
+                        match key.code {
+                            KeyCode::Char('1') => {
+                                active_menu = None;
+                                if in_focus_mode {
+                                    focus_mode_state.shutdown();
+                                    in_focus_mode = false;
+                                }
+                                active_tab = ActiveTab::Repositories;
+                            }
+                            KeyCode::Char('2') => {
+                                active_menu = None;
+                                if in_focus_mode {
+                                    focus_mode_state.shutdown();
+                                    in_focus_mode = false;
+                                }
+                                active_tab = ActiveTab::Overview;
+                                if !overview_state.initialized {
+                                    overview_state
+                                        .sync_agents(&agents, last_content_area);
+                                } else {
+                                    overview_state.force_resize_all();
+                                }
+                            }
+                            _ => {}
+                        }
                     // Context menu overlay: intercept all keys when active
                     } else if let Some(ref mut menu_state) = active_menu {
                         let result = match menu_state {
