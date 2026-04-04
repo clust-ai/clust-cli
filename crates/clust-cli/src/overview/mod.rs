@@ -1143,13 +1143,15 @@ impl FocusModeState {
             task_handle: handle,
         });
 
-        // Spawn diff refresh task
-        let (stop_tx, stop_rx) = watch::channel(false);
-        let diff_tx = self.diff_tx.clone();
-        let diff_handle =
-            gitdiff::spawn_diff_task(working_dir.to_string(), diff_tx, stop_rx);
-        self.diff_stop_tx = Some(stop_tx);
-        self.diff_task = Some(diff_handle);
+        // Spawn diff refresh task (only if inside a repository)
+        if repo_path.is_some() {
+            let (stop_tx, stop_rx) = watch::channel(false);
+            let diff_tx = self.diff_tx.clone();
+            let diff_handle =
+                gitdiff::spawn_diff_task(working_dir.to_string(), diff_tx, stop_rx);
+            self.diff_stop_tx = Some(stop_tx);
+            self.diff_task = Some(diff_handle);
+        }
     }
 
     /// Drain all pending output events from the background task.
@@ -1283,8 +1285,12 @@ pub fn render_focus_mode(frame: &mut Frame, area: Rect, state: &mut FocusModeSta
         .and_then(|rp| repo_colors.get(rp.as_str()))
         .map(|cn| theme::repo_color(cn));
 
-    // Left side: tab bar + content
-    render_left_panel(frame, left_area, state, click_map, panel_color);
+    // Left side: repo-aware rendering
+    if state.repo_path.is_some() {
+        render_left_panel(frame, left_area, state, click_map, panel_color);
+    } else {
+        render_no_repo_left_panel(frame, left_area);
+    }
 
     // Right side: agent panel or empty state
     let right_focused = state.focus_side == FocusSide::Right;
@@ -1333,6 +1339,18 @@ fn render_left_panel(frame: &mut Frame, area: Rect, state: &FocusModeState, clic
             );
         }
     }
+}
+
+fn render_no_repo_left_panel(frame: &mut Frame, area: Rect) {
+    frame.render_widget(
+        Paragraph::new(Line::from(Span::styled(
+            "Agent not running inside repository",
+            Style::default().fg(theme::R_TEXT_TERTIARY),
+        )))
+        .alignment(ratatui::layout::Alignment::Center)
+        .style(Style::default().bg(theme::R_BG_BASE)),
+        area,
+    );
 }
 
 fn render_left_tab_bar(

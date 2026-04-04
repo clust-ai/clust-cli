@@ -269,7 +269,7 @@ Focus mode is an overlay state (tracked by an `in_focus_mode` boolean), not a ta
 
 **Back-bar header:**
 
-When focus mode is active, the 1-row tab bar is replaced by a back-bar that shows: `<- Shift+↑  Back to [tab name]  agent-id . binary . repo/branch  Shift+←/→ panels`. The left side shows the exit hint and origin tab name; the center shows the agent identity followed by the repo name (in the repo's assigned color) and branch name; the right side shows keyboard hints.
+When focus mode is active, the 1-row tab bar is replaced by a back-bar that shows: `<- Shift+↑  Back to [tab name]  agent-id . binary . repo/branch  Shift+←/→ panels`. The left side shows the exit hint and origin tab name; the center shows the agent identity followed by the repo name (in the repo's assigned color) and branch name; the right side shows keyboard hints. When the agent has no `repo_path` (non-repository agent), the keyboard hints on the right side of the back-bar are hidden.
 
 ```
 ┌─────────────────────────────────────────────────────┐
@@ -288,7 +288,7 @@ When focus mode is active, the 1-row tab bar is replaced by a back-bar that show
 
 **Left panel:**
 
-The left panel has a tab bar at the top with three tabs: `Changes`, `Panel 2`, `Panel 3`. The `Changes` tab shows a unified inline diff viewer. `Panel 2` and `Panel 3` are placeholders for future content.
+The left panel has a tab bar at the top with three tabs: `Changes`, `Panel 2`, `Panel 3`. The `Changes` tab shows a unified inline diff viewer. `Panel 2` and `Panel 3` are placeholders for future content. When the agent has no `repo_path` (non-repository agent), the left panel renders a simplified state: the tab bar and diff viewer are replaced by a centered "Agent not running inside repository" message in tertiary text color on the base background. The diff refresh background task is not spawned for non-repository agents.
 
 **Diff viewer (Changes tab):**
 
@@ -305,7 +305,7 @@ The left panel has a tab bar at the top with three tabs: `Changes`, `Panel 2`, `
 
 **Panel focus:**
 
-The focus view has a concept of which side (left or right) has keyboard focus. The focused side is indicated by visual cues (tab bar highlight, panel border accent). `Shift+←` and `Shift+→` switch focus between the left and right panels. `Shift+↑` exits focus mode from either panel. When the right panel is focused, `Esc` is forwarded to the agent process.
+The focus view has a concept of which side (left or right) has keyboard focus. The focused side is indicated by visual cues (tab bar highlight, panel border accent). `Shift+←` and `Shift+→` switch focus between the left and right panels. `Shift+↑` exits focus mode from either panel. When the right panel is focused, `Esc` is forwarded to the agent process. When the agent has no `repo_path` (non-repository agent), `Shift+←` from the right panel is blocked (the left panel cannot receive focus), and mouse clicks on the left panel area do not switch focus to the left panel. Clicking the right panel area still works normally.
 
 **Entry points:**
 
@@ -323,7 +323,7 @@ The agent's `working_dir`, `repo_path`, and `branch_name` are passed to `open_ag
 - `FocusSide` enum tracks which panel has keyboard focus (`Left` or `Right`).
 - `LeftPanelTab` enum tracks the active tab in the left panel (`Changes`, `Panel2`, `Panel3`) with `next()` for cycling.
 - Diff state is managed via `ParsedDiff` (lines, file start indices, file names), `diff_scroll` (current scroll position), and `diff_error` (error message if `git diff` failed).
-- A background diff refresh task (`spawn_diff_task`) runs every 2 seconds and sends `DiffEvent::Updated` or `DiffEvent::Error` via an `mpsc` channel. A `watch` channel signals the task to stop.
+- A background diff refresh task (`spawn_diff_task`) runs every 2 seconds and sends `DiffEvent::Updated` or `DiffEvent::Error` via an `mpsc` channel. A `watch` channel signals the task to stop. The diff task is only spawned when `repo_path` is `Some` (i.e., the agent is running inside a git repository).
 - `drain_diff_events()` is called each frame in the main event loop alongside `drain_output_events()`.
 - `parse_unified_diff()` parses raw `git diff HEAD` output into structured `DiffLine` entries with kind (FileHeader, HunkHeader, Context, Add, Delete, FileMetadata, Separator), content, line numbers, and file index. Separator lines are automatically inserted between files during parsing.
 - On terminal resize, the focus mode panel is resized via `TerminalEmulator::resize()` (preserving scrollback history) and the hub is notified via `ResizeAgent`. On `FocusGained` events, dimensions are also re-sent unconditionally to account for PTY resizes by other clients while the window was unfocused.
@@ -490,8 +490,8 @@ Clicking anywhere in the tree area (including empty space) sets keyboard focus t
 
 | Click Target | Action |
 |--------------|--------|
-| Left panel tab (Changes/Panel 2/Panel 3) | Switch to that tab and focus the left panel |
-| Left panel area | Switch keyboard focus to left panel |
+| Left panel tab (Changes/Panel 2/Panel 3) | Switch to that tab and focus the left panel (only when agent has a repo) |
+| Left panel area | Switch keyboard focus to left panel (only when agent has a repo) |
 | Right panel area | Switch keyboard focus to right panel |
 
 #### Cmd+Click URL Opening

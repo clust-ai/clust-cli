@@ -2244,7 +2244,7 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                             overview_state.force_resize_all();
                                         }
                                     }
-                                    KeyCode::Left => {
+                                    KeyCode::Left if focus_mode_state.repo_path.is_some() => {
                                         focus_mode_state.focus_side =
                                             overview::FocusSide::Left;
                                     }
@@ -3543,11 +3543,15 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                             {
                                 overview_state.force_resize_all();
                             }
-                        } else if let Some((_, tab)) = click_map.focus_left_tabs.iter().find(|(r, _)| r.contains(pos)) {
-                            focus_mode_state.left_tab = *tab;
-                            focus_mode_state.focus_side = overview::FocusSide::Left;
-                        } else if click_map.focus_left_area.contains(pos) {
-                            focus_mode_state.focus_side = overview::FocusSide::Left;
+                        } else if focus_mode_state.repo_path.is_some() {
+                            if let Some((_, tab)) = click_map.focus_left_tabs.iter().find(|(r, _)| r.contains(pos)) {
+                                focus_mode_state.left_tab = *tab;
+                                focus_mode_state.focus_side = overview::FocusSide::Left;
+                            } else if click_map.focus_left_area.contains(pos) {
+                                focus_mode_state.focus_side = overview::FocusSide::Left;
+                            } else if click_map.focus_right_area.contains(pos) {
+                                focus_mode_state.focus_side = overview::FocusSide::Right;
+                            }
                         } else if click_map.focus_right_area.contains(pos) {
                             focus_mode_state.focus_side = overview::FocusSide::Right;
                         }
@@ -3922,23 +3926,25 @@ fn render_focus_back_bar(
         }
     }
 
-    // Right: keyboard hints
-    let hints = "Shift+\u{2190}/\u{2192} panels  Shift+\u{2191}/\u{2193} jump file";
-    let left_width: usize = spans.iter().map(|s| s.content.chars().count()).sum();
-    let hints_width = hints.chars().count();
-    let gap = (area.width as usize)
-        .saturating_sub(left_width)
-        .saturating_sub(hints_width)
-        .saturating_sub(1); // trailing space
-    if gap > 0 {
-        spans.push(Span::styled(" ".repeat(gap), bg));
+    // Right: keyboard hints (only for repo agents)
+    if state.repo_path.is_some() {
+        let hints = "Shift+\u{2190}/\u{2192} panels  Shift+\u{2191}/\u{2193} jump file";
+        let left_width: usize = spans.iter().map(|s| s.content.chars().count()).sum();
+        let hints_width = hints.chars().count();
+        let gap = (area.width as usize)
+            .saturating_sub(left_width)
+            .saturating_sub(hints_width)
+            .saturating_sub(1); // trailing space
+        if gap > 0 {
+            spans.push(Span::styled(" ".repeat(gap), bg));
+        }
+        spans.push(Span::styled(
+            hints,
+            Style::default()
+                .fg(theme::R_TEXT_TERTIARY)
+                .bg(theme::R_BG_RAISED),
+        ));
     }
-    spans.push(Span::styled(
-        hints,
-        Style::default()
-            .fg(theme::R_TEXT_TERTIARY)
-            .bg(theme::R_BG_RAISED),
-    ));
 
     // Fill remaining
     let total_width: usize = spans.iter().map(|s| s.content.chars().count()).sum();
