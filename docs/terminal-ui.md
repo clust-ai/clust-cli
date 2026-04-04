@@ -274,7 +274,7 @@ When focus mode is active, the 1-row tab bar is replaced by a back-bar that show
 ```
 ┌─────────────────────────────────────────────────────┐
 │ ← Shift+↑  Back to Overview  a3f8c1 · claude · myrepo/main        Shift+←/→ panels │
-│ Changes │ Panel 2 │ Panel 3 │┌────────────────────┐│
+│ Changes │ Compare │ Panel 3 │┌────────────────────┐│
 │                               ││ a3f8c1 · claude ●  ││
 │      1      1│fn main() {     ││                    ││
 │      2       │-  old_code();  ││ Agent PTY output   ││
@@ -288,7 +288,7 @@ When focus mode is active, the 1-row tab bar is replaced by a back-bar that show
 
 **Left panel:**
 
-The left panel has a tab bar at the top with three tabs: `Changes`, `Panel 2`, `Panel 3`. The `Changes` tab shows a unified inline diff viewer. `Panel 2` and `Panel 3` are placeholders for future content. When the agent has no `repo_path` (non-repository agent), the left panel renders a simplified state: the tab bar and diff viewer are replaced by a centered "Agent not running inside repository" message in tertiary text color on the base background. The diff refresh background task is not spawned for non-repository agents.
+The left panel has a tab bar at the top with three tabs: `Changes`, `Compare`, `Panel 3`. The `Changes` tab shows a unified inline diff viewer showing uncommitted changes (`git diff HEAD`). The `Compare` tab shows a branch comparison diff viewer where users can select any local branch and view the diff between it and the agent's current branch. `Panel 3` is a placeholder for future content. When the agent has no `repo_path` (non-repository agent), the left panel renders a simplified state: the tab bar and diff viewer are replaced by a centered "Agent not running inside repository" message in tertiary text color on the base background. The diff refresh background task is not spawned for non-repository agents.
 
 **Diff viewer (Changes tab):**
 
@@ -302,6 +302,21 @@ The left panel has a tab bar at the top with three tabs: `Changes`, `Panel 2`, `
 - Scrolling is supported with `↑` / `↓` keys when the left panel is focused
 - Error state shows the error message in `R_ERROR` color with word wrapping enabled (`.wrap(Wrap { trim: false })`) so long error messages do not overflow the terminal width
 - Empty state shows "No uncommitted changes"; loading state shows "Loading diff..."
+
+**Branch Compare (Compare tab):**
+
+- Allows comparing the agent's current branch against any other local branch in the same repository
+- Has two modes controlled by `BranchPickerMode`: `Searching` and `Selected`
+- **Searching mode:** Shows a text input field with fuzzy search filtering and a scrollable branch list below it. The agent's own branch is excluded from the list. Uses `SkimMatcherV2` for fuzzy matching, with results sorted by match score descending. Keyboard controls: `↑` / `↓` navigate the list, `Enter` selects a branch and switches to Selected mode, `Esc` cancels and returns to Selected mode, typing filters the list, `Backspace` deletes characters, `←` / `→` move the cursor within the input
+- **Selected mode:** Shows a label bar displaying the selected branch name (or "No branch selected" if none), followed by a diff viewer showing the output of `git diff <selected-branch> <agent-branch>`. Pressing `Enter` re-opens the search picker. `↑` / `↓` scroll the diff. `Tab` cycles to the next left panel tab
+- The diff is refreshed every 2 seconds via a background tokio task (`spawn_branch_diff_task`) that runs `git diff <base> <head>` in a `spawn_blocking` call, mirroring the Changes tab refresh mechanism
+- `BranchPicker` struct manages the picker state: input text, cursor position, selected index, selected branch name, branch list, and a `SkimMatcherV2` fuzzy matcher
+- Branch list is updated via `update_compare_branches()` which is called during the repo refresh path, pulling local branches from the matching `RepoInfo`
+- When a branch is selected, `start_compare_diff()` stops any existing compare diff task and spawns a new one
+- `drain_compare_diff_events()` is called each frame in the main event loop to process background diff results
+- Scroll state, diff data, and error state are managed independently from the Changes tab (`compare_diff`, `compare_diff_scroll`, `compare_diff_error`)
+- The diff viewer rendering is shared with the Changes tab via a parameterized `render_diff_viewer()` function
+- Mouse scroll within the left panel area is tab-aware, routing to `compare_scroll_up/down` when the Compare tab is active
 
 **Panel focus:**
 
@@ -321,7 +336,7 @@ The agent's `working_dir`, `repo_path`, and `branch_name` are passed to `open_ag
 - `FocusModeState` manages a single `AgentPanel` with its own IPC background task, output channel, and `TerminalEmulator`. It also tracks `branch_name` (in addition to `working_dir` and `repo_path`) to support worktree cleanup dialogs when exiting focus mode.
 - The panel dimensions are calculated as 40% of the content area width (minus borders) by the content area height (minus header).
 - `FocusSide` enum tracks which panel has keyboard focus (`Left` or `Right`).
-- `LeftPanelTab` enum tracks the active tab in the left panel (`Changes`, `Panel2`, `Panel3`) with `next()` for cycling.
+- `LeftPanelTab` enum tracks the active tab in the left panel (`Changes`, `Compare`, `Panel3`) with `next()` for cycling.
 - Diff state is managed via `ParsedDiff` (lines, file start indices, file names), `diff_scroll` (current scroll position), and `diff_error` (error message if `git diff` failed).
 - A background diff refresh task (`spawn_diff_task`) runs every 2 seconds and sends `DiffEvent::Updated` or `DiffEvent::Error` via an `mpsc` channel. A `watch` channel signals the task to stop. The diff task is only spawned when `repo_path` is `Some` (i.e., the agent is running inside a git repository).
 - `drain_diff_events()` is called each frame in the main event loop alongside `drain_output_events()`.
@@ -342,7 +357,7 @@ The agent's `working_dir`, `repo_path`, and `branch_name` are passed to `open_ag
 | `Shift+PageDown` | Scroll down through scrollback history |
 | All other keys | Forwarded to the focused agent's PTY |
 
-**Keyboard shortcuts (focus mode, left panel focused):**
+**Keyboard shortcuts (focus mode, left panel focused, Changes tab):**
 
 | Shortcut | Action |
 |----------|--------|
@@ -350,6 +365,27 @@ The agent's `working_dir`, `repo_path`, and `branch_name` are passed to `open_ag
 | `Shift+↑` | Exit focus mode, return to originating tab |
 | `Shift+→` | Switch focus to right panel |
 | `Tab` | Cycle to next left panel tab |
+
+**Keyboard shortcuts (focus mode, left panel focused, Compare tab -- Selected mode):**
+
+| Shortcut | Action |
+|----------|--------|
+| `↑` / `↓` | Scroll compare diff up/down |
+| `Enter` | Open branch search picker |
+| `Shift+↑` | Exit focus mode, return to originating tab |
+| `Shift+→` | Switch focus to right panel |
+| `Tab` | Cycle to next left panel tab |
+
+**Keyboard shortcuts (focus mode, left panel focused, Compare tab -- Searching mode):**
+
+| Shortcut | Action |
+|----------|--------|
+| `↑` / `↓` | Navigate branch list up/down |
+| `Enter` | Select highlighted branch, start diff |
+| `Esc` | Cancel search, return to Selected mode |
+| Typing | Filter branch list with fuzzy search |
+| `Backspace` | Delete character before cursor |
+| `←` / `→` | Move cursor within search input |
 
 ### Help Overlay (`?`)
 
@@ -490,7 +526,7 @@ Clicking anywhere in the tree area (including empty space) sets keyboard focus t
 
 | Click Target | Action |
 |--------------|--------|
-| Left panel tab (Changes/Panel 2/Panel 3) | Switch to that tab and focus the left panel (only when agent has a repo) |
+| Left panel tab (Changes/Compare/Panel 3) | Switch to that tab and focus the left panel (only when agent has a repo) |
 | Left panel area | Switch keyboard focus to left panel (only when agent has a repo) |
 | Right panel area | Switch keyboard focus to right panel |
 

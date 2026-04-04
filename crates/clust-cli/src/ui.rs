@@ -883,6 +883,7 @@ pub fn run(hub_name: &str) -> io::Result<()> {
         overview_state.drain_output_events();
         focus_mode_state.drain_output_events();
         focus_mode_state.drain_diff_events();
+        focus_mode_state.drain_compare_diff_events();
 
         // Immediate worktree cleanup prompt when agent exits in focus mode
         if in_focus_mode && active_menu.is_none() {
@@ -985,6 +986,9 @@ pub fn run(hub_name: &str) -> io::Result<()> {
         if hub_running && last_repo_fetch.elapsed() >= AGENT_FETCH_INTERVAL {
             repos = fetch_repos();
             last_repo_fetch = Instant::now();
+            if in_focus_mode {
+                focus_mode_state.update_compare_branches(&repos);
+            }
         }
 
         // Build display_repos: real repos + synthetic "No Repository" for unlinked agents
@@ -2225,18 +2229,64 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                     _ => {}
                                 }
                             } else {
-                                match key.code {
-                                    KeyCode::Up => {
-                                        focus_mode_state.diff_scroll_up()
+                                match focus_mode_state.left_tab {
+                                    overview::LeftPanelTab::Changes => {
+                                        match key.code {
+                                            KeyCode::Up => {
+                                                focus_mode_state.diff_scroll_up()
+                                            }
+                                            KeyCode::Down => {
+                                                focus_mode_state.diff_scroll_down()
+                                            }
+                                            KeyCode::Tab => {
+                                                focus_mode_state.left_tab =
+                                                    focus_mode_state.left_tab.next();
+                                            }
+                                            _ => {}
+                                        }
                                     }
-                                    KeyCode::Down => {
-                                        focus_mode_state.diff_scroll_down()
+                                    overview::LeftPanelTab::Compare => {
+                                        match focus_mode_state.compare_picker.mode {
+                                            overview::BranchPickerMode::Searching => {
+                                                let changed = focus_mode_state
+                                                    .compare_picker
+                                                    .handle_key(key);
+                                                if changed {
+                                                    focus_mode_state.start_compare_diff();
+                                                }
+                                            }
+                                            overview::BranchPickerMode::Selected => {
+                                                match key.code {
+                                                    KeyCode::Up => {
+                                                        focus_mode_state
+                                                            .compare_scroll_up()
+                                                    }
+                                                    KeyCode::Down => {
+                                                        focus_mode_state
+                                                            .compare_scroll_down()
+                                                    }
+                                                    KeyCode::Enter => {
+                                                        focus_mode_state
+                                                            .compare_picker
+                                                            .enter_search();
+                                                    }
+                                                    KeyCode::Tab => {
+                                                        focus_mode_state.left_tab =
+                                                            focus_mode_state
+                                                                .left_tab
+                                                                .next();
+                                                    }
+                                                    _ => {}
+                                                }
+                                            }
+                                        }
                                     }
-                                    KeyCode::Tab => {
-                                        focus_mode_state.left_tab =
-                                            focus_mode_state.left_tab.next();
+                                    overview::LeftPanelTab::Panel3 => {
+                                        if key.code == KeyCode::Tab {
+                                            focus_mode_state.left_tab =
+                                                focus_mode_state.left_tab.next();
+                                        }
                                     }
-                                    _ => {}
                                 }
                             }
                         } else {
@@ -3676,7 +3726,10 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                     (panel.panel_scroll_offset + 3).min(max);
                             }
                         } else if click_map.focus_left_area.contains(pos) {
-                            focus_mode_state.diff_scroll_up();
+                            match focus_mode_state.left_tab {
+                                overview::LeftPanelTab::Compare => focus_mode_state.compare_scroll_up(),
+                                _ => focus_mode_state.diff_scroll_up(),
+                            }
                         }
                     } else if active_tab == ActiveTab::Overview {
                         if let Some((_, idx)) = click_map.overview_panels.iter().find(|(r, _)| r.contains(pos)) {
@@ -3709,7 +3762,10 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                     panel.panel_scroll_offset.saturating_sub(3);
                             }
                         } else if click_map.focus_left_area.contains(pos) {
-                            focus_mode_state.diff_scroll_down();
+                            match focus_mode_state.left_tab {
+                                overview::LeftPanelTab::Compare => focus_mode_state.compare_scroll_down(),
+                                _ => focus_mode_state.diff_scroll_down(),
+                            }
                         }
                     } else if active_tab == ActiveTab::Overview {
                         if let Some((_, idx)) = click_map.overview_panels.iter().find(|(r, _)| r.contains(pos)) {
