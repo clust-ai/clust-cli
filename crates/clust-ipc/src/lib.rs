@@ -99,6 +99,15 @@ pub enum CliMessage {
         repo_name: Option<String>,
         remote_branch: String,
     },
+    CreateRepo {
+        parent_dir: String,
+        name: String,
+    },
+    CloneRepo {
+        url: String,
+        parent_dir: String,
+        name: Option<String>,
+    },
 }
 
 /// Info about a running agent, returned in AgentList.
@@ -223,6 +232,17 @@ pub enum HubMessage {
     },
     RemoteBranchCheckedOut {
         branch_name: String,
+    },
+    RepoCreated {
+        path: String,
+        name: String,
+    },
+    RepoCloned {
+        path: String,
+        name: String,
+    },
+    CloneProgress {
+        step: String,
     },
 }
 

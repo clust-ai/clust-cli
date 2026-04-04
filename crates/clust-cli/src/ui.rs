@@ -25,6 +25,7 @@ use crate::{
     format::{format_attached, format_started},
     ipc,
     overview::{self, OverviewFocus, OverviewState},
+    repo_modal::{RepoModal, RepoModalResult},
     search_modal::{SearchModal, SearchResult},
     terminal_emulator,
     theme, version,
@@ -83,6 +84,28 @@ struct PurgeProgress {
     rx: tokio::sync::mpsc::UnboundedReceiver<PurgeEvent>,
     started: Instant,
 }
+
+// ---------------------------------------------------------------------------
+// Clone progress modal
+// ---------------------------------------------------------------------------
+
+enum CloneEvent {
+    Step(String),
+    Done,
+    Error(String),
+}
+
+struct CloneProgress {
+    url: String,
+    steps: Vec<String>,
+    done: bool,
+    error: Option<String>,
+    rx: tokio::sync::mpsc::UnboundedReceiver<CloneEvent>,
+    started: Instant,
+}
+
+/// Sentinel path used for the "Add Repository" synthetic tree entry.
+const ADD_REPO_SENTINEL: &str = "__add_repo__";
 
 const SPINNER_CHARS: &[char] = &['\u{2839}', '\u{2838}', '\u{283c}', '\u{2834}',
                                   '\u{2826}', '\u{2827}', '\u{2807}', '\u{280f}'];
@@ -873,6 +896,10 @@ pub fn run(hub_name: &str) -> io::Result<()> {
     let mut detached_modal: Option<DetachedAgentModal> = None;
     // Purge progress modal state
     let mut purge_progress: Option<PurgeProgress> = None;
+    // Repository create/clone modal state
+    let mut repo_modal: Option<RepoModal> = None;
+    // Clone progress modal state
+    let mut clone_progress: Option<CloneProgress> = None;
     let (agent_start_tx, mut agent_start_rx) =
         tokio::sync::mpsc::channel::<AgentStartResult>(4);
     let (status_tx, mut status_rx) =
@@ -975,6 +1002,20 @@ pub fn run(hub_name: &str) -> io::Result<()> {
             }
         }
 
+        // Drain clone progress events
+        if let Some(ref mut cp) = clone_progress {
+            while let Ok(event) = cp.rx.try_recv() {
+                match event {
+                    CloneEvent::Step(step) => cp.steps.push(step),
+                    CloneEvent::Done => cp.done = true,
+                    CloneEvent::Error(msg) => {
+                        cp.error = Some(msg);
+                        cp.done = true;
+                    }
+                }
+            }
+        }
+
         // Periodically fetch agent list and repo state from hub
         let mut agents_refreshed = false;
         if hub_running && last_agent_fetch.elapsed() >= AGENT_FETCH_INTERVAL {
@@ -1019,6 +1060,14 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                     remote_branches: vec![],
                 });
             }
+            // Always append the "Add Repository" action entry
+            dr.push(RepoInfo {
+                path: ADD_REPO_SENTINEL.to_string(),
+                name: "Add Repository".to_string(),
+                color: None,
+                local_branches: vec![],
+                remote_branches: vec![],
+            });
             dr
         };
         selection.clamp(&display_repos);
@@ -1047,9 +1096,10 @@ pub fn run(hub_name: &str) -> io::Result<()> {
             .collect();
 
         let mut click_map = ClickMap::default();
-        let show_modal = create_modal.is_some() || detached_modal.is_some();
+        let show_modal = create_modal.is_some() || detached_modal.is_some() || repo_modal.is_some();
         let show_search = search_modal.is_some();
         let purge_ref = &purge_progress;
+        let clone_ref = &clone_progress;
 
         terminal.draw(|frame| {
             let area = frame.area();
@@ -1177,6 +1227,9 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                 if let Some(ref modal) = detached_modal {
                     modal.render(frame, content_area);
                 }
+                if let Some(ref modal) = repo_modal {
+                    modal.render(frame, content_area);
+                }
             }
 
             if show_search {
@@ -1187,6 +1240,9 @@ pub fn run(hub_name: &str) -> io::Result<()> {
 
             if let Some(ref pp) = *purge_ref {
                 render_purge_progress(frame, content_area, pp);
+            }
+            if let Some(ref cp) = *clone_ref {
+                render_clone_progress(frame, content_area, cp);
             }
         })?;
 
@@ -1239,6 +1295,15 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                 }
                             }
                             _ => {}
+                        }
+                    // Clone progress modal: block all input, Esc dismisses when done
+                    } else if clone_progress.is_some() {
+                        if key.code == KeyCode::Esc
+                            && clone_progress.as_ref().is_some_and(|cp| cp.done)
+                        {
+                            clone_progress = None;
+                            last_repo_fetch = Instant::now() - Duration::from_secs(10);
+                            last_agent_fetch = Instant::now() - Duration::from_secs(10);
                         }
                     // Context menu overlay: intercept all keys when active
                     } else if let Some(ref mut menu_state) = active_menu {
@@ -2178,6 +2243,75 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                             }
                             DetachedModalResult::Pending => {}
                         }
+                    } else if let Some(ref mut modal) = repo_modal {
+                        match modal.handle_key(key) {
+                            RepoModalResult::Cancelled => {
+                                repo_modal = None;
+                            }
+                            RepoModalResult::CreateRepo(output) => {
+                                repo_modal = None;
+                                let tx = status_tx.clone();
+                                tokio::spawn(async move {
+                                    let mut stream = match ipc::try_connect().await {
+                                        Ok(s) => s,
+                                        Err(e) => {
+                                            let _ = tx.send(StatusMessage {
+                                                text: format!("Create failed: {e}"),
+                                                level: StatusLevel::Error,
+                                                created: Instant::now(),
+                                            }).await;
+                                            return;
+                                        }
+                                    };
+                                    let msg = CliMessage::CreateRepo {
+                                        parent_dir: output.parent_dir,
+                                        name: output.name,
+                                    };
+                                    if let Err(e) = clust_ipc::send_message(&mut stream, &msg).await {
+                                        let _ = tx.send(StatusMessage {
+                                            text: format!("Create failed: {e}"),
+                                            level: StatusLevel::Error,
+                                            created: Instant::now(),
+                                        }).await;
+                                        return;
+                                    }
+                                    match clust_ipc::recv_message::<HubMessage>(&mut stream).await {
+                                        Ok(HubMessage::RepoCreated { name, .. }) => {
+                                            let _ = tx.send(StatusMessage {
+                                                text: format!("Created repository \"{name}\""),
+                                                level: StatusLevel::Success,
+                                                created: Instant::now(),
+                                            }).await;
+                                        }
+                                        Ok(HubMessage::Error { message }) => {
+                                            let _ = tx.send(StatusMessage {
+                                                text: message,
+                                                level: StatusLevel::Error,
+                                                created: Instant::now(),
+                                            }).await;
+                                        }
+                                        Err(e) => {
+                                            let _ = tx.send(StatusMessage {
+                                                text: format!("Create failed: {e}"),
+                                                level: StatusLevel::Error,
+                                                created: Instant::now(),
+                                            }).await;
+                                        }
+                                        _ => {}
+                                    }
+                                });
+                                last_repo_fetch = Instant::now() - Duration::from_secs(10);
+                            }
+                            RepoModalResult::CloneRepo(output) => {
+                                repo_modal = None;
+                                clone_progress = Some(start_clone_async(
+                                    &output.url,
+                                    &output.parent_dir,
+                                    output.name.as_deref(),
+                                ));
+                            }
+                            RepoModalResult::Pending => {}
+                        }
                     } else if key.code == KeyCode::Char('e')
                         && key.modifiers.contains(KeyModifiers::ALT)
                     {
@@ -2200,6 +2334,12 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                             search_modal = Some(SearchModal::new(agents.clone()));
                             show_help = false;
                         }
+                    } else if key.code == KeyCode::Char('n')
+                        && key.modifiers.contains(KeyModifiers::ALT)
+                    {
+                        // Global shortcut: Alt+N opens new repository modal
+                        repo_modal = Some(RepoModal::new());
+                        show_help = false;
                     } else
                     // Focus mode: behavior depends on which side has focus
                     if in_focus_mode
@@ -2584,9 +2724,12 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                         if focus == FocusPanel::Left {
                                             match selection.level {
                                                 TreeLevel::Repo => {
-                                                    // Open context menu for real repos
                                                     if let Some(repo) = display_repos.get(selection.repo_idx) {
-                                                        if !repo.path.is_empty() {
+                                                        if repo.path == ADD_REPO_SENTINEL {
+                                                            // Open the repo create/clone modal
+                                                            repo_modal = Some(RepoModal::new());
+                                                            show_help = false;
+                                                        } else if !repo.path.is_empty() {
                                                             active_menu = Some(ActiveMenu::RepoActions {
                                                                 repo_path: repo.path.clone(),
                                                                 menu: ContextMenu::new(
@@ -4120,6 +4263,37 @@ fn build_repo_tree_lines(
             targets.push(TreeClickTarget::Repo(repo_idx));
         }
 
+        // "Add Repository" action entry — rendered as a distinct button-like row
+        if repo.path == ADD_REPO_SENTINEL {
+            let (bg, plus_fg, name_fg) = if repo_selected {
+                (Some(theme::R_BG_HOVER), theme::R_ACCENT_BRIGHT, theme::R_TEXT_PRIMARY)
+            } else {
+                (None, theme::R_TEXT_TERTIARY, theme::R_TEXT_SECONDARY)
+            };
+            let mut spans = Vec::new();
+            let mut plus_style = Style::default().fg(plus_fg);
+            if let Some(bg_color) = bg {
+                plus_style = plus_style.bg(bg_color);
+            }
+            spans.push(Span::styled(" + ", plus_style));
+            let mut name_style = Style::default().fg(name_fg);
+            if let Some(bg_color) = bg {
+                name_style = name_style.bg(bg_color);
+            }
+            spans.push(Span::styled(repo.name.clone(), name_style));
+            if repo_selected {
+                spans.push(Span::styled(
+                    "  Enter",
+                    Style::default()
+                        .fg(theme::R_TEXT_TERTIARY)
+                        .bg(theme::R_BG_HOVER),
+                ));
+            }
+            lines.push(pad_line(spans, width, bg));
+            targets.push(TreeClickTarget::Repo(repo_idx));
+            continue;
+        }
+
         // Repo name header with collapse chevron
         let chevron = if repo_collapsed { "▸" } else { "▾" };
         let repo_clr = repo
@@ -4987,7 +5161,7 @@ fn render_status_bar(
                 }
             }
         } else {
-            format!("{mod_key}+R new agent  q quit  Q stop+quit  ? keys")
+            format!("{mod_key}+N new repo  {mod_key}+R new agent  q quit  Q stop+quit  ? keys")
         };
 
         left_spans.extend([
@@ -5079,6 +5253,7 @@ fn render_help_overlay(frame: &mut Frame, area: Rect, active_tab: ActiveTab, in_
     lines.push(binding_line("Alt+E", "Create agent"));
     lines.push(binding_line("Alt+D", "New directory agent"));
     lines.push(binding_line("Alt+F", "Search agents"));
+    lines.push(binding_line("Alt+N", "Add repository"));
 
     // -- Repositories --
     if active_tab == ActiveTab::Repositories {
@@ -5488,6 +5663,177 @@ fn render_purge_progress(frame: &mut Frame, area: Rect, progress: &PurgeProgress
     }
 
     let title = format!("Purging {}", progress.repo_name);
+    let content_max_width = lines
+        .iter()
+        .map(|l| {
+            l.spans
+                .iter()
+                .map(|s| s.content.chars().count())
+                .sum::<usize>()
+        })
+        .max()
+        .unwrap_or(0)
+        .max(title.chars().count() + 4);
+    let modal_width = (content_max_width + 4) as u16;
+    let modal_height = (lines.len() + 3) as u16;
+
+    let [horz_area] = Layout::horizontal([Constraint::Length(modal_width)])
+        .flex(Flex::Center)
+        .areas(area);
+
+    let modal_rect = Rect {
+        x: horz_area.x,
+        y: area.y + area.height.saturating_sub(modal_height) / 2,
+        width: modal_width.min(area.width),
+        height: modal_height.min(area.height),
+    };
+
+    frame.render_widget(Clear, modal_rect);
+
+    let block = Block::default()
+        .title(Line::from(vec![
+            Span::styled(" ", Style::default()),
+            Span::styled(
+                title,
+                Style::default()
+                    .fg(theme::R_TEXT_PRIMARY)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(" ", Style::default()),
+        ]))
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(theme::R_TEXT_TERTIARY))
+        .padding(Padding::new(1, 1, 0, 0))
+        .style(Style::default().bg(theme::R_BG_OVERLAY));
+
+    let inner = block.inner(modal_rect);
+    frame.render_widget(block, modal_rect);
+    frame.render_widget(Paragraph::new(lines), inner);
+}
+
+fn start_clone_async(url: &str, parent_dir: &str, name: Option<&str>) -> CloneProgress {
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+    let url_owned = url.to_string();
+    let parent_dir_owned = parent_dir.to_string();
+    let name_owned = name.map(|s| s.to_string());
+    let display_url = url.to_string();
+    tokio::spawn(async move {
+        let Ok(mut stream) = ipc::try_connect().await else {
+            let _ = tx.send(CloneEvent::Error("Failed to connect to hub".into()));
+            return;
+        };
+        let msg = CliMessage::CloneRepo {
+            url: url_owned,
+            parent_dir: parent_dir_owned,
+            name: name_owned,
+        };
+        if clust_ipc::send_message(&mut stream, &msg)
+            .await
+            .is_err()
+        {
+            let _ = tx.send(CloneEvent::Error("Failed to send clone request".into()));
+            return;
+        }
+        loop {
+            match clust_ipc::recv_message::<HubMessage>(&mut stream).await {
+                Ok(HubMessage::CloneProgress { step }) => {
+                    let _ = tx.send(CloneEvent::Step(step));
+                }
+                Ok(HubMessage::RepoCloned { .. }) => {
+                    let _ = tx.send(CloneEvent::Done);
+                    return;
+                }
+                Ok(HubMessage::Error { message }) => {
+                    let _ = tx.send(CloneEvent::Error(message));
+                    return;
+                }
+                Err(e) => {
+                    let _ = tx.send(CloneEvent::Error(format!("Connection error: {e}")));
+                    return;
+                }
+                _ => {}
+            }
+        }
+    });
+    CloneProgress {
+        url: display_url,
+        steps: Vec::new(),
+        done: false,
+        error: None,
+        rx,
+        started: Instant::now(),
+    }
+}
+
+fn render_clone_progress(frame: &mut Frame, area: Rect, progress: &CloneProgress) {
+    let spinner_idx =
+        (progress.started.elapsed().as_millis() / 120) as usize % SPINNER_CHARS.len();
+    let spinner = SPINNER_CHARS[spinner_idx];
+
+    let mut lines: Vec<Line> = Vec::new();
+
+    for (i, step) in progress.steps.iter().enumerate() {
+        let is_last = i == progress.steps.len() - 1;
+        let (prefix, prefix_color) = if is_last && !progress.done {
+            (format!(" {spinner} "), theme::R_ACCENT)
+        } else {
+            (" \u{2713} ".to_string(), theme::R_SUCCESS)
+        };
+
+        lines.push(Line::from(vec![
+            Span::styled(
+                prefix,
+                Style::default().fg(prefix_color).bg(theme::R_BG_OVERLAY),
+            ),
+            Span::styled(
+                step.clone(),
+                Style::default()
+                    .fg(theme::R_TEXT_SECONDARY)
+                    .bg(theme::R_BG_OVERLAY),
+            ),
+        ]));
+    }
+
+    if progress.steps.is_empty() && !progress.done {
+        lines.push(Line::from(vec![
+            Span::styled(
+                format!(" {spinner} "),
+                Style::default().fg(theme::R_ACCENT).bg(theme::R_BG_OVERLAY),
+            ),
+            Span::styled(
+                "Starting clone\u{2026}",
+                Style::default()
+                    .fg(theme::R_TEXT_SECONDARY)
+                    .bg(theme::R_BG_OVERLAY),
+            ),
+        ]));
+    }
+
+    if let Some(ref error) = progress.error {
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled(
+            format!(" Error: {error}"),
+            Style::default().fg(theme::R_ERROR).bg(theme::R_BG_OVERLAY),
+        )));
+    }
+
+    if progress.done {
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled(
+            " Press Esc to close",
+            Style::default()
+                .fg(theme::R_TEXT_TERTIARY)
+                .bg(theme::R_BG_OVERLAY),
+        )));
+    }
+
+    // Truncate the URL for display
+    let url_short = if progress.url.len() > 40 {
+        format!("\u{2026}{}", &progress.url[progress.url.len() - 39..])
+    } else {
+        progress.url.clone()
+    };
+    let title = format!("Cloning {url_short}");
     let content_max_width = lines
         .iter()
         .map(|l| {

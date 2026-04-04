@@ -97,7 +97,7 @@ The active tab is highlighted with the accent color. A `Tab/Shift+Tab` hint is s
 
 #### Content Panels (Repositories tab)
 
-- **Left panel (40%):** Repository tracker with `(2,2,1,0)` padding. Shows a "Repositories" title on the first row with the focus indicator (`●`) right-aligned on the same line, followed by a 1-row spacer, then the tree content below. Shows a tree view of registered git repositories with their local and remote branches. Repository header lines use reverse-video styling (repo color background, dark text, bold) for visual prominence; when selected, the header uses the standard hover background with colored text instead. An empty line separates each repository group in the tree for visual clarity. Repository names are preceded by a colored `●` dot matching the repo's assigned color (from the 10-color repo palette: red, orange, yellow, lime, green, teal, blue, purple, pink, coral). Tree connectors use `├──` / `└──` for clear hierarchy. Branch names are rendered Bold. Remote branches are collapsed by default. Branches with active agents display a green `●` indicator with count; branches checked out in worktrees display a `⎇` indicator. The current HEAD branch is highlighted using the repo's assigned color. Displays "No repositories found" when no repos are registered. Uses background colors for visual separation (no borders). The focused panel shows a bright accent dot; the unfocused panel shows a dim dot. Agents not associated with any git repository are grouped under a synthetic "No Repository" entry at the bottom of the tree. This entry has no local/remote category level -- agents are listed directly under the repo node with their binary name and working directory. Navigation skips the category level for this group.
+- **Left panel (40%):** Repository tracker with `(2,2,1,0)` padding. Shows a "Repositories" title on the first row with the focus indicator (`●`) right-aligned on the same line, followed by a 1-row spacer, then the tree content below. Shows a tree view of registered git repositories with their local and remote branches. Repository header lines use reverse-video styling (repo color background, dark text, bold) for visual prominence; when selected, the header uses the standard hover background with colored text instead. An empty line separates each repository group in the tree for visual clarity. Repository names are preceded by a colored `●` dot matching the repo's assigned color (from the 10-color repo palette: red, orange, yellow, lime, green, teal, blue, purple, pink, coral). Tree connectors use `├──` / `└──` for clear hierarchy. Branch names are rendered Bold. Remote branches are collapsed by default. Branches with active agents display a green `●` indicator with count; branches checked out in worktrees display a `⎇` indicator. The current HEAD branch is highlighted using the repo's assigned color. Displays "No repositories found" when no repos are registered. Uses background colors for visual separation (no borders). The focused panel shows a bright accent dot; the unfocused panel shows a dim dot. Agents not associated with any git repository are grouped under a synthetic "No Repository" entry at the bottom of the tree. This entry has no local/remote category level -- agents are listed directly under the repo node with their binary name and working directory. Navigation skips the category level for this group. An "Add Repository" entry with a `+` icon is always appended at the bottom of the tree. Selecting it and pressing Enter (or clicking it) opens the add-repository modal (`RepoModal`).
 - **Vertical divider (1 col):** A single-column divider between the two panels.
 - **Right panel (60%):** Shows agent cards grouped by repository (default) or by hub name, with section headers and `(2,2,1,0)` padding. 1-line gaps separate agent cards within a group and a 1-line spacer follows each group header. The mode label line shows the current grouping (e.g., "by repo") with a "v to switch" hint. When only a single default group exists (only "default_hub" in by-hub mode, or only "No repository" in by-repo mode), the group header is hidden for a cleaner look. In by-repo mode, agents without a linked repository display their working directory on the agent card. Displays the CLUST logo when no agents are running.
 
@@ -205,9 +205,10 @@ On startup, `clust ui` automatically connects to the hub daemon, starting it if 
 | `Shift+Tab` | Switch to previous tab |
 | `?` | Toggle keyboard shortcut overlay |
 | `F2` | Toggle mouse capture (allows text selection and link clicking when off) |
-| `Opt+R` (macOS) / `Alt+R` | Open the create-agent modal |
+| `Opt+E` (macOS) / `Alt+E` | Open the create-agent modal |
 | `Opt+D` (macOS) / `Alt+D` | Open the detached agent modal (any directory) |
 | `Opt+F` (macOS) / `Alt+F` | Open the search-agent modal (only when agents are running) |
+| `Opt+N` (macOS) / `Alt+N` | Open the add-repository modal |
 | `Cmd+1` | Switch to Repositories tab (dismisses context menus, exits focus mode) |
 | `Cmd+2` | Switch to Overview tab (dismisses context menus, exits focus mode) |
 
@@ -391,7 +392,7 @@ The agent's `working_dir`, `repo_path`, and `branch_name` are passed to `open_ag
 
 The `?` key toggles a keyboard shortcut overlay rendered as a centered modal (44 columns wide) anchored to the bottom of the content area. The modal is organized into sections with bold secondary-colored headers and context-aware visibility:
 
-- **Global section (always shown):** `q / Esc×2`, `Q`, `Ctrl+C`, `Tab`, `Shift+Tab`, `?`, `F2`, `Alt+R`, `Alt+D`, `Alt+F`, `Cmd+1`, `Cmd+2`.
+- **Global section (always shown):** `q / Esc×2`, `Q`, `Ctrl+C`, `Tab`, `Shift+Tab`, `?`, `F2`, `Alt+E`, `Alt+D`, `Alt+F`, `Alt+N`, `Cmd+1`, `Cmd+2`.
 - **Repositories section (shown when Repositories tab is active):** `↑/↓` navigate, `←/→` navigate tree, `Shift+←/→` switch panel, `Enter` open menu/focus agent, `Space` collapse/expand, `v` toggle grouping.
 - **Overview section (shown when Overview tab is active):** `Shift+←/→` scroll panels, `Shift+↓` enter terminal, plus an "In terminal:" sub-context label followed by `Shift+↑` back to options bar, `Shift+↓` enter focus mode, `Shift+←/→` switch agent, `PgUp/PgDn` scroll terminal.
 - **Focus Mode section (shown when in focus mode):** `Shift+↑` exit, `Shift+←/→` switch panel, `Shift+PgUp/PgDn` scroll terminal, plus a "Left panel:" sub-context label followed by `Tab` cycle tabs, `↑/↓` scroll diff.
@@ -400,7 +401,7 @@ Key names are displayed in accent color (left-aligned, 16 chars wide); descripti
 
 ### Create Agent Modal
 
-A multi-step modal for creating new agents on git worktrees, opened globally with `Opt+R` (macOS) / `Alt+R`. The modal guides the user through 4 sequential steps:
+A multi-step modal for creating new agents on git worktrees, opened globally with `Opt+E` (macOS) / `Alt+E`. The modal guides the user through 4 sequential steps:
 
 | Step | Title | Description |
 |------|-------|-------------|
@@ -423,7 +424,7 @@ A multi-step modal for creating new agents on git worktrees, opened globally wit
 
 **Rendering:** The modal is rendered as a centered overlay (60 columns wide, 60% of terminal height) with a titled border, input field with visible cursor, and a scrollable list with fuzzy-matched results. The selected item is indicated with a `>` prefix and bold text. In the prompt step (4/4), the input area expands to fill remaining modal space and text wraps within the field (`.wrap(Wrap { trim: false })`) with automatic scrolling to keep the cursor visible.
 
-The `Opt+R` / `Alt+R` hint is shown in the status bar (platform-aware).
+The `Opt+E` / `Alt+E` and `Opt+N` / `Alt+N` hints are shown in the status bar (platform-aware).
 
 ### Search Agent Modal
 
@@ -467,6 +468,41 @@ A two-step modal for spawning agents in any directory (not limited to git reposi
 **Completion:** On completing step 2, the modal sends a `CliMessage::StartAgent` IPC message to the hub (reusing the existing agent start path). The hub auto-detects git repository information if the selected directory is inside a git repo. The `AgentStartResult::Started` variant includes an `is_worktree: bool` field to properly propagate whether the agent is running in a worktree. On success, the TUI opens the new agent in focus mode with a status message (e.g., "Agent started in /path/to/dir"). On failure, the error is surfaced as a status bar error message.
 
 **Rendering:** The modal is rendered as a centered overlay (60 columns wide, 60% of terminal height) with the same visual style as the Create Agent Modal. The directory step shows the current base path above the input field, with a scrollable list of filtered subdirectories below. The selected item is indicated with a `>` prefix and bold text. In the prompt step, the input area expands to fill remaining modal space with text wrapping.
+
+### Add Repository Modal
+
+A multi-step wizard modal for creating new repositories or cloning existing ones, opened globally with `Opt+N` (macOS) / `Alt+N` or by selecting the "Add Repository" entry in the repository tree. The modal follows the same visual patterns as the `DetachedAgentModal`.
+
+| Step | Title | Description |
+|------|-------|-------------|
+| 1 | Choose action | Select between "Create new repository" and "Clone existing repository". |
+| 2 | Select directory | Browse and select a parent directory for the new/cloned repository. Fuzzy search filters subdirectories by name. Hidden directories (starting with `.`) are excluded. |
+| 3 (Clone only) | Enter URL | Type the git clone URL (HTTPS or SSH format). |
+| 4 | Enter name | Type a name for the repository directory. For clone, this is optional -- press Enter to use the name extracted from the URL. For create, this is required. |
+
+**Navigation:**
+- `Up` / `Down` -- move selection in list steps
+- `Tab` -- autocomplete: enter the selected directory and show its subdirectories (directory step)
+- `Enter` -- confirm selection / advance to next step
+- `Backspace` (when input is empty) -- navigate up one directory level (directory step)
+- `Esc` -- go back to previous step, or cancel from step 1
+
+**Completion:**
+- **Create:** Sends a `CliMessage::CreateRepo` IPC message. The hub runs `git init`, registers the repository, and returns `RepoCreated`. A success status message is displayed.
+- **Clone:** Initiates an asynchronous clone operation via `start_clone_async()`, which sends a `CliMessage::CloneRepo` IPC message. The clone progress modal is shown during the operation (see below).
+
+**Rendering:** The modal is rendered as a centered overlay (60 columns wide, 60% of terminal height) with the same visual style as the Detached Agent Modal. The action selection step shows numbered options. The directory step shows the current base path above the input field. The URL and name steps show text input fields.
+
+### Clone Progress Modal
+
+A centered overlay that shows real-time progress during a git clone operation. Displayed automatically when a clone is initiated from the add-repository modal.
+
+- Each progress line from the git clone stderr output is shown as a line item with an animated braille spinner while in progress, replaced by a checkmark when complete.
+- On successful completion, the repository is auto-registered and the modal shows "Press Esc to close".
+- On error, the error message is displayed in `R_ERROR` color.
+- All keyboard and mouse input is blocked while the clone is running, except `Esc` which is accepted after completion or error.
+- The clone runs asynchronously via a background tokio task that streams `CloneProgress` IPC messages from the hub via an unbounded channel, keeping the TUI responsive throughout.
+- The URL is displayed in the modal title, truncated to fit the modal width.
 
 ### Mouse Support
 
