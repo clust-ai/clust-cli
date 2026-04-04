@@ -121,7 +121,7 @@ A multi-agent terminal overview that displays all active agents side-by-side wit
 ││                    │││                │││         ││
 │└──── Shift+↓ focus──┘│└────────────────┘│└─────────┘│
 ├──────────────────────┴──────────────────┴───────────┤
-│ ● connected  Shift+↓ enter terminal  ...    v0.0.11 │
+│ ● connected  Shift+↓ enter terminal  ...    v0.0.12 │
 └─────────────────────────────────────────────────────┘
 ```
 
@@ -166,7 +166,7 @@ A multi-agent terminal overview that displays all active agents side-by-side wit
 - Lazy initialization: overview connections are only established on first switch to the Overview tab.
 - On connect, each panel's background task consumes the hub's replay buffer before entering the main output loop, so panels show recent history immediately.
 - On terminal resize, all panels are resized via `TerminalEmulator::resize()` (which preserves accumulated scrollback history) and the hub is notified via `ResizeAgent`. Same-size resizes are skipped as a no-op to preserve content. The viewport is scrolled automatically to keep the focused panel visible.
-- **Force-resize triggers:** Panel dimensions are re-sent to the hub unconditionally (bypassing the same-size skip) in several scenarios where the hub's PTY may have been resized by another client: (1) switching to the Overview tab via `Tab`/`Shift+Tab` when already initialized, (2) exiting focus mode back to Overview (when `in_focus_mode` is set to `false`), (3) navigating between panels with `Shift+←`/`Shift+→` (focused panel only), (4) entering terminal focus with `Shift+↓` (focused panel only), and (5) when the terminal window regains focus (`FocusGained` event). The `EnableFocusChange`/`DisableFocusChange` crossterm sequences are used to detect window focus changes.
+- **Force-resize triggers:** Panel dimensions are re-sent to the hub unconditionally (bypassing the same-size skip) in several scenarios where the hub's PTY may have been resized by another client: (1) switching to the Overview tab via `Tab`/`Shift+Tab` or `Cmd+2` when already initialized, (2) exiting focus mode back to Overview (when `in_focus_mode` is set to `false`), (3) navigating between panels with `Shift+←`/`Shift+→` (focused panel only), (4) entering terminal focus with `Shift+↓` (focused panel only), and (5) when the terminal window regains focus (`FocusGained` event). The `EnableFocusChange`/`DisableFocusChange` crossterm sequences are used to detect window focus changes.
 - Each panel has a `panel_scroll_offset` for scrolling through the combined scrollback + live grid. When scrolled, a `↑N` indicator appears in the panel header.
 - On exit, all connections are detached and background tasks are aborted.
 
@@ -177,7 +177,7 @@ On startup, `clust ui` automatically connects to the hub daemon, starting it if 
 ### Bottom Status Bar
 
 ```
-● connected  q to quit  Q to quit and stop hub  ↑↓←→ navigate  Shift+←→ panels  v toggle agents          v0.0.11
+● connected  q to quit  Q to quit and stop hub  ↑↓←→ navigate  Shift+←→ panels  v toggle agents          v0.0.12
 ```
 
 | Section | Description |
@@ -186,7 +186,7 @@ On startup, `clust ui` automatically connects to the hub daemon, starting it if 
 | Status label | `connected` or `disconnected` |
 | Focused agent | When an agent has keyboard focus (in Overview terminal focus or focus mode), shows the repo name in the repo's assigned color followed by `/branch` in secondary text color |
 | Status message / Shortcuts | Either a temporary status message or context-aware keybinding hints (see below) |
-| Version | Right-aligned, e.g. `v0.0.11` |
+| Version | Right-aligned, e.g. `v0.0.12` |
 
 **Status messages:** Temporary status messages override the keybinding hints area. Messages are displayed for 5 seconds before auto-dismissing, after which the keybinding hints reappear. Two severity levels exist: `Error` (displayed in `R_ERROR` color) and `Success` (displayed in `R_SUCCESS` color). Status messages are used to surface feedback from async operations such as agent creation and branch pulls -- both success confirmations (e.g., "Agent started on feature-branch", "Pulled main: Already up to date.") and error details (e.g., "Agent create failed: hub connect error: ...", "Pull failed: ..."). The `StatusMessage` struct tracks the message text, level, and creation `Instant` for auto-dismissal timing. Status messages are delivered from background tokio tasks to the main event loop via a dedicated `mpsc` channel (`status_tx` / `status_rx`), separate from the `AgentStartResult` channel used for agent creation results.
 
@@ -208,6 +208,8 @@ On startup, `clust ui` automatically connects to the hub daemon, starting it if 
 | `Opt+R` (macOS) / `Alt+R` | Open the create-agent modal |
 | `Opt+D` (macOS) / `Alt+D` | Open the detached agent modal (any directory) |
 | `Opt+F` (macOS) / `Alt+F` | Open the search-agent modal (only when agents are running) |
+| `Cmd+1` | Switch to Repositories tab (dismisses context menus, exits focus mode) |
+| `Cmd+2` | Switch to Overview tab (dismisses context menus, exits focus mode) |
 
 **Repositories tab:**
 
@@ -280,7 +282,7 @@ When focus mode is active, the 1-row tab bar is replaced by a back-bar that show
 │      3      3│  let x = 1;   ││                    ││
 │                               │└────────────────────┘│
 ├─────────────────────────────────────────────────────┤
-│ ● connected  Shift+←/→ switch panel  ...     v0.0.11│
+│ ● connected  Shift+←/→ switch panel  ...     v0.0.12│
 └─────────────────────────────────────────────────────┘
 ```
 
@@ -353,7 +355,7 @@ The agent's `working_dir`, `repo_path`, and `branch_name` are passed to `open_ag
 
 The `?` key toggles a keyboard shortcut overlay rendered as a centered modal (44 columns wide) anchored to the bottom of the content area. The modal is organized into sections with bold secondary-colored headers and context-aware visibility:
 
-- **Global section (always shown):** `q / Esc×2`, `Q`, `Ctrl+C`, `Tab`, `Shift+Tab`, `?`, `F2`, `Alt+R`, `Alt+D`, `Alt+F`.
+- **Global section (always shown):** `q / Esc×2`, `Q`, `Ctrl+C`, `Tab`, `Shift+Tab`, `?`, `F2`, `Alt+R`, `Alt+D`, `Alt+F`, `Cmd+1`, `Cmd+2`.
 - **Repositories section (shown when Repositories tab is active):** `↑/↓` navigate, `←/→` navigate tree, `Shift+←/→` switch panel, `Enter` open menu/focus agent, `Space` collapse/expand, `v` toggle grouping.
 - **Overview section (shown when Overview tab is active):** `Shift+←/→` scroll panels, `Shift+↓` enter terminal, plus an "In terminal:" sub-context label followed by `Shift+↑` back to options bar, `Shift+↓` enter focus mode, `Shift+←/→` switch agent, `PgUp/PgDn` scroll terminal.
 - **Focus Mode section (shown when in focus mode):** `Shift+↑` exit, `Shift+←/→` switch panel, `Shift+PgUp/PgDn` scroll terminal, plus a "Left panel:" sub-context label followed by `Tab` cycle tabs, `↑/↓` scroll diff.
