@@ -94,6 +94,11 @@ pub enum CliMessage {
         repo_path: String,
         branch_name: String,
     },
+    CheckoutRemoteBranch {
+        working_dir: Option<String>,
+        repo_name: Option<String>,
+        remote_branch: String,
+    },
 }
 
 /// Info about a running agent, returned in AgentList.
@@ -215,6 +220,9 @@ pub enum HubMessage {
     BranchPulled {
         branch_name: String,
         summary: String,
+    },
+    RemoteBranchCheckedOut {
+        branch_name: String,
     },
 }
 
@@ -933,6 +941,16 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn cli_checkout_remote_branch() {
+        assert_cli_round_trip(CliMessage::CheckoutRemoteBranch {
+            working_dir: Some("/home/user/project".into()),
+            repo_name: None,
+            remote_branch: "origin/feature/auth".into(),
+        })
+        .await;
+    }
+
+    #[tokio::test]
     async fn cli_purge_repo() {
         assert_cli_round_trip(CliMessage::PurgeRepo {
             path: "/home/user/project".into(),
@@ -1123,6 +1141,14 @@ mod tests {
             working_dir: "/home/user/project/.clust/worktrees/feature__foo".into(),
             repo_path: Some("/home/user/project".into()),
             branch_name: Some("feature/foo".into()),
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn hub_remote_branch_checked_out() {
+        assert_hub_round_trip(HubMessage::RemoteBranchCheckedOut {
+            branch_name: "feature/auth".into(),
         })
         .await;
     }

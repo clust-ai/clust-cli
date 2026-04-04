@@ -226,6 +226,7 @@ enum BranchAction {
     RemoteStartAgent,
     RemoteCreateWorktree,
     DeleteRemoteBranch,
+    CheckoutRemote,
     BaseWorktreeOff,
 }
 
@@ -1847,6 +1848,14 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                                     last_repo_fetch =
                                                         Instant::now() - Duration::from_secs(10);
                                                 }
+                                                BranchAction::CheckoutRemote => {
+                                                    checkout_remote_ipc(
+                                                        &repo_path,
+                                                        &branch_name,
+                                                    );
+                                                    last_repo_fetch =
+                                                        Instant::now() - Duration::from_secs(10);
+                                                }
                                             }
                                         }
                                     }
@@ -2605,6 +2614,8 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                                             if let Some(branch) = repo.remote_branches.get(selection.branch_idx) {
                                                                 let mut labels = Vec::new();
                                                                 let mut actions = Vec::new();
+                                                                labels.push("Checkout & Track Locally".to_string());
+                                                                actions.push(BranchAction::CheckoutRemote);
                                                                 labels.push("Start Agent (checkout)".to_string());
                                                                 actions.push(BranchAction::RemoteStartAgent);
                                                                 labels.push("Create Worktree".to_string());
@@ -3394,6 +3405,14 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                                 }
                                                 BranchAction::DeleteRemoteBranch => {
                                                     delete_remote_branch_ipc(
+                                                        &repo_path,
+                                                        &branch_name,
+                                                    );
+                                                    last_repo_fetch =
+                                                        Instant::now() - Duration::from_secs(10);
+                                                }
+                                                BranchAction::CheckoutRemote => {
+                                                    checkout_remote_ipc(
                                                         &repo_path,
                                                         &branch_name,
                                                     );
@@ -5244,6 +5263,26 @@ fn delete_remote_branch_ipc(repo_path: &str, branch_name: &str) {
                 working_dir: Some(working_dir),
                 repo_name: None,
                 branch_name,
+            },
+        )
+        .await;
+        let _ = clust_ipc::recv_message::<HubMessage>(&mut stream).await;
+    });
+}
+
+fn checkout_remote_ipc(repo_path: &str, remote_branch: &str) {
+    let working_dir = repo_path.to_string();
+    let remote_branch = remote_branch.to_string();
+    block_on_async(async {
+        let Ok(mut stream) = ipc::try_connect().await else {
+            return;
+        };
+        let _ = clust_ipc::send_message(
+            &mut stream,
+            &CliMessage::CheckoutRemoteBranch {
+                working_dir: Some(working_dir),
+                repo_name: None,
+                remote_branch,
             },
         )
         .await;

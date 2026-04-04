@@ -1094,6 +1094,47 @@ async fn handle_connection(
                 }
             }
         }
+        CliMessage::CheckoutRemoteBranch {
+            working_dir,
+            repo_name,
+            remote_branch,
+        } => {
+            let repo_root = {
+                let hub_state = state.lock().await;
+                crate::repo::resolve_repo(
+                    working_dir.as_deref(),
+                    repo_name.as_deref(),
+                    hub_state.db.as_ref(),
+                )
+            };
+            match repo_root {
+                Ok(root) => {
+                    match crate::repo::checkout_remote_branch(&root, &remote_branch) {
+                        Ok(branch_name) => {
+                            clust_ipc::send_message_write(
+                                &mut writer,
+                                &HubMessage::RemoteBranchCheckedOut { branch_name },
+                            )
+                            .await?;
+                        }
+                        Err(e) => {
+                            clust_ipc::send_message_write(
+                                &mut writer,
+                                &HubMessage::Error { message: e },
+                            )
+                            .await?;
+                        }
+                    }
+                }
+                Err(e) => {
+                    clust_ipc::send_message_write(
+                        &mut writer,
+                        &HubMessage::Error { message: e },
+                    )
+                    .await?;
+                }
+            }
+        }
         CliMessage::PurgeRepo { path } => {
             let git_root = crate::repo::detect_git_root(&path);
             match git_root {
