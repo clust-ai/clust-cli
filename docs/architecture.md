@@ -126,6 +126,8 @@ CLI -> Hub:
   PurgeRepo { path: String }
   CleanStaleRefs { working_dir: Option<String>, repo_name: Option<String> }
   PullBranch { repo_path: String, branch_name: String }
+  CreateRepo { parent_dir: String, name: String }
+  CloneRepo { url: String, parent_dir: String, name: Option<String> }
 
 Hub -> CLI:
   Ok
@@ -156,6 +158,9 @@ Hub -> CLI:
   PurgeProgress { step: String }
   StaleRefsCleaned { path: String }
   BranchPulled { branch_name: String, summary: String }
+  RepoCreated { path: String, name: String }
+  RepoCloned { path: String, name: String }
+  CloneProgress { step: String }
 ```
 
 ### Connection Lifecycle

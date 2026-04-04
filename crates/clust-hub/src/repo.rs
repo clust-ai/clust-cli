@@ -837,6 +837,93 @@ pub fn purge_repo(repo_root: &Path) -> Result<PurgeResult, String> {
     })
 }
 
+/// Extract a repository name from a clone URL.
+///
+/// Handles HTTPS (`https://github.com/user/repo.git`) and
+/// SSH (`git@github.com:user/repo.git`) URLs.
+pub fn repo_name_from_url(url: &str) -> Option<String> {
+    let s = url.trim().trim_end_matches('/');
+    let s = s.strip_suffix(".git").unwrap_or(s);
+    // SSH: git@host:user/repo  →  take after last '/'  (or after ':' if no '/')
+    // HTTPS: https://host/user/repo  →  take after last '/'
+    let name = if let Some(colon_part) = s.rsplit_once(':') {
+        // SSH-style — the part after ':' may contain '/'
+        colon_part.1.rsplit('/').next()
+    } else {
+        s.rsplit('/').next()
+    };
+    name.filter(|n| !n.is_empty()).map(|n| n.to_string())
+}
+
+/// Create a new git repository via `git init`.
+pub fn init_repo(parent_dir: &Path, name: &str) -> Result<PathBuf, String> {
+    if !parent_dir.is_dir() {
+        return Err(format!(
+            "Parent directory does not exist: {}",
+            parent_dir.display()
+        ));
+    }
+    let repo_path = parent_dir.join(name);
+    if repo_path.exists() {
+        return Err(format!("Directory already exists: {}", repo_path.display()));
+    }
+    let output = std::process::Command::new("git")
+        .args([
+            "init",
+            repo_path
+                .to_str()
+                .ok_or_else(|| "invalid path encoding".to_string())?,
+        ])
+        .output()
+        .map_err(|e| format!("failed to run git: {e}"))?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(format!("git init failed: {}", stderr.trim()));
+    }
+    Ok(repo_path)
+}
+
+/// Spawn a `git clone --progress` child process and return the handle together
+/// with the expected output directory path.
+///
+/// The caller is responsible for reading the child's stderr (progress output)
+/// and waiting for completion.
+pub fn start_clone(
+    url: &str,
+    parent_dir: &Path,
+    name: Option<&str>,
+) -> Result<(std::process::Child, PathBuf), String> {
+    if !parent_dir.is_dir() {
+        return Err(format!(
+            "Parent directory does not exist: {}",
+            parent_dir.display()
+        ));
+    }
+    let dir_name = match name {
+        Some(n) => n.to_string(),
+        None => repo_name_from_url(url)
+            .ok_or_else(|| format!("Cannot determine repo name from URL: {url}"))?,
+    };
+    let repo_path = parent_dir.join(&dir_name);
+    if repo_path.exists() {
+        return Err(format!("Directory already exists: {}", repo_path.display()));
+    }
+
+    let mut cmd = std::process::Command::new("git");
+    cmd.current_dir(parent_dir);
+    cmd.args(["clone", "--progress", url]);
+    if name.is_some() {
+        cmd.arg(&dir_name);
+    }
+    cmd.stdout(std::process::Stdio::piped());
+    cmd.stderr(std::process::Stdio::piped());
+
+    let child = cmd
+        .spawn()
+        .map_err(|e| format!("failed to start git clone: {e}"))?;
+    Ok((child, repo_path))
+}
+
 /// Prune stale remote tracking refs for all remotes.
 pub fn clean_stale_refs(repo_root: &Path) -> Result<(), String> {
     let output = std::process::Command::new("git")
