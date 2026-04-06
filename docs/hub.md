@@ -92,6 +92,8 @@ When the hub receives a `StartAgent` message:
 3. Allocate a PTY pair (master/slave) via `portable-pty`
 4. Spawn the agent process in the slave PTY
    - If `prompt` is provided, pass it as an argument to the agent binary
+   - If `bypass_permissions` is enabled globally, append the agent's bypass-permissions args (e.g., `--dangerously-skip-permissions` for Claude). Bypass supersedes `accept_edits` (strictly more permissive).
+   - Otherwise, if `accept_edits` is requested, append the agent's accept-edits args (e.g., `--permission-mode acceptEdits` for Claude).
    - Set working directory to the directory the CLI was invoked from (passed in the StartAgent message)
 5. Store agent metadata in memory:
    - ID, agent binary, PID, PTY master handle, start time, attached clients
@@ -297,6 +299,7 @@ Each phase sends a `PurgeProgress` IPC message to the client before execution, a
 struct HubState {
     agents: HashMap<String, AgentEntry>,
     default_agent: Option<String>,         // loaded from SQLite on startup; None if unset
+    bypass_permissions: bool,              // loaded from SQLite on startup; false if unset
     db: Option<rusqlite::Connection>,      // open SQLite connection; Some after init_db()
 }
 

@@ -59,6 +59,7 @@ pub type SharedHubState = Arc<Mutex<HubState>>;
 pub struct HubState {
     pub agents: HashMap<String, AgentEntry>,
     pub default_agent: Option<String>,
+    pub bypass_permissions: bool,
     pub db: Option<rusqlite::Connection>,
 }
 
@@ -71,6 +72,7 @@ impl HubState {
     pub fn init_db(&mut self) -> Result<(), String> {
         let conn = crate::db::open_or_create()?;
         self.default_agent = crate::db::get_default_agent(&conn);
+        self.bypass_permissions = crate::db::get_bypass_permissions(&conn);
         self.db = Some(conn);
         Ok(())
     }
@@ -208,7 +210,14 @@ pub fn spawn_agent(
     if let Some(ref p) = params.prompt {
         cmd.arg(p);
     }
-    if params.accept_edits {
+    if state.bypass_permissions {
+        // bypass_permissions supersedes accept_edits (strictly more permissive)
+        if let Some(args) = clust_ipc::agents::bypass_permissions_args_for(&binary) {
+            for arg in args {
+                cmd.arg(arg);
+            }
+        }
+    } else if params.accept_edits {
         if let Some(args) = clust_ipc::agents::accept_edits_args_for(&binary) {
             for arg in args {
                 cmd.arg(arg);

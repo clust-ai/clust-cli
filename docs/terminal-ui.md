@@ -185,6 +185,7 @@ On startup, `clust ui` automatically connects to the hub daemon, starting it if 
 |---------|-------------|
 | Status dot | Green `●` when connected, dim when disconnected |
 | Status label | `connected` or `disconnected` |
+| BYPASS indicator | When bypass-permissions is enabled globally, shows `BYPASS` in a distinct color. Hidden when disabled. |
 | Focused agent | When an agent has keyboard focus (in Overview terminal focus or focus mode), shows the repo name in the repo's assigned color followed by `/branch` in secondary text color |
 | Status message / Shortcuts | Either a temporary status message or context-aware keybinding hints (see below) |
 | Version | Right-aligned, e.g. `v0.0.14` |
@@ -210,6 +211,7 @@ On startup, `clust ui` automatically connects to the hub daemon, starting it if 
 | `Opt+E` (macOS) / `Alt+E` | Open the create-agent modal |
 | `Opt+D` (macOS) / `Alt+D` | Open the detached agent modal (any directory) |
 | `Opt+F` (macOS) / `Alt+F` | Open the search-agent modal (only when agents are running) |
+| `Opt+B` (macOS) / `Alt+B` | Toggle bypass permissions (global, persisted in SQLite) |
 | `Opt+N` (macOS) / `Alt+N` | Open the add-repository modal |
 | `Opt+V` (macOS) / `Alt+V` | Open in editor (see Editor Integration below) |
 | `Cmd+1` | Switch to Repositories tab (dismisses context menus, exits focus mode) |

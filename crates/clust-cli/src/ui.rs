@@ -911,6 +911,7 @@ pub fn run(hub_name: &str) -> io::Result<()> {
     let mut in_focus_mode = false;
     let mut status_message: Option<StatusMessage> = None;
     let mut mouse_captured = true;
+    let mut bypass_permissions = fetch_bypass_permissions();
     let mut mouse_passthrough_until: Option<Instant> = None;
     let mut last_esc_press: Option<Instant> = None;
     let (init_cols, init_rows) = crossterm::terminal::size().unwrap_or((80, 24));
@@ -1268,6 +1269,7 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                 status_msg_ref,
                 mouse_captured_now,
                 mouse_passthrough_now,
+                bypass_permissions,
             );
 
             if let Some(ref menu_state) = menu_ref {
@@ -2548,6 +2550,21 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                 &editors_cache,
                             );
                         }
+                    } else if key.code == KeyCode::Char('b')
+                        && key.modifiers.contains(KeyModifiers::ALT)
+                    {
+                        // Global shortcut: Alt+B toggles bypass permissions
+                        bypass_permissions = !bypass_permissions;
+                        set_bypass_permissions_ipc(bypass_permissions);
+                        status_message = Some(StatusMessage {
+                            text: if bypass_permissions {
+                                "bypass permissions: on".to_string()
+                            } else {
+                                "bypass permissions: off".to_string()
+                            },
+                            level: StatusLevel::Success,
+                            created: Instant::now(),
+                        });
                     } else
                     // Focus mode: behavior depends on which side has focus
                     if in_focus_mode
@@ -5469,6 +5486,7 @@ fn render_status_bar(
     status_message: Option<&StatusMessage>,
     mouse_captured: bool,
     mouse_passthrough: bool,
+    bypass_permissions: bool,
 ) {
     let bg = Style::default().bg(theme::R_BG_RAISED);
 
@@ -5523,6 +5541,17 @@ fn render_status_bar(
         left_spans.push(Span::styled("  ", Style::default().bg(theme::R_BG_RAISED)));
         left_spans.push(Span::styled(
             label,
+            Style::default()
+                .fg(theme::R_WARNING)
+                .bg(theme::R_BG_RAISED)
+                .add_modifier(Modifier::BOLD),
+        ));
+    }
+
+    if bypass_permissions {
+        left_spans.push(Span::styled("  ", Style::default().bg(theme::R_BG_RAISED)));
+        left_spans.push(Span::styled(
+            "BYPASS",
             Style::default()
                 .fg(theme::R_WARNING)
                 .bg(theme::R_BG_RAISED)
@@ -5652,6 +5681,7 @@ fn render_help_overlay(frame: &mut Frame, area: Rect, active_tab: ActiveTab, in_
     lines.push(binding_line("Alt+F", "Search agents"));
     lines.push(binding_line("Alt+N", "Add repository"));
     lines.push(binding_line("Alt+V", "Open in editor"));
+    lines.push(binding_line("Alt+B", "Toggle bypass permissions"));
 
     // -- Repositories --
     if active_tab == ActiveTab::Repositories {
@@ -5755,6 +5785,38 @@ fn fetch_repos() -> Vec<RepoInfo> {
             _ => vec![],
         }
     })
+}
+
+fn fetch_bypass_permissions() -> bool {
+    block_on_async(async {
+        let Ok(mut stream) = ipc::try_connect().await else {
+            return false;
+        };
+        if clust_ipc::send_message(&mut stream, &CliMessage::GetBypassPermissions)
+            .await
+            .is_err()
+        {
+            return false;
+        }
+        match clust_ipc::recv_message::<HubMessage>(&mut stream).await {
+            Ok(HubMessage::BypassPermissions { enabled }) => enabled,
+            _ => false,
+        }
+    })
+}
+
+fn set_bypass_permissions_ipc(enabled: bool) {
+    block_on_async(async {
+        let Ok(mut stream) = ipc::try_connect().await else {
+            return;
+        };
+        let _ = clust_ipc::send_message(
+            &mut stream,
+            &CliMessage::SetBypassPermissions { enabled },
+        )
+        .await;
+        let _ = clust_ipc::recv_message::<HubMessage>(&mut stream).await;
+    });
 }
 
 fn set_repo_color_ipc(path: &str, color: &str) {

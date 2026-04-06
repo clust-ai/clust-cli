@@ -55,6 +55,15 @@ pub enum Commands {
     /// Worktree management
     #[command(alias = "worktree")]
     Wt(WtArgs),
+    /// Toggle bypass-permissions mode for all new agents
+    Bypass {
+        /// Enable bypass permissions
+        #[arg(long = "on", group = "toggle")]
+        on: bool,
+        /// Disable bypass permissions
+        #[arg(long = "off", group = "toggle")]
+        off: bool,
+    },
     /// Repository management
     Repo {
         /// Add the current directory's git repository for tracking
@@ -453,6 +462,49 @@ mod tests {
     #[test]
     fn parse_invalid_flag_errors() {
         assert!(Cli::try_parse_from(["clust", "--nonsense"]).is_err());
+    }
+
+    // ── Bypass subcommand tests ──────────────────────────────────────
+
+    #[test]
+    fn parse_bypass_on() {
+        let cli = Cli::try_parse_from(["clust", "bypass", "--on"]).unwrap();
+        match cli.command {
+            Some(Commands::Bypass { on, off }) => {
+                assert!(on);
+                assert!(!off);
+            }
+            _ => panic!("expected Bypass command"),
+        }
+    }
+
+    #[test]
+    fn parse_bypass_off() {
+        let cli = Cli::try_parse_from(["clust", "bypass", "--off"]).unwrap();
+        match cli.command {
+            Some(Commands::Bypass { on, off }) => {
+                assert!(!on);
+                assert!(off);
+            }
+            _ => panic!("expected Bypass command"),
+        }
+    }
+
+    #[test]
+    fn parse_bypass_no_flags() {
+        let cli = Cli::try_parse_from(["clust", "bypass"]).unwrap();
+        match cli.command {
+            Some(Commands::Bypass { on, off }) => {
+                assert!(!on);
+                assert!(!off);
+            }
+            _ => panic!("expected Bypass command"),
+        }
+    }
+
+    #[test]
+    fn parse_bypass_on_off_conflict() {
+        assert!(Cli::try_parse_from(["clust", "bypass", "--on", "--off"]).is_err());
     }
 
     // ── Hub flag tests ──────────────────────────────────────────────

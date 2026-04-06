@@ -179,6 +179,34 @@ clust wt info <NAME>
 |----------|-------------|
 | `NAME` | Branch name of the worktree to inspect. |
 
+### `clust bypass`
+
+Toggle bypass-permissions mode for all new agents. When enabled, agents that support it (e.g., Claude) are started with `--dangerously-skip-permissions`. The setting is persisted in SQLite.
+
+```
+clust bypass [OPTIONS]
+```
+
+| Flag | Description |
+|------|-------------|
+| `--on` | Enable bypass permissions. |
+| `--off` | Disable bypass permissions. |
+
+With no flags, displays the current bypass-permissions state.
+
+`--on` and `--off` are mutually exclusive.
+
+```bash
+# Enable bypass permissions
+clust bypass --on
+
+# Disable bypass permissions
+clust bypass --off
+
+# Show current state
+clust bypass
+```
+
 ### `clust repo`
 
 Repository management.
@@ -293,6 +321,15 @@ clust wt rm --force
 # Show worktree details
 clust wt info feature/auth
 
+# Enable bypass permissions (all new agents skip permission checks)
+clust bypass --on
+
+# Disable bypass permissions
+clust bypass --off
+
+# Show current bypass permissions state
+clust bypass
+
 # Show help
 clust -h
 ```
@@ -326,6 +363,7 @@ These shortcuts are active in the `clust ui` dashboard. They are displayed in th
 | `Opt+E` (macOS) / `Alt+E` | Open the create-agent modal (multi-step builder for creating agents on worktrees) |
 | `Opt+D` (macOS) / `Alt+D` | Open the detached agent modal (start agent in any directory) |
 | `Opt+F` (macOS) / `Alt+F` | Open the search-agent modal (only when agents are running) |
+| `Opt+B` (macOS) / `Alt+B` | Toggle bypass permissions (global, persisted) |
 | `Opt+N` (macOS) / `Alt+N` | Open the add-repository modal |
 | `Opt+V` (macOS) / `Alt+V` | Open in editor (see Editor Integration in terminal-ui.md) |
 | `Cmd+1` | Switch to Repositories tab (dismisses context menus, exits focus mode) |

@@ -77,7 +77,7 @@ The CLI is a thin client. It does NOT manage agent processes directly.
 - Protocol version constant (`PROTOCOL_VERSION`) for detecting stale hubs after rebuilds
 - Split-stream variants for bidirectional sessions
 - Socket path and clust directory helpers
-- Known agent registry (`KNOWN_AGENTS`) with accept-edits metadata
+- Known agent registry (`KNOWN_AGENTS`) with accept-edits and bypass-permissions metadata
 - Branch name sanitization (`sanitize_branch_name`) for converting user input into valid git branch names
 
 ## IPC Design
@@ -132,6 +132,8 @@ CLI -> Hub:
   PullBranch { repo_path: String, branch_name: String }
   CreateRepo { parent_dir: String, name: String }
   CloneRepo { url: String, parent_dir: String, name: Option<String> }
+  SetBypassPermissions { enabled: bool }
+  GetBypassPermissions
   Ping { protocol_version: u32 }
 
 Hub -> CLI:
@@ -168,12 +170,13 @@ Hub -> CLI:
   RepoCreated { path: String, name: String }
   RepoCloned { path: String, name: String }
   CloneProgress { step: String }
+  BypassPermissions { enabled: bool }
   Pong { protocol_version: u32 }
 ```
 
 ### Protocol Versioning
 
-The IPC protocol includes a version check to detect stale hubs. `clust-ipc` exports a `PROTOCOL_VERSION` constant (currently `1`) that must be bumped whenever the `CliMessage` or `HubMessage` enum shapes change (since `rmp-serde` uses numeric enum indices).
+The IPC protocol includes a version check to detect stale hubs. `clust-ipc` exports a `PROTOCOL_VERSION` constant (currently `2`) that must be bumped whenever the `CliMessage` or `HubMessage` enum shapes change (since `rmp-serde` uses numeric enum indices).
 
 On connection, the CLI sends a `Ping { protocol_version }` message. The hub replies with `Pong { protocol_version }` carrying its own version. If versions mismatch, the CLI stops the stale hub and spawns a fresh one before proceeding.
 
