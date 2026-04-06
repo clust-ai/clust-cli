@@ -121,7 +121,7 @@ A multi-agent terminal overview that displays all active agents side-by-side wit
 ││                    │││                │││         ││
 │└──── Shift+↓ focus──┘│└────────────────┘│└─────────┘│
 ├──────────────────────┴──────────────────┴───────────┤
-│ ● connected  Shift+↓ enter terminal  ...    v0.0.12 │
+│ ● connected  Shift+↓ enter terminal  ...    v0.0.13 │
 └─────────────────────────────────────────────────────┘
 ```
 
@@ -177,7 +177,7 @@ On startup, `clust ui` automatically connects to the hub daemon, starting it if 
 ### Bottom Status Bar
 
 ```
-● connected  q to quit  Q to quit and stop hub  ↑↓←→ navigate  Shift+←→ panels  v toggle agents          v0.0.12
+● connected  q to quit  Q to quit and stop hub  ↑↓←→ navigate  Shift+←→ panels  v toggle agents          v0.0.13
 ```
 
 | Section | Description |
@@ -186,7 +186,7 @@ On startup, `clust ui` automatically connects to the hub daemon, starting it if 
 | Status label | `connected` or `disconnected` |
 | Focused agent | When an agent has keyboard focus (in Overview terminal focus or focus mode), shows the repo name in the repo's assigned color followed by `/branch` in secondary text color |
 | Status message / Shortcuts | Either a temporary status message or context-aware keybinding hints (see below) |
-| Version | Right-aligned, e.g. `v0.0.12` |
+| Version | Right-aligned, e.g. `v0.0.13` |
 
 **Status messages:** Temporary status messages override the keybinding hints area. Messages are displayed for 5 seconds before auto-dismissing, after which the keybinding hints reappear. Two severity levels exist: `Error` (displayed in `R_ERROR` color) and `Success` (displayed in `R_SUCCESS` color). Status messages are used to surface feedback from async operations such as agent creation and branch pulls -- both success confirmations (e.g., "Agent started on feature-branch", "Pulled main: Already up to date.") and error details (e.g., "Agent create failed: hub connect error: ...", "Pull failed: ..."). The `StatusMessage` struct tracks the message text, level, and creation `Instant` for auto-dismissal timing. Status messages are delivered from background tokio tasks to the main event loop via a dedicated `mpsc` channel (`status_tx` / `status_rx`), separate from the `AgentStartResult` channel used for agent creation results.
 
@@ -217,6 +217,7 @@ On startup, `clust ui` automatically connects to the hub daemon, starting it if 
 | Shortcut | Action |
 |----------|--------|
 | `↑` / `↓` | Move selection in visual order (flat navigation across repos, categories, and branches) |
+| `Shift+↑` / `Shift+↓` | Jump to previous/next repository header (skips categories and branches) |
 | `→` | Descend into selected item (navigate tree) |
 | `←` | Ascend to parent level (navigate tree) |
 | `Enter` | Left panel: on repo opens repo context menu; on local branch opens local branch context menu; on remote branch opens remote branch context menu. Right panel: enter focus mode for selected agent. |
@@ -283,7 +284,7 @@ When focus mode is active, the 1-row tab bar is replaced by a back-bar that show
 │      3      3│  let x = 1;   ││                    ││
 │                               │└────────────────────┘│
 ├─────────────────────────────────────────────────────┤
-│ ● connected  Shift+←/→ switch panel  ...     v0.0.12│
+│ ● connected  Shift+←/→ switch panel  ...     v0.0.13│
 └─────────────────────────────────────────────────────┘
 ```
 
@@ -393,7 +394,7 @@ The agent's `working_dir`, `repo_path`, and `branch_name` are passed to `open_ag
 The `?` key toggles a keyboard shortcut overlay rendered as a centered modal (44 columns wide) anchored to the bottom of the content area. The modal is organized into sections with bold secondary-colored headers and context-aware visibility:
 
 - **Global section (always shown):** `q / Esc×2`, `Q`, `Ctrl+C`, `Tab`, `Shift+Tab`, `?`, `F2`, `Alt+E`, `Alt+D`, `Alt+F`, `Alt+N`, `Cmd+1`, `Cmd+2`.
-- **Repositories section (shown when Repositories tab is active):** `↑/↓` navigate, `←/→` navigate tree, `Shift+←/→` switch panel, `Enter` open menu/focus agent, `Space` collapse/expand, `v` toggle grouping.
+- **Repositories section (shown when Repositories tab is active):** `↑/↓` navigate, `Shift+↑/↓` jump repos, `←/→` navigate tree, `Shift+←/→` switch panel, `Enter` open menu/focus agent, `Space` collapse/expand, `v` toggle grouping.
 - **Overview section (shown when Overview tab is active):** `Shift+←/→` scroll panels, `Shift+↓` enter terminal, plus an "In terminal:" sub-context label followed by `Shift+↑` back to options bar, `Shift+↓` enter focus mode, `Shift+←/→` switch agent, `PgUp/PgDn` scroll terminal.
 - **Focus Mode section (shown when in focus mode):** `Shift+↑` exit, `Shift+←/→` switch panel, `Shift+PgUp/PgDn` scroll terminal, plus a "Left panel:" sub-context label followed by `Tab` cycle tabs, `↑/↓` scroll diff.
 

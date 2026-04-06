@@ -726,6 +726,24 @@ impl TreeSelection {
         }
     }
 
+    /// Jump to the previous repo header (Shift+Up).
+    fn jump_prev_repo(&mut self, repos: &[RepoInfo]) {
+        if repos.is_empty() || self.repo_idx == 0 {
+            return;
+        }
+        self.repo_idx -= 1;
+        self.level = TreeLevel::Repo;
+    }
+
+    /// Jump to the next repo header (Shift+Down).
+    fn jump_next_repo(&mut self, repos: &[RepoInfo]) {
+        if repos.is_empty() || self.repo_idx + 1 >= repos.len() {
+            return;
+        }
+        self.repo_idx += 1;
+        self.level = TreeLevel::Repo;
+    }
+
     /// Right arrow: descend one level deeper, or expand if collapsed.
     fn descend(&mut self, repos: &[RepoInfo]) {
         if repos.is_empty() {
@@ -2877,6 +2895,26 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                             }
                                         };
                                         agent_selection = AgentSelection::default();
+                                    }
+                                    KeyCode::Up
+                                        if key
+                                            .modifiers
+                                            .contains(KeyModifiers::SHIFT) =>
+                                    {
+                                        if focus == FocusPanel::Left {
+                                            selection
+                                                .jump_prev_repo(&display_repos);
+                                        }
+                                    }
+                                    KeyCode::Down
+                                        if key
+                                            .modifiers
+                                            .contains(KeyModifiers::SHIFT) =>
+                                    {
+                                        if focus == FocusPanel::Left {
+                                            selection
+                                                .jump_next_repo(&display_repos);
+                                        }
                                     }
                                     KeyCode::Up => match focus {
                                         FocusPanel::Left => {
