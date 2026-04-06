@@ -249,6 +249,22 @@ When the hub receives a `CloneRepo` message:
 7. If the progress channel closes unexpectedly before completion, return an `Error` message instead of silently dropping the connection.
 8. Return `RepoCloned { path, name }` on success, or `Error` on failure at any stage.
 
+## Editor Preferences
+
+### Set Repository Editor
+
+When the hub receives a `SetRepoEditor` message:
+
+1. Update the `editor` column in the `repos` table for the given path.
+2. Return `RepoEditorSet { path, editor }`.
+
+### Set Default Editor
+
+When the hub receives a `SetDefaultEditor` message:
+
+1. Insert or replace the `default_editor` key in the `config` table.
+2. Return `DefaultEditorSet`.
+
 ## Repository Maintenance
 
 ### Clean Stale Refs
