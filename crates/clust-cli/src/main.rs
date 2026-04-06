@@ -10,6 +10,7 @@ mod repo_modal;
 mod hub_launcher;
 mod scroll_break;
 mod search_modal;
+mod syntax;
 mod terminal;
 pub mod terminal_emulator;
 mod theme;

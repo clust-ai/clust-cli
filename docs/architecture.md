@@ -220,3 +220,4 @@ clust "do something"
 | `vt100` | Terminal emulator (overview panels, focus mode, attached scrollback) |
 | `fuzzy-matcher` | Fuzzy string matching (create-agent and search-agent modal filtering) |
 | `which` | Locate agent binaries on PATH (default agent discovery) |
+| `syntect` | Syntax highlighting for diff viewer (TextMate grammar based) |
