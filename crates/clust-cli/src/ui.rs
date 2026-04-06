@@ -897,6 +897,7 @@ pub fn run(hub_name: &str) -> io::Result<()> {
     let mut in_focus_mode = false;
     let mut status_message: Option<StatusMessage> = None;
     let mut mouse_captured = true;
+    let mut mouse_passthrough_until: Option<Instant> = None;
     let mut last_esc_press: Option<Instant> = None;
     let (init_cols, init_rows) = crossterm::terminal::size().unwrap_or((80, 24));
     let mut last_content_area = Rect {
@@ -931,6 +932,15 @@ pub fn run(hub_name: &str) -> io::Result<()> {
         focus_mode_state.drain_output_events();
         focus_mode_state.drain_diff_events();
         focus_mode_state.drain_compare_diff_events();
+
+        // Re-enable mouse capture after passthrough timer expires
+        if let Some(deadline) = mouse_passthrough_until {
+            if Instant::now() >= deadline {
+                mouse_passthrough_until = None;
+                mouse_captured = true;
+                io::stdout().execute(EnableMouseCapture)?;
+            }
+        }
 
         // Immediate worktree cleanup prompt when agent exits in focus mode
         if in_focus_mode && active_menu.is_none() {
@@ -1127,6 +1137,7 @@ pub fn run(hub_name: &str) -> io::Result<()> {
         let status_msg_ref = status_message.as_ref();
         let show_help_now = show_help;
         let mouse_captured_now = mouse_captured;
+        let mouse_passthrough_now = mouse_passthrough_until.is_some();
         let menu_ref = &active_menu;
         let repo_colors: HashMap<String, String> = repos
             .iter()
@@ -1238,6 +1249,7 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                 focused_agent_info.as_ref(),
                 status_msg_ref,
                 mouse_captured_now,
+                mouse_passthrough_now,
             );
 
             if let Some(ref menu_state) = menu_ref {
@@ -1290,11 +1302,20 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                     // F2: toggle mouse capture (global, never forwarded)
                     if key.code == KeyCode::F(2) {
                         mouse_captured = !mouse_captured;
+                        mouse_passthrough_until = None;
                         if mouse_captured {
                             io::stdout().execute(EnableMouseCapture)?;
                         } else {
                             io::stdout().execute(DisableMouseCapture)?;
                         }
+                        continue;
+                    }
+
+                    // Alt+M: temporarily disable mouse capture (re-enables after 5s)
+                    if key.code == KeyCode::Char('m') && key.modifiers.contains(KeyModifiers::ALT) {
+                        mouse_captured = false;
+                        io::stdout().execute(DisableMouseCapture)?;
+                        mouse_passthrough_until = Some(Instant::now() + Duration::from_secs(5));
                         continue;
                     }
 
@@ -5283,6 +5304,7 @@ fn render_status_bar(
     focused_agent_info: Option<&(String, ratatui::style::Color, String)>,
     status_message: Option<&StatusMessage>,
     mouse_captured: bool,
+    mouse_passthrough: bool,
 ) {
     let bg = Style::default().bg(theme::R_BG_RAISED);
 
@@ -5329,9 +5351,14 @@ fn render_status_bar(
     }
 
     if !mouse_captured {
+        let label = if mouse_passthrough {
+            "MOUSE OFF \u{00b7} \u{2325}M"
+        } else {
+            "MOUSE OFF \u{00b7} F2"
+        };
         left_spans.push(Span::styled("  ", Style::default().bg(theme::R_BG_RAISED)));
         left_spans.push(Span::styled(
-            "MOUSE OFF \u{00b7} F2",
+            label,
             Style::default()
                 .fg(theme::R_WARNING)
                 .bg(theme::R_BG_RAISED)
@@ -5455,6 +5482,7 @@ fn render_help_overlay(frame: &mut Frame, area: Rect, active_tab: ActiveTab, in_
     lines.push(binding_line("Shift+Tab", "Previous tab"));
     lines.push(binding_line("?", "Toggle this help"));
     lines.push(binding_line("F2", "Toggle mouse capture"));
+    lines.push(binding_line("Alt+M", "Mouse passthrough (5s)"));
     lines.push(binding_line("Alt+E", "Create agent"));
     lines.push(binding_line("Alt+D", "New directory agent"));
     lines.push(binding_line("Alt+F", "Search agents"));
