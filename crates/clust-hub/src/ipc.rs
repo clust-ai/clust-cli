@@ -287,6 +287,41 @@ async fn handle_connection(
             )
             .await?;
         }
+        CliMessage::SetBypassPermissions { enabled } => {
+            let result = {
+                let hub = state.lock().await;
+                if let Some(ref db) = hub.db {
+                    crate::db::set_bypass_permissions(db, enabled)
+                } else {
+                    Err("database not initialized".into())
+                }
+            };
+            match result {
+                Ok(()) => {
+                    let mut hub = state.lock().await;
+                    hub.bypass_permissions = enabled;
+                    clust_ipc::send_message_write(&mut writer, &HubMessage::Ok).await?;
+                }
+                Err(e) => {
+                    clust_ipc::send_message_write(
+                        &mut writer,
+                        &HubMessage::Error { message: e },
+                    )
+                    .await?;
+                }
+            }
+        }
+        CliMessage::GetBypassPermissions => {
+            let enabled = {
+                let hub = state.lock().await;
+                hub.bypass_permissions
+            };
+            clust_ipc::send_message_write(
+                &mut writer,
+                &HubMessage::BypassPermissions { enabled },
+            )
+            .await?;
+        }
         CliMessage::RegisterRepo { path } => {
             // Detect git root BEFORE acquiring the lock (avoid holding lock during I/O)
             let git_root = crate::repo::detect_git_root(&path);

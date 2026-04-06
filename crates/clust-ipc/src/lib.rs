@@ -14,7 +14,7 @@ pub const DEFAULT_HUB: &str = "default_hub";
 
 /// Protocol version for IPC compatibility checks.
 /// Bump this whenever `CliMessage` or `HubMessage` enum shapes change.
-pub const PROTOCOL_VERSION: u32 = 1;
+pub const PROTOCOL_VERSION: u32 = 2;
 
 /// Messages sent from CLI to Hub.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -122,6 +122,10 @@ pub enum CliMessage {
     SetDefaultEditor {
         editor: String,
     },
+    SetBypassPermissions {
+        enabled: bool,
+    },
+    GetBypassPermissions,
 }
 
 /// Info about a running agent, returned in AgentList.
@@ -263,6 +267,9 @@ pub enum HubMessage {
     },
     Pong {
         protocol_version: u32,
+    },
+    BypassPermissions {
+        enabled: bool,
     },
 }
 

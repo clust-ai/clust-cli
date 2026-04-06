@@ -119,6 +119,12 @@ async fn main() {
         return;
     }
 
+    // Subcommand: bypass
+    if let Some(cli::Commands::Bypass { on, off }) = args.command {
+        handle_bypass(on, off).await;
+        return;
+    }
+
     // Subcommand: repo
     if let Some(cli::Commands::Repo {
         add,
@@ -1069,6 +1075,90 @@ async fn handle_default_picker() {
                     theme::TEXT_PRIMARY,
                     theme::RESET,
                 );
+            }
+        }
+    }
+}
+
+async fn handle_bypass(on: bool, off: bool) {
+    println!();
+    let spinner = spin("connecting to hub");
+
+    let mut stream = match ipc::connect_to_hub().await {
+        Ok(s) => {
+            stop_spin(spinner, "connected");
+            s
+        }
+        Err(e) => {
+            stop_spin_err(spinner, &format!("failed to connect to hub: {e}"));
+            std::process::exit(1);
+        }
+    };
+
+    if on || off {
+        let enabled = on;
+        clust_ipc::send_message(
+            &mut stream,
+            &CliMessage::SetBypassPermissions { enabled },
+        )
+        .await
+        .unwrap_or_else(|e| {
+            eprintln!(
+                "  {}✘{} {}failed to set bypass permissions: {e}{}",
+                theme::ERROR, theme::RESET, theme::TEXT_PRIMARY, theme::RESET,
+            );
+            std::process::exit(1);
+        });
+
+        match clust_ipc::recv_message::<HubMessage>(&mut stream).await {
+            Ok(HubMessage::Ok) => {
+                let state = if enabled { "on" } else { "off" };
+                println!(
+                    "  {}✔{} {}bypass permissions: {}{}{}\n",
+                    theme::SUCCESS, theme::RESET, theme::TEXT_PRIMARY, theme::ACCENT, state, theme::RESET,
+                );
+            }
+            Ok(HubMessage::Error { message }) => {
+                eprintln!(
+                    "  {}✘{} {}failed to set bypass permissions: {message}{}\n",
+                    theme::ERROR, theme::RESET, theme::TEXT_PRIMARY, theme::RESET,
+                );
+                std::process::exit(1);
+            }
+            _ => {
+                eprintln!(
+                    "  {}✘{} {}unexpected response from hub{}\n",
+                    theme::ERROR, theme::RESET, theme::TEXT_PRIMARY, theme::RESET,
+                );
+                std::process::exit(1);
+            }
+        }
+    } else {
+        // Query current state
+        clust_ipc::send_message(&mut stream, &CliMessage::GetBypassPermissions)
+            .await
+            .unwrap_or_else(|e| {
+                eprintln!(
+                    "  {}✘{} {}failed to query bypass permissions: {e}{}",
+                    theme::ERROR, theme::RESET, theme::TEXT_PRIMARY, theme::RESET,
+                );
+                std::process::exit(1);
+            });
+
+        match clust_ipc::recv_message::<HubMessage>(&mut stream).await {
+            Ok(HubMessage::BypassPermissions { enabled }) => {
+                let state = if enabled { "on" } else { "off" };
+                println!(
+                    "  {}bypass permissions: {}{}{}\n",
+                    theme::TEXT_PRIMARY, theme::ACCENT, state, theme::RESET,
+                );
+            }
+            _ => {
+                eprintln!(
+                    "  {}✘{} {}unexpected response from hub{}\n",
+                    theme::ERROR, theme::RESET, theme::TEXT_PRIMARY, theme::RESET,
+                );
+                std::process::exit(1);
             }
         }
     }

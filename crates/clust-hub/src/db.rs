@@ -245,6 +245,27 @@ pub fn get_default_agent(conn: &Connection) -> Option<String> {
     .ok()
 }
 
+/// Read the bypass-permissions flag from the config table. Defaults to `false`.
+pub fn get_bypass_permissions(conn: &Connection) -> bool {
+    conn.query_row(
+        "SELECT value FROM config WHERE key = 'bypass_permissions'",
+        [],
+        |row| row.get::<_, String>(0),
+    )
+    .map(|v| v == "true")
+    .unwrap_or(false)
+}
+
+/// Set (or update) the bypass-permissions flag in the config table.
+pub fn set_bypass_permissions(conn: &Connection, enabled: bool) -> Result<(), String> {
+    conn.execute(
+        "INSERT OR REPLACE INTO config (key, value) VALUES ('bypass_permissions', ?1)",
+        [if enabled { "true" } else { "false" }],
+    )
+    .map_err(|e| format!("failed to set bypass permissions: {e}"))?;
+    Ok(())
+}
+
 /// Set (or update) the default agent in the config table.
 pub fn set_default_agent(conn: &Connection, binary: &str) -> Result<(), String> {
     conn.execute(
@@ -286,6 +307,28 @@ mod tests {
     fn fresh_db_returns_none() {
         let conn = in_memory_db();
         assert_eq!(get_default_agent(&conn), None);
+    }
+
+    #[test]
+    fn fresh_db_bypass_permissions_is_false() {
+        let conn = in_memory_db();
+        assert!(!get_bypass_permissions(&conn));
+    }
+
+    #[test]
+    fn set_and_get_bypass_permissions() {
+        let conn = in_memory_db();
+        set_bypass_permissions(&conn, true).unwrap();
+        assert!(get_bypass_permissions(&conn));
+    }
+
+    #[test]
+    fn set_bypass_permissions_toggles() {
+        let conn = in_memory_db();
+        set_bypass_permissions(&conn, true).unwrap();
+        assert!(get_bypass_permissions(&conn));
+        set_bypass_permissions(&conn, false).unwrap();
+        assert!(!get_bypass_permissions(&conn));
     }
 
     #[test]
