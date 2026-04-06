@@ -366,7 +366,7 @@ async fn handle_connection(
             // Do git I/O outside the lock
             let mut valid_repos = Vec::new();
             let mut stale_paths = Vec::new();
-            for (path, name, color) in repo_list {
+            for (path, name, color, editor) in repo_list {
                 match crate::repo::get_repo_state(
                     std::path::Path::new(&path),
                     &name,
@@ -374,6 +374,7 @@ async fn handle_connection(
                 ) {
                     Some(mut info) => {
                         info.color = color;
+                        info.editor = editor;
                         valid_repos.push(info);
                     }
                     None => stale_paths.push(path),
@@ -410,6 +411,58 @@ async fn handle_connection(
                     clust_ipc::send_message_write(
                         &mut writer,
                         &HubMessage::RepoColorSet { path, color },
+                    )
+                    .await?;
+                }
+                Err(e) => {
+                    clust_ipc::send_message_write(
+                        &mut writer,
+                        &HubMessage::Error { message: e },
+                    )
+                    .await?;
+                }
+            }
+        }
+        CliMessage::SetRepoEditor { path, editor } => {
+            let result = {
+                let hub_state = state.lock().await;
+                if let Some(ref db) = hub_state.db {
+                    crate::db::set_repo_editor(db, &path, &editor)
+                } else {
+                    Err("database not initialized".into())
+                }
+            };
+            match result {
+                Ok(()) => {
+                    clust_ipc::send_message_write(
+                        &mut writer,
+                        &HubMessage::RepoEditorSet { path, editor },
+                    )
+                    .await?;
+                }
+                Err(e) => {
+                    clust_ipc::send_message_write(
+                        &mut writer,
+                        &HubMessage::Error { message: e },
+                    )
+                    .await?;
+                }
+            }
+        }
+        CliMessage::SetDefaultEditor { editor } => {
+            let result = {
+                let hub_state = state.lock().await;
+                if let Some(ref db) = hub_state.db {
+                    crate::db::set_default_editor(db, &editor)
+                } else {
+                    Err("database not initialized".into())
+                }
+            };
+            match result {
+                Ok(()) => {
+                    clust_ipc::send_message_write(
+                        &mut writer,
+                        &HubMessage::DefaultEditorSet,
                     )
                     .await?;
                 }

@@ -2,6 +2,9 @@ use std::path::PathBuf;
 
 use rusqlite::Connection;
 
+/// A row from the repos table: (path, name, color, editor).
+pub type RepoRow = (String, String, Option<String>, Option<String>);
+
 /// Returns the database path: `~/.clust/clust.db`.
 fn db_path() -> PathBuf {
     clust_ipc::clust_dir().join("clust.db")
@@ -46,6 +49,9 @@ fn run_migrations(conn: &Connection) -> Result<(), String> {
     }
     if current_version < 3 {
         migrate_v3(conn)?;
+    }
+    if current_version < 4 {
+        migrate_v4(conn)?;
     }
 
     Ok(())
@@ -104,6 +110,16 @@ fn migrate_v3(conn: &Connection) -> Result<(), String> {
     Ok(())
 }
 
+/// Migration v4: add editor column to repos table.
+fn migrate_v4(conn: &Connection) -> Result<(), String> {
+    conn.execute_batch(
+        "ALTER TABLE repos ADD COLUMN editor TEXT;
+         INSERT INTO schema_version (version) VALUES (4);",
+    )
+    .map_err(|e| format!("migration v4 failed: {e}"))?;
+    Ok(())
+}
+
 /// Available colors for repository identification.
 pub const REPO_COLORS: &[&str] = &[
     "red", "orange", "yellow", "lime", "green",
@@ -121,13 +137,13 @@ pub fn register_repo(conn: &Connection, path: &str, name: &str, color: &str) -> 
     Ok(())
 }
 
-/// List all registered repositories, ordered by name. Returns (path, name, color).
-pub fn list_repos(conn: &Connection) -> Result<Vec<(String, String, Option<String>)>, String> {
+/// List all registered repositories, ordered by name. Returns (path, name, color, editor).
+pub fn list_repos(conn: &Connection) -> Result<Vec<RepoRow>, String> {
     let mut stmt = conn
-        .prepare("SELECT path, name, color FROM repos ORDER BY name")
+        .prepare("SELECT path, name, color, editor FROM repos ORDER BY name")
         .map_err(|e| format!("failed to prepare repo query: {e}"))?;
     let rows = stmt
-        .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)))
         .map_err(|e| format!("failed to query repos: {e}"))?;
     rows.collect::<Result<Vec<_>, _>>()
         .map_err(|e| format!("failed to collect repos: {e}"))
@@ -167,6 +183,36 @@ pub fn set_repo_color(conn: &Connection, path: &str, color: &str) -> Result<(), 
     )
     .map_err(|e| format!("failed to set repo color: {e}"))?;
     Ok(())
+}
+
+/// Update the preferred editor for an existing repository.
+pub fn set_repo_editor(conn: &Connection, path: &str, editor: &str) -> Result<(), String> {
+    conn.execute(
+        "UPDATE repos SET editor = ?1 WHERE path = ?2",
+        rusqlite::params![editor, path],
+    )
+    .map_err(|e| format!("failed to set repo editor: {e}"))?;
+    Ok(())
+}
+
+/// Set the global default editor in the config table.
+pub fn set_default_editor(conn: &Connection, editor: &str) -> Result<(), String> {
+    conn.execute(
+        "INSERT OR REPLACE INTO config (key, value) VALUES ('default_editor', ?1)",
+        [editor],
+    )
+    .map_err(|e| format!("failed to set default editor: {e}"))?;
+    Ok(())
+}
+
+/// Read the global default editor from the config table.
+pub fn get_default_editor(conn: &Connection) -> Option<String> {
+    conn.query_row(
+        "SELECT value FROM config WHERE key = 'default_editor'",
+        [],
+        |row| row.get(0),
+    )
+    .ok()
 }
 
 /// Find a registered repository by name. Returns an error if multiple repos share the name.
@@ -342,7 +388,7 @@ mod tests {
         register_repo(&conn, "/a/alpha", "alpha", "blue").unwrap();
         register_repo(&conn, "/m/mid", "mid", "green").unwrap();
         let repos = list_repos(&conn).unwrap();
-        let names: Vec<&str> = repos.iter().map(|(_, n, _)| n.as_str()).collect();
+        let names: Vec<&str> = repos.iter().map(|(_, n, _, _)| n.as_str()).collect();
         assert_eq!(names, vec!["alpha", "mid", "zebra"]);
     }
 
@@ -485,8 +531,9 @@ mod tests {
             rusqlite::params!["/b/beta", "beta", now],
         )
         .unwrap();
-        // Run migration v3
+        // Run migrations v3 and v4
         migrate_v3(&conn).unwrap();
+        migrate_v4(&conn).unwrap();
         // Repos should now have colors (ordered by name: alpha, beta)
         let repos = list_repos(&conn).unwrap();
         assert_eq!(repos[0].2, Some(REPO_COLORS[0].to_string())); // alpha

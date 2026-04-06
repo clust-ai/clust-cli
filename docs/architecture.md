@@ -49,6 +49,7 @@
 - Handle attach/detach lifecycle
 - TUI dashboard (`clust ui`) with repo tree, agent cards, and multi-agent overview via `ratatui`
 - Default agent picker with known agent detection
+- Editor detection and "open in editor" integration (scanning PATH for known editors via `which`)
 - Version update check (via Git)
 - Worktree cleanup prompts when agents in worktrees are stopped or exit
 
@@ -115,6 +116,8 @@ CLI -> Hub:
   UnregisterRepo { path: String }
   StopRepoAgents { path: String }
   SetRepoColor { path: String, color: String }
+  SetRepoEditor { path: String, editor: String }
+  SetDefaultEditor { editor: String }
   ListRepos
   ListWorktrees { working_dir: Option<String>, repo_name: Option<String> }
   AddWorktree { working_dir: Option<String>, repo_name: Option<String>, branch_name: String, base_branch: Option<String>, checkout_existing: bool }
@@ -147,6 +150,8 @@ Hub -> CLI:
   RepoUnregistered { path: String, name: String, stopped_agents: usize }
   RepoAgentsStopped { path: String, stopped_count: usize }
   RepoColorSet { path: String, color: String }
+  RepoEditorSet { path: String, editor: String }
+  DefaultEditorSet
   RepoList { repos: Vec<RepoInfo> }
   WorktreeList { repo_name: String, repo_path: String, worktrees: Vec<WorktreeEntry> }
   WorktreeAdded { branch_name: String, path: String }

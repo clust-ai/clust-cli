@@ -213,6 +213,7 @@ On startup, `clust ui` automatically connects to the hub daemon, starting it if 
 | `Opt+D` (macOS) / `Alt+D` | Open the detached agent modal (any directory) |
 | `Opt+F` (macOS) / `Alt+F` | Open the search-agent modal (only when agents are running) |
 | `Opt+N` (macOS) / `Alt+N` | Open the add-repository modal |
+| `Opt+O` (macOS) / `Alt+O` | Open in editor (see Editor Integration below) |
 | `Cmd+1` | Switch to Repositories tab (dismisses context menus, exits focus mode) |
 | `Cmd+2` | Switch to Overview tab (dismisses context menus, exits focus mode) |
 
@@ -398,7 +399,7 @@ The agent's `working_dir`, `repo_path`, and `branch_name` are passed to `open_ag
 
 The `?` key toggles a keyboard shortcut overlay rendered as a centered modal (44 columns wide) anchored to the bottom of the content area. The modal is organized into sections with bold secondary-colored headers and context-aware visibility:
 
-- **Global section (always shown):** `q / Esc×2`, `Q`, `Ctrl+C`, `Tab`, `Shift+Tab`, `?`, `F2`, `Alt+M`, `Alt+E`, `Alt+D`, `Alt+F`, `Alt+N`, `Cmd+1`, `Cmd+2`.
+- **Global section (always shown):** `q / Esc×2`, `Q`, `Ctrl+C`, `Tab`, `Shift+Tab`, `?`, `F2`, `Alt+M`, `Alt+E`, `Alt+D`, `Alt+F`, `Alt+N`, `Alt+O`, `Cmd+1`, `Cmd+2`.
 - **Repositories section (shown when Repositories tab is active):** `↑/↓` navigate, `Shift+↑/↓` jump repos, `←/→` navigate tree, `Shift+←/→` switch panel, `Enter` open menu/focus agent, `Space` collapse/expand, `v` toggle grouping.
 - **Overview section (shown when Overview tab is active):** `Shift+←/→` scroll panels, `Shift+↓` enter terminal, plus an "In terminal:" sub-context label followed by `Shift+↑` back to options bar, `Shift+↓` enter focus mode, `Shift+←/→` switch agent, `PgUp/PgDn` scroll terminal.
 - **Focus Mode section (shown when in focus mode):** `Shift+↑` exit, `Shift+←/→` switch panel, `Shift+PgUp/PgDn` scroll terminal, plus a "Left panel:" sub-context label followed by `Tab` cycle tabs, `↑/↓` scroll diff.
@@ -520,6 +521,41 @@ All modal text inputs (Create Agent, Search Agent, Detached Agent, Add Repositor
 - **Render:** the cursor character is extracted by slicing a full character from the byte offset, not a single byte
 
 Bracketed paste mode is enabled via `crossterm::EnableBracketedPaste` on TUI startup and disabled on exit. This causes pasted text to arrive as a single `Event::Paste(String)` rather than as individual `KeyCode::Char` events. Without bracketed paste, pasted newlines would trigger `Enter` (submitting forms prematurely) and escape characters would cancel modals. Each modal exposes a `handle_paste()` method that inserts the pasted text character-by-character (stripping newlines and carriage returns) while maintaining the byte-offset cursor position.
+
+### Editor Integration
+
+The `Opt+O` (macOS) / `Alt+O` shortcut opens the current context in an external editor. Available globally across all modes (focus, overview, repository).
+
+**Editor detection:** On startup, the TUI scans PATH for known editor binaries using the `which` crate. Detected editors are cached for the session. Editors are sorted by category:
+
+| Category | Editors |
+|----------|---------|
+| Generic | VS Code (`code`), Cursor (`cursor`), Zed (`zed`), Sublime Text (`subl`) |
+| JetBrains | IntelliJ IDEA (`idea`), WebStorm (`webstorm`), PyCharm (`pycharm`), GoLand (`goland`), RustRover (`rustrover`), CLion (`clion`), PHPStorm (`phpstorm`), Rider (`rider`), Fleet (`fleet`) |
+| Terminal | Neovim (`nvim`), Vim (`vim`), Emacs (`emacs`), Helix (`hx`) |
+
+GUI editors (Generic, JetBrains) are opened directly via their binary. Terminal editors are opened in a new terminal window (via `osascript` on macOS, or by trying `x-terminal-emulator`, `gnome-terminal`, `konsole`, `xfce4-terminal` on Linux).
+
+**Target resolution:** The target path depends on the current context:
+
+| Context | Target |
+|---------|--------|
+| Focus mode | Agent's working directory |
+| Repositories tab (repo selected) | Repository root path |
+| Repositories tab (branch selected) | Worktree directory (if worktree), otherwise repo root |
+| Overview tab (terminal focused) | Agent's working directory |
+
+**Flow:**
+
+1. If the repository has a saved editor preference (per-repo `editor` column or global `default_editor`), the editor opens immediately without showing any modal.
+2. If multiple editors are detected, an **editor picker modal** is shown listing all detected editors by name. The user selects one.
+3. If only one editor is detected, it opens immediately.
+4. After opening (when the target is inside a repository), an **editor remember modal** asks "Remember this editor?" with three options:
+   - "Just this time" -- no preference saved
+   - "For this repository" -- saves the editor in the `repos.editor` column via `SetRepoEditor` IPC
+   - "For all repositories" -- saves the editor as the global default via `SetDefaultEditor` IPC
+
+Both modals use the standard `ContextMenu` rendering (centered modal overlay with arrow key navigation, Enter to confirm, Esc to dismiss, number keys for direct selection, mouse click support).
 
 ### Mouse Support
 
