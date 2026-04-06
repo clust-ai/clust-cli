@@ -115,6 +115,13 @@ pub enum CliMessage {
     Ping {
         protocol_version: u32,
     },
+    SetRepoEditor {
+        path: String,
+        editor: String,
+    },
+    SetDefaultEditor {
+        editor: String,
+    },
 }
 
 /// Info about a running agent, returned in AgentList.
@@ -137,6 +144,7 @@ pub struct RepoInfo {
     pub path: String,
     pub name: String,
     pub color: Option<String>,
+    pub editor: Option<String>,
     pub local_branches: Vec<BranchInfo>,
     pub remote_branches: Vec<BranchInfo>,
 }
@@ -189,6 +197,8 @@ pub enum HubMessage {
     RepoUnregistered { path: String, name: String, stopped_agents: usize },
     RepoAgentsStopped { path: String, stopped_count: usize },
     RepoColorSet { path: String, color: String },
+    RepoEditorSet { path: String, editor: String },
+    DefaultEditorSet,
     RepoList { repos: Vec<RepoInfo> },
     AgentReplayComplete { id: String },
     WorktreeList {
@@ -822,6 +832,7 @@ mod tests {
                 path: "/home/user/project".into(),
                 name: "project".into(),
                 color: Some("blue".into()),
+                editor: None,
                 local_branches: vec![
                     BranchInfo {
                         name: "main".into(),

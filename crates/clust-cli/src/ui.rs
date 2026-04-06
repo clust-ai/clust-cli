@@ -296,6 +296,19 @@ enum ActiveMenu {
         branch_name: String,
         menu: ContextMenu,
     },
+    /// Editor picker shown when multiple editors are installed.
+    EditorPicker {
+        target_path: String,
+        repo_path: Option<String>,
+        editors: Vec<crate::editor::DetectedEditor>,
+        menu: ContextMenu,
+    },
+    /// "Remember this editor?" confirmation after selecting an editor.
+    EditorRemember {
+        repo_path: Option<String>,
+        editor: crate::editor::DetectedEditor,
+        menu: ContextMenu,
+    },
 }
 
 // ---------------------------------------------------------------------------
@@ -921,6 +934,8 @@ pub fn run(hub_name: &str) -> io::Result<()> {
     let mut repo_modal: Option<RepoModal> = None;
     // Clone progress modal state
     let mut clone_progress: Option<CloneProgress> = None;
+    // Cached list of installed editors (detected once at startup)
+    let editors_cache = crate::editor::detect_installed_editors();
     let (agent_start_tx, mut agent_start_rx) =
         tokio::sync::mpsc::channel::<AgentStartResult>(4);
     let (status_tx, mut status_rx) =
@@ -1090,6 +1105,7 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                     path: String::new(),
                     name: "No Repository".to_string(),
                     color: None,
+                    editor: None,
                     local_branches: unlinked
                         .iter()
                         .map(|a| {
@@ -1113,6 +1129,7 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                 path: ADD_REPO_SENTINEL.to_string(),
                 name: "Add Repository".to_string(),
                 color: None,
+                editor: None,
                 local_branches: vec![],
                 remote_branches: vec![],
             });
@@ -1260,6 +1277,8 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                     ActiveMenu::BranchActions { ref menu, .. } => menu,
                     ActiveMenu::ConfirmAction { ref menu, .. } => menu,
                     ActiveMenu::WorktreeCleanup { ref menu, .. } => menu,
+                    ActiveMenu::EditorPicker { ref menu, .. } => menu,
+                    ActiveMenu::EditorRemember { ref menu, .. } => menu,
                 };
                 let (modal_rect, inner_rect) = menu.render(frame, content_area);
                 click_map.menu_modal_rect = modal_rect;
@@ -1373,6 +1392,8 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                             ActiveMenu::BranchActions { ref mut menu, .. } => menu.handle_key(key.code),
                             ActiveMenu::ConfirmAction { ref mut menu, .. } => menu.handle_key(key.code),
                             ActiveMenu::WorktreeCleanup { ref mut menu, .. } => menu.handle_key(key.code),
+                            ActiveMenu::EditorPicker { ref mut menu, .. } => menu.handle_key(key.code),
+                            ActiveMenu::EditorRemember { ref mut menu, .. } => menu.handle_key(key.code),
                         };
                         match result {
                             MenuResult::Selected(idx) => {
@@ -2165,6 +2186,46 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                             active_menu = Some(m);
                                         }
                                     }
+                                    ActiveMenu::EditorPicker { target_path, repo_path, editors, .. } => {
+                                        if let Some(editor) = editors.get(idx).cloned() {
+                                            crate::editor::open_in_editor(&editor, &target_path);
+                                            if repo_path.is_some() {
+                                                active_menu = Some(ActiveMenu::EditorRemember {
+                                                    repo_path,
+                                                    editor,
+                                                    menu: ContextMenu::new(
+                                                        "Remember this editor?",
+                                                        vec![
+                                                            "Just this time".to_string(),
+                                                            "For this repository".to_string(),
+                                                            "For all repositories".to_string(),
+                                                        ],
+                                                    ),
+                                                });
+                                            }
+                                        }
+                                    }
+                                    ActiveMenu::EditorRemember { repo_path, editor, .. } => {
+                                        match idx {
+                                            1 => {
+                                                // For this repository
+                                                if let Some(rp) = repo_path {
+                                                    set_repo_editor_ipc(&rp, &editor.binary);
+                                                    if let Some(repo) = repos.iter_mut().find(|r| r.path == rp) {
+                                                        repo.editor = Some(editor.binary);
+                                                    }
+                                                }
+                                            }
+                                            2 => {
+                                                // For all repositories
+                                                set_default_editor_ipc(&editor.binary);
+                                                // Update local cache so all repos without
+                                                // a per-repo editor pick this up next time
+                                                // repos are refreshed from the hub.
+                                            }
+                                            _ => {} // Just this time
+                                        }
+                                    }
                                 }
                             }
                             MenuResult::Dismissed => {
@@ -2464,6 +2525,28 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                         // Global shortcut: Alt+N opens new repository modal
                         repo_modal = Some(RepoModal::new());
                         show_help = false;
+                    } else if key.code == KeyCode::Char('o')
+                        && key.modifiers.contains(KeyModifiers::ALT)
+                    {
+                        // Global shortcut: Alt+O opens in editor
+                        let (target, rp) = resolve_editor_target(
+                            in_focus_mode,
+                            &focus_mode_state,
+                            active_tab,
+                            &overview_state,
+                            &display_repos,
+                            &selection,
+                            &agents,
+                        );
+                        if let Some(target_path) = target {
+                            trigger_open_in_editor(
+                                &target_path,
+                                rp.as_deref(),
+                                &repos,
+                                &mut active_menu,
+                                &editors_cache,
+                            );
+                        }
                     } else
                     // Focus mode: behavior depends on which side has focus
                     if in_focus_mode
@@ -3162,6 +3245,8 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                 ActiveMenu::BranchActions { menu, .. } => menu.items.len(),
                                 ActiveMenu::ConfirmAction { menu, .. } => menu.items.len(),
                                 ActiveMenu::WorktreeCleanup { menu, .. } => menu.items.len(),
+                                ActiveMenu::EditorPicker { menu, .. } => menu.items.len(),
+                                ActiveMenu::EditorRemember { menu, .. } => menu.items.len(),
                             };
                             if idx < item_count {
                                 // Highlight the clicked item then select it
@@ -3172,6 +3257,8 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                     ActiveMenu::BranchActions { menu, .. } => menu.selected_idx = idx,
                                     ActiveMenu::ConfirmAction { menu, .. } => menu.selected_idx = idx,
                                     ActiveMenu::WorktreeCleanup { menu, .. } => menu.selected_idx = idx,
+                                    ActiveMenu::EditorPicker { menu, .. } => menu.selected_idx = idx,
+                                    ActiveMenu::EditorRemember { menu, .. } => menu.selected_idx = idx,
                                 }
                                 let taken = active_menu.take().unwrap();
                                 match taken {
@@ -3964,6 +4051,41 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                             });
                                         }
                                     }
+                                    ActiveMenu::EditorPicker { target_path, repo_path, editors, .. } => {
+                                        if let Some(editor) = editors.get(idx).cloned() {
+                                            crate::editor::open_in_editor(&editor, &target_path);
+                                            if repo_path.is_some() {
+                                                active_menu = Some(ActiveMenu::EditorRemember {
+                                                    repo_path,
+                                                    editor,
+                                                    menu: ContextMenu::new(
+                                                        "Remember this editor?",
+                                                        vec![
+                                                            "Just this time".to_string(),
+                                                            "For this repository".to_string(),
+                                                            "For all repositories".to_string(),
+                                                        ],
+                                                    ),
+                                                });
+                                            }
+                                        }
+                                    }
+                                    ActiveMenu::EditorRemember { repo_path, editor, .. } => {
+                                        match idx {
+                                            1 => {
+                                                if let Some(rp) = repo_path {
+                                                    set_repo_editor_ipc(&rp, &editor.binary);
+                                                    if let Some(repo) = repos.iter_mut().find(|r| r.path == rp) {
+                                                        repo.editor = Some(editor.binary);
+                                                    }
+                                                }
+                                            }
+                                            2 => {
+                                                set_default_editor_ipc(&editor.binary);
+                                            }
+                                            _ => {}
+                                        }
+                                    }
                                 }
                             }
                         } else if !click_map.menu_modal_rect.contains(pos) {
@@ -4082,7 +4204,9 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                             | ActiveMenu::ColorPicker { menu, .. }
                             | ActiveMenu::BranchActions { menu, .. }
                             | ActiveMenu::ConfirmAction { menu, .. }
-                            | ActiveMenu::WorktreeCleanup { menu, .. } => {
+                            | ActiveMenu::WorktreeCleanup { menu, .. }
+                            | ActiveMenu::EditorPicker { menu, .. }
+                            | ActiveMenu::EditorRemember { menu, .. } => {
                                 menu.selected_idx = menu.selected_idx.saturating_sub(1);
                             }
                         }
@@ -4117,7 +4241,9 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                             | ActiveMenu::ColorPicker { menu, .. }
                             | ActiveMenu::BranchActions { menu, .. }
                             | ActiveMenu::ConfirmAction { menu, .. }
-                            | ActiveMenu::WorktreeCleanup { menu, .. } => {
+                            | ActiveMenu::WorktreeCleanup { menu, .. }
+                            | ActiveMenu::EditorPicker { menu, .. }
+                            | ActiveMenu::EditorRemember { menu, .. } => {
                                 if !menu.items.is_empty() {
                                     menu.selected_idx = (menu.selected_idx + 1).min(menu.items.len() - 1);
                                 }
@@ -5487,6 +5613,7 @@ fn render_help_overlay(frame: &mut Frame, area: Rect, active_tab: ActiveTab, in_
     lines.push(binding_line("Alt+D", "New directory agent"));
     lines.push(binding_line("Alt+F", "Search agents"));
     lines.push(binding_line("Alt+N", "Add repository"));
+    lines.push(binding_line("Alt+O", "Open in editor"));
 
     // -- Repositories --
     if active_tab == ActiveTab::Repositories {
@@ -6154,6 +6281,166 @@ fn open_in_terminal(path: &str) {
     }
 }
 
+fn set_repo_editor_ipc(path: &str, editor: &str) {
+    let path = path.to_string();
+    let editor = editor.to_string();
+    block_on_async(async {
+        let Ok(mut stream) = ipc::try_connect().await else {
+            return;
+        };
+        let _ = clust_ipc::send_message(
+            &mut stream,
+            &CliMessage::SetRepoEditor { path, editor },
+        )
+        .await;
+        let _ = clust_ipc::recv_message::<HubMessage>(&mut stream).await;
+    });
+}
+
+fn set_default_editor_ipc(editor: &str) {
+    let editor = editor.to_string();
+    block_on_async(async {
+        let Ok(mut stream) = ipc::try_connect().await else {
+            return;
+        };
+        let _ = clust_ipc::send_message(
+            &mut stream,
+            &CliMessage::SetDefaultEditor { editor },
+        )
+        .await;
+        let _ = clust_ipc::recv_message::<HubMessage>(&mut stream).await;
+    });
+}
+
+/// Determine the target path and repo path for "open in editor" based on current mode.
+fn resolve_editor_target(
+    in_focus_mode: bool,
+    focus_mode_state: &overview::FocusModeState,
+    active_tab: ActiveTab,
+    overview_state: &OverviewState,
+    display_repos: &[RepoInfo],
+    selection: &TreeSelection,
+    agents: &[AgentInfo],
+) -> (Option<String>, Option<String>) {
+    // Focus mode: use the agent's working directory
+    if in_focus_mode && focus_mode_state.is_active() {
+        let target = focus_mode_state.working_dir.clone();
+        let rp = focus_mode_state.repo_path.clone();
+        return (target, rp);
+    }
+
+    match active_tab {
+        ActiveTab::Repositories => {
+            if let Some(repo) = display_repos.get(selection.repo_idx) {
+                if repo.path.is_empty() {
+                    return (None, None);
+                }
+                match selection.level {
+                    TreeLevel::Repo | TreeLevel::Category => {
+                        (Some(repo.path.clone()), Some(repo.path.clone()))
+                    }
+                    TreeLevel::Branch => {
+                        if selection.category_idx == 0 {
+                            // Local branch
+                            if let Some(branch) = repo.local_branches.get(selection.branch_idx) {
+                                let target = if branch.is_head {
+                                    repo.path.clone()
+                                } else if branch.is_worktree {
+                                    worktree_dir(&repo.path, &branch.name)
+                                } else {
+                                    repo.path.clone()
+                                };
+                                (Some(target), Some(repo.path.clone()))
+                            } else {
+                                (Some(repo.path.clone()), Some(repo.path.clone()))
+                            }
+                        } else {
+                            // Remote branch — open repo root
+                            (Some(repo.path.clone()), Some(repo.path.clone()))
+                        }
+                    }
+                }
+            } else {
+                (None, None)
+            }
+        }
+        ActiveTab::Overview => {
+            if let overview::OverviewFocus::Terminal(idx) = overview_state.focus {
+                if let Some(panel) = overview_state.panels.get(idx) {
+                    // Look up agent working_dir from the agents list
+                    let target = agents
+                        .iter()
+                        .find(|a| a.id == panel.id)
+                        .map(|a| a.working_dir.clone());
+                    let rp = panel.repo_path.clone();
+                    return (target, rp);
+                }
+            }
+            (None, None)
+        }
+    }
+}
+
+/// Compute the worktree directory for a branch (branch name with / → __).
+fn worktree_dir(repo_path: &str, branch_name: &str) -> String {
+    let serialized = branch_name.replace('/', "__");
+    format!("{repo_path}/.clust/worktrees/{serialized}")
+}
+
+/// Trigger the "open in editor" flow: either open directly if a preference is saved,
+/// or show the editor picker modal.
+fn trigger_open_in_editor(
+    target_path: &str,
+    repo_path: Option<&str>,
+    repos: &[RepoInfo],
+    active_menu: &mut Option<ActiveMenu>,
+    editors_cache: &[crate::editor::DetectedEditor],
+) {
+    // Check if this repo has a saved editor preference
+    if let Some(rp) = repo_path {
+        if let Some(repo) = repos.iter().find(|r| r.path == rp) {
+            if let Some(ref editor_binary) = repo.editor {
+                if let Some(editor) = crate::editor::find_editor_by_binary(editors_cache, editor_binary) {
+                    crate::editor::open_in_editor(editor, target_path);
+                    return;
+                }
+                // Saved editor no longer installed — fall through to picker
+            }
+        }
+    }
+
+    match editors_cache.len() {
+        0 => {} // No editors found
+        1 => {
+            let editor = editors_cache[0].clone();
+            crate::editor::open_in_editor(&editor, target_path);
+            if repo_path.is_some() {
+                *active_menu = Some(ActiveMenu::EditorRemember {
+                    repo_path: repo_path.map(|s| s.to_string()),
+                    editor,
+                    menu: ContextMenu::new(
+                        "Remember this editor?",
+                        vec![
+                            "Just this time".to_string(),
+                            "For this repository".to_string(),
+                            "For all repositories".to_string(),
+                        ],
+                    ),
+                });
+            }
+        }
+        _ => {
+            let labels: Vec<String> = editors_cache.iter().map(|e| e.name.clone()).collect();
+            *active_menu = Some(ActiveMenu::EditorPicker {
+                target_path: target_path.to_string(),
+                repo_path: repo_path.map(|s| s.to_string()),
+                editors: editors_cache.to_vec(),
+                menu: ContextMenu::new("Open in Editor", labels),
+            });
+        }
+    }
+}
+
 /// Run an async future from the synchronous UI loop.
 /// Requires the multi-thread tokio scheduler (`#[tokio::main]`).
 fn block_on_async<F: std::future::Future>(f: F) -> F::Output {
@@ -6189,6 +6476,7 @@ mod tests {
             path: format!("/repos/{name}"),
             name: name.to_string(),
             color: Some("blue".to_string()),
+            editor: None,
             local_branches: local,
             remote_branches: remote,
         }
