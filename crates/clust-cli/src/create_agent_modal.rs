@@ -149,7 +149,11 @@ impl CreateAgentModal {
             }
             KeyCode::Backspace => {
                 if self.cursor_pos > 0 {
-                    self.cursor_pos -= 1;
+                    self.cursor_pos = self.input[..self.cursor_pos]
+                        .char_indices()
+                        .next_back()
+                        .map(|(i, _)| i)
+                        .unwrap_or(0);
                     self.input.remove(self.cursor_pos);
                     self.selected_idx = 0;
                 }
@@ -157,13 +161,18 @@ impl CreateAgentModal {
             }
             KeyCode::Left => {
                 if self.cursor_pos > 0 {
-                    self.cursor_pos -= 1;
+                    self.cursor_pos = self.input[..self.cursor_pos]
+                        .char_indices()
+                        .next_back()
+                        .map(|(i, _)| i)
+                        .unwrap_or(0);
                 }
                 ModalResult::Pending
             }
             KeyCode::Right => {
                 if self.cursor_pos < self.input.len() {
-                    self.cursor_pos += 1;
+                    self.cursor_pos +=
+                        self.input[self.cursor_pos..].chars().next().unwrap().len_utf8();
                 }
                 ModalResult::Pending
             }
@@ -174,7 +183,7 @@ impl CreateAgentModal {
                     return ModalResult::Pending;
                 }
                 self.input.insert(self.cursor_pos, c);
-                self.cursor_pos += 1;
+                self.cursor_pos += c.len_utf8();
                 self.selected_idx = 0;
                 ModalResult::Pending
             }
@@ -239,6 +248,17 @@ impl CreateAgentModal {
                 })
             }
         }
+    }
+
+    pub fn handle_paste(&mut self, text: &str) {
+        for c in text.chars() {
+            if c == '\n' || c == '\r' {
+                continue;
+            }
+            self.input.insert(self.cursor_pos, c);
+            self.cursor_pos += c.len_utf8();
+        }
+        self.selected_idx = 0;
     }
 
     fn reset_input(&mut self) {
@@ -377,14 +397,14 @@ impl CreateAgentModal {
 
     fn render_input(&self, frame: &mut Frame, area: Rect) {
         let before_cursor = &self.input[..self.cursor_pos];
-        let cursor_char = self
-            .input
-            .get(self.cursor_pos..self.cursor_pos + 1)
-            .unwrap_or(" ");
-        let after_cursor = if self.cursor_pos < self.input.len() {
-            &self.input[self.cursor_pos + 1..]
+        let (cursor_char, after_cursor) = if self.cursor_pos < self.input.len() {
+            let ch_len = self.input[self.cursor_pos..].chars().next().unwrap().len_utf8();
+            (
+                &self.input[self.cursor_pos..self.cursor_pos + ch_len],
+                &self.input[self.cursor_pos + ch_len..],
+            )
         } else {
-            ""
+            (" ", "")
         };
 
         let line = Line::from(vec![
@@ -405,7 +425,8 @@ impl CreateAgentModal {
         ]);
         let width = area.width as usize;
         let scroll = if width > 0 {
-            let cursor_line = (2 + self.cursor_pos) / width;
+            let char_pos = self.input[..self.cursor_pos].chars().count();
+            let cursor_line = (2 + char_pos) / width;
             let visible = area.height as usize;
             if cursor_line >= visible {
                 (cursor_line - visible + 1) as u16

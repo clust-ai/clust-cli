@@ -4,7 +4,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use crossterm::{
-    event::{self, Event, KeyCode, KeyEventKind, KeyModifiers, KeyboardEnhancementFlags, MouseButton, MouseEvent, MouseEventKind, EnableMouseCapture, DisableMouseCapture, EnableFocusChange, DisableFocusChange, PushKeyboardEnhancementFlags, PopKeyboardEnhancementFlags},
+    event::{self, Event, KeyCode, KeyEventKind, KeyModifiers, KeyboardEnhancementFlags, MouseButton, MouseEvent, MouseEventKind, EnableMouseCapture, DisableMouseCapture, EnableBracketedPaste, DisableBracketedPaste, EnableFocusChange, DisableFocusChange, PushKeyboardEnhancementFlags, PopKeyboardEnhancementFlags},
     terminal::{disable_raw_mode, enable_raw_mode, supports_keyboard_enhancement, EnterAlternateScreen, LeaveAlternateScreen},
     ExecutableCommand,
 };
@@ -818,6 +818,7 @@ pub fn run(hub_name: &str) -> io::Result<()> {
     io::stdout().execute(EnterAlternateScreen)?;
     enable_raw_mode()?;
     io::stdout().execute(EnableMouseCapture)?;
+    io::stdout().execute(EnableBracketedPaste)?;
     io::stdout().execute(EnableFocusChange)?;
 
     // Enable Kitty keyboard protocol so crossterm reports SUPER (Cmd) modifier
@@ -836,6 +837,7 @@ pub fn run(hub_name: &str) -> io::Result<()> {
             let _ = io::stdout().execute(PopKeyboardEnhancementFlags);
         }
         let _ = io::stdout().execute(DisableFocusChange);
+        let _ = io::stdout().execute(DisableBracketedPaste);
         let _ = io::stdout().execute(DisableMouseCapture);
         let _ = disable_raw_mode();
         let _ = io::stdout().execute(LeaveAlternateScreen);
@@ -2926,6 +2928,22 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                         }
                     }
                 }
+                Event::Paste(ref text) => {
+                    if let Some(ref mut modal) = create_modal {
+                        modal.handle_paste(text);
+                    } else if let Some(ref mut modal) = search_modal {
+                        modal.handle_paste(text);
+                    } else if let Some(ref mut modal) = detached_modal {
+                        modal.handle_paste(text);
+                    } else if let Some(ref mut modal) = repo_modal {
+                        modal.handle_paste(text);
+                    } else if in_focus_mode
+                        && focus_mode_state.compare_picker.mode
+                            == overview::BranchPickerMode::Searching
+                    {
+                        focus_mode_state.compare_picker.handle_paste(text);
+                    }
+                }
                 Event::Resize(cols, rows) => {
                     // Compute content area from the new dimensions directly
                     // to avoid using stale last_content_area.
@@ -3932,6 +3950,7 @@ pub fn run(hub_name: &str) -> io::Result<()> {
         let _ = io::stdout().execute(PopKeyboardEnhancementFlags);
     }
     io::stdout().execute(DisableFocusChange)?;
+    io::stdout().execute(DisableBracketedPaste)?;
     io::stdout().execute(DisableMouseCapture)?;
     disable_raw_mode()?;
     io::stdout().execute(LeaveAlternateScreen)?;
