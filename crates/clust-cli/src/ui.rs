@@ -215,7 +215,8 @@ pub(crate) struct ClickMap {
 
     // Overview tab
     pub(crate) overview_panels: Vec<(Rect, usize)>, // (area, global_panel_idx)
-    pub(crate) overview_filter_chips: Vec<(Rect, String)>, // (area, repo_path)
+    pub(crate) overview_repo_buttons: Vec<(Rect, String)>, // (area, repo_path) — collapse toggle
+    pub(crate) overview_agent_indicators: Vec<(Rect, usize)>, // (area, global_panel_idx) — focus agent
 
     // Focus mode
     pub(crate) focus_left_area: Rect,
@@ -2804,23 +2805,36 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                         overview_state
                                             .scroll_right(last_content_area.width);
                                     }
-                                    // Filter chip navigation
-                                    KeyCode::Left if !shift && !repos.is_empty() => {
+                                    // Filter group navigation
+                                    KeyCode::Left if !shift => {
                                         if overview_state.filter_cursor > 0 {
                                             overview_state.filter_cursor -= 1;
                                         }
                                     }
-                                    KeyCode::Right if !shift && !repos.is_empty() => {
-                                        if overview_state.filter_cursor + 1 < repos.len() {
+                                    KeyCode::Right if !shift => {
+                                        let has_other = agents.iter().any(|a| a.repo_path.is_none());
+                                        let group_count = repos.len() + if has_other { 1 } else { 0 };
+                                        if group_count > 0 && overview_state.filter_cursor + 1 < group_count {
                                             overview_state.filter_cursor += 1;
                                         }
                                     }
-                                    KeyCode::Enter | KeyCode::Char(' ') if !repos.is_empty() => {
-                                        if let Some(repo) = repos.get(overview_state.filter_cursor) {
-                                            if overview_state.hidden_repos.contains(&repo.path) {
-                                                overview_state.hidden_repos.remove(&repo.path);
+                                    KeyCode::Enter | KeyCode::Char(' ') => {
+                                        // Toggle collapse for the selected repo group
+                                        if overview_state.filter_cursor < repos.len() {
+                                            if let Some(repo) = repos.get(overview_state.filter_cursor) {
+                                                if overview_state.collapsed_repos.contains(&repo.path) {
+                                                    overview_state.collapsed_repos.remove(&repo.path);
+                                                } else {
+                                                    overview_state.collapsed_repos.insert(repo.path.clone());
+                                                }
+                                            }
+                                        } else {
+                                            // "Other" group (empty string key)
+                                            let key = String::new();
+                                            if overview_state.collapsed_repos.contains(&key) {
+                                                overview_state.collapsed_repos.remove(&key);
                                             } else {
-                                                overview_state.hidden_repos.insert(repo.path.clone());
+                                                overview_state.collapsed_repos.insert(key);
                                             }
                                         }
                                     }
@@ -4056,13 +4070,20 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                 }
                             }
                             ActiveTab::Overview => {
-                                // Filter chip clicks
-                                if let Some((_, repo_path)) = click_map.overview_filter_chips.iter().find(|(r, _)| r.contains(pos)) {
+                                // Agent indicator clicks → focus that agent
+                                if let Some((_, global_idx)) = click_map.overview_agent_indicators.iter().find(|(r, _)| r.contains(pos)) {
+                                    let idx = *global_idx;
+                                    overview_state.focus = overview::OverviewFocus::Terminal(idx);
+                                    overview_state.last_terminal_idx = idx;
+                                    overview_state.ensure_visible_sorted(idx);
+                                }
+                                // Repo button clicks → toggle collapse
+                                else if let Some((_, repo_path)) = click_map.overview_repo_buttons.iter().find(|(r, _)| r.contains(pos)) {
                                     let rp = repo_path.clone();
-                                    if overview_state.hidden_repos.contains(&rp) {
-                                        overview_state.hidden_repos.remove(&rp);
+                                    if overview_state.collapsed_repos.contains(&rp) {
+                                        overview_state.collapsed_repos.remove(&rp);
                                     } else {
-                                        overview_state.hidden_repos.insert(rp);
+                                        overview_state.collapsed_repos.insert(rp);
                                     }
                                 }
                                 // Panel clicks
