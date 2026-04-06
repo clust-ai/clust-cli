@@ -356,15 +356,34 @@ impl OverviewState {
     // -- Private helpers --
 
     fn ensure_visible(&mut self, idx: usize) {
-        if idx < self.scroll_offset {
-            self.scroll_offset = idx;
+        if self.viewport_width == 0 {
+            return;
         }
-        if self.viewport_width > 0 {
-            let fully_visible = max_panels_for_width(self.viewport_width);
+        let fully_visible = max_panels_for_width(self.viewport_width);
+
+        if fully_visible >= 3 {
+            // Keep a 1-panel buffer from viewport edges.
+            // Scroll left when selection is at the first visible position.
+            if idx <= self.scroll_offset {
+                self.scroll_offset = idx.saturating_sub(1);
+            }
+            // Scroll right when selection is at the last visible position.
+            if idx + 1 >= self.scroll_offset + fully_visible {
+                self.scroll_offset = (idx + 2).saturating_sub(fully_visible);
+            }
+        } else {
+            // < 3 visible panels: no room for buffer, keep current behavior.
+            if idx < self.scroll_offset {
+                self.scroll_offset = idx;
+            }
             if idx >= self.scroll_offset + fully_visible {
                 self.scroll_offset = idx + 1 - fully_visible;
             }
         }
+
+        // Clamp to valid range.
+        let max_offset = self.panels.len().saturating_sub(fully_visible);
+        self.scroll_offset = self.scroll_offset.min(max_offset);
     }
 
     fn clamp_focus(&mut self) {
