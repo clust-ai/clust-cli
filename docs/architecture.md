@@ -73,6 +73,7 @@ The CLI is a thin client. It does NOT manage agent processes directly.
 
 - Define IPC message types (`CliMessage` and `HubMessage` enums)
 - Length-prefixed MessagePack framing (`send_message` / `recv_message`)
+- Protocol version constant (`PROTOCOL_VERSION`) for detecting stale hubs after rebuilds
 - Split-stream variants for bidirectional sessions
 - Socket path and clust directory helpers
 - Known agent registry (`KNOWN_AGENTS`) with accept-edits metadata
@@ -128,6 +129,7 @@ CLI -> Hub:
   PullBranch { repo_path: String, branch_name: String }
   CreateRepo { parent_dir: String, name: String }
   CloneRepo { url: String, parent_dir: String, name: Option<String> }
+  Ping { protocol_version: u32 }
 
 Hub -> CLI:
   Ok
@@ -161,15 +163,24 @@ Hub -> CLI:
   RepoCreated { path: String, name: String }
   RepoCloned { path: String, name: String }
   CloneProgress { step: String }
+  Pong { protocol_version: u32 }
 ```
+
+### Protocol Versioning
+
+The IPC protocol includes a version check to detect stale hubs. `clust-ipc` exports a `PROTOCOL_VERSION` constant (currently `1`) that must be bumped whenever the `CliMessage` or `HubMessage` enum shapes change (since `rmp-serde` uses numeric enum indices).
+
+On connection, the CLI sends a `Ping { protocol_version }` message. The hub replies with `Pong { protocol_version }` carrying its own version. If versions mismatch, the CLI stops the stale hub and spawns a fresh one before proceeding.
 
 ### Connection Lifecycle
 
 1. CLI opens connection to `~/.clust/clust.sock`
 2. If connection fails → CLI spawns `clust-hub` as a background process, retries
-3. CLI sends command message
-4. For attach: connection stays open, bidirectional streaming (output down, input up)
-5. For one-shot commands (ls, stop): hub responds, connection closes
+3. If connection succeeds → CLI sends `Ping` to verify protocol compatibility
+4. If protocol mismatch → CLI sends `StopHub`, waits for socket release, spawns a new hub
+5. CLI sends command message
+6. For attach: connection stays open, bidirectional streaming (output down, input up)
+7. For one-shot commands (ls, stop): hub responds, connection closes
 
 ## Agent Lifecycle
 
