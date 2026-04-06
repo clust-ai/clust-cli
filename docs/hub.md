@@ -233,8 +233,9 @@ When the hub receives a `CreateRepo` message:
 
 1. Validate the parent directory exists.
 2. Run `git init` in a new subdirectory named by `name` within `parent_dir`.
-3. Register the new repository in the SQLite database with an auto-assigned color.
-4. Return `RepoCreated { path, name }` on success, or `Error` on failure.
+3. Ensure the repository has a "main" branch by creating an initial empty commit via `ensure_main_branch()`. This prevents the repo from being in a branchless state (HEAD pointing to an unborn ref), which would cause issues with worktree creation and branch listing.
+4. Register the new repository in the SQLite database with an auto-assigned color.
+5. Return `RepoCreated { path, name }` on success, or `Error` on failure.
 
 ### Clone Repository
 
@@ -245,9 +246,10 @@ When the hub receives a `CloneRepo` message:
 3. Spawn `git clone --progress` as a child process with stdout discarded (null) and stderr piped for progress output.
 4. Send an initial `CloneProgress { step }` message to the client.
 5. Read stderr line-by-line in a `spawn_blocking` task, bridged to the async event loop via an unbounded channel. Each non-empty line is forwarded to the client as a `CloneProgress { step }` message, enabling real-time progress display.
-6. On successful completion, register the cloned repository in the SQLite database with an auto-assigned color.
-7. If the progress channel closes unexpectedly before completion, return an `Error` message instead of silently dropping the connection.
-8. Return `RepoCloned { path, name }` on success, or `Error` on failure at any stage.
+6. On successful completion, ensure the repository has a "main" branch via `ensure_main_branch()` (handles edge cases where the cloned repo has no branches).
+7. Register the cloned repository in the SQLite database with an auto-assigned color.
+8. If the progress channel closes unexpectedly before completion, return an `Error` message instead of silently dropping the connection.
+9. Return `RepoCloned { path, name }` on success, or `Error` on failure at any stage.
 
 ## Editor Preferences
 

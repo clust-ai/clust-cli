@@ -919,7 +919,41 @@ pub fn init_repo(parent_dir: &Path, name: &str) -> Result<PathBuf, String> {
         let stderr = String::from_utf8_lossy(&output.stderr);
         return Err(format!("git init failed: {}", stderr.trim()));
     }
+    ensure_main_branch(&repo_path);
     Ok(repo_path)
+}
+
+/// Ensure the repository has a "main" branch. If the repo has no branches
+/// (e.g. right after `git init`), create an initial empty commit on "main".
+pub fn ensure_main_branch(repo_path: &Path) {
+    let repo = match git2::Repository::open(repo_path) {
+        Ok(r) => r,
+        Err(_) => return,
+    };
+
+    let has_branches = repo
+        .branches(Some(git2::BranchType::Local))
+        .map(|mut b| b.next().is_some())
+        .unwrap_or(false);
+
+    if has_branches {
+        return;
+    }
+
+    let sig = match git2::Signature::now("clust", "clust@localhost") {
+        Ok(s) => s,
+        Err(_) => return,
+    };
+    let tree_id = match repo.index().and_then(|mut idx| idx.write_tree()) {
+        Ok(id) => id,
+        Err(_) => return,
+    };
+    let tree = match repo.find_tree(tree_id) {
+        Ok(t) => t,
+        Err(_) => return,
+    };
+    let _ = repo.commit(Some("refs/heads/main"), &sig, &sig, "Initial commit", &tree, &[]);
+    let _ = repo.set_head("refs/heads/main");
 }
 
 /// Spawn a `git clone --progress` child process and return the handle together

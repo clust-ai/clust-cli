@@ -1465,6 +1465,7 @@ async fn handle_connection(
                     }
 
                     if clone_ok {
+                        crate::repo::ensure_main_branch(&repo_path);
                         let path_str = repo_path.to_string_lossy().into_owned();
                         let repo_name = repo_path
                             .file_name()

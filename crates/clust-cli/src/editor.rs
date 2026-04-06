@@ -107,6 +107,7 @@ fn open_terminal_editor(editor: &DetectedEditor, path: &str) {
 }
 
 /// Simple shell escaping for paths (wraps in single quotes, escapes inner quotes).
+#[cfg(target_os = "macos")]
 fn shell_escape(s: &str) -> String {
     format!("'{}'", s.replace('\'', "'\\''"))
 }
