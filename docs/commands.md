@@ -322,6 +322,7 @@ These shortcuts are active in the `clust ui` dashboard. They are displayed in th
 | `Shift+Tab` | Switch to previous tab |
 | `?` | Toggle keyboard shortcut overlay |
 | `F2` | Toggle mouse capture (allows text selection and link clicking when off) |
+| `Opt+M` (macOS) / `Alt+M` | Temporarily disable mouse capture for 5 seconds (mouse passthrough) |
 | `Opt+E` (macOS) / `Alt+E` | Open the create-agent modal (multi-step builder for creating agents on worktrees) |
 | `Opt+D` (macOS) / `Alt+D` | Open the detached agent modal (start agent in any directory) |
 | `Opt+F` (macOS) / `Alt+F` | Open the search-agent modal (only when agents are running) |

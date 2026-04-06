@@ -206,6 +206,7 @@ On startup, `clust ui` automatically connects to the hub daemon, starting it if 
 | `Shift+Tab` | Switch to previous tab |
 | `?` | Toggle keyboard shortcut overlay |
 | `F2` | Toggle mouse capture (allows text selection and link clicking when off) |
+| `Opt+M` (macOS) / `Alt+M` | Temporarily disable mouse capture for 5 seconds (mouse passthrough) |
 | `Opt+E` (macOS) / `Alt+E` | Open the create-agent modal |
 | `Opt+D` (macOS) / `Alt+D` | Open the detached agent modal (any directory) |
 | `Opt+F` (macOS) / `Alt+F` | Open the search-agent modal (only when agents are running) |
@@ -395,7 +396,7 @@ The agent's `working_dir`, `repo_path`, and `branch_name` are passed to `open_ag
 
 The `?` key toggles a keyboard shortcut overlay rendered as a centered modal (44 columns wide) anchored to the bottom of the content area. The modal is organized into sections with bold secondary-colored headers and context-aware visibility:
 
-- **Global section (always shown):** `q / Esc×2`, `Q`, `Ctrl+C`, `Tab`, `Shift+Tab`, `?`, `F2`, `Alt+E`, `Alt+D`, `Alt+F`, `Alt+N`, `Cmd+1`, `Cmd+2`.
+- **Global section (always shown):** `q / Esc×2`, `Q`, `Ctrl+C`, `Tab`, `Shift+Tab`, `?`, `F2`, `Alt+M`, `Alt+E`, `Alt+D`, `Alt+F`, `Alt+N`, `Cmd+1`, `Cmd+2`.
 - **Repositories section (shown when Repositories tab is active):** `↑/↓` navigate, `Shift+↑/↓` jump repos, `←/→` navigate tree, `Shift+←/→` switch panel, `Enter` open menu/focus agent, `Space` collapse/expand, `v` toggle grouping.
 - **Overview section (shown when Overview tab is active):** `Shift+←/→` scroll panels, `Shift+↓` enter terminal, plus an "In terminal:" sub-context label followed by `Shift+↑` back to options bar, `Shift+↓` enter focus mode, `Shift+←/→` switch agent, `PgUp/PgDn` scroll terminal.
 - **Focus Mode section (shown when in focus mode):** `Shift+↑` exit, `Shift+←/→` switch panel, `Shift+PgUp/PgDn` scroll terminal, plus a "Left panel:" sub-context label followed by `Tab` cycle tabs, `↑/↓` scroll diff.
@@ -525,6 +526,10 @@ Mouse capture is enabled via `crossterm::EnableMouseCapture` on TUI startup and 
 #### F2 Mouse Capture Toggle
 
 Pressing `F2` toggles mouse capture on/off. When mouse capture is disabled, the terminal emulator regains control of mouse events, allowing native text selection, copy/paste, and link clicking. When mouse capture is off, all mouse events (clicks, scrolls) are ignored by the TUI. The status bar displays a `MOUSE OFF . F2` indicator in the warning color when mouse capture is disabled. Pressing `F2` again re-enables mouse capture and restores normal TUI mouse handling. The `mouse_captured` boolean state is tracked in the main event loop and passed to `render_status_bar()` for display.
+
+#### Alt+M Mouse Passthrough (5 seconds)
+
+Pressing `Alt+M` (or `Opt+M` on macOS) temporarily disables mouse capture for 5 seconds, then automatically re-enables it. This is useful for quickly clicking a terminal link without needing to manually toggle mouse capture back on. The status bar displays `MOUSE OFF . ⌥M` during the passthrough period (distinct from the persistent `MOUSE OFF . F2` indicator). The passthrough is tracked via a `mouse_passthrough_until: Option<Instant>` state variable. At the top of each event loop iteration, the timer is checked; when the deadline is reached, mouse capture is re-enabled automatically. Pressing `F2` while a passthrough is active clears the passthrough timer and applies the persistent toggle instead.
 
 #### Click Map Architecture
 
