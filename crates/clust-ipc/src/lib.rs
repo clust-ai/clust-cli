@@ -12,6 +12,10 @@ use tokio::net::UnixStream;
 /// Default hub name for agents not assigned to a specific hub.
 pub const DEFAULT_HUB: &str = "default_hub";
 
+/// Protocol version for IPC compatibility checks.
+/// Bump this whenever `CliMessage` or `HubMessage` enum shapes change.
+pub const PROTOCOL_VERSION: u32 = 1;
+
 /// Messages sent from CLI to Hub.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum CliMessage {
@@ -107,6 +111,9 @@ pub enum CliMessage {
         url: String,
         parent_dir: String,
         name: Option<String>,
+    },
+    Ping {
+        protocol_version: u32,
     },
 }
 
@@ -243,6 +250,9 @@ pub enum HubMessage {
     },
     CloneProgress {
         step: String,
+    },
+    Pong {
+        protocol_version: u32,
     },
 }
 
@@ -1169,6 +1179,77 @@ mod tests {
     async fn hub_remote_branch_checked_out() {
         assert_hub_round_trip(HubMessage::RemoteBranchCheckedOut {
             branch_name: "feature/auth".into(),
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn cli_create_repo() {
+        assert_cli_round_trip(CliMessage::CreateRepo {
+            parent_dir: "/home/user".into(),
+            name: "new-project".into(),
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn cli_clone_repo() {
+        assert_cli_round_trip(CliMessage::CloneRepo {
+            url: "https://github.com/user/repo.git".into(),
+            parent_dir: "/home/user".into(),
+            name: None,
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn cli_clone_repo_with_name() {
+        assert_cli_round_trip(CliMessage::CloneRepo {
+            url: "git@github.com:user/repo.git".into(),
+            parent_dir: "/tmp".into(),
+            name: Some("custom-name".into()),
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn cli_ping() {
+        assert_cli_round_trip(CliMessage::Ping {
+            protocol_version: PROTOCOL_VERSION,
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn hub_repo_created() {
+        assert_hub_round_trip(HubMessage::RepoCreated {
+            path: "/home/user/new-project".into(),
+            name: "new-project".into(),
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn hub_repo_cloned() {
+        assert_hub_round_trip(HubMessage::RepoCloned {
+            path: "/home/user/repo".into(),
+            name: "repo".into(),
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn hub_clone_progress() {
+        assert_hub_round_trip(HubMessage::CloneProgress {
+            step: "Receiving objects: 45%".into(),
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn hub_pong() {
+        assert_hub_round_trip(HubMessage::Pong {
+            protocol_version: PROTOCOL_VERSION,
         })
         .await;
     }

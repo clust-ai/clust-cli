@@ -9,16 +9,31 @@ use clust_ipc::{CliMessage, HubMessage};
 use crate::hub_launcher;
 
 /// Connect to the hub, auto-spawning it if not running.
+/// Detects stale hubs via protocol version check and restarts them.
 /// Retries every 50ms for up to 2 seconds after spawning.
 pub async fn connect_to_hub() -> io::Result<UnixStream> {
     let sock = clust_ipc::socket_path();
 
     // Try connecting first without spawning
-    if let Ok(stream) = UnixStream::connect(&sock).await {
-        return Ok(stream);
+    if UnixStream::connect(&sock).await.is_ok() {
+        // Hub is running — verify protocol compatibility
+        match check_hub_protocol().await {
+            Ok(()) => {
+                // Compatible — return a fresh connection
+                return UnixStream::connect(&sock).await;
+            }
+            Err(_) => {
+                // Stale hub — stop it, then fall through to spawn a new one
+                if let Ok(mut stream) = UnixStream::connect(&sock).await {
+                    let _ = send_stop(&mut stream).await;
+                }
+                // Give old hub time to release the socket
+                sleep(Duration::from_millis(200)).await;
+            }
+        }
     }
 
-    // Hub not running — spawn it
+    // Hub not running (or we just stopped a stale one) — spawn it
     hub_launcher::spawn_hub()?;
 
     // Retry with backoff
@@ -42,6 +57,36 @@ pub async fn connect_to_hub() -> io::Result<UnixStream> {
             clust_ipc::log_path().display()
         ),
     ))
+}
+
+/// Check that the running hub speaks the same protocol version.
+async fn check_hub_protocol() -> io::Result<()> {
+    let mut stream = try_connect().await?;
+    clust_ipc::send_message(
+        &mut stream,
+        &CliMessage::Ping {
+            protocol_version: clust_ipc::PROTOCOL_VERSION,
+        },
+    )
+    .await?;
+    match clust_ipc::recv_message::<HubMessage>(&mut stream).await {
+        Ok(HubMessage::Pong { protocol_version })
+            if protocol_version == clust_ipc::PROTOCOL_VERSION =>
+        {
+            Ok(())
+        }
+        Ok(HubMessage::Pong { protocol_version }) => Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "hub protocol mismatch: hub={protocol_version}, cli={}",
+                clust_ipc::PROTOCOL_VERSION
+            ),
+        )),
+        _ => Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "hub did not respond to ping (likely outdated)",
+        )),
+    }
 }
 
 /// Try to connect to an existing hub without spawning one.

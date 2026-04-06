@@ -915,7 +915,7 @@ pub fn start_clone(
     if name.is_some() {
         cmd.arg(&dir_name);
     }
-    cmd.stdout(std::process::Stdio::piped());
+    cmd.stdout(std::process::Stdio::null());
     cmd.stderr(std::process::Stdio::piped());
 
     let child = cmd
