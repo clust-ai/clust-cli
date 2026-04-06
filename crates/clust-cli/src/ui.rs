@@ -2526,10 +2526,10 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                         // Global shortcut: Alt+N opens new repository modal
                         repo_modal = Some(RepoModal::new());
                         show_help = false;
-                    } else if key.code == KeyCode::Char('o')
+                    } else if key.code == KeyCode::Char('v')
                         && key.modifiers.contains(KeyModifiers::ALT)
                     {
-                        // Global shortcut: Alt+O opens in editor
+                        // Global shortcut: Alt+V opens in editor
                         let (target, rp) = resolve_editor_target(
                             in_focus_mode,
                             &focus_mode_state,
@@ -5634,7 +5634,7 @@ fn render_help_overlay(frame: &mut Frame, area: Rect, active_tab: ActiveTab, in_
     lines.push(binding_line("Alt+D", "New directory agent"));
     lines.push(binding_line("Alt+F", "Search agents"));
     lines.push(binding_line("Alt+N", "Add repository"));
-    lines.push(binding_line("Alt+O", "Open in editor"));
+    lines.push(binding_line("Alt+V", "Open in editor"));
 
     // -- Repositories --
     if active_tab == ActiveTab::Repositories {
