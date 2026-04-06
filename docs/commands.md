@@ -327,6 +327,7 @@ These shortcuts are active in the `clust ui` dashboard. They are displayed in th
 | `Opt+D` (macOS) / `Alt+D` | Open the detached agent modal (start agent in any directory) |
 | `Opt+F` (macOS) / `Alt+F` | Open the search-agent modal (only when agents are running) |
 | `Opt+N` (macOS) / `Alt+N` | Open the add-repository modal |
+| `Opt+V` (macOS) / `Alt+V` | Open in editor (see Editor Integration in terminal-ui.md) |
 | `Cmd+1` | Switch to Repositories tab (dismisses context menus, exits focus mode) |
 | `Cmd+2` | Switch to Overview tab (dismisses context menus, exits focus mode) |
 
@@ -335,6 +336,7 @@ These shortcuts are active in the `clust ui` dashboard. They are displayed in th
 | Shortcut | Action |
 |----------|--------|
 | `↑` / `↓` | Move selection within current level |
+| `Shift+↑` / `Shift+↓` | Jump to previous/next repository header (skips categories and branches) |
 | `→` | Descend into selected item (navigate tree) |
 | `←` | Ascend to parent level (navigate tree) |
 | `Enter` | Left panel: on repo opens repo context menu; on local branch opens local branch context menu; on remote branch opens remote branch context menu. Right panel: enter focus mode for selected agent. |

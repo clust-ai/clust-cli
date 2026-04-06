@@ -484,10 +484,36 @@ fn detach_head(repo_root: &Path) -> Result<(), String> {
     Ok(())
 }
 
+/// Fetch the latest version of a branch from the remote.
+///
+/// For remote refs like `origin/feature`, fetches the branch from the
+/// named remote. For local branches, delegates to [`pull_branch`] which
+/// handles branches checked out at HEAD, in worktrees, or not checked out.
+fn fetch_latest(repo_root: &Path, branch: &str) -> Result<(), String> {
+    if let Some(remote_branch) = branch.strip_prefix("origin/") {
+        let output = std::process::Command::new("git")
+            .current_dir(repo_root)
+            .args(["fetch", "origin", remote_branch])
+            .output()
+            .map_err(|e| format!("failed to run git fetch: {e}"))?;
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return Err(format!("git fetch failed: {}", stderr.trim()));
+        }
+        Ok(())
+    } else {
+        pull_branch(repo_root, branch).map(|_| ())
+    }
+}
+
 /// Create a new worktree.
 ///
 /// If `checkout_existing` is true, checks out an existing branch.
 /// Otherwise creates a new branch from `base` (or current HEAD).
+///
+/// Before creating the worktree, fetches the latest changes for the
+/// base branch from the remote to minimise future merge conflicts.
+/// Fetch failures are best-effort and do not block worktree creation.
 ///
 /// When checking out an existing branch that is currently HEAD,
 /// HEAD is automatically detached first so the branch can be moved
@@ -500,17 +526,29 @@ pub fn add_worktree(
 ) -> Result<PathBuf, String> {
     ensure_clust_dir_excluded(repo_root)?;
 
-    // If the branch is currently checked out in the main worktree,
-    // detach HEAD first so `git worktree add` can claim it.
-    if checkout_existing && is_branch_head(repo_root, branch) {
-        detach_head(repo_root)?;
-    }
-
     let wt_path = worktree_path(repo_root, branch);
 
     // If the worktree already exists, reuse it.
     if wt_path.join(".git").exists() {
         return Ok(wt_path);
+    }
+
+    // Fetch latest changes for the base branch so the new worktree
+    // starts from the most recent remote state.  Best-effort: fetch
+    // failures (no network, no remote, etc.) do not block creation.
+    let fetch_target = if checkout_existing {
+        Some(branch)
+    } else {
+        base
+    };
+    if let Some(target) = fetch_target {
+        let _ = fetch_latest(repo_root, target);
+    }
+
+    // If the branch is currently checked out in the main worktree,
+    // detach HEAD first so `git worktree add` can claim it.
+    if checkout_existing && is_branch_head(repo_root, branch) {
+        detach_head(repo_root)?;
     }
 
     if let Some(parent) = wt_path.parent() {
