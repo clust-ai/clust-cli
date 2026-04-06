@@ -1433,6 +1433,14 @@ async fn handle_connection(
                             },
                         )
                         .await?;
+                    } else {
+                        clust_ipc::send_message_write(
+                            &mut writer,
+                            &HubMessage::Error {
+                                message: "Clone failed unexpectedly".into(),
+                            },
+                        )
+                        .await?;
                     }
                 }
                 Err(e) => {
@@ -1442,6 +1450,22 @@ async fn handle_connection(
                     )
                     .await?;
                 }
+            }
+        }
+
+        CliMessage::Ping { protocol_version } => {
+            clust_ipc::send_message_write(
+                &mut writer,
+                &HubMessage::Pong {
+                    protocol_version: clust_ipc::PROTOCOL_VERSION,
+                },
+            )
+            .await?;
+            if protocol_version != clust_ipc::PROTOCOL_VERSION {
+                eprintln!(
+                    "protocol version mismatch: hub={}, client={protocol_version}",
+                    clust_ipc::PROTOCOL_VERSION
+                );
             }
         }
 

@@ -13,10 +13,12 @@ The hub starts automatically when any `clust` command is run and no hub is alrea
 **Startup sequence:**
 
 1. CLI tries to connect to `~/.clust/clust.sock`
-2. Connection fails → no hub running
-3. CLI spawns `clust-hub` as a detached background process
-4. CLI retries connection with short backoff (e.g., 50ms intervals, max 2s)
-5. Connection succeeds → CLI proceeds with its command
+2. Connection succeeds → CLI sends `Ping { protocol_version }` to verify compatibility
+3. If the hub replies with a matching `Pong`, the CLI proceeds with its command
+4. If the hub replies with a mismatched version (or fails to reply), the CLI sends `StopHub` to terminate the stale hub, waits 200ms for socket release, then falls through to step 5
+5. Connection fails (or stale hub was stopped) → CLI spawns `clust-hub` as a detached background process
+6. CLI retries connection with short backoff (50ms intervals, max 2s)
+7. Connection succeeds → CLI proceeds with its command
 
 **Hub startup:**
 
@@ -47,6 +49,10 @@ Since the hub is ephemeral (no state survives restart):
 - If the hub crashes, the socket file may be stale
 - On next startup, the hub removes any existing socket file before binding
 - Running agents are lost on hub crash (they were children of the hub process)
+
+### Stale Hub Detection
+
+After rebuilding the CLI/hub binaries, a running hub may have incompatible IPC message layouts (MessagePack uses numeric enum indices). The CLI detects this via `Ping`/`Pong` protocol version checks on every connection attempt. If the versions do not match, the CLI gracefully stops the old hub and spawns a new one. This prevents "early EOF" deserialization errors when new message variants are added.
 
 ## Hubs
 
@@ -236,11 +242,12 @@ When the hub receives a `CloneRepo` message:
 
 1. Validate the parent directory exists.
 2. Determine the repository name: use the provided `name` if given, otherwise extract it from the URL via `repo_name_from_url()` (handles both HTTPS and SSH URL formats).
-3. Spawn `git clone --progress` as a child process with stderr piped for progress output.
+3. Spawn `git clone --progress` as a child process with stdout discarded (null) and stderr piped for progress output.
 4. Send an initial `CloneProgress { step }` message to the client.
 5. Read stderr line-by-line in a `spawn_blocking` task, bridged to the async event loop via an unbounded channel. Each non-empty line is forwarded to the client as a `CloneProgress { step }` message, enabling real-time progress display.
 6. On successful completion, register the cloned repository in the SQLite database with an auto-assigned color.
-7. Return `RepoCloned { path, name }` on success, or `Error` on failure at any stage.
+7. If the progress channel closes unexpectedly before completion, return an `Error` message instead of silently dropping the connection.
+8. Return `RepoCloned { path, name }` on success, or `Error` on failure at any stage.
 
 ## Repository Maintenance
 
