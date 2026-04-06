@@ -928,6 +928,24 @@ pub fn run(hub_name: &str) -> io::Result<()> {
             }
         }
 
+        // Immediate worktree cleanup prompt when agent exits in overview mode
+        if !in_focus_mode && active_tab == ActiveTab::Overview && active_menu.is_none() {
+            for panel in overview_state.panels.iter_mut() {
+                if panel.exited && panel.is_worktree && !panel.worktree_cleanup_shown {
+                    panel.worktree_cleanup_shown = true;
+                    if let (Some(rp), Some(bn)) = (&panel.repo_path, &panel.branch_name) {
+                        pending_worktree_cleanups.push(crate::worktree::WorktreeCleanup {
+                            repo_path: rp.clone(),
+                            branch_name: bn.clone(),
+                        });
+                    }
+                }
+            }
+            if !pending_worktree_cleanups.is_empty() {
+                active_menu = pop_worktree_cleanup_menu(&mut pending_worktree_cleanups);
+            }
+        }
+
         // Check for completed agent start requests
         if let Ok(result) = agent_start_rx.try_recv() {
             match result {
