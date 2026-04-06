@@ -111,9 +111,7 @@ A multi-agent terminal overview that displays all active agents side-by-side wit
 
 ```
 ┌─────────────────────────────────────────────────────┐
-│ ┌─ myrepo ──────────┐ ┌─ Other ─────┐              │
-│ │ Repo  main  feat-x │ │ Other  wip  │              │
-│ └────────────────────┘ └─────────────┘              │
+│ ● myrepo  ● Other │  main  feat-x  wip             │
 ├──────────────────────┬──────────────────┬───────────┤
 │┌──────────────────────┐│┌────────────────┐│┌─────────┐│
 ││a3f8c1·claude·repo/main●│││ b7e2d9·claude● │││ c4a1e0 ·││
@@ -123,13 +121,13 @@ A multi-agent terminal overview that displays all active agents side-by-side wit
 ││                    │││                │││         ││
 │└──── Shift+↓ focus──┘│└────────────────┘│└─────────┘│
 ├──────────────────────┴──────────────────┴───────────┤
-│ ● connected  Shift+↓ enter terminal  ...    v0.0.13 │
+│ ● connected  Shift+↓ enter terminal  ...    v0.0.14 │
 └─────────────────────────────────────────────────────┘
 ```
 
 **Layout:**
 
-- **Options bar (3 rows):** A bordered group bar at the top that groups agents by repository. Each repository is rendered as a 3-row bordered block (top border, content row, bottom border) using the repo's assigned color. The block contains the repo name (with colored background) followed by agent branch indicators showing each agent's branch name. Agents without a repository are grouped under a synthetic "Other" block using the accent color. Clicking a repo block toggles collapse/expand -- collapsed repos hide their agent indicators and filter their agent panels out of the viewport (collapsed repos have dimmed text using `R_TEXT_DISABLED`). Clicking an individual agent indicator within a block focuses that agent's terminal panel. The active block (cursor position) uses bright border colors when the options bar is focused; other blocks use dimmed borders (`dim_color()`). Agent indicators for panels currently visible on screen use `R_TEXT_SECONDARY` color; off-screen agents use `R_TEXT_DISABLED`. When no repos exist, the bar is rendered as an empty 3-row area. Background changes based on focus (`R_BG_OVERLAY` when focused, `R_BG_RAISED` when unfocused). Panels are ordered by repo group (matching repo registration order), then by branch name, then by agent ID within each group via `compute_sorted_indices()`.
+- **Filter bar (1 row):** A single-line bar at the top that groups agents by repository. The left section shows repo chips -- each repo has a colored `●` dot (using the repo's assigned color) followed by the repo name. The cursor position is indicated with `R_BG_ACTIVE` background on the chip. A `│` separator divides the left and right sections. The right section shows all agent branch indicators colored by their repo's assigned color. Visible agents use inverse video styling (repo color background, primary text foreground); off-screen agents use the repo color as foreground; collapsed repo agents use `R_TEXT_DISABLED`. Agents without a repository are grouped under a synthetic "Other" chip using the accent color. Clicking a repo chip toggles collapse/expand -- collapsed repos have dimmed dots and `R_TEXT_DISABLED` text, and their agent panels are filtered out of the viewport. Clicking an individual branch indicator focuses that agent's terminal panel. When no repos exist, the bar is rendered as an empty 1-row area. Background changes based on focus (`R_BG_OVERLAY` when focused, `R_BG_RAISED` when unfocused). Panels are ordered by repo group (matching repo registration order), then by branch name, then by agent ID within each group via `compute_sorted_indices()`.
 - **Agent panels (horizontal):** Dynamically sized columns distributed evenly across the available width. The number of visible panels is determined by how many fit at the minimum width of 60 columns. Panels use ratio-based constraints so they fill the screen evenly (1 panel = half screen, 2 panels = half each, 3 panels = one-third each, etc.). A single panel never exceeds half the screen width. When more agents exist than fit on screen, horizontal scrolling is enabled with `◀ N` / `N ▶` indicators.
 - Each panel has **box-drawing borders** (top, bottom, left, right). When a panel's agent is associated with a repository, the border color uses the repo's assigned color (bright when focused, dimmed to 60% brightness when unfocused via `dim_color()`). Panels without a repo fall back to accent blue when focused and subtle gray when unfocused.
 - The **focused panel** displays a centered `Shift+↓ focus` hint in its bottom border (rendered via `Block::title_bottom()`). The shortcut text uses the bright accent color and the label uses secondary text color. This hint only appears when a terminal panel is focused in overview mode (not in focus mode).
@@ -180,7 +178,7 @@ On startup, `clust ui` automatically connects to the hub daemon, starting it if 
 ### Bottom Status Bar
 
 ```
-● connected  q to quit  Q to quit and stop hub  ↑↓←→ navigate  Shift+←→ panels  v toggle agents          v0.0.13
+● connected  q to quit  Q to quit and stop hub  ↑↓←→ navigate  Shift+←→ panels  v toggle agents          v0.0.14
 ```
 
 | Section | Description |
@@ -189,7 +187,7 @@ On startup, `clust ui` automatically connects to the hub daemon, starting it if 
 | Status label | `connected` or `disconnected` |
 | Focused agent | When an agent has keyboard focus (in Overview terminal focus or focus mode), shows the repo name in the repo's assigned color followed by `/branch` in secondary text color |
 | Status message / Shortcuts | Either a temporary status message or context-aware keybinding hints (see below) |
-| Version | Right-aligned, e.g. `v0.0.13` |
+| Version | Right-aligned, e.g. `v0.0.14` |
 
 **Status messages:** Temporary status messages override the keybinding hints area. Messages are displayed for 5 seconds before auto-dismissing, after which the keybinding hints reappear. Two severity levels exist: `Error` (displayed in `R_ERROR` color) and `Success` (displayed in `R_SUCCESS` color). Status messages are used to surface feedback from async operations such as agent creation, branch pulls, and remote branch checkout -- both success confirmations (e.g., "Agent started on feature-branch", "Pulled main: Already up to date.", "Checked out feature-branch") and error details (e.g., "Agent create failed: hub connect error: ...", "Pull failed: ...", "Checkout failed: ..."). The `StatusMessage` struct tracks the message text, level, and creation `Instant` for auto-dismissal timing. Status messages are delivered from background tokio tasks to the main event loop via a dedicated `mpsc` channel (`status_tx` / `status_rx`), separate from the `AgentStartResult` channel used for agent creation results.
 
@@ -289,7 +287,7 @@ When focus mode is active, the 1-row tab bar is replaced by a back-bar that show
 │      3      3│  let x = 1;   ││                    ││
 │                               │└────────────────────┘│
 ├─────────────────────────────────────────────────────┤
-│ ● connected  Shift+←/→ switch panel  ...     v0.0.13│
+│ ● connected  Shift+←/→ switch panel  ...     v0.0.14│
 └─────────────────────────────────────────────────────┘
 ```
 
@@ -520,7 +518,7 @@ All modal text inputs (Create Agent, Search Agent, Detached Agent, Add Repositor
 - **Right arrow:** advances `cursor_pos` by the byte length of the character at the current position
 - **Render:** the cursor character is extracted by slicing a full character from the byte offset, not a single byte
 
-Bracketed paste mode is enabled via `crossterm::EnableBracketedPaste` on TUI startup and disabled on exit. This causes pasted text to arrive as a single `Event::Paste(String)` rather than as individual `KeyCode::Char` events. Without bracketed paste, pasted newlines would trigger `Enter` (submitting forms prematurely) and escape characters would cancel modals. Each modal exposes a `handle_paste()` method that inserts the pasted text character-by-character (stripping newlines and carriage returns) while maintaining the byte-offset cursor position.
+Bracketed paste mode is enabled via `crossterm::EnableBracketedPaste` on TUI startup and disabled on exit. This causes pasted text to arrive as a single `Event::Paste(String)` rather than as individual `KeyCode::Char` events. Without bracketed paste, pasted newlines would trigger `Enter` (submitting forms prematurely) and escape characters would cancel modals. Each modal exposes a `handle_paste()` method that inserts the pasted text character-by-character (stripping newlines and carriage returns) while maintaining the byte-offset cursor position. When no modal is active, paste events are forwarded to agent terminals: in focus mode (when the right panel is focused) and in overview mode (when a terminal panel is focused), the pasted text is wrapped in bracketed paste sequences (`\x1b[200~`...`\x1b[201~`) and sent to the agent's PTY input.
 
 ### Editor Integration
 

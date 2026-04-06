@@ -693,9 +693,9 @@ async fn agent_connection_task(
 // ---------------------------------------------------------------------------
 
 pub fn render_overview(frame: &mut Frame, area: Rect, state: &mut OverviewState, click_map: &mut ClickMap, repo_colors: &HashMap<String, String>, repos: &[RepoInfo]) {
-    // Split into grouped filter bar (3 rows) + panels area
+    // Split into filter bar (1 row) + panels area
     let [options_area, panels_area] = Layout::vertical([
-        Constraint::Length(3),
+        Constraint::Length(1),
         Constraint::Min(0),
     ])
     .areas(area);
@@ -807,7 +807,7 @@ pub fn render_overview(frame: &mut Frame, area: Rect, state: &mut OverviewState,
 #[allow(clippy::too_many_arguments)]
 fn render_options_bar(
     frame: &mut Frame,
-    area: Rect, // 3 rows tall
+    area: Rect, // 1 row
     focused: bool,
     repos: &[RepoInfo],
     panels: &[AgentPanel],
@@ -823,28 +823,15 @@ fn render_options_bar(
         theme::R_BG_RAISED
     };
 
-    // Fill entire 3-row area with background
-    for row in 0..area.height {
-        let fill_area = Rect {
-            x: area.x,
-            y: area.y + row,
-            width: area.width,
-            height: 1,
-        };
-        frame.render_widget(
-            Paragraph::new(Line::from(Span::styled(
-                " ".repeat(area.width as usize),
-                Style::default().bg(bar_bg),
-            ))),
-            fill_area,
-        );
-    }
+    // Fill the 1-row area with background
+    frame.render_widget(
+        Paragraph::new(Line::from(Span::styled(
+            " ".repeat(area.width as usize),
+            Style::default().bg(bar_bg),
+        ))),
+        area,
+    );
 
-    if area.height < 3 {
-        return;
-    }
-
-    // Check if there are no-repo agents
     let has_other = panels.iter().any(|p| p.repo_path.is_none());
     let group_count = repos.len() + if has_other { 1 } else { 0 };
 
@@ -852,9 +839,11 @@ fn render_options_bar(
         return;
     }
 
+    let mut spans: Vec<Span> = Vec::new();
     let mut x = area.x;
 
-    // Render repo groups
+    // ── LEFT SECTION: Repo chips ──
+
     for (i, repo) in repos.iter().enumerate() {
         let is_collapsed = collapsed_repos.contains(&repo.path);
         let is_cursor = focused && i == filter_cursor;
@@ -865,259 +854,193 @@ fn render_options_bar(
             .map(|c| theme::repo_color(c))
             .unwrap_or(theme::R_ACCENT);
 
-        // Find ALL agents for this repo (not just visible/sorted)
-        let repo_agents: Vec<(usize, &AgentPanel)> = panels
-            .iter()
-            .enumerate()
-            .filter(|(_, p)| p.repo_path.as_deref() == Some(repo.path.as_str()))
-            .collect();
-
-        // Calculate content width
-        let name_width = repo.name.len() + 2; // " name "
-        let agents_width: usize = if is_collapsed {
-            0
+        let chip_bg = if is_cursor {
+            theme::R_BG_ACTIVE
         } else {
-            repo_agents
-                .iter()
-                .map(|(_, p)| {
-                    let branch = p.branch_name.as_deref().unwrap_or(&p.id);
-                    branch.len() + 1 // " branch"
-                })
-                .sum()
-        };
-        let inner_width = (name_width + agents_width) as u16;
-        let block_width = inner_width + 2; // +2 for left/right borders
-
-        // Stop if we'd overflow the area
-        if x + block_width > area.x + area.width {
-            break;
-        }
-
-        let block_area = Rect {
-            x,
-            y: area.y,
-            width: block_width,
-            height: 3,
+            bar_bg
         };
 
-        // Border color: bright for cursor, dimmed otherwise
-        let border_color = if is_cursor {
-            color
+        let (dot_color, text_color) = if is_collapsed {
+            (theme::dim_color(color), theme::R_TEXT_DISABLED)
         } else {
-            theme::dim_color(color)
+            (color, theme::R_TEXT_PRIMARY)
         };
 
-        let block = Block::default()
-            .borders(Borders::ALL)
-            .border_style(Style::default().fg(border_color))
-            .style(Style::default().bg(bar_bg));
+        let dot_span = Span::styled(" \u{25cf} ", Style::default().fg(dot_color).bg(chip_bg));
+        let name_span = Span::styled(
+            format!("{} ", repo.name),
+            Style::default().fg(text_color).bg(chip_bg),
+        );
 
-        let inner = block.inner(block_area);
-        frame.render_widget(block, block_area);
+        let chip_width = 3 + repo.name.len() as u16 + 1; // " ● " + name + " "
 
-        if inner.width == 0 || inner.height == 0 {
-            x += block_width + 1;
-            continue;
+        // Register click target for repo chip
+        if x + chip_width <= area.x + area.width {
+            let chip_rect = Rect {
+                x,
+                y: area.y,
+                width: chip_width,
+                height: 1,
+            };
+            click_map
+                .overview_repo_buttons
+                .push((chip_rect, repo.path.clone()));
         }
 
-        // Build content spans
-        let mut spans: Vec<Span> = Vec::new();
-
-        // Repo name "button" with repo color background
-        let name_fg = if is_collapsed {
-            theme::R_TEXT_DISABLED
-        } else {
-            theme::R_TEXT_PRIMARY
-        };
-        let name_bg = if is_collapsed {
-            theme::dim_color(color)
-        } else {
-            color
-        };
-        spans.push(Span::styled(
-            format!(" {} ", repo.name),
-            Style::default().fg(name_fg).bg(name_bg),
-        ));
-
-        // Agent branch indicators (only when expanded)
-        if !is_collapsed {
-            for &(global_idx, panel) in &repo_agents {
-                let branch = panel.branch_name.as_deref().unwrap_or(&panel.id);
-                let is_visible = visible_indices.contains(&global_idx);
-                let fg = if is_visible {
-                    theme::R_TEXT_SECONDARY
-                } else {
-                    theme::R_TEXT_DISABLED
-                };
-                spans.push(Span::styled(
-                    format!(" {branch}"),
-                    Style::default().fg(fg).bg(bar_bg),
-                ));
-            }
-        }
-
-        // Fill remaining inner width with background
-        let content_len: usize = spans.iter().map(|s| s.content.chars().count()).sum();
-        let remaining = (inner.width as usize).saturating_sub(content_len);
-        if remaining > 0 {
-            spans.push(Span::styled(
-                " ".repeat(remaining),
-                Style::default().bg(bar_bg),
-            ));
-        }
-
-        frame.render_widget(Paragraph::new(Line::from(spans)), inner);
-
-        // Register click target for the whole block → repo collapse toggle
-        click_map
-            .overview_repo_buttons
-            .push((block_area, repo.path.clone()));
-
-        // Register individual agent indicator click targets
-        if !is_collapsed {
-            let mut agent_x = inner.x + (repo.name.len() + 2) as u16;
-            for &(global_idx, panel) in &repo_agents {
-                let branch = panel.branch_name.as_deref().unwrap_or(&panel.id);
-                let agent_width = (branch.len() + 1) as u16;
-                if agent_x + agent_width <= inner.x + inner.width {
-                    let agent_rect = Rect {
-                        x: agent_x,
-                        y: area.y,
-                        width: agent_width,
-                        height: 3,
-                    };
-                    click_map
-                        .overview_agent_indicators
-                        .push((agent_rect, global_idx));
-                }
-                agent_x += agent_width;
-            }
-        }
-
-        x += block_width + 1; // 1 char gap between groups
+        spans.push(dot_span);
+        spans.push(name_span);
+        x += chip_width;
     }
 
-    // "Other" group for agents with no repo
+    // "Other" chip for agents with no repo
     if has_other {
         let is_collapsed = collapsed_repos.contains("");
         let is_cursor = focused && repos.len() == filter_cursor;
         let color = theme::R_ACCENT;
 
-        let other_agents: Vec<(usize, &AgentPanel)> = panels
-            .iter()
-            .enumerate()
-            .filter(|(_, p)| p.repo_path.is_none())
-            .collect();
-
-        let name_width = 7; // " Other "
-        let agents_width: usize = if is_collapsed {
-            0
+        let chip_bg = if is_cursor {
+            theme::R_BG_ACTIVE
         } else {
-            other_agents
-                .iter()
-                .map(|(_, p)| {
-                    let branch = p.branch_name.as_deref().unwrap_or(&p.id);
-                    branch.len() + 1
-                })
-                .sum()
+            bar_bg
         };
-        let inner_width = (name_width + agents_width) as u16;
-        let block_width = inner_width + 2;
 
-        if x + block_width <= area.x + area.width {
-            let block_area = Rect {
+        let (dot_color, text_color) = if is_collapsed {
+            (theme::dim_color(color), theme::R_TEXT_DISABLED)
+        } else {
+            (color, theme::R_TEXT_PRIMARY)
+        };
+
+        let dot_span = Span::styled(" \u{25cf} ", Style::default().fg(dot_color).bg(chip_bg));
+        let name_span = Span::styled(
+            "Other ",
+            Style::default().fg(text_color).bg(chip_bg),
+        );
+
+        let chip_width: u16 = 3 + 6; // " ● " + "Other "
+        if x + chip_width <= area.x + area.width {
+            let chip_rect = Rect {
                 x,
                 y: area.y,
-                width: block_width,
-                height: 3,
+                width: chip_width,
+                height: 1,
             };
-
-            let border_color = if is_cursor {
-                color
-            } else {
-                theme::dim_color(color)
-            };
-
-            let block = Block::default()
-                .borders(Borders::ALL)
-                .border_style(Style::default().fg(border_color))
-                .style(Style::default().bg(bar_bg));
-
-            let inner = block.inner(block_area);
-            frame.render_widget(block, block_area);
-
-            if inner.width > 0 && inner.height > 0 {
-                let mut spans: Vec<Span> = Vec::new();
-
-                let name_fg = if is_collapsed {
-                    theme::R_TEXT_DISABLED
-                } else {
-                    theme::R_TEXT_PRIMARY
-                };
-                let name_bg = if is_collapsed {
-                    theme::dim_color(color)
-                } else {
-                    color
-                };
-                spans.push(Span::styled(
-                    " Other ",
-                    Style::default().fg(name_fg).bg(name_bg),
-                ));
-
-                if !is_collapsed {
-                    for &(global_idx, panel) in &other_agents {
-                        let branch = panel.branch_name.as_deref().unwrap_or(&panel.id);
-                        let is_visible = visible_indices.contains(&global_idx);
-                        let fg = if is_visible {
-                            theme::R_TEXT_SECONDARY
-                        } else {
-                            theme::R_TEXT_DISABLED
-                        };
-                        spans.push(Span::styled(
-                            format!(" {branch}"),
-                            Style::default().fg(fg).bg(bar_bg),
-                        ));
-                    }
-                }
-
-                let content_len: usize =
-                    spans.iter().map(|s| s.content.chars().count()).sum();
-                let remaining = (inner.width as usize).saturating_sub(content_len);
-                if remaining > 0 {
-                    spans.push(Span::styled(
-                        " ".repeat(remaining),
-                        Style::default().bg(bar_bg),
-                    ));
-                }
-
-                frame.render_widget(Paragraph::new(Line::from(spans)), inner);
-            }
-
             click_map
                 .overview_repo_buttons
-                .push((block_area, String::new()));
-
-            if !is_collapsed {
-                let mut agent_x = inner.x + 7; // " Other " width
-                for &(global_idx, panel) in &other_agents {
-                    let branch = panel.branch_name.as_deref().unwrap_or(&panel.id);
-                    let agent_width = (branch.len() + 1) as u16;
-                    if agent_x + agent_width <= inner.x + inner.width {
-                        let agent_rect = Rect {
-                            x: agent_x,
-                            y: area.y,
-                            width: agent_width,
-                            height: 3,
-                        };
-                        click_map
-                            .overview_agent_indicators
-                            .push((agent_rect, global_idx));
-                    }
-                    agent_x += agent_width;
-                }
-            }
+                .push((chip_rect, String::new()));
         }
+
+        spans.push(dot_span);
+        spans.push(name_span);
+        x += chip_width;
     }
+
+    // ── SEPARATOR ──
+
+    if !panels.is_empty() {
+        spans.push(Span::styled(
+            " \u{2502} ",
+            Style::default()
+                .fg(theme::R_TEXT_TERTIARY)
+                .bg(bar_bg),
+        ));
+        x += 3;
+    }
+
+    // ── RIGHT SECTION: Branch indicators (all agents, sorted by repo order) ──
+
+    // Build repo order map for sorting
+    let repo_order: HashMap<&str, usize> = repos
+        .iter()
+        .enumerate()
+        .map(|(i, r)| (r.path.as_str(), i))
+        .collect();
+
+    // Collect all agents with their global indices, sorted by repo order then branch
+    let mut all_agents: Vec<(usize, &AgentPanel)> = panels.iter().enumerate().collect();
+    all_agents.sort_by(|&(_, a), &(_, b)| {
+        let order_a = a
+            .repo_path
+            .as_deref()
+            .and_then(|rp| repo_order.get(rp).copied())
+            .unwrap_or(usize::MAX);
+        let order_b = b
+            .repo_path
+            .as_deref()
+            .and_then(|rp| repo_order.get(rp).copied())
+            .unwrap_or(usize::MAX);
+        order_a
+            .cmp(&order_b)
+            .then_with(|| a.branch_name.cmp(&b.branch_name))
+            .then_with(|| a.id.cmp(&b.id))
+    });
+
+    for &(global_idx, panel) in &all_agents {
+        let branch = panel.branch_name.as_deref().unwrap_or(&panel.id);
+        let is_visible = visible_indices.contains(&global_idx);
+
+        let repo_color = panel
+            .repo_path
+            .as_ref()
+            .and_then(|rp| {
+                repos
+                    .iter()
+                    .find(|r| r.path == *rp)
+                    .and_then(|r| r.color.as_ref())
+                    .map(|c| theme::repo_color(c))
+            })
+            .unwrap_or(theme::R_ACCENT);
+
+        let is_repo_collapsed = match &panel.repo_path {
+            Some(rp) => collapsed_repos.contains(rp),
+            None => collapsed_repos.contains(""),
+        };
+
+        let style = if is_visible {
+            // Inverse video: repo color background, primary text
+            Style::default()
+                .fg(theme::R_TEXT_PRIMARY)
+                .bg(repo_color)
+        } else if is_repo_collapsed {
+            Style::default()
+                .fg(theme::R_TEXT_DISABLED)
+                .bg(bar_bg)
+        } else {
+            Style::default()
+                .fg(repo_color)
+                .bg(bar_bg)
+        };
+
+        let branch_text = format!(" {branch} ");
+        let branch_width = branch_text.len() as u16;
+
+        // Register click target for agent indicator
+        if x + branch_width <= area.x + area.width {
+            let agent_rect = Rect {
+                x,
+                y: area.y,
+                width: branch_width,
+                height: 1,
+            };
+            click_map
+                .overview_agent_indicators
+                .push((agent_rect, global_idx));
+        }
+
+        spans.push(Span::styled(branch_text, style));
+        x += branch_width;
+    }
+
+    // Fill remaining width with background
+    let content_len: usize = spans.iter().map(|s| s.content.chars().count()).sum();
+    let remaining = (area.width as usize).saturating_sub(content_len);
+    if remaining > 0 {
+        spans.push(Span::styled(
+            " ".repeat(remaining),
+            Style::default().bg(bar_bg),
+        ));
+    }
+
+    frame.render_widget(Paragraph::new(Line::from(spans)), area);
 }
 
 fn render_agent_panel(

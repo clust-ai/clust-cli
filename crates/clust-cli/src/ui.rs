@@ -3181,6 +3181,23 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                             == overview::BranchPickerMode::Searching
                     {
                         focus_mode_state.compare_picker.handle_paste(text);
+                    } else if in_focus_mode
+                        && focus_mode_state.is_active()
+                        && focus_mode_state.focus_side == overview::FocusSide::Right
+                    {
+                        let mut bytes = Vec::new();
+                        bytes.extend_from_slice(b"\x1b[200~");
+                        bytes.extend_from_slice(text.as_bytes());
+                        bytes.extend_from_slice(b"\x1b[201~");
+                        focus_mode_state.send_input(bytes);
+                    } else if active_tab == ActiveTab::Overview
+                        && matches!(overview_state.focus, overview::OverviewFocus::Terminal(_))
+                    {
+                        let mut bytes = Vec::new();
+                        bytes.extend_from_slice(b"\x1b[200~");
+                        bytes.extend_from_slice(text.as_bytes());
+                        bytes.extend_from_slice(b"\x1b[201~");
+                        overview_state.send_input(bytes);
                     }
                 }
                 Event::Resize(cols, rows) => {
