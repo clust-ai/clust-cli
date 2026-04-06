@@ -19,7 +19,7 @@ use fuzzy_matcher::FuzzyMatcher;
 
 use clust_ipc::{AgentInfo, BranchInfo, CliMessage, HubMessage, RepoInfo};
 
-use crate::{ipc, terminal_emulator::TerminalEmulator, theme, ui::ClickMap};
+use crate::{ipc, syntax, terminal_emulator::TerminalEmulator, theme, ui::ClickMap};
 
 /// Minimum width in columns for a single agent panel.
 const MIN_PANEL_WIDTH: u16 = 60;
@@ -1803,11 +1803,35 @@ fn render_diff_viewer(
         let content_chars = display_content.chars().count();
         let pad = (content_width as usize).saturating_sub(content_chars);
 
+        // Syntax-highlight code lines (Add/Delete/Context); others keep plain styling
+        let content_spans = match diff_line.kind {
+            gitdiff::DiffLineKind::Add
+            | gitdiff::DiffLineKind::Delete
+            | gitdiff::DiffLineKind::Context => {
+                let file_name = diff.file_names.get(diff_line.file_idx).map(|s| s.as_str());
+                let file_syntax = file_name.and_then(syntax::syntax_for_file);
+                match file_syntax {
+                    Some(syn) => {
+                        let spans = syntax::highlight_line(
+                            &display_content, syn, line_bg, content_fg,
+                        );
+                        if spans.is_empty() {
+                            vec![Span::styled(display_content, content_style)]
+                        } else {
+                            spans
+                        }
+                    }
+                    None => vec![Span::styled(display_content, content_style)],
+                }
+            }
+            _ => vec![Span::styled(display_content, content_style)],
+        };
+
         let mut spans = vec![
             Span::styled(gutter_text, gutter_style),
             Span::styled(separator, sep_style),
-            Span::styled(display_content, content_style),
         ];
+        spans.extend(content_spans);
 
         if pad > 0 {
             spans.push(Span::styled(" ".repeat(pad), content_style));
