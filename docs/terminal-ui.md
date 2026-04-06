@@ -506,6 +506,17 @@ A centered overlay that shows real-time progress during a git clone operation. D
 - The clone runs asynchronously via a background tokio task that streams `CloneProgress` IPC messages from the hub via an unbounded channel, keeping the TUI responsive throughout.
 - The URL is displayed in the modal title, truncated to fit the modal width.
 
+### Text Input and Paste Handling
+
+All modal text inputs (Create Agent, Search Agent, Detached Agent, Add Repository, and the Branch Picker in focus mode) track cursor position as a **byte offset** into the UTF-8 `String`, not a character index. This ensures correct behavior when the input contains multi-byte UTF-8 characters (e.g., em-dash, en-dash, accented characters):
+
+- **Insert:** advances `cursor_pos` by `c.len_utf8()`
+- **Backspace / Left arrow:** retreats `cursor_pos` to the previous character boundary via `char_indices().next_back()`
+- **Right arrow:** advances `cursor_pos` by the byte length of the character at the current position
+- **Render:** the cursor character is extracted by slicing a full character from the byte offset, not a single byte
+
+Bracketed paste mode is enabled via `crossterm::EnableBracketedPaste` on TUI startup and disabled on exit. This causes pasted text to arrive as a single `Event::Paste(String)` rather than as individual `KeyCode::Char` events. Without bracketed paste, pasted newlines would trigger `Enter` (submitting forms prematurely) and escape characters would cancel modals. Each modal exposes a `handle_paste()` method that inserts the pasted text character-by-character (stripping newlines and carriage returns) while maintaining the byte-offset cursor position.
+
 ### Mouse Support
 
 Mouse capture is enabled via `crossterm::EnableMouseCapture` on TUI startup and disabled on exit. The Kitty keyboard protocol (`PushKeyboardEnhancementFlags` with `DISAMBIGUATE_ESCAPE_CODES`) is also enabled when the terminal supports it, allowing detection of the SUPER (Cmd) modifier on mouse events. Terminals that do not support the Kitty protocol gracefully degrade (the modifier is simply not reported). All mouse interactions use `MouseEventKind::Down(MouseButton::Left)` for clicks and `MouseEventKind::ScrollUp`/`ScrollDown` for scroll wheel.

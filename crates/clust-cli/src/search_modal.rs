@@ -77,7 +77,11 @@ impl SearchModal {
             }
             KeyCode::Backspace => {
                 if self.cursor_pos > 0 {
-                    self.cursor_pos -= 1;
+                    self.cursor_pos = self.input[..self.cursor_pos]
+                        .char_indices()
+                        .next_back()
+                        .map(|(i, _)| i)
+                        .unwrap_or(0);
                     self.input.remove(self.cursor_pos);
                     self.selected_idx = 0;
                 }
@@ -85,13 +89,18 @@ impl SearchModal {
             }
             KeyCode::Left => {
                 if self.cursor_pos > 0 {
-                    self.cursor_pos -= 1;
+                    self.cursor_pos = self.input[..self.cursor_pos]
+                        .char_indices()
+                        .next_back()
+                        .map(|(i, _)| i)
+                        .unwrap_or(0);
                 }
                 SearchResult::Pending
             }
             KeyCode::Right => {
                 if self.cursor_pos < self.input.len() {
-                    self.cursor_pos += 1;
+                    self.cursor_pos +=
+                        self.input[self.cursor_pos..].chars().next().unwrap().len_utf8();
                 }
                 SearchResult::Pending
             }
@@ -102,12 +111,23 @@ impl SearchModal {
                     return SearchResult::Pending;
                 }
                 self.input.insert(self.cursor_pos, c);
-                self.cursor_pos += 1;
+                self.cursor_pos += c.len_utf8();
                 self.selected_idx = 0;
                 SearchResult::Pending
             }
             _ => SearchResult::Pending,
         }
+    }
+
+    pub fn handle_paste(&mut self, text: &str) {
+        for c in text.chars() {
+            if c == '\n' || c == '\r' {
+                continue;
+            }
+            self.input.insert(self.cursor_pos, c);
+            self.cursor_pos += c.len_utf8();
+        }
+        self.selected_idx = 0;
     }
 
     // -----------------------------------------------------------------------
@@ -227,14 +247,14 @@ impl SearchModal {
 
     fn render_input(&self, frame: &mut Frame, area: Rect) {
         let before_cursor = &self.input[..self.cursor_pos];
-        let cursor_char = self
-            .input
-            .get(self.cursor_pos..self.cursor_pos + 1)
-            .unwrap_or(" ");
-        let after_cursor = if self.cursor_pos < self.input.len() {
-            &self.input[self.cursor_pos + 1..]
+        let (cursor_char, after_cursor) = if self.cursor_pos < self.input.len() {
+            let ch_len = self.input[self.cursor_pos..].chars().next().unwrap().len_utf8();
+            (
+                &self.input[self.cursor_pos..self.cursor_pos + ch_len],
+                &self.input[self.cursor_pos + ch_len..],
+            )
         } else {
-            ""
+            (" ", "")
         };
 
         let line = Line::from(vec![
