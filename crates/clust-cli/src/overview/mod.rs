@@ -1155,30 +1155,52 @@ impl BranchPicker {
             }
             KeyCode::Char(c) => {
                 self.input.insert(self.cursor_pos, c);
-                self.cursor_pos += 1;
+                self.cursor_pos += c.len_utf8();
                 self.selected_idx = 0;
                 false
             }
             KeyCode::Backspace => {
                 if self.cursor_pos > 0 {
-                    self.cursor_pos -= 1;
+                    self.cursor_pos = self.input[..self.cursor_pos]
+                        .char_indices()
+                        .next_back()
+                        .map(|(i, _)| i)
+                        .unwrap_or(0);
                     self.input.remove(self.cursor_pos);
                     self.selected_idx = 0;
                 }
                 false
             }
             KeyCode::Left => {
-                self.cursor_pos = self.cursor_pos.saturating_sub(1);
+                if self.cursor_pos > 0 {
+                    self.cursor_pos = self.input[..self.cursor_pos]
+                        .char_indices()
+                        .next_back()
+                        .map(|(i, _)| i)
+                        .unwrap_or(0);
+                }
                 false
             }
             KeyCode::Right => {
                 if self.cursor_pos < self.input.len() {
-                    self.cursor_pos += 1;
+                    self.cursor_pos +=
+                        self.input[self.cursor_pos..].chars().next().unwrap().len_utf8();
                 }
                 false
             }
             _ => false,
         }
+    }
+
+    pub fn handle_paste(&mut self, text: &str) {
+        for c in text.chars() {
+            if c == '\n' || c == '\r' {
+                continue;
+            }
+            self.input.insert(self.cursor_pos, c);
+            self.cursor_pos += c.len_utf8();
+        }
+        self.selected_idx = 0;
     }
 
     /// Compute scroll offset to keep the selected item centered.
@@ -1974,14 +1996,18 @@ fn render_picker_hint(frame: &mut Frame, area: Rect) {
 
 fn render_picker_input(frame: &mut Frame, area: Rect, picker: &BranchPicker) {
     let before_cursor = &picker.input[..picker.cursor_pos];
-    let cursor_char = picker
-        .input
-        .get(picker.cursor_pos..picker.cursor_pos + 1)
-        .unwrap_or(" ");
-    let after_cursor = if picker.cursor_pos < picker.input.len() {
-        &picker.input[picker.cursor_pos + 1..]
+    let (cursor_char, after_cursor) = if picker.cursor_pos < picker.input.len() {
+        let ch_len = picker.input[picker.cursor_pos..]
+            .chars()
+            .next()
+            .unwrap()
+            .len_utf8();
+        (
+            &picker.input[picker.cursor_pos..picker.cursor_pos + ch_len],
+            &picker.input[picker.cursor_pos + ch_len..],
+        )
     } else {
-        ""
+        (" ", "")
     };
 
     let line = Line::from(vec![
