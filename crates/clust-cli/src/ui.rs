@@ -1918,10 +1918,75 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                                         Instant::now() - Duration::from_secs(10);
                                                 }
                                                 BranchAction::CheckoutRemote => {
-                                                    checkout_remote_ipc(
-                                                        &repo_path,
-                                                        &branch_name,
-                                                    );
+                                                    let tx = status_tx.clone();
+                                                    let rp = repo_path.clone();
+                                                    let bn = branch_name.clone();
+                                                    tokio::spawn(async move {
+                                                        let mut stream =
+                                                            match ipc::try_connect().await {
+                                                                Ok(s) => s,
+                                                                Err(e) => {
+                                                                    let _ = tx.send(StatusMessage {
+                                                                        text: format!("Checkout failed: hub connect error: {e}"),
+                                                                        level: StatusLevel::Error,
+                                                                        created: Instant::now(),
+                                                                    }).await;
+                                                                    return;
+                                                                }
+                                                            };
+                                                        let msg = CliMessage::CheckoutRemoteBranch {
+                                                            working_dir: Some(rp),
+                                                            repo_name: None,
+                                                            remote_branch: bn.clone(),
+                                                        };
+                                                        if let Err(e) = clust_ipc::send_message(
+                                                            &mut stream,
+                                                            &msg,
+                                                        )
+                                                        .await
+                                                        {
+                                                            let _ = tx.send(StatusMessage {
+                                                                text: format!("Checkout failed: send error: {e}"),
+                                                                level: StatusLevel::Error,
+                                                                created: Instant::now(),
+                                                            }).await;
+                                                            return;
+                                                        }
+                                                        match clust_ipc::recv_message::<HubMessage>(
+                                                            &mut stream,
+                                                        )
+                                                        .await
+                                                        {
+                                                            Ok(HubMessage::RemoteBranchCheckedOut { branch_name }) => {
+                                                                let _ = tx.send(StatusMessage {
+                                                                    text: format!("Checked out {branch_name}"),
+                                                                    level: StatusLevel::Success,
+                                                                    created: Instant::now(),
+                                                                }).await;
+                                                            }
+                                                            Ok(HubMessage::Error { message }) => {
+                                                                let _ = tx.send(StatusMessage {
+                                                                    text: format!("Checkout failed: {message}"),
+                                                                    level: StatusLevel::Error,
+                                                                    created: Instant::now(),
+                                                                }).await;
+                                                            }
+                                                            Ok(_) => {
+                                                                let _ = tx.send(StatusMessage {
+                                                                    text: "Checkout failed: unexpected hub response".to_string(),
+                                                                    level: StatusLevel::Error,
+                                                                    created: Instant::now(),
+                                                                }).await;
+                                                            }
+                                                            Err(e) => {
+                                                                let _ = tx.send(StatusMessage {
+                                                                    text: format!("Checkout failed: recv error: {e}"),
+                                                                    level: StatusLevel::Error,
+                                                                    created: Instant::now(),
+                                                                }).await;
+                                                            }
+                                                        }
+                                                    });
                                                     last_repo_fetch =
                                                         Instant::now() - Duration::from_secs(10);
                                                 }
@@ -3605,10 +3670,75 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                                         Instant::now() - Duration::from_secs(10);
                                                 }
                                                 BranchAction::CheckoutRemote => {
-                                                    checkout_remote_ipc(
-                                                        &repo_path,
-                                                        &branch_name,
-                                                    );
+                                                    let tx = status_tx.clone();
+                                                    let rp = repo_path.clone();
+                                                    let bn = branch_name.clone();
+                                                    tokio::spawn(async move {
+                                                        let mut stream =
+                                                            match ipc::try_connect().await {
+                                                                Ok(s) => s,
+                                                                Err(e) => {
+                                                                    let _ = tx.send(StatusMessage {
+                                                                        text: format!("Checkout failed: hub connect error: {e}"),
+                                                                        level: StatusLevel::Error,
+                                                                        created: Instant::now(),
+                                                                    }).await;
+                                                                    return;
+                                                                }
+                                                            };
+                                                        let msg = CliMessage::CheckoutRemoteBranch {
+                                                            working_dir: Some(rp),
+                                                            repo_name: None,
+                                                            remote_branch: bn.clone(),
+                                                        };
+                                                        if let Err(e) = clust_ipc::send_message(
+                                                            &mut stream,
+                                                            &msg,
+                                                        )
+                                                        .await
+                                                        {
+                                                            let _ = tx.send(StatusMessage {
+                                                                text: format!("Checkout failed: send error: {e}"),
+                                                                level: StatusLevel::Error,
+                                                                created: Instant::now(),
+                                                            }).await;
+                                                            return;
+                                                        }
+                                                        match clust_ipc::recv_message::<HubMessage>(
+                                                            &mut stream,
+                                                        )
+                                                        .await
+                                                        {
+                                                            Ok(HubMessage::RemoteBranchCheckedOut { branch_name }) => {
+                                                                let _ = tx.send(StatusMessage {
+                                                                    text: format!("Checked out {branch_name}"),
+                                                                    level: StatusLevel::Success,
+                                                                    created: Instant::now(),
+                                                                }).await;
+                                                            }
+                                                            Ok(HubMessage::Error { message }) => {
+                                                                let _ = tx.send(StatusMessage {
+                                                                    text: format!("Checkout failed: {message}"),
+                                                                    level: StatusLevel::Error,
+                                                                    created: Instant::now(),
+                                                                }).await;
+                                                            }
+                                                            Ok(_) => {
+                                                                let _ = tx.send(StatusMessage {
+                                                                    text: "Checkout failed: unexpected hub response".to_string(),
+                                                                    level: StatusLevel::Error,
+                                                                    created: Instant::now(),
+                                                                }).await;
+                                                            }
+                                                            Err(e) => {
+                                                                let _ = tx.send(StatusMessage {
+                                                                    text: format!("Checkout failed: recv error: {e}"),
+                                                                    level: StatusLevel::Error,
+                                                                    created: Instant::now(),
+                                                                }).await;
+                                                            }
+                                                        }
+                                                    });
                                                     last_repo_fetch =
                                                         Instant::now() - Duration::from_secs(10);
                                                 }
@@ -5500,26 +5630,6 @@ fn delete_remote_branch_ipc(repo_path: &str, branch_name: &str) {
                 working_dir: Some(working_dir),
                 repo_name: None,
                 branch_name,
-            },
-        )
-        .await;
-        let _ = clust_ipc::recv_message::<HubMessage>(&mut stream).await;
-    });
-}
-
-fn checkout_remote_ipc(repo_path: &str, remote_branch: &str) {
-    let working_dir = repo_path.to_string();
-    let remote_branch = remote_branch.to_string();
-    block_on_async(async {
-        let Ok(mut stream) = ipc::try_connect().await else {
-            return;
-        };
-        let _ = clust_ipc::send_message(
-            &mut stream,
-            &CliMessage::CheckoutRemoteBranch {
-                working_dir: Some(working_dir),
-                repo_name: None,
-                remote_branch,
             },
         )
         .await;
