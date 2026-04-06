@@ -348,8 +348,8 @@ These shortcuts are active in the `clust ui` dashboard. They are displayed in th
 |----------|--------|
 | `Shift+↓` | Enter terminal focus |
 | `Shift+←` / `Shift+→` | Scroll viewport left/right |
-| `←` / `→` | Navigate filter chips |
-| `Enter` / `Space` | Toggle visibility of selected repo |
+| `←` / `→` | Navigate repo groups |
+| `Enter` / `Space` | Toggle collapse/expand of selected repo group |
 
 **Overview tab (Terminal focused):**
 

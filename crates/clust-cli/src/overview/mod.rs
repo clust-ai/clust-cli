@@ -91,10 +91,14 @@ pub struct OverviewState {
     panel_rows: u16,
     viewport_width: u16,
     pub initialized: bool,
-    /// Repo paths that are currently hidden by the filter bar.
-    pub hidden_repos: HashSet<String>,
-    /// Cursor position within the filter chips (when OptionsBar is focused).
+    /// Repo paths that are currently collapsed in the filter bar.
+    /// Collapsed repos hide their agents from both the overview panels and the bar indicators.
+    pub collapsed_repos: HashSet<String>,
+    /// Cursor position within the repo groups (when OptionsBar is focused).
     pub filter_cursor: usize,
+    /// Sorted+filtered panel indices, recomputed each frame.
+    /// Used by both rendering and keyboard navigation.
+    pub sorted_indices: Vec<usize>,
 }
 
 impl OverviewState {
@@ -111,8 +115,9 @@ impl OverviewState {
             panel_rows: 24,
             viewport_width: 0,
             initialized: false,
-            hidden_repos: HashSet::new(),
+            collapsed_repos: HashSet::new(),
             filter_cursor: 0,
+            sorted_indices: Vec::new(),
         }
     }
 
@@ -244,41 +249,47 @@ impl OverviewState {
         }
     }
 
-    /// Number of panels that fit in the given width.
+    /// Number of panels that fit in the given width (uses sorted/filtered list).
     pub fn visible_panel_count(&self, width: u16) -> usize {
-        if self.panels.is_empty() {
+        if self.sorted_indices.is_empty() {
             return 0;
         }
-        let remaining = self.panels.len() - self.scroll_offset;
+        let remaining = self.sorted_indices.len().saturating_sub(self.scroll_offset);
         let max_fit = max_panels_for_width(width);
         remaining.min(max_fit)
     }
 
-    /// Move focus to the previous agent terminal.
+    /// Move focus to the previous agent terminal (sorted order).
     pub fn focus_prev(&mut self) {
         if let OverviewFocus::Terminal(idx) = self.focus {
-            let new_idx = if idx > 0 {
-                idx - 1
-            } else {
-                self.panels.len() - 1
-            };
-            self.focus = OverviewFocus::Terminal(new_idx);
-            self.last_terminal_idx = new_idx;
-            self.ensure_visible(new_idx);
+            if let Some(pos) = self.sorted_indices.iter().position(|&i| i == idx) {
+                let new_pos = if pos > 0 {
+                    pos - 1
+                } else {
+                    self.sorted_indices.len() - 1
+                };
+                let new_idx = self.sorted_indices[new_pos];
+                self.focus = OverviewFocus::Terminal(new_idx);
+                self.last_terminal_idx = new_idx;
+                self.ensure_visible_sorted(new_idx);
+            }
         }
     }
 
-    /// Move focus to the next agent terminal.
+    /// Move focus to the next agent terminal (sorted order).
     pub fn focus_next(&mut self) {
         if let OverviewFocus::Terminal(idx) = self.focus {
-            let new_idx = if idx + 1 < self.panels.len() {
-                idx + 1
-            } else {
-                0
-            };
-            self.focus = OverviewFocus::Terminal(new_idx);
-            self.last_terminal_idx = new_idx;
-            self.ensure_visible(new_idx);
+            if let Some(pos) = self.sorted_indices.iter().position(|&i| i == idx) {
+                let new_pos = if pos + 1 < self.sorted_indices.len() {
+                    pos + 1
+                } else {
+                    0
+                };
+                let new_idx = self.sorted_indices[new_pos];
+                self.focus = OverviewFocus::Terminal(new_idx);
+                self.last_terminal_idx = new_idx;
+                self.ensure_visible_sorted(new_idx);
+            }
         }
     }
 
@@ -287,16 +298,24 @@ impl OverviewState {
         if let Some(idx) = self.panels.iter().position(|p| p.id == agent_id) {
             self.focus = OverviewFocus::Terminal(idx);
             self.last_terminal_idx = idx;
-            self.ensure_visible(idx);
+            self.ensure_visible_sorted(idx);
         }
     }
 
     /// Enter terminal focus from options bar.
     pub fn enter_terminal(&mut self) {
-        if !self.panels.is_empty() {
-            let idx = self.last_terminal_idx.min(self.panels.len() - 1);
-            self.focus = OverviewFocus::Terminal(idx);
-            self.ensure_visible(idx);
+        if !self.sorted_indices.is_empty() {
+            // Try to return to the last focused terminal if it's still visible
+            if self.sorted_indices.contains(&self.last_terminal_idx) {
+                self.focus = OverviewFocus::Terminal(self.last_terminal_idx);
+                self.ensure_visible_sorted(self.last_terminal_idx);
+            } else {
+                // Fall back to the first visible panel in sorted order
+                let idx = self.sorted_indices[0];
+                self.focus = OverviewFocus::Terminal(idx);
+                self.last_terminal_idx = idx;
+                self.ensure_visible_sorted(idx);
+            }
         }
     }
 
@@ -338,52 +357,37 @@ impl OverviewState {
         }
     }
 
-    /// Scroll viewport left.
+    /// Scroll viewport left (within sorted/filtered list).
     pub fn scroll_left(&mut self) {
         if self.scroll_offset > 0 {
             self.scroll_offset -= 1;
         }
     }
 
-    /// Scroll viewport right.
+    /// Scroll viewport right (within sorted/filtered list).
     pub fn scroll_right(&mut self, visible_width: u16) {
         let visible = self.visible_panel_count(visible_width);
-        if self.scroll_offset + visible < self.panels.len() {
+        if self.scroll_offset + visible < self.sorted_indices.len() {
             self.scroll_offset += 1;
         }
     }
 
     // -- Private helpers --
 
-    fn ensure_visible(&mut self, idx: usize) {
-        if self.viewport_width == 0 {
-            return;
-        }
-        let fully_visible = max_panels_for_width(self.viewport_width);
-
-        if fully_visible >= 3 {
-            // Keep a 1-panel buffer from viewport edges.
-            // Scroll left when selection is at the first visible position.
-            if idx <= self.scroll_offset {
-                self.scroll_offset = idx.saturating_sub(1);
+    /// Ensure a global panel index is visible on screen by adjusting scroll_offset.
+    /// Works on position within sorted_indices.
+    pub fn ensure_visible_sorted(&mut self, global_idx: usize) {
+        if let Some(pos) = self.sorted_indices.iter().position(|&i| i == global_idx) {
+            if pos < self.scroll_offset {
+                self.scroll_offset = pos;
             }
-            // Scroll right when selection is at the last visible position.
-            if idx + 1 >= self.scroll_offset + fully_visible {
-                self.scroll_offset = (idx + 2).saturating_sub(fully_visible);
-            }
-        } else {
-            // < 3 visible panels: no room for buffer, keep current behavior.
-            if idx < self.scroll_offset {
-                self.scroll_offset = idx;
-            }
-            if idx >= self.scroll_offset + fully_visible {
-                self.scroll_offset = idx + 1 - fully_visible;
+            if self.viewport_width > 0 {
+                let fully_visible = max_panels_for_width(self.viewport_width);
+                if pos >= self.scroll_offset + fully_visible {
+                    self.scroll_offset = pos + 1 - fully_visible;
+                }
             }
         }
-
-        // Clamp to valid range.
-        let max_offset = self.panels.len().saturating_sub(fully_visible);
-        self.scroll_offset = self.scroll_offset.min(max_offset);
     }
 
     fn clamp_focus(&mut self) {
@@ -400,9 +404,54 @@ impl OverviewState {
         self.last_terminal_idx = self
             .last_terminal_idx
             .min(self.panels.len().saturating_sub(1));
-        self.scroll_offset = self
-            .scroll_offset
-            .min(self.panels.len().saturating_sub(1));
+        // Clamp scroll to sorted_indices bounds (may be empty if not yet computed)
+        if !self.sorted_indices.is_empty() {
+            self.scroll_offset = self
+                .scroll_offset
+                .min(self.sorted_indices.len().saturating_sub(1));
+        }
+    }
+
+    /// Compute panel indices sorted by repo group order, then branch, then ID.
+    /// Panels whose repo is collapsed are excluded from the result.
+    pub fn compute_sorted_indices(&mut self, repos: &[RepoInfo]) {
+        let repo_order: HashMap<&str, usize> = repos
+            .iter()
+            .enumerate()
+            .map(|(i, r)| (r.path.as_str(), i))
+            .collect();
+
+        let mut indices: Vec<usize> = self
+            .panels
+            .iter()
+            .enumerate()
+            .filter(|(_, p)| match &p.repo_path {
+                Some(rp) => !self.collapsed_repos.contains(rp),
+                None => !self.collapsed_repos.contains(""),
+            })
+            .map(|(i, _)| i)
+            .collect();
+
+        indices.sort_by(|&a, &b| {
+            let pa = &self.panels[a];
+            let pb = &self.panels[b];
+            let order_a = pa
+                .repo_path
+                .as_deref()
+                .and_then(|rp| repo_order.get(rp).copied())
+                .unwrap_or(usize::MAX);
+            let order_b = pb
+                .repo_path
+                .as_deref()
+                .and_then(|rp| repo_order.get(rp).copied())
+                .unwrap_or(usize::MAX);
+            order_a
+                .cmp(&order_b)
+                .then_with(|| pa.branch_name.cmp(&pb.branch_name))
+                .then_with(|| pa.id.cmp(&pb.id))
+        });
+
+        self.sorted_indices = indices;
     }
 
     fn recalculate_panel_size(&mut self, agent_count: usize, content_area: Rect) {
@@ -411,8 +460,8 @@ impl OverviewState {
         }
         self.viewport_width = content_area.width;
         // Content area already excludes the tab bar and status bar.
-        // We subtract 1 row for the options bar.
-        let available_height = content_area.height.saturating_sub(1);
+        // We subtract 3 rows for the grouped filter bar (border + content + border).
+        let available_height = content_area.height.saturating_sub(3);
         // Each panel has: top border (1) + header (1) + terminal content + bottom border (1)
         self.panel_rows = available_height.saturating_sub(3).max(1);
 
@@ -644,52 +693,56 @@ async fn agent_connection_task(
 // ---------------------------------------------------------------------------
 
 pub fn render_overview(frame: &mut Frame, area: Rect, state: &mut OverviewState, click_map: &mut ClickMap, repo_colors: &HashMap<String, String>, repos: &[RepoInfo]) {
-    // Split into options bar (1 row) + panels area
+    // Split into grouped filter bar (3 rows) + panels area
     let [options_area, panels_area] = Layout::vertical([
-        Constraint::Length(1),
+        Constraint::Length(3),
         Constraint::Min(0),
     ])
     .areas(area);
 
-    let focused = matches!(state.focus, OverviewFocus::OptionsBar);
+    // 1. Compute sorted+filtered panel indices (populates state.sorted_indices)
+    state.compute_sorted_indices(repos);
+
+    // 2. Compute scroll range within sorted indices
+    let sorted_len = state.sorted_indices.len();
+    let visible_count = state.visible_panel_count(panels_area.width);
+
+    let (scroll, end) = if sorted_len == 0 || visible_count == 0 {
+        (0, 0)
+    } else {
+        let scroll = state.scroll_offset.min(sorted_len.saturating_sub(1));
+        let end = (scroll + visible_count).min(sorted_len);
+        (scroll, end)
+    };
+
+    // 3. Build set of global panel indices that are currently visible on screen
+    let visible_indices: HashSet<usize> = if end > scroll {
+        state.sorted_indices[scroll..end].iter().copied().collect()
+    } else {
+        HashSet::new()
+    };
+
+    // 4. Render the grouped filter bar
+    let bar_focused = matches!(state.focus, OverviewFocus::OptionsBar);
     render_options_bar(
         frame,
         options_area,
-        focused,
+        bar_focused,
         repos,
-        &state.hidden_repos,
+        &state.panels,
+        &state.sorted_indices,
+        &state.collapsed_repos,
+        &visible_indices,
         state.filter_cursor,
         click_map,
     );
 
-    // Build list of panel indices that pass the repo filter
-    let filtered_indices: Vec<usize> = state
-        .panels
-        .iter()
-        .enumerate()
-        .filter(|(_, p)| {
-            match &p.repo_path {
-                Some(rp) => !state.hidden_repos.contains(rp),
-                None => true, // always show agents with no repo
-            }
-        })
-        .map(|(i, _)| i)
-        .collect();
-
-    if filtered_indices.is_empty() {
+    // 5. Render panels
+    if sorted_len == 0 || visible_count == 0 {
         render_empty_state(frame, panels_area);
         return;
     }
 
-    let visible_count = state.visible_panel_count(panels_area.width);
-    if visible_count == 0 {
-        render_empty_state(frame, panels_area);
-        return;
-    }
-
-    // Clamp scroll offset to filtered list bounds
-    let scroll = state.scroll_offset.min(filtered_indices.len().saturating_sub(1));
-    let end = (scroll + visible_count).min(filtered_indices.len());
     let actual_visible = end - scroll;
 
     // Distribute available width evenly; at least 2 slots so 1 panel = half screen
@@ -700,7 +753,7 @@ pub fn render_overview(frame: &mut Frame, area: Rect, state: &mut OverviewState,
     let panel_areas = Layout::horizontal(constraints).split(panels_area);
 
     let focus = state.focus;
-    for (i, &global_idx) in filtered_indices[scroll..end].iter().enumerate() {
+    for (i, &global_idx) in state.sorted_indices[scroll..end].iter().enumerate() {
         let panel = &mut state.panels[global_idx];
         let is_focused = matches!(focus, OverviewFocus::Terminal(idx) if idx == global_idx);
         click_map.overview_panels.push((panel_areas[i], global_idx));
@@ -730,8 +783,8 @@ pub fn render_overview(frame: &mut Frame, area: Rect, state: &mut OverviewState,
         frame.render_widget(Paragraph::new(Line::from(indicator)), indicator_area);
     }
 
-    if end < filtered_indices.len() {
-        let right_count = filtered_indices.len() - end;
+    if end < sorted_len {
+        let right_count = sorted_len - end;
         let text = format!(" {right_count} ▶ ");
         let text_len = text.chars().count() as u16;
         let indicator = Span::styled(
@@ -751,12 +804,16 @@ pub fn render_overview(frame: &mut Frame, area: Rect, state: &mut OverviewState,
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn render_options_bar(
     frame: &mut Frame,
-    area: Rect,
+    area: Rect, // 3 rows tall
     focused: bool,
     repos: &[RepoInfo],
-    hidden_repos: &HashSet<String>,
+    panels: &[AgentPanel],
+    _sorted_indices: &[usize],
+    collapsed_repos: &HashSet<String>,
+    visible_indices: &HashSet<usize>,
     filter_cursor: usize,
     click_map: &mut ClickMap,
 ) {
@@ -766,20 +823,40 @@ fn render_options_bar(
         theme::R_BG_RAISED
     };
 
-    if repos.is_empty() {
-        let fill = " ".repeat(area.width as usize);
+    // Fill entire 3-row area with background
+    for row in 0..area.height {
+        let fill_area = Rect {
+            x: area.x,
+            y: area.y + row,
+            width: area.width,
+            height: 1,
+        };
         frame.render_widget(
-            Paragraph::new(Line::from(Span::styled(fill, Style::default().bg(bar_bg)))),
-            area,
+            Paragraph::new(Line::from(Span::styled(
+                " ".repeat(area.width as usize),
+                Style::default().bg(bar_bg),
+            ))),
+            fill_area,
         );
+    }
+
+    if area.height < 3 {
         return;
     }
 
-    let mut spans: Vec<Span> = Vec::new();
-    let mut chip_x = area.x;
+    // Check if there are no-repo agents
+    let has_other = panels.iter().any(|p| p.repo_path.is_none());
+    let group_count = repos.len() + if has_other { 1 } else { 0 };
 
+    if group_count == 0 {
+        return;
+    }
+
+    let mut x = area.x;
+
+    // Render repo groups
     for (i, repo) in repos.iter().enumerate() {
-        let is_hidden = hidden_repos.contains(&repo.path);
+        let is_collapsed = collapsed_repos.contains(&repo.path);
         let is_cursor = focused && i == filter_cursor;
 
         let color = repo
@@ -788,55 +865,259 @@ fn render_options_bar(
             .map(|c| theme::repo_color(c))
             .unwrap_or(theme::R_ACCENT);
 
-        let chip_bg = if is_cursor {
-            theme::R_BG_ACTIVE
+        // Find ALL agents for this repo (not just visible/sorted)
+        let repo_agents: Vec<(usize, &AgentPanel)> = panels
+            .iter()
+            .enumerate()
+            .filter(|(_, p)| p.repo_path.as_deref() == Some(repo.path.as_str()))
+            .collect();
+
+        // Calculate content width
+        let name_width = repo.name.len() + 2; // " name "
+        let agents_width: usize = if is_collapsed {
+            0
         } else {
-            bar_bg
+            repo_agents
+                .iter()
+                .map(|(_, p)| {
+                    let branch = p.branch_name.as_deref().unwrap_or(&p.id);
+                    branch.len() + 1 // " branch"
+                })
+                .sum()
         };
+        let inner_width = (name_width + agents_width) as u16;
+        let block_width = inner_width + 2; // +2 for left/right borders
 
-        let (dot_color, text_color) = if is_hidden {
-            (theme::dim_color(color), theme::R_TEXT_DISABLED)
-        } else {
-            (color, theme::R_TEXT_PRIMARY)
-        };
-
-        // Build chip: " ● name "
-        let dot_span = Span::styled(" ● ", Style::default().fg(dot_color).bg(chip_bg));
-        let name_span = Span::styled(
-            format!("{} ", repo.name),
-            Style::default().fg(text_color).bg(chip_bg),
-        );
-
-        let chip_width = 3 + repo.name.len() as u16 + 1; // " ● " + name + " "
-
-        // Register click target
-        if chip_x + chip_width <= area.x + area.width {
-            let chip_rect = Rect {
-                x: chip_x,
-                y: area.y,
-                width: chip_width,
-                height: 1,
-            };
-            click_map
-                .overview_filter_chips
-                .push((chip_rect, repo.path.clone()));
+        // Stop if we'd overflow the area
+        if x + block_width > area.x + area.width {
+            break;
         }
 
-        spans.push(dot_span);
-        spans.push(name_span);
-        chip_x += chip_width;
-    }
+        let block_area = Rect {
+            x,
+            y: area.y,
+            width: block_width,
+            height: 3,
+        };
 
-    // Fill remaining width with bar background
-    let used = chip_x.saturating_sub(area.x);
-    if used < area.width {
+        // Border color: bright for cursor, dimmed otherwise
+        let border_color = if is_cursor {
+            color
+        } else {
+            theme::dim_color(color)
+        };
+
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(border_color))
+            .style(Style::default().bg(bar_bg));
+
+        let inner = block.inner(block_area);
+        frame.render_widget(block, block_area);
+
+        if inner.width == 0 || inner.height == 0 {
+            x += block_width + 1;
+            continue;
+        }
+
+        // Build content spans
+        let mut spans: Vec<Span> = Vec::new();
+
+        // Repo name "button" with repo color background
+        let name_fg = if is_collapsed {
+            theme::R_TEXT_DISABLED
+        } else {
+            theme::R_TEXT_PRIMARY
+        };
+        let name_bg = if is_collapsed {
+            theme::dim_color(color)
+        } else {
+            color
+        };
         spans.push(Span::styled(
-            " ".repeat((area.width - used) as usize),
-            Style::default().bg(bar_bg),
+            format!(" {} ", repo.name),
+            Style::default().fg(name_fg).bg(name_bg),
         ));
+
+        // Agent branch indicators (only when expanded)
+        if !is_collapsed {
+            for &(global_idx, panel) in &repo_agents {
+                let branch = panel.branch_name.as_deref().unwrap_or(&panel.id);
+                let is_visible = visible_indices.contains(&global_idx);
+                let fg = if is_visible {
+                    theme::R_TEXT_SECONDARY
+                } else {
+                    theme::R_TEXT_DISABLED
+                };
+                spans.push(Span::styled(
+                    format!(" {branch}"),
+                    Style::default().fg(fg).bg(bar_bg),
+                ));
+            }
+        }
+
+        // Fill remaining inner width with background
+        let content_len: usize = spans.iter().map(|s| s.content.chars().count()).sum();
+        let remaining = (inner.width as usize).saturating_sub(content_len);
+        if remaining > 0 {
+            spans.push(Span::styled(
+                " ".repeat(remaining),
+                Style::default().bg(bar_bg),
+            ));
+        }
+
+        frame.render_widget(Paragraph::new(Line::from(spans)), inner);
+
+        // Register click target for the whole block → repo collapse toggle
+        click_map
+            .overview_repo_buttons
+            .push((block_area, repo.path.clone()));
+
+        // Register individual agent indicator click targets
+        if !is_collapsed {
+            let mut agent_x = inner.x + (repo.name.len() + 2) as u16;
+            for &(global_idx, panel) in &repo_agents {
+                let branch = panel.branch_name.as_deref().unwrap_or(&panel.id);
+                let agent_width = (branch.len() + 1) as u16;
+                if agent_x + agent_width <= inner.x + inner.width {
+                    let agent_rect = Rect {
+                        x: agent_x,
+                        y: area.y,
+                        width: agent_width,
+                        height: 3,
+                    };
+                    click_map
+                        .overview_agent_indicators
+                        .push((agent_rect, global_idx));
+                }
+                agent_x += agent_width;
+            }
+        }
+
+        x += block_width + 1; // 1 char gap between groups
     }
 
-    frame.render_widget(Paragraph::new(Line::from(spans)), area);
+    // "Other" group for agents with no repo
+    if has_other {
+        let is_collapsed = collapsed_repos.contains("");
+        let is_cursor = focused && repos.len() == filter_cursor;
+        let color = theme::R_ACCENT;
+
+        let other_agents: Vec<(usize, &AgentPanel)> = panels
+            .iter()
+            .enumerate()
+            .filter(|(_, p)| p.repo_path.is_none())
+            .collect();
+
+        let name_width = 7; // " Other "
+        let agents_width: usize = if is_collapsed {
+            0
+        } else {
+            other_agents
+                .iter()
+                .map(|(_, p)| {
+                    let branch = p.branch_name.as_deref().unwrap_or(&p.id);
+                    branch.len() + 1
+                })
+                .sum()
+        };
+        let inner_width = (name_width + agents_width) as u16;
+        let block_width = inner_width + 2;
+
+        if x + block_width <= area.x + area.width {
+            let block_area = Rect {
+                x,
+                y: area.y,
+                width: block_width,
+                height: 3,
+            };
+
+            let border_color = if is_cursor {
+                color
+            } else {
+                theme::dim_color(color)
+            };
+
+            let block = Block::default()
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(border_color))
+                .style(Style::default().bg(bar_bg));
+
+            let inner = block.inner(block_area);
+            frame.render_widget(block, block_area);
+
+            if inner.width > 0 && inner.height > 0 {
+                let mut spans: Vec<Span> = Vec::new();
+
+                let name_fg = if is_collapsed {
+                    theme::R_TEXT_DISABLED
+                } else {
+                    theme::R_TEXT_PRIMARY
+                };
+                let name_bg = if is_collapsed {
+                    theme::dim_color(color)
+                } else {
+                    color
+                };
+                spans.push(Span::styled(
+                    " Other ",
+                    Style::default().fg(name_fg).bg(name_bg),
+                ));
+
+                if !is_collapsed {
+                    for &(global_idx, panel) in &other_agents {
+                        let branch = panel.branch_name.as_deref().unwrap_or(&panel.id);
+                        let is_visible = visible_indices.contains(&global_idx);
+                        let fg = if is_visible {
+                            theme::R_TEXT_SECONDARY
+                        } else {
+                            theme::R_TEXT_DISABLED
+                        };
+                        spans.push(Span::styled(
+                            format!(" {branch}"),
+                            Style::default().fg(fg).bg(bar_bg),
+                        ));
+                    }
+                }
+
+                let content_len: usize =
+                    spans.iter().map(|s| s.content.chars().count()).sum();
+                let remaining = (inner.width as usize).saturating_sub(content_len);
+                if remaining > 0 {
+                    spans.push(Span::styled(
+                        " ".repeat(remaining),
+                        Style::default().bg(bar_bg),
+                    ));
+                }
+
+                frame.render_widget(Paragraph::new(Line::from(spans)), inner);
+            }
+
+            click_map
+                .overview_repo_buttons
+                .push((block_area, String::new()));
+
+            if !is_collapsed {
+                let mut agent_x = inner.x + 7; // " Other " width
+                for &(global_idx, panel) in &other_agents {
+                    let branch = panel.branch_name.as_deref().unwrap_or(&panel.id);
+                    let agent_width = (branch.len() + 1) as u16;
+                    if agent_x + agent_width <= inner.x + inner.width {
+                        let agent_rect = Rect {
+                            x: agent_x,
+                            y: area.y,
+                            width: agent_width,
+                            height: 3,
+                        };
+                        click_map
+                            .overview_agent_indicators
+                            .push((agent_rect, global_idx));
+                    }
+                    agent_x += agent_width;
+                }
+            }
+        }
+    }
 }
 
 fn render_agent_panel(
