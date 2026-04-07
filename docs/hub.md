@@ -353,7 +353,7 @@ The hub includes a batch engine (`batch.rs`) that manages batch persistence and 
 ### IPC Messages
 
 - **QueueBatch**: Creates a new queued batch with a scheduled start time. The batch and its tasks are persisted to the `queued_batches` and `queued_batch_tasks` tables. Returns `BatchQueued { batch_id, scheduled_at }`.
-- **CancelQueuedBatch**: Cancels a queued batch by ID. Removes it from both memory and the database. Returns `BatchCancelled { batch_id }`.
+- **CancelQueuedBatch**: Cancels a queued batch by ID with a `cleanup_mode` field (`BatchCleanupMode` enum). `NoCleanup` removes the batch record without stopping agents or cleaning up worktrees. `StopAgents` stops all active agents associated with the batch before removing it. `StopAgentsAndRemoveBranches` stops agents, removes their worktrees, and deletes their local branches before removing the batch. Returns `BatchCancelled { batch_id }`.
 - **ListQueuedBatches**: Returns a list of all non-completed queued batches as `QueuedBatchList { batches: Vec<QueuedBatchInfo> }`. Each `QueuedBatchInfo` includes full per-task detail (`tasks: Vec<QueuedBatchTaskInfo>`), `launch_mode`, `max_concurrent`, `prompt_prefix`, `prompt_suffix`, `plan_mode`, `allow_bypass`, and `agent_binary` so the CLI can fully reconstruct batch state.
 - **RegisterBatch**: Registers a new batch with the hub for persistence without scheduling it (status = `idle`). Used by the CLI when a batch is created in the Tasks tab. The batch and its tasks are persisted immediately. Returns `BatchRegistered { batch_id }`.
 - **AddBatchTask**: Adds a task to an existing registered batch. The hub appends the task to the `queued_batch_tasks` table with the next available `task_index`. Returns `Ok`.
