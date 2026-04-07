@@ -82,7 +82,12 @@ async fn main() {
     }
 
     // Subcommand: ls
-    if let Some(cli::Commands::Ls { select, hub }) = args.command {
+    if let Some(cli::Commands::Ls {
+        select,
+        hub,
+        batch,
+    }) = args.command
+    {
         // Validate hub filter if provided
         if let Some(ref p) = hub {
             if let Err(e) = cli::validate_hub_name(p) {
@@ -96,7 +101,7 @@ async fn main() {
                 std::process::exit(1);
             }
         }
-        handle_ls(select, hub).await;
+        handle_ls(select, hub, batch).await;
         return;
     }
 
@@ -623,9 +628,9 @@ async fn handle_attach(id: String) {
 }
 
 /// List all running agents, or open interactive selector with `--select`.
-async fn handle_ls(select: bool, hub: Option<String>) {
+async fn handle_ls(select: bool, hub: Option<String>, batch: Option<String>) {
     if select {
-        handle_select(hub).await;
+        handle_select(hub, batch).await;
         return;
     }
 
@@ -644,18 +649,24 @@ async fn handle_ls(select: bool, hub: Option<String>) {
         }
     };
 
-    clust_ipc::send_message(&mut stream, &CliMessage::ListAgents { hub: hub.clone() })
-        .await
-        .unwrap_or_else(|e| {
-            eprintln!(
-                "\n  {}✘{} {}failed to send list: {e}{}\n",
-                theme::ERROR,
-                theme::RESET,
-                theme::TEXT_PRIMARY,
-                theme::RESET,
-            );
-            std::process::exit(1);
-        });
+    clust_ipc::send_message(
+        &mut stream,
+        &CliMessage::ListAgents {
+            hub: hub.clone(),
+            batch: batch.clone(),
+        },
+    )
+    .await
+    .unwrap_or_else(|e| {
+        eprintln!(
+            "\n  {}✘{} {}failed to send list: {e}{}\n",
+            theme::ERROR,
+            theme::RESET,
+            theme::TEXT_PRIMARY,
+            theme::RESET,
+        );
+        std::process::exit(1);
+    });
 
     let response: HubMessage = clust_ipc::recv_message(&mut stream)
         .await
@@ -716,7 +727,7 @@ async fn handle_ls(select: bool, hub: Option<String>) {
 
 fn print_agent_header() {
     println!(
-        "  {}{:<8} {:<12} {:<16} {:<20} {:<10} {:<14} ATTACHED{}",
+        "  {}{:<8} {:<12} {:<16} {:<20} {:<10} {:<14} {:<12} ATTACHED{}",
         theme::TEXT_TERTIARY,
         "ID",
         "AGENT",
@@ -724,6 +735,7 @@ fn print_agent_header() {
         "BRANCH",
         "STATUS",
         "STARTED",
+        "BATCH",
         theme::RESET,
     );
 }
@@ -741,8 +753,13 @@ fn print_agent_row(agent: &clust_ipc::AgentInfo) {
         .as_deref()
         .unwrap_or("—")
         .to_string();
+    let batch_display = agent
+        .batch_title
+        .as_deref()
+        .unwrap_or("—")
+        .to_string();
     println!(
-        "  {}{:<8}{} {}{:<12}{} {}{:<16}{} {}{:<20}{} {}{:<10}{} {}{:<14}{} {}{}{}",
+        "  {}{:<8}{} {}{:<12}{} {}{:<16}{} {}{:<20}{} {}{:<10}{} {}{:<14}{} {}{:<12}{} {}{}{}",
         theme::ACCENT,
         agent.id,
         theme::RESET,
@@ -760,6 +777,9 @@ fn print_agent_row(agent: &clust_ipc::AgentInfo) {
         theme::RESET,
         theme::TEXT_SECONDARY,
         started,
+        theme::RESET,
+        theme::TEXT_SECONDARY,
+        batch_display,
         theme::RESET,
         theme::TEXT_SECONDARY,
         attached,
@@ -804,13 +824,19 @@ impl Drop for RawModeGuard {
 }
 
 /// Interactive agent selector.
-async fn handle_select(hub: Option<String>) {
+async fn handle_select(hub: Option<String>, batch: Option<String>) {
     // Fetch agent list (hub might not be running)
     let agents = match ipc::try_connect().await {
         Ok(mut stream) => {
-            if clust_ipc::send_message(&mut stream, &CliMessage::ListAgents { hub: hub.clone() })
-                .await
-                .is_err()
+            if clust_ipc::send_message(
+                &mut stream,
+                &CliMessage::ListAgents {
+                    hub: hub.clone(),
+                    batch,
+                },
+            )
+            .await
+            .is_err()
             {
                 vec![]
             } else {

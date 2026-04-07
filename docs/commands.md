@@ -52,25 +52,33 @@ clust ls [OPTIONS]
 |------|------|-------------|
 | `-i` | `--select` | Interactive selector: navigate with arrow keys, Enter to attach or start a new agent. |
 | `-H` | `--hub <NAME>` | Filter agents by hub name. Without this flag, agents are grouped by hub. |
+| `-B` | `--batch <ID_OR_TITLE>` | Filter agents by batch ID or title (case-insensitive substring match on title). |
 
 Output (no filter — grouped by hub):
 
 ```
   default_hub
-  ID       AGENT        REPO             BRANCH               STATUS     STARTED        ATTACHED
+  ID       AGENT        REPO             BRANCH               STATUS     STARTED        ATTACHED   BATCH
   a3f8c1   claude       my-project       main                 running    14:32          1 terminal
-  b7e2d9   claude       my-project       feature/auth         running    14:17          0 terminals
+  b7e2d9   claude       my-project       feature/auth         running    14:17          0 terminals refactor-batch
 
   my_feature
-  ID       AGENT        REPO             BRANCH               STATUS     STARTED        ATTACHED
+  ID       AGENT        REPO             BRANCH               STATUS     STARTED        ATTACHED   BATCH
   c4d5e6   aider        other-repo       develop              running    15:01          1 terminal
 ```
 
 Output (with `-H` filter — flat list):
 
 ```
-  ID       AGENT        REPO             BRANCH               STATUS     STARTED        ATTACHED
+  ID       AGENT        REPO             BRANCH               STATUS     STARTED        ATTACHED   BATCH
   c4d5e6   aider        other-repo       develop              running    15:01          1 terminal
+```
+
+Output (with `-B` filter — agents in matching batch only):
+
+```
+  ID       AGENT        REPO             BRANCH               STATUS     STARTED        ATTACHED   BATCH
+  b7e2d9   claude       my-project       feature/auth         running    14:17          0 terminals refactor-batch
 ```
 
 ### `clust ui`
@@ -252,6 +260,10 @@ clust ls
 
 # List only agents in a specific hub
 clust ls -H my_feature
+
+# List only agents belonging to a batch (by ID or title substring)
+clust ls -B refactor
+clust ls --batch abc123
 
 # Use a specific agent for this session only
 clust -u opencode "refactor auth"

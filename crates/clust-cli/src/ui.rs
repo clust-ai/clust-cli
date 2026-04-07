@@ -6407,9 +6407,15 @@ fn fetch_agents() -> Vec<AgentInfo> {
         let Ok(mut stream) = ipc::try_connect().await else {
             return vec![];
         };
-        if clust_ipc::send_message(&mut stream, &CliMessage::ListAgents { hub: None })
-            .await
-            .is_err()
+        if clust_ipc::send_message(
+            &mut stream,
+            &CliMessage::ListAgents {
+                hub: None,
+                batch: None,
+            },
+        )
+        .await
+        .is_err()
         {
             return vec![];
         }
@@ -7750,6 +7756,8 @@ mod tests {
             repo_path: None,
             branch_name: None,
             is_worktree: false,
+            batch_id: None,
+            batch_title: None,
         }
     }
 

@@ -195,25 +195,61 @@ async fn handle_connection(
                 }
             }
         }
-        CliMessage::ListAgents { hub: filter } => {
+        CliMessage::ListAgents {
+            hub: filter,
+            batch: batch_filter,
+        } => {
             let agents = {
                 let hub_state = state.lock().await;
+
+                // Build a map of agent_id → (batch_id, batch_title) from queued batches
+                let mut agent_batch_map: std::collections::HashMap<
+                    &str,
+                    (&str, &str),
+                > = std::collections::HashMap::new();
+                for batch in &hub_state.queued_batches {
+                    for task in &batch.tasks {
+                        if let Some(ref aid) = task.agent_id {
+                            agent_batch_map.insert(aid.as_str(), (batch.id.as_str(), batch.title.as_str()));
+                        }
+                    }
+                }
+
                 hub_state
                     .agents
                     .values()
                     .filter(|e| filter.as_ref().is_none_or(|f| &e.hub == f))
-                    .map(|e| clust_ipc::AgentInfo {
-                        id: e.id.clone(),
-                        agent_binary: e.agent_binary.clone(),
-                        started_at: e.started_at.clone(),
-                        attached_clients: e
-                            .attached_count
-                            .load(Ordering::Relaxed),
-                        hub: e.hub.clone(),
-                        working_dir: e.working_dir.clone(),
-                        repo_path: e.repo_path.clone(),
-                        branch_name: e.branch_name.clone(),
-                        is_worktree: e.is_worktree,
+                    .map(|e| {
+                        let (batch_id, batch_title) =
+                            agent_batch_map.get(e.id.as_str()).map_or(
+                                (None, None),
+                                |&(bid, btitle)| {
+                                    (Some(bid.to_owned()), Some(btitle.to_owned()))
+                                },
+                            );
+                        clust_ipc::AgentInfo {
+                            id: e.id.clone(),
+                            agent_binary: e.agent_binary.clone(),
+                            started_at: e.started_at.clone(),
+                            attached_clients: e
+                                .attached_count
+                                .load(Ordering::Relaxed),
+                            hub: e.hub.clone(),
+                            working_dir: e.working_dir.clone(),
+                            repo_path: e.repo_path.clone(),
+                            branch_name: e.branch_name.clone(),
+                            is_worktree: e.is_worktree,
+                            batch_id,
+                            batch_title,
+                        }
+                    })
+                    .filter(|a| {
+                        batch_filter.as_ref().is_none_or(|bf| {
+                            a.batch_id.as_deref().is_some_and(|bid| bid == bf)
+                                || a.batch_title
+                                    .as_deref()
+                                    .is_some_and(|bt| bt.to_lowercase().contains(&bf.to_lowercase()))
+                        })
                     })
                     .collect()
             };
