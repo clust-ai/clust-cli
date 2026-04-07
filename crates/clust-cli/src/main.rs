@@ -17,6 +17,7 @@ mod search_modal;
 mod syntax;
 mod tasks;
 mod terminal;
+mod timer_modal;
 pub mod terminal_emulator;
 mod theme;
 mod ui;

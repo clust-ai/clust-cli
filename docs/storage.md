@@ -59,6 +59,45 @@ Migration v3 adds the `color` column and backfills existing repos with cycling c
 
 Migration v4 adds the `editor` column for per-repository editor preferences. When set, the TUI skips the editor picker modal and opens the repository directly in the saved editor.
 
+#### `queued_batches` *(migration v5)*
+
+Batches scheduled for future execution by the hub daemon. Persisted so batches survive hub restarts.
+
+```sql
+CREATE TABLE queued_batches (
+    id              TEXT PRIMARY KEY,
+    title           TEXT NOT NULL,
+    repo_path       TEXT NOT NULL,
+    target_branch   TEXT NOT NULL,
+    max_concurrent  INTEGER,
+    prompt_prefix   TEXT,
+    prompt_suffix   TEXT,
+    plan_mode       INTEGER NOT NULL DEFAULT 0,
+    allow_bypass    INTEGER NOT NULL DEFAULT 0,
+    agent_binary    TEXT,
+    hub             TEXT NOT NULL,
+    scheduled_at    TEXT NOT NULL,       -- RFC 3339 timestamp
+    status          TEXT NOT NULL DEFAULT 'scheduled',  -- scheduled, running, completed
+    created_at      TEXT NOT NULL        -- RFC 3339 timestamp
+);
+```
+
+#### `queued_batch_tasks` *(migration v5)*
+
+Individual tasks within a queued batch. Each task maps to an agent that will be spawned in a worktree.
+
+```sql
+CREATE TABLE queued_batch_tasks (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    batch_id    TEXT NOT NULL REFERENCES queued_batches(id) ON DELETE CASCADE,
+    task_index  INTEGER NOT NULL,
+    branch_name TEXT NOT NULL,
+    prompt      TEXT NOT NULL,
+    status      TEXT NOT NULL DEFAULT 'idle',  -- idle, active, done
+    agent_id    TEXT                            -- set when the task's agent is started
+);
+```
+
 #### `agent_history` *(deferred — future migration)*
 
 Log of past agent sessions. Written when an agent exits. Useful for future features (UI history, analytics). Not yet created.
@@ -97,6 +136,7 @@ On startup, the hub checks `schema_version` and applies any pending migrations s
 | Registered repositories | SQLite `repos` table | Persistent (auto-cleaned if path deleted) |
 | Per-repo editor preference | SQLite `repos` table (`editor` column) | Persistent (survives restarts) |
 | Agent session history | SQLite `agent_history` table | Persistent *(not yet implemented)* |
+| Queued batches | SQLite `queued_batches` + `queued_batch_tasks` tables | Persistent (survives restarts, loaded on startup) |
 | Running agent state | Hub in-memory | Ephemeral (dies with hub) |
 | Repository branch/worktree data | Fetched from git on demand | Ephemeral (never persisted) |
 | IPC socket | `~/.clust/clust.sock` | Runtime only |

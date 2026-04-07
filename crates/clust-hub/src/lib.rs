@@ -1,4 +1,5 @@
 pub mod agent;
+pub mod batch;
 pub mod db;
 pub mod ipc;
 pub mod repo;

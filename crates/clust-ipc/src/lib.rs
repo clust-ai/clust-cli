@@ -14,7 +14,7 @@ pub const DEFAULT_HUB: &str = "default_hub";
 
 /// Protocol version for IPC compatibility checks.
 /// Bump this whenever `CliMessage` or `HubMessage` enum shapes change.
-pub const PROTOCOL_VERSION: u32 = 4;
+pub const PROTOCOL_VERSION: u32 = 5;
 
 /// Messages sent from CLI to Hub.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -141,6 +141,23 @@ pub enum CliMessage {
     TerminalInput { id: String, data: Vec<u8> },
     ResizeTerminal { id: String, cols: u16, rows: u16 },
     StopTerminal { id: String },
+    // Queued batch management
+    QueueBatch {
+        repo_path: String,
+        target_branch: String,
+        title: String,
+        max_concurrent: Option<usize>,
+        prompt_prefix: Option<String>,
+        prompt_suffix: Option<String>,
+        plan_mode: bool,
+        allow_bypass: bool,
+        agent_binary: Option<String>,
+        hub: String,
+        tasks: Vec<QueuedTask>,
+        scheduled_at: String,
+    },
+    CancelQueuedBatch { batch_id: String },
+    ListQueuedBatches,
 }
 
 /// Info about a running agent, returned in AgentList.
@@ -185,6 +202,27 @@ pub struct WorktreeEntry {
     pub is_main: bool,
     pub is_dirty: bool,
     pub active_agents: Vec<AgentInfo>,
+}
+
+/// A single task within a queued batch.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct QueuedTask {
+    pub branch_name: String,
+    pub prompt: String,
+}
+
+/// Summary info about a queued batch, returned in QueuedBatchList.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct QueuedBatchInfo {
+    pub batch_id: String,
+    pub title: String,
+    pub repo_path: String,
+    pub target_branch: String,
+    pub scheduled_at: String,
+    pub status: String,
+    pub task_count: usize,
+    pub tasks_done: usize,
+    pub tasks_active: usize,
 }
 
 /// Messages sent from Hub to CLI.
@@ -293,6 +331,10 @@ pub enum HubMessage {
     TerminalExited { id: String, exit_code: i32 },
     TerminalReplayComplete { id: String },
     TerminalStopped { id: String },
+    // Queued batch responses
+    BatchQueued { batch_id: String, scheduled_at: String },
+    BatchCancelled { batch_id: String },
+    QueuedBatchList { batches: Vec<QueuedBatchInfo> },
 }
 
 /// Returns the clust data directory: `~/.clust/`.

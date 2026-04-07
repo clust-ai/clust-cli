@@ -62,6 +62,7 @@ pub struct HubState {
     pub default_agent: Option<String>,
     pub bypass_permissions: bool,
     pub db: Option<rusqlite::Connection>,
+    pub queued_batches: Vec<crate::batch::HubBatchEntry>,
 }
 
 impl HubState {
@@ -75,6 +76,31 @@ impl HubState {
         self.default_agent = crate::db::get_default_agent(&conn);
         self.bypass_permissions = crate::db::get_bypass_permissions(&conn);
         self.db = Some(conn);
+        // Load persisted queued batches
+        self.queued_batches = crate::batch::load_batches_from_db(self);
+        // Mark any "running" tasks whose agents are gone (hub restart) as done
+        for batch in self.queued_batches.iter_mut() {
+            if batch.status == crate::batch::HubBatchStatus::Running {
+                for (idx, task) in batch.tasks.iter_mut().enumerate() {
+                    if task.status == crate::batch::HubTaskStatus::Active {
+                        if let Some(ref aid) = task.agent_id {
+                            if !self.agents.contains_key(aid) {
+                                task.status = crate::batch::HubTaskStatus::Done;
+                                if let Some(ref db) = self.db {
+                                    let _ = crate::db::update_task_status(
+                                        db,
+                                        &batch.id,
+                                        idx,
+                                        "done",
+                                        task.agent_id.as_deref(),
+                                    );
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
         Ok(())
     }
 }
@@ -344,11 +370,12 @@ fn spawn_pty_reader(
 
         let _ = output_tx.send(AgentEvent::Exited(exit_code));
 
-        // Remove agent from shared state
+        // Remove agent from shared state and notify batch engine
         let handle = tokio::runtime::Handle::current();
         handle.block_on(async {
             let mut hub = state.lock().await;
             hub.agents.remove(&agent_id);
+            crate::batch::on_agent_exited(&mut hub, &agent_id);
         });
     });
 }
