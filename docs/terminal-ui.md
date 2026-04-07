@@ -184,7 +184,9 @@ A batch management tab that displays created batch definitions as horizontal car
 Each batch card has:
 - **Box-drawing borders** using the repo's assigned color (bright when focused, dimmed when unfocused via `dim_color()`). Cards without a repo fall back to accent blue when focused and tertiary text color when unfocused.
 - **Title** displayed in the border (accent bright when focused, accent when unfocused).
-- **Card body** showing: Repo name (in repo color), Branch name, Workers (concurrency limit or infinity symbol), Tasks (count of tasks added to the batch), Prefix (prompt prefix or "(none)"), Suffix (prompt suffix or "(none)"), Status (Idle in disabled/gray or Active in green/bold), and a per-task list showing each task's status and branch name.
+- **Card body** showing: Repo name (in repo color), Branch name, Workers (concurrency limit or infinity symbol), Tasks (count of tasks added to the batch), Prefix (prompt prefix or "(none)"), Suffix (prompt suffix or "(none)"), Status (Idle in disabled/gray or Active in green/bold), and a task box list below the metadata.
+- **Task boxes:** Each task is rendered as a full-width box within the batch card, separated by horizontal lines colored by status (green for Active, gray for Idle, tertiary for Done). Each task box displays: task number, status indicator, branch name (truncated with ellipsis if too long), and truncated first line of the prompt. Tasks are sorted with Active tasks above Idle and Done tasks.
+- **Terminal preview:** Active task boxes optionally show a small terminal output preview (last 4 lines of the agent's terminal output). The preview is gated behind the `SHOW_TERMINAL_PREVIEW` constant in `tasks/mod.rs` for easy toggling. Preview data is extracted from the corresponding `AgentPanel` via the task's `agent_id` field.
 - Focused cards use `R_BG_SURFACE` background; unfocused cards use `R_BG_BASE`.
 
 **Empty state:** When no batches exist, a centered message is displayed: "No batches defined -- press Opt+T to create one".
@@ -215,7 +217,10 @@ Each batch card has:
 - `TasksState` manages the batch list, focus state, scroll offset, and ID generation.
 - `TasksFocus` enum tracks whether the batch list or a specific card is focused.
 - `BatchInfo` stores: id, title, repo_path, repo_name, branch_name, max_concurrent, prompt_prefix, prompt_suffix, tasks (list of `TaskEntry`), status (`BatchStatus`: Idle or Active), and created_at timestamp.
-- `TaskEntry` stores: branch_name, prompt, and status (`TaskStatus`: Idle, Active, or Done) for a single task within a batch.
+- `TaskEntry` stores: branch_name, prompt, status (`TaskStatus`: Idle, Active, or Done), and an optional `agent_id` (set when the task's agent is started, linking it to its `AgentPanel` in `OverviewState`) for a single task within a batch.
+- `TerminalPreviewMap` (type alias for `HashMap<String, Vec<Line>>`) maps agent IDs to their last N terminal output lines, built by `build_task_terminal_previews()` in `ui.rs` each render frame.
+- `SHOW_TERMINAL_PREVIEW` constant (default `true`) gates whether terminal output previews are shown in active task boxes.
+- `TASK_TERMINAL_PREVIEW_LINES` constant (default `4`) controls how many terminal output lines are shown in the preview.
 - `BatchStatus` enum: `Idle` (default, gray/disabled text) and `Active` (green bold text).
 - `TaskStatus` enum: `Idle` (gray/disabled text), `Active` (green bold text), and `Done` (amber/warning text).
 - `add_task()` adds a `TaskEntry` (with `Idle` status) to a specific batch by index.
