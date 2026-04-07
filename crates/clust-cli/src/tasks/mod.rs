@@ -45,6 +45,12 @@ pub enum BatchStatus {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
+pub enum LaunchMode {
+    Auto,
+    Manual,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
 #[allow(dead_code)]
 pub enum TaskStatus {
     Idle,
@@ -70,6 +76,7 @@ pub struct BatchInfo {
     pub repo_name: String,
     pub branch_name: String,
     pub max_concurrent: Option<usize>,
+    pub launch_mode: LaunchMode,
     pub prompt_prefix: Option<String>,
     pub prompt_suffix: Option<String>,
     pub tasks: Vec<TaskEntry>,
@@ -112,6 +119,7 @@ pub enum TasksFocus {
 pub struct TasksState {
     pub batches: Vec<BatchInfo>,
     pub focus: TasksFocus,
+    pub focused_task: Option<usize>,
     pub scroll_offset: usize,
     next_id: usize,
     next_auto_name: usize,
@@ -122,6 +130,7 @@ impl TasksState {
         Self {
             batches: Vec::new(),
             focus: TasksFocus::BatchList,
+            focused_task: None,
             scroll_offset: 0,
             next_id: 1,
             next_auto_name: 1,
@@ -141,6 +150,7 @@ impl TasksState {
             repo_name: output.repo_name,
             branch_name: output.branch_name,
             max_concurrent: output.max_concurrent,
+            launch_mode: output.launch_mode,
             prompt_prefix: None,
             prompt_suffix: None,
             tasks: Vec::new(),
@@ -173,10 +183,32 @@ impl TasksState {
         }
     }
 
+    /// Start a single task by index within a manual-mode batch.
+    pub fn start_single_task(&mut self, batch_idx: usize, task_idx: usize) -> Option<BatchStartInfo> {
+        let batch = self.batches.get(batch_idx)?;
+        if batch.launch_mode != LaunchMode::Manual {
+            return None;
+        }
+        let task = batch.tasks.get(task_idx)?;
+        if task.status != TaskStatus::Idle {
+            return None;
+        }
+        Some(BatchStartInfo {
+            batch_id: batch.id,
+            repo_path: batch.repo_path.clone(),
+            target_branch: batch.branch_name.clone(),
+            tasks_to_start: vec![(task_idx, task.branch_name.clone(), task.prompt.clone())],
+        })
+    }
+
     /// Toggle the focused batch status. If transitioning to Active, returns
     /// the info needed to start agents for idle tasks (up to max_concurrent).
+    /// Returns None for manual-mode batches (use start_single_task instead).
     pub fn toggle_batch_status(&mut self, batch_idx: usize) -> Option<BatchStartInfo> {
         let batch = self.batches.get_mut(batch_idx)?;
+        if batch.launch_mode == LaunchMode::Manual {
+            return None;
+        }
         match batch.status {
             BatchStatus::Active => {
                 batch.status = BatchStatus::Idle;
@@ -313,12 +345,40 @@ impl TasksState {
 
     pub fn focus_prev_card(&mut self) {
         if let TasksFocus::BatchCard(idx) = self.focus {
+            self.focused_task = None;
             if idx > 0 {
                 self.focus = TasksFocus::BatchCard(idx - 1);
             } else {
                 self.focus = TasksFocus::BatchList;
             }
         }
+    }
+
+    pub fn focus_task_down(&mut self) {
+        if let TasksFocus::BatchCard(idx) = self.focus {
+            let task_count = self.batches.get(idx).map_or(0, |b| b.tasks.len());
+            if task_count == 0 {
+                return;
+            }
+            self.focused_task = Some(match self.focused_task {
+                None => 0,
+                Some(i) if i + 1 < task_count => i + 1,
+                Some(i) => i,
+            });
+        }
+    }
+
+    pub fn focus_task_up(&mut self) {
+        match self.focused_task {
+            Some(0) => self.focused_task = None,
+            Some(i) => self.focused_task = Some(i - 1),
+            None => {}
+        }
+    }
+
+    #[allow(dead_code)]
+    pub fn clear_focused_task(&mut self) {
+        self.focused_task = None;
     }
 }
 
@@ -376,7 +436,8 @@ pub fn render_tasks(
             .get(batch.repo_path.as_str())
             .map(|c| theme::repo_color(c));
 
-        render_batch_card(frame, card_areas[i], batch, is_focused, repo_color, terminal_previews);
+        let ft = if is_focused { state.focused_task } else { None };
+        render_batch_card(frame, card_areas[i], batch, is_focused, repo_color, ft, terminal_previews);
 
         click_map.tasks_batch_cards.push((card_areas[i], batch_idx));
     }
@@ -403,7 +464,7 @@ fn render_options_bar(frame: &mut Frame, area: Rect, state: &TasksState) {
                 .bg(theme::R_BG_RAISED),
         ),
         Span::styled(
-            format!("  {mod_key}+T create batch  Space toggle status  d clear done"),
+            format!("  {mod_key}+T create batch  Space toggle status  {mod_key}+S start task  d clear done"),
             Style::default()
                 .fg(theme::R_TEXT_TERTIARY)
                 .bg(theme::R_BG_RAISED),
@@ -443,6 +504,7 @@ fn render_batch_card(
     batch: &BatchInfo,
     focused: bool,
     repo_color: Option<ratatui::style::Color>,
+    focused_task: Option<usize>,
     terminal_previews: &TerminalPreviewMap,
 ) {
     let border_color = match (focused, repo_color) {
@@ -489,16 +551,20 @@ fn render_batch_card(
     let label_style = Style::default().fg(theme::R_TEXT_TERTIARY);
     let value_style = Style::default().fg(theme::R_TEXT_SECONDARY);
 
-    let status_span = match batch.status {
-        BatchStatus::Idle => {
-            Span::styled("Idle", Style::default().fg(theme::R_TEXT_DISABLED))
+    let status_span = if batch.launch_mode == LaunchMode::Manual {
+        Span::styled("Manual", Style::default().fg(theme::R_INFO))
+    } else {
+        match batch.status {
+            BatchStatus::Idle => {
+                Span::styled("Idle", Style::default().fg(theme::R_TEXT_DISABLED))
+            }
+            BatchStatus::Active => Span::styled(
+                "Active",
+                Style::default()
+                    .fg(theme::R_SUCCESS)
+                    .add_modifier(Modifier::BOLD),
+            ),
         }
-        BatchStatus::Active => Span::styled(
-            "Active",
-            Style::default()
-                .fg(theme::R_SUCCESS)
-                .add_modifier(Modifier::BOLD),
-        ),
     };
 
     let metadata_lines = vec![
@@ -510,10 +576,17 @@ fn render_batch_card(
             Span::styled("Branch    ", label_style),
             Span::styled(&batch.branch_name, value_style),
         ]),
-        Line::from(vec![
-            Span::styled("Workers   ", label_style),
-            Span::styled(concurrency_text, value_style),
-        ]),
+        if batch.launch_mode == LaunchMode::Auto {
+            Line::from(vec![
+                Span::styled("Workers   ", label_style),
+                Span::styled(concurrency_text, value_style),
+            ])
+        } else {
+            Line::from(vec![
+                Span::styled("Mode      ", label_style),
+                Span::styled("Manual", Style::default().fg(theme::R_INFO)),
+            ])
+        },
         Line::from(vec![
             Span::styled("Tasks     ", label_style),
             Span::styled(batch.tasks.len().to_string(), value_style),
@@ -553,7 +626,7 @@ fn render_batch_card(
     frame.render_widget(Paragraph::new(metadata_lines), metadata_area);
 
     if !batch.tasks.is_empty() {
-        render_task_boxes(frame, tasks_area, batch, terminal_previews);
+        render_task_boxes(frame, tasks_area, batch, focused_task, terminal_previews);
     }
 }
 
@@ -581,6 +654,7 @@ fn render_task_boxes(
     frame: &mut Frame,
     area: Rect,
     batch: &BatchInfo,
+    focused_task: Option<usize>,
     terminal_previews: &TerminalPreviewMap,
 ) {
     if area.height < 2 || batch.tasks.is_empty() {
@@ -624,7 +698,8 @@ fn render_task_boxes(
 
     for (vi, &idx) in sorted_indices.iter().take(visible_count).enumerate() {
         let task = &batch.tasks[idx];
-        render_single_task_box(frame, box_areas[vi], task, idx, terminal_previews);
+        let is_focused = focused_task == Some(idx);
+        render_single_task_box(frame, box_areas[vi], task, idx, is_focused, terminal_previews);
     }
 }
 
@@ -634,6 +709,7 @@ fn render_single_task_box(
     area: Rect,
     task: &TaskEntry,
     original_index: usize,
+    is_focused: bool,
     terminal_previews: &TerminalPreviewMap,
 ) {
     if area.height < 2 || area.width < 4 {
@@ -655,11 +731,15 @@ fn render_single_task_box(
         TaskStatus::Done => ("Done", Style::default().fg(theme::R_WARNING)),
     };
 
-    // Separator color based on status
-    let sep_color = match task.status {
-        TaskStatus::Active => theme::R_SUCCESS,
-        TaskStatus::Idle => theme::R_TEXT_DISABLED,
-        TaskStatus::Done => theme::R_TEXT_TERTIARY,
+    // Separator color based on status (accent when focused)
+    let sep_color = if is_focused {
+        theme::R_ACCENT_BRIGHT
+    } else {
+        match task.status {
+            TaskStatus::Active => theme::R_SUCCESS,
+            TaskStatus::Idle => theme::R_TEXT_DISABLED,
+            TaskStatus::Done => theme::R_TEXT_TERTIARY,
+        }
     };
 
     // Top separator line
@@ -686,8 +766,24 @@ fn render_single_task_box(
         return;
     }
 
-    // Line 1: task number + status + branch name
-    let max_branch = (content_area.width as usize).saturating_sub(12);
+    // Line 1: focus indicator + task number + status + branch name
+    let indicator = if is_focused { "> " } else { "  " };
+    let indicator_style = if is_focused {
+        Style::default()
+            .fg(theme::R_ACCENT_BRIGHT)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        label_style
+    };
+    let branch_style = if is_focused {
+        Style::default()
+            .fg(theme::R_TEXT_PRIMARY)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        value_style
+    };
+
+    let max_branch = (content_area.width as usize).saturating_sub(14);
     let branch_display = if task.branch_name.len() > max_branch {
         format!(
             "{}\u{2026}",
@@ -698,11 +794,12 @@ fn render_single_task_box(
     };
 
     let header_line = Line::from(vec![
+        Span::styled(indicator, indicator_style),
         Span::styled(format!("{}.", original_index + 1), label_style),
         Span::raw(" "),
         Span::styled(status_text, status_style),
         Span::raw(" "),
-        Span::styled(branch_display, value_style),
+        Span::styled(branch_display, branch_style),
     ]);
 
     let mut lines = vec![header_line];
