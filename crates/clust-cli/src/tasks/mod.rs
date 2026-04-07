@@ -386,12 +386,18 @@ fn render_batch_card(
         (false, None) => theme::R_TEXT_TERTIARY,
     };
 
+    let title_color = match (focused, repo_color) {
+        (true, Some(c)) => c,
+        (false, Some(c)) => theme::dim_color(c),
+        (true, None) => theme::R_ACCENT_BRIGHT,
+        (false, None) => theme::R_ACCENT,
+    };
     let title_style = if focused {
         Style::default()
-            .fg(theme::R_ACCENT_BRIGHT)
+            .fg(title_color)
             .add_modifier(Modifier::BOLD)
     } else {
-        Style::default().fg(theme::R_ACCENT)
+        Style::default().fg(title_color)
     };
 
     let block = Block::default()
