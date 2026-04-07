@@ -174,17 +174,17 @@ A multi-agent terminal overview that displays all active agents side-by-side wit
 
 #### Tasks Tab
 
-A batch management tab that displays created batch definitions as horizontal cards. Batches are UI-only definitions (no execution) that store configuration for future batch agent operations.
+A batch management tab that displays created batch definitions as horizontal cards. Batches can be toggled between Idle and Active status, and when activated, automatically start agents for their tasks via `CreateWorktreeAgent` IPC.
 
 **Layout:**
 
-- **Options bar (1 row):** A single-line bar at the top showing the batch count (e.g., "3 batches") and a `Opt+T create batch` hint. The bar uses `R_BG_RAISED` background.
+- **Options bar (1 row):** A single-line bar at the top showing the batch count (e.g., "3 batches") and hints `Opt+T create batch` and `Space toggle status`. The bar uses `R_BG_RAISED` background.
 - **Batch cards (horizontal):** Dynamically sized columns distributed evenly across the available width. The minimum card width is 40 columns. Cards use ratio-based constraints so they fill the screen evenly. A single card never exceeds half the screen width (minimum 2 slots). When more batches exist than fit on screen, horizontal scrolling is enabled via `Shift+Left`/`Shift+Right`.
 
 Each batch card has:
 - **Box-drawing borders** using the repo's assigned color (bright when focused, dimmed when unfocused via `dim_color()`). Cards without a repo fall back to accent blue when focused and tertiary text color when unfocused.
 - **Title** displayed in the border (accent bright when focused, accent when unfocused).
-- **Card body** showing: Repo name (in repo color), Branch name, Workers (concurrency limit or infinity symbol), Tasks (count of tasks added to the batch), Prefix (prompt prefix or "(none)"), Suffix (prompt suffix or "(none)"), and Status ("Not started").
+- **Card body** showing: Repo name (in repo color), Branch name, Workers (concurrency limit or infinity symbol), Tasks (count of tasks added to the batch), Prefix (prompt prefix or "(none)"), Suffix (prompt suffix or "(none)"), Status (Idle in disabled/gray or Active in green/bold), and a per-task list showing each task's status and branch name.
 - Focused cards use `R_BG_SURFACE` background; unfocused cards use `R_BG_BASE`.
 
 **Empty state:** When no batches exist, a centered message is displayed: "No batches defined -- press Opt+T to create one".
@@ -206,6 +206,7 @@ Each batch card has:
 | `Up` | Return to batch list focus |
 | `Delete` / `Backspace` | Remove the focused batch card |
 | `Enter` | Open the Add Task modal for the focused batch card |
+| `Space` | Toggle focused batch status between Idle and Active |
 | `p` | Open the Edit Field modal to edit the prompt prefix of the focused batch |
 | `s` | Open the Edit Field modal to edit the prompt suffix of the focused batch |
 
@@ -213,11 +214,16 @@ Each batch card has:
 
 - `TasksState` manages the batch list, focus state, scroll offset, and ID generation.
 - `TasksFocus` enum tracks whether the batch list or a specific card is focused.
-- `BatchInfo` stores: id, title, repo_path, repo_name, branch_name, max_concurrent, prompt_prefix, prompt_suffix, tasks (list of `TaskEntry`), and created_at timestamp.
-- `TaskEntry` stores: branch_name and prompt for a single task within a batch.
-- `add_task()` adds a `TaskEntry` to a specific batch by index.
+- `BatchInfo` stores: id, title, repo_path, repo_name, branch_name, max_concurrent, prompt_prefix, prompt_suffix, tasks (list of `TaskEntry`), status (`BatchStatus`: Idle or Active), and created_at timestamp.
+- `TaskEntry` stores: branch_name, prompt, and status (`TaskStatus`: Idle, Active, or Done) for a single task within a batch.
+- `BatchStatus` enum: `Idle` (default, gray/disabled text) and `Active` (green bold text).
+- `TaskStatus` enum: `Idle` (gray/disabled text), `Active` (green bold text), and `Done` (amber/warning text).
+- `add_task()` adds a `TaskEntry` (with `Idle` status) to a specific batch by index.
 - `set_prompt_prefix()` / `set_prompt_suffix()` update the prompt prefix/suffix for a batch (empty string clears to `None`).
-- `BatchInfo::build_prompt(task_prompt)` combines the batch prefix, task prompt, and batch suffix into a single string (joined with double newlines), for use by future agent startup code.
+- `BatchInfo::build_prompt(task_prompt)` combines the batch prefix, task prompt, and batch suffix into a single string (joined with double newlines). Used by the agent spawner when starting batch tasks.
+- `toggle_batch_status()` toggles a batch between Idle and Active. When transitioning to Active, returns a `BatchStartInfo` containing the tasks to start (up to `max_concurrent` minus already-active tasks). Only Idle tasks are started.
+- `batch_by_id_mut()` finds a batch by its unique id for updating task statuses after agent start results.
+- `BatchStartInfo` struct carries batch_id, repo_path, target_branch, and a list of (task_index, branch_name, prompt) tuples for tasks that need agents started.
 - Auto-naming: when no title is provided, batches are named sequentially ("Batch 1", "Batch 2", etc.).
 - Click support: clicking a batch card focuses it via the `tasks_batch_cards` click map.
 
@@ -242,7 +248,7 @@ On startup, `clust ui` automatically connects to the hub daemon, starting it if 
 
 **Status messages:** Temporary status messages override the keybinding hints area. Messages are displayed for 5 seconds before auto-dismissing, after which the keybinding hints reappear. Two severity levels exist: `Error` (displayed in `R_ERROR` color) and `Success` (displayed in `R_SUCCESS` color). Status messages are used to surface feedback from async operations such as agent creation, branch pulls, and remote branch checkout -- both success confirmations (e.g., "Agent started on feature-branch", "Pulled main: Already up to date.", "Checked out feature-branch") and error details (e.g., "Agent create failed: hub connect error: ...", "Pull failed: ...", "Checkout failed: ..."). The `StatusMessage` struct tracks the message text, level, and creation `Instant` for auto-dismissal timing. Status messages are delivered from background tokio tasks to the main event loop via a dedicated `mpsc` channel (`status_tx` / `status_rx`), separate from the `AgentStartResult` channel used for agent creation results.
 
-**Keybinding hints (when no status message is active):** Context-aware hints: on Repositories tab shows `q quit`, `Q stop+quit`, navigation hints; on Overview tab shows focus-dependent hints (e.g., `Shift+↓ enter terminal` or `Shift+↑ options`); on Tasks tab shows `Opt+T new batch`, `Left/Right navigate`, `Enter add task`, `p prefix`, `s suffix`, `Del remove`, `q quit`, `? keys`; in focus mode shows `Shift+←/→ switch panel`, `Shift+↑ exit`.
+**Keybinding hints (when no status message is active):** Context-aware hints: on Repositories tab shows `q quit`, `Q stop+quit`, navigation hints; on Overview tab shows focus-dependent hints (e.g., `Shift+↓ enter terminal` or `Shift+↑ options`); on Tasks tab shows `Opt+T new batch`, `Left/Right navigate`, `Space toggle`, `Enter add task`, `p prefix`, `s suffix`, `Del remove`, `q quit`, `? keys`; in focus mode shows `Shift+←/→ switch panel`, `Shift+↑ exit`.
 
 ### Keyboard Shortcuts
 
@@ -487,7 +493,7 @@ The `?` key toggles a keyboard shortcut overlay rendered as a centered modal (44
 - **Global section (always shown):** `q / Esc×2`, `Q`, `Ctrl+C`, `Tab`, `Shift+Tab`, `?`, `F2`, `Alt+M`, `Alt+E`, `Alt+D`, `Alt+F`, `Alt+N`, `Alt+V`, `Alt+B`, `Alt+T`, `Cmd+1`, `Cmd+2`.
 - **Repositories section (shown when Repositories tab is active):** `↑/↓` navigate, `Shift+↑/↓` jump repos, `←/→` navigate tree, `Shift+←/→` switch panel, `Enter` open menu/focus agent, `Space` collapse/expand, `v` toggle grouping.
 - **Overview section (shown when Overview tab is active):** `Shift+←/→` scroll panels, `Shift+↓` enter terminal, plus an "In terminal:" sub-context label followed by `Shift+↑` back to options bar, `Shift+↓` enter focus mode, `Shift+←/→` switch agent, `PgUp/PgDn` scroll terminal.
-- **Tasks section (shown when Tasks tab is active):** `←/→` navigate batches, `Shift+←/→` scroll batches, `Enter` add task to batch, `p` edit prompt prefix, `s` edit prompt suffix, `Del/Backspace` remove batch.
+- **Tasks section (shown when Tasks tab is active):** `←/→` navigate batches, `Shift+←/→` scroll batches, `Space` toggle batch status, `Enter` add task to batch, `p` edit prompt prefix, `s` edit prompt suffix, `Del/Backspace` remove batch.
 - **Focus Mode section (shown when in focus mode):** `Shift+↑` exit, `Shift+←/→` switch panel, `Shift+PgUp/PgDn` scroll terminal, plus a "Left panel:" sub-context label followed by `Tab` cycle tabs, `Shift+Tab` prev tab (used in Terminal tab since Tab is forwarded to the shell), `↑/↓` scroll diff.
 
 Key names are displayed in accent color (left-aligned, 16 chars wide); descriptions use primary text color. Section headers use secondary text color with bold modifier. Sub-context labels use tertiary text color and are indented.
@@ -513,7 +519,7 @@ A multi-step modal for creating new agents on git worktrees, opened globally wit
 
 **Branch name sanitization:** In step 3 (New branch), user input is sanitized via `clust_ipc::branch::sanitize_branch_name()` before being sent to the hub. This converts spaces to hyphens, slashes to double underscores, strips git-invalid characters, collapses sequences, and handles edge cases. The sanitized name is what gets used as the actual git branch name.
 
-**Completion:** On completing step 4, the modal sends a `CreateWorktreeAgent` IPC message to the hub. The hub creates the worktree (via the existing `add_worktree()` logic), spawns an agent in it, and returns `WorktreeAgentStarted`. The behavior depends on the active tab: when on the **Overview tab**, the TUI stays in overview mode and selects the newly created agent's panel after the next agent sync (via `pending_overview_select` and `OverviewState::select_agent_by_id()`); when on the **Repositories tab**, the TUI opens the new agent in focus mode as before. On success, a status bar message confirms the agent started (e.g., "Agent started on feature-branch"). On failure (hub connection error, send error, unexpected response, or hub-reported error), the error is surfaced as a status bar error message instead of being lost to stderr. The `AgentStartResult` enum has `Started` and `Failed(String)` variants to communicate the outcome from the background tokio task to the main event loop.
+**Completion:** On completing step 4, the modal sends a `CreateWorktreeAgent` IPC message to the hub. The hub creates the worktree (via the existing `add_worktree()` logic), spawns an agent in it, and returns `WorktreeAgentStarted`. The behavior depends on the active tab: when on the **Overview tab**, the TUI stays in overview mode and selects the newly created agent's panel after the next agent sync (via `pending_overview_select` and `OverviewState::select_agent_by_id()`); when on the **Repositories tab**, the TUI opens the new agent in focus mode as before. On success, a status bar message confirms the agent started (e.g., "Agent started on feature-branch"). On failure (hub connection error, send error, unexpected response, or hub-reported error), the error is surfaced as a status bar error message instead of being lost to stderr. The `AgentStartResult` enum has `Started`, `Failed(String)`, `BatchTaskStarted`, and `BatchTaskFailed` variants to communicate the outcome from background tokio tasks to the main event loop. Batch variants include `batch_id` and `task_index` for updating task statuses. The agent start channel uses a buffer size of 16 (to handle concurrent batch task starts) and is drained in a `while let Ok(result)` loop instead of processing a single result per tick.
 
 **Rendering:** The modal is rendered as a centered overlay (60 columns wide, 60% of terminal height) with a titled border, input field with visible cursor, and a scrollable list with fuzzy-matched results. The selected item is indicated with a `>` prefix and bold text. In the prompt step (4/4), the input area expands to fill remaining modal space and text wraps within the field (`.wrap(Wrap { trim: false })`) with automatic scrolling to keep the cursor visible.
 
