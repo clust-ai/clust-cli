@@ -183,7 +183,7 @@ A batch management tab that displays created batch definitions as horizontal car
 
 Each batch card has:
 - **Box-drawing borders** using the repo's assigned color (bright when focused, dimmed when unfocused via `dim_color()`). Cards without a repo fall back to accent blue when focused and tertiary text color when unfocused.
-- **Title** displayed in the border (accent bright when focused, accent when unfocused).
+- **Title** displayed in the border using the repo's assigned color (bright when focused, dimmed when unfocused via `dim_color()`). Cards without a repo fall back to accent bright when focused and accent when unfocused.
 - **Card body** showing: Repo name (in repo color), Branch name, Workers (concurrency limit or infinity symbol), Tasks (count of tasks added to the batch), Prefix (prompt prefix or "(none)"), Suffix (prompt suffix or "(none)"), Status (Idle in disabled/gray or Active in green/bold), and a per-task list showing each task's status and branch name.
 - Focused cards use `R_BG_SURFACE` background; unfocused cards use `R_BG_BASE`.
 
