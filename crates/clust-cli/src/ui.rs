@@ -21,12 +21,14 @@ use clust_ipc::{AgentInfo, CliMessage, HubMessage, RepoInfo, DEFAULT_HUB};
 use crate::{
     context_menu::{ContextMenu, ContextMenuItem, MenuResult},
     create_agent_modal::{CreateAgentModal, ModalResult},
+    create_batch_modal::{CreateBatchModal, BatchModalResult},
     detached_agent_modal::{DetachedAgentModal, DetachedModalResult},
     format::{format_attached, format_started},
     ipc,
     overview::{self, OverviewFocus, OverviewState},
     repo_modal::{RepoModal, RepoModalResult},
     search_modal::{SearchModal, SearchResult},
+    tasks::{self, TasksFocus, TasksState},
     terminal_emulator,
     theme, version,
 };
@@ -145,20 +147,23 @@ enum FocusPanel {
 enum ActiveTab {
     Repositories,
     Overview,
+    Tasks,
 }
 
 impl ActiveTab {
     fn next(self) -> Self {
         match self {
             Self::Repositories => Self::Overview,
-            Self::Overview => Self::Repositories,
+            Self::Overview => Self::Tasks,
+            Self::Tasks => Self::Repositories,
         }
     }
 
     fn prev(self) -> Self {
         match self {
-            Self::Repositories => Self::Overview,
+            Self::Repositories => Self::Tasks,
             Self::Overview => Self::Repositories,
+            Self::Tasks => Self::Overview,
         }
     }
 
@@ -166,6 +171,7 @@ impl ActiveTab {
         match self {
             Self::Repositories => "Repositories",
             Self::Overview => "Overview",
+            Self::Tasks => "Tasks",
         }
     }
 }
@@ -227,6 +233,9 @@ pub(crate) struct ClickMap {
     // Terminal content areas (inner area excluding borders/header) for URL click
     pub(crate) overview_content_areas: Vec<(Rect, usize)>, // (content_area, panel_idx)
     pub(crate) focus_right_content_area: Rect,
+
+    // Tasks tab
+    pub(crate) tasks_batch_cards: Vec<(Rect, usize)>, // (area, batch_idx)
 
     // Context menu overlay
     menu_modal_rect: Rect,
@@ -924,6 +933,10 @@ pub fn run(hub_name: &str) -> io::Result<()> {
 
     // Create-agent modal state
     let mut create_modal: Option<CreateAgentModal> = None;
+    // Create-batch modal state
+    let mut create_batch_modal: Option<CreateBatchModal> = None;
+    // Tasks tab state
+    let mut tasks_state = TasksState::new();
     // Search-agent modal state
     let mut search_modal: Option<SearchModal> = None;
     // Agent ID to select in overview after next sync
@@ -1164,7 +1177,7 @@ pub fn run(hub_name: &str) -> io::Result<()> {
             .collect();
 
         let mut click_map = ClickMap::default();
-        let show_modal = create_modal.is_some() || detached_modal.is_some() || repo_modal.is_some();
+        let show_modal = create_modal.is_some() || create_batch_modal.is_some() || detached_modal.is_some() || repo_modal.is_some();
         let show_search = search_modal.is_some();
         let purge_ref = &purge_progress;
         let clone_ref = &clone_progress;
@@ -1232,6 +1245,9 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                     ActiveTab::Overview => {
                         overview::render_overview(frame, content_area, &mut overview_state, &mut click_map, &repo_colors, &repos);
                     }
+                    ActiveTab::Tasks => {
+                        tasks::render_tasks(frame, content_area, &mut tasks_state, &mut click_map, &repo_colors);
+                    }
                 }
             }
 
@@ -1294,6 +1310,9 @@ pub fn run(hub_name: &str) -> io::Result<()> {
 
             if show_modal {
                 if let Some(ref modal) = create_modal {
+                    modal.render(frame, content_area);
+                }
+                if let Some(ref modal) = create_batch_modal {
                     modal.render(frame, content_area);
                 }
                 if let Some(ref modal) = detached_modal {
@@ -1374,6 +1393,14 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                 } else {
                                     overview_state.force_resize_all();
                                 }
+                            }
+                            KeyCode::Char('3') => {
+                                active_menu = None;
+                                if in_focus_mode {
+                                    focus_mode_state.shutdown();
+                                    in_focus_mode = false;
+                                }
+                                active_tab = ActiveTab::Tasks;
                             }
                             _ => {}
                         }
@@ -2322,6 +2349,19 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                             }
                             ModalResult::Pending => {}
                         }
+                    // Create-batch modal takes priority over all other input
+                    } else if let Some(ref mut modal) = create_batch_modal {
+                        match modal.handle_key(key) {
+                            BatchModalResult::Cancelled => {
+                                create_batch_modal = None;
+                            }
+                            BatchModalResult::Completed(output) => {
+                                create_batch_modal = None;
+                                tasks_state.add_batch(output);
+                                active_tab = ActiveTab::Tasks;
+                            }
+                            BatchModalResult::Pending => {}
+                        }
                     // Search-agent modal takes priority over all other input
                     } else if let Some(ref mut modal) = search_modal {
                         match modal.handle_key(key) {
@@ -2565,6 +2605,14 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                             level: StatusLevel::Success,
                             created: Instant::now(),
                         });
+                    } else if key.code == KeyCode::Char('t')
+                        && key.modifiers.contains(KeyModifiers::ALT)
+                    {
+                        // Global shortcut: Alt+T opens create-batch modal
+                        if !repos.is_empty() {
+                            create_batch_modal = Some(CreateBatchModal::new(repos.clone()));
+                            show_help = false;
+                        }
                     } else
                     // Focus mode: behavior depends on which side has focus
                     if in_focus_mode
@@ -2941,6 +2989,36 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                     _ => {}
                                 }
                             }
+                            // Tasks tab navigation
+                            _ if active_tab == ActiveTab::Tasks => {
+                                let shift = key.modifiers.contains(KeyModifiers::SHIFT);
+                                match key.code {
+                                    KeyCode::Left if shift => {
+                                        tasks_state.scroll_left();
+                                    }
+                                    KeyCode::Right if shift => {
+                                        tasks_state.scroll_right(last_content_area.width);
+                                    }
+                                    KeyCode::Left => {
+                                        tasks_state.focus_prev_card();
+                                    }
+                                    KeyCode::Right => {
+                                        tasks_state.focus_next_card();
+                                    }
+                                    KeyCode::Down => {
+                                        tasks_state.focus_first_card();
+                                    }
+                                    KeyCode::Up => {
+                                        tasks_state.focus = TasksFocus::BatchList;
+                                    }
+                                    KeyCode::Delete | KeyCode::Backspace => {
+                                        if let TasksFocus::BatchCard(idx) = tasks_state.focus {
+                                            tasks_state.remove_batch(idx);
+                                        }
+                                    }
+                                    _ => {}
+                                }
+                            }
                             // Repositories tab navigation
                             _ if active_tab == ActiveTab::Repositories => {
                                 match key.code {
@@ -3186,6 +3264,8 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                 }
                 Event::Paste(ref text) => {
                     if let Some(ref mut modal) = create_modal {
+                        modal.handle_paste(text);
+                    } else if let Some(ref mut modal) = create_batch_modal {
                         modal.handle_paste(text);
                     } else if let Some(ref mut modal) = search_modal {
                         modal.handle_paste(text);
@@ -4247,6 +4327,11 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                     overview_state.focus = overview::OverviewFocus::Terminal(*idx);
                                 }
                             }
+                            ActiveTab::Tasks => {
+                                if let Some((_, batch_idx)) = click_map.tasks_batch_cards.iter().find(|(r, _)| r.contains(pos)) {
+                                    tasks_state.focus = TasksFocus::BatchCard(*batch_idx);
+                                }
+                            }
                         }
                     }
                 }
@@ -4403,7 +4488,7 @@ fn find_url_at_click(
 // ---------------------------------------------------------------------------
 
 fn render_tab_bar(frame: &mut Frame, area: Rect, active_tab: ActiveTab, click_map: &mut ClickMap) {
-    let tabs = [ActiveTab::Repositories, ActiveTab::Overview];
+    let tabs = [ActiveTab::Repositories, ActiveTab::Overview, ActiveTab::Tasks];
     let mut spans = Vec::new();
     let mut cursor_x = area.x;
 
@@ -5585,6 +5670,8 @@ fn render_status_bar(
                     format!("Shift+\u{2193} enter terminal  Shift+\u{2190}/\u{2192} scroll  {mod_key}+R new agent  q quit  ? keys")
                 }
             }
+        } else if active_tab == ActiveTab::Tasks {
+            format!("{mod_key}+T new batch  \u{2190}/\u{2192} navigate  Del remove  q quit  ? keys")
         } else {
             format!("{mod_key}+N new repo  {mod_key}+R new agent  q quit  Q stop+quit  ? keys")
         };
@@ -5682,6 +5769,7 @@ fn render_help_overlay(frame: &mut Frame, area: Rect, active_tab: ActiveTab, in_
     lines.push(binding_line("Alt+N", "Add repository"));
     lines.push(binding_line("Alt+V", "Open in editor"));
     lines.push(binding_line("Alt+B", "Toggle bypass permissions"));
+    lines.push(binding_line("Alt+T", "Create batch"));
 
     // -- Repositories --
     if active_tab == ActiveTab::Repositories {
@@ -5706,6 +5794,15 @@ fn render_help_overlay(frame: &mut Frame, area: Rect, active_tab: ActiveTab, in_
         lines.push(binding_line("Shift+\u{2193}", "Enter focus mode"));
         lines.push(binding_line("Shift+\u{2190}/\u{2192}", "Switch agent"));
         lines.push(binding_line("PgUp / PgDn", "Scroll terminal"));
+    }
+
+    // -- Tasks --
+    if active_tab == ActiveTab::Tasks {
+        lines.push(Line::from(""));
+        lines.push(header_line("Tasks"));
+        lines.push(binding_line("\u{2190} / \u{2192}", "Navigate batches"));
+        lines.push(binding_line("Shift+\u{2190}/\u{2192}", "Scroll batches"));
+        lines.push(binding_line("Del / Backspace", "Remove batch"));
     }
 
     // -- Focus Mode --
@@ -6478,6 +6575,7 @@ fn resolve_editor_target(
             }
             (None, None)
         }
+        ActiveTab::Tasks => (None, None),
     }
 }
 
@@ -7201,20 +7299,23 @@ mod tests {
     fn active_tab_next_cycles() {
         let tab = ActiveTab::Repositories;
         assert_eq!(tab.next(), ActiveTab::Overview);
-        assert_eq!(tab.next().next(), ActiveTab::Repositories);
+        assert_eq!(tab.next().next(), ActiveTab::Tasks);
+        assert_eq!(tab.next().next().next(), ActiveTab::Repositories);
     }
 
     #[test]
     fn active_tab_prev_cycles() {
         let tab = ActiveTab::Repositories;
-        assert_eq!(tab.prev(), ActiveTab::Overview);
-        assert_eq!(tab.prev().prev(), ActiveTab::Repositories);
+        assert_eq!(tab.prev(), ActiveTab::Tasks);
+        assert_eq!(tab.prev().prev(), ActiveTab::Overview);
+        assert_eq!(tab.prev().prev().prev(), ActiveTab::Repositories);
     }
 
     #[test]
     fn active_tab_labels() {
         assert_eq!(ActiveTab::Repositories.label(), "Repositories");
         assert_eq!(ActiveTab::Overview.label(), "Overview");
+        assert_eq!(ActiveTab::Tasks.label(), "Tasks");
     }
 
     #[test]

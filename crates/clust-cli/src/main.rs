@@ -1,6 +1,7 @@
 mod cli;
 mod context_menu;
 mod create_agent_modal;
+mod create_batch_modal;
 mod detached_agent_modal;
 mod editor;
 mod format;
@@ -12,6 +13,7 @@ mod hub_launcher;
 mod scroll_break;
 mod search_modal;
 mod syntax;
+mod tasks;
 mod terminal;
 pub mod terminal_emulator;
 mod theme;
