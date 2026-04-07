@@ -2735,6 +2735,30 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                             create_batch_modal = Some(CreateBatchModal::new(repos.clone()));
                             show_help = false;
                         }
+                    } else if key.code == KeyCode::Char('s')
+                        && key.modifiers.contains(KeyModifiers::ALT)
+                        && active_tab == ActiveTab::Tasks
+                    {
+                        // Alt+S: start a single task in a manual-mode batch
+                        if let TasksFocus::BatchCard(batch_idx) = tasks_state.focus {
+                            if let Some(task_idx) = tasks_state.focused_task {
+                                if let Some(start_info) = tasks_state.start_single_task(batch_idx, task_idx) {
+                                    spawn_batch_tasks(
+                                        &tasks_state,
+                                        &start_info,
+                                        hub_name,
+                                        agent_start_tx.clone(),
+                                    );
+                                }
+                            } else {
+                                let mod_key = if cfg!(target_os = "macos") { "Opt" } else { "Alt" };
+                                status_message = Some(StatusMessage {
+                                    text: format!("Select a task first (\u{2191}/\u{2193} to navigate), then {mod_key}+S to start"),
+                                    level: StatusLevel::Error,
+                                    created: Instant::now(),
+                                });
+                            }
+                        }
                     } else
                     // Focus mode: behavior depends on which side has focus
                     if in_focus_mode
@@ -3179,13 +3203,21 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                         tasks_state.focus_prev_card();
                                     }
                                     KeyCode::Right => {
+                                        tasks_state.focused_task = None;
                                         tasks_state.focus_next_card();
                                     }
                                     KeyCode::Down => {
-                                        tasks_state.focus_first_card();
+                                        match tasks_state.focus {
+                                            TasksFocus::BatchList => tasks_state.focus_first_card(),
+                                            TasksFocus::BatchCard(_) => tasks_state.focus_task_down(),
+                                        }
                                     }
                                     KeyCode::Up => {
-                                        tasks_state.focus = TasksFocus::BatchList;
+                                        if tasks_state.focused_task.is_some() {
+                                            tasks_state.focus_task_up();
+                                        } else {
+                                            tasks_state.focus = TasksFocus::BatchList;
+                                        }
                                     }
                                     KeyCode::Delete | KeyCode::Backspace => {
                                         if let TasksFocus::BatchCard(idx) = tasks_state.focus {
@@ -3230,6 +3262,16 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                     }
                                     KeyCode::Char(' ') => {
                                         if let TasksFocus::BatchCard(idx) = tasks_state.focus {
+                                            if let Some(batch) = tasks_state.batches.get(idx) {
+                                                if batch.launch_mode == tasks::LaunchMode::Manual {
+                                                    let mod_key = if cfg!(target_os = "macos") { "Opt" } else { "Alt" };
+                                                    status_message = Some(StatusMessage {
+                                                        text: format!("Manual batch \u{2014} use {mod_key}+S on a task to start it"),
+                                                        level: StatusLevel::Error,
+                                                        created: Instant::now(),
+                                                    });
+                                                }
+                                            }
                                             if let Some(start_info) = tasks_state.toggle_batch_status(idx) {
                                                 spawn_batch_tasks(
                                                     &tasks_state,
@@ -5858,6 +5900,7 @@ fn state_to_agent_info(
     Some((repo_display, repo_clr, branch))
 }
 
+
 #[allow(clippy::too_many_arguments)]
 fn render_status_bar(
     frame: &mut Frame,
@@ -6103,7 +6146,9 @@ fn render_help_overlay(frame: &mut Frame, area: Rect, active_tab: ActiveTab, in_
         lines.push(header_line("Tasks"));
         lines.push(binding_line("\u{2190} / \u{2192}", "Navigate batches"));
         lines.push(binding_line("Shift+\u{2190}/\u{2192}", "Scroll batches"));
-        lines.push(binding_line("Space", "Toggle batch status"));
+        lines.push(binding_line("\u{2191} / \u{2193}", "Navigate tasks in batch"));
+        lines.push(binding_line("Space", "Toggle batch status (auto)"));
+        lines.push(binding_line("Alt+S", "Start selected task (manual)"));
         lines.push(binding_line("Enter", "Add task to batch"));
         lines.push(binding_line("p", "Edit prompt prefix"));
         lines.push(binding_line("s", "Edit prompt suffix"));
