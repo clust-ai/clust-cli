@@ -185,7 +185,7 @@ Each batch card has:
 - **Box-drawing borders** using the repo's assigned color (bright when focused, dimmed when unfocused via `dim_color()`). Cards without a repo fall back to accent blue when focused and tertiary text color when unfocused.
 - **Title** displayed in the border using the repo's assigned color (bright when focused, dimmed when unfocused via `dim_color()`). Cards without a repo fall back to accent bright when focused and accent when unfocused.
 - **Card body** showing: Repo name (in repo color), Branch name, Workers (concurrency limit or infinity symbol, for Auto-mode batches) or Mode ("Manual" in info color, for Manual-mode batches), Tasks (count of tasks added to the batch), Prefix (prompt prefix or "(none)"), Suffix (prompt suffix or "(none)"), Mode ("Plan" in warning/bold when plan_mode is enabled, "Normal" in disabled text otherwise), Bypass ("Allowed" in warning/bold when allow_bypass is enabled, "Off" in disabled text otherwise), Status (Idle in disabled/gray, Active in green/bold for Auto-mode, "Queued HH:MM (Xh Ym)" in info color with live countdown for queued batches; "Manual" in info color for Manual-mode), and a task box list below the metadata.
-- **Task boxes:** Each task is rendered as a full-width box within the batch card, separated by horizontal lines colored by status (green for Active, gray for Idle, tertiary for Done; accent bright when the task is focused). Each task box displays: focus indicator (`>` when focused), task number, status indicator, branch name (truncated with ellipsis if too long), and truncated first line of the prompt. When a focused task is Active and has an `agent_id`, a `Shift+↓ focus` hint is shown in the task header (styled with `R_ACCENT` color) to indicate the task can be opened in focus mode. Tasks are sorted with Active tasks above Idle and Done tasks.
+- **Task boxes:** Each task is rendered as a full-width box within the batch card, separated by horizontal lines colored by status (green for Active, gray for Idle, tertiary for Done; accent bright when the task is focused). Each task box displays: focus indicator (`>` when focused), task number, status indicator, branch name (truncated with ellipsis if too long), truncated first line of the prompt, and a status bar showing prefix/suffix toggle indicators. The status bar shows checkmark/cross indicators for prefix and suffix state (green when applied and the batch has a prefix/suffix, disabled color otherwise), with an `Alt+P/S toggle` hint when the task is focused. When a focused task is Active and has an `agent_id`, a `Shift+↓ focus` hint is shown in the task header (styled with `R_ACCENT` color) to indicate the task can be opened in focus mode. Tasks are sorted with Active tasks above Idle and Done tasks.
 - **Terminal preview:** Active task boxes optionally show a small terminal output preview (last 4 lines of the agent's terminal output). The preview is gated behind the `SHOW_TERMINAL_PREVIEW` constant in `tasks/mod.rs` for easy toggling. Preview data is extracted from the corresponding `AgentPanel` via the task's `agent_id` field.
 - Focused cards use `R_BG_SURFACE` background; unfocused cards use `R_BG_BASE`.
 
@@ -211,7 +211,8 @@ Each batch card has:
 | `Space` | Toggle focused batch status between Idle and Active (Auto-mode batches only; no-op for Manual-mode). If the batch is Queued, cancels the queue via `CancelQueuedBatch` IPC and reverts to Idle. |
 | `t` | Open the Timer modal to set a scheduled start time for the focused batch (Auto-mode Idle batches only). Sends `QueueBatch` IPC to the hub daemon. |
 | `Shift+↓` | Open the focused active task in focus mode (only when the focused task is Active and has an agent_id) |
-| `Opt+S` (macOS) / `Alt+S` | Start the focused task in a Manual-mode batch (only when a task is focused and the task is Idle) |
+| `Opt+P` (macOS) / `Alt+P` | Toggle per-task prefix on the focused task (only when a task is focused) |
+| `Opt+S` (macOS) / `Alt+S` | Start the focused task in a Manual-mode batch (when the task is Idle in Manual mode); otherwise toggle per-task suffix on the focused task |
 | `m` | Toggle plan mode on the focused batch card |
 | `b` | Toggle allow bypass on the focused batch card |
 | `p` | Open the Edit Field modal to edit the prompt prefix of the focused batch |
@@ -226,19 +227,20 @@ Each batch card has:
 - `focused_active_agent()` returns `(batch_idx, task_idx, agent_id, batch_title)` for the currently focused task if it is Active and has an `agent_id`. Used by the `Shift+↓` handler to open the task in focus mode.
 - `BatchInfo` stores: id, title, repo_path, repo_name, branch_name, max_concurrent, launch_mode (`LaunchMode`), prompt_prefix, prompt_suffix, tasks (list of `TaskEntry`), status (`BatchStatus`: Idle or Active), plan_mode (bool), allow_bypass (bool), and created_at timestamp.
 - `LaunchMode` enum: `Auto` (default, batches use concurrency-based toggling) and `Manual` (tasks are started individually).
-- `TaskEntry` stores: branch_name, prompt, status (`TaskStatus`: Idle, Active, or Done), and an optional `agent_id` (set when the task's agent is started, linking it to its `AgentPanel` in `OverviewState`) for a single task within a batch.
+- `TaskEntry` stores: branch_name, prompt, status (`TaskStatus`: Idle, Active, or Done), an optional `agent_id` (set when the task's agent is started, linking it to its `AgentPanel` in `OverviewState`), `use_prefix` (bool, default true), and `use_suffix` (bool, default true) for a single task within a batch.
 - `BatchAgentInfo` stores: batch_title, batch_id, task_index, and task_count for an agent that belongs to a batch. Built by `TasksState::batch_agent_map()` which returns a `HashMap<String, BatchAgentInfo>` mapping agent IDs to their batch membership info. Used by the overview tab for sorting, filter bar labels, and panel border titles.
 - `TerminalPreviewMap` (type alias for `HashMap<String, Vec<Line>>`) maps agent IDs to their last N terminal output lines, built by `build_task_terminal_previews()` in `ui.rs` each render frame.
 - `SHOW_TERMINAL_PREVIEW` constant (default `true`) gates whether terminal output previews are shown in active task boxes.
 - `TASK_TERMINAL_PREVIEW_LINES` constant (default `4`) controls how many terminal output lines are shown in the preview.
 - `BatchStatus` enum: `Idle` (default, gray/disabled text), `Active` (green bold text), and `Queued { scheduled_at: String, batch_id: String }` (info color with live countdown). Queued batches display a formatted countdown (e.g., "Queued 16:00 (1h 30m)") that updates each render frame via `timer_modal::format_countdown()`.
 - `TaskStatus` enum: `Idle` (gray/disabled text), `Active` (green bold text), and `Done` (amber/warning text).
-- `add_task()` adds a `TaskEntry` (with `Idle` status) to a specific batch by index.
+- `add_task()` adds a `TaskEntry` (with `Idle` status and the given `use_prefix`/`use_suffix` flags) to a specific batch by index.
+- `toggle_task_use_prefix()` / `toggle_task_use_suffix()` toggle the per-task prefix/suffix flags on a specific task within a batch.
 - `remove_done_tasks()` removes all tasks with `Done` status from a batch by index (retains only non-Done tasks).
 - `toggle_plan_mode()` toggles plan mode on a batch by index.
 - `toggle_allow_bypass()` toggles allow bypass on a batch by index.
 - `set_prompt_prefix()` / `set_prompt_suffix()` update the prompt prefix/suffix for a batch (empty string clears to `None`).
-- `BatchInfo::build_prompt(task_prompt)` combines the batch prefix, task prompt, and batch suffix into a single string (joined with double newlines). Used by the agent spawner when starting batch tasks.
+- `BatchInfo::build_prompt(task_prompt, use_prefix, use_suffix)` combines the batch prefix (if `use_prefix` is true), task prompt, and batch suffix (if `use_suffix` is true) into a single string (joined with double newlines). Used by the agent spawner when starting batch tasks, respecting per-task prefix/suffix flags.
 - `toggle_batch_status()` toggles a batch between Idle and Active. Returns `None` for Manual-mode batches. When transitioning an Auto-mode batch to Active, returns a `BatchStartInfo` containing the tasks to start (up to `max_concurrent` minus already-active tasks). Only Idle tasks are started. The batch's `plan_mode` and `allow_bypass` settings are passed through to the `CreateWorktreeAgent` IPC message for each spawned agent.
 - `start_single_task()` starts a single task by index within a Manual-mode batch. Returns `None` if the batch is not Manual-mode or the task is not Idle. Returns a `BatchStartInfo` with exactly one task to start.
 - `focus_task_down()` / `focus_task_up()` navigate task-level focus within a focused batch card. Down enters task focus from None to first task; Up from the first task exits task focus back to None.
@@ -249,7 +251,7 @@ Each batch card has:
 - Auto-naming: when no title is provided, batches are named sequentially ("Batch 1", "Batch 2", etc.).
 - Click support: clicking a batch card focuses it via the `tasks_batch_cards` click map.
 - Agent exit detection: on each agent list refresh, the main UI loop checks if any Active batch task agents have disappeared from the hub's agent list. For each exited agent, `mark_agent_done()` is called which marks the task as Done and returns the next Idle tasks to start (if any). This provides automatic task progression within a batch.
-- `spawn_batch_tasks()` is a helper function that spawns worktree agents for each entry in a `BatchStartInfo`. It builds full prompts using the batch's prefix/suffix via `build_prompt()`, then spawns a tokio task per entry that sends `CreateWorktreeAgent` IPC to the hub. Results are sent back via the `agent_start_tx` channel. This function is used both when toggling a batch to Active and when auto-starting next tasks after agent exit.
+- `spawn_batch_tasks()` is a helper function that spawns worktree agents for each entry in a `BatchStartInfo`. It builds full prompts using the batch's prefix/suffix via `build_prompt()`, respecting each task's `use_prefix` and `use_suffix` flags. It then spawns a tokio task per entry that sends `CreateWorktreeAgent` IPC to the hub. Results are sent back via the `agent_start_tx` channel. This function is used both when toggling a batch to Active and when auto-starting next tasks after agent exit.
 
 ### Auto-connect
 
@@ -522,7 +524,7 @@ The `?` key toggles a keyboard shortcut overlay rendered as a centered modal (44
 - **Global section (always shown):** `q / Esc×2`, `Q`, `Ctrl+C`, `Tab`, `Shift+Tab`, `?`, `F2`, `Alt+M`, `Alt+E`, `Alt+D`, `Alt+F`, `Alt+N`, `Alt+V`, `Alt+B`, `Alt+T`, `Alt+I`, `Cmd+1`, `Cmd+2`.
 - **Repositories section (shown when Repositories tab is active):** `↑/↓` navigate, `Shift+↑/↓` jump repos, `←/→` navigate tree, `Shift+←/→` switch panel, `Enter` open menu/focus agent, `Space` collapse/expand, `v` toggle grouping.
 - **Overview section (shown when Overview tab is active):** `Shift+←/→` scroll panels, `Shift+↓` enter terminal, plus an "In terminal:" sub-context label followed by `Shift+↑` back to options bar, `Shift+↓` enter focus mode, `Shift+←/→` switch agent, `PgUp/PgDn` scroll terminal.
-- **Jobs section (shown when Jobs tab is active):** `←/→` navigate batches, `↑/↓` navigate tasks within a batch, `Shift+↓` open active task in focus mode, `Shift+←/→` scroll batches, `Space` toggle batch status (or cancel queued), `t` set timer (queue batch), `Alt+S` start selected task (manual), `Enter` add task to batch, `p` edit prompt prefix, `s` edit prompt suffix, `d` clear done tasks, `Del/Backspace` remove batch.
+- **Jobs section (shown when Jobs tab is active):** `←/→` navigate batches, `↑/↓` navigate tasks within a batch, `Shift+↓` open active task in focus mode, `Shift+←/→` scroll batches, `Space` toggle batch status (or cancel queued), `t` set timer (queue batch), `Alt+P` toggle task prefix, `Alt+S` toggle task suffix / start (manual), `Enter` add task to batch, `p` edit prompt prefix, `s` edit prompt suffix, `d` clear done tasks, `Del/Backspace` remove batch.
 - **Focus Mode section (shown when in focus mode):** `Shift+↑` exit, `Shift+←/→` switch panel, `Shift+PgUp/PgDn` scroll terminal, plus a "Left panel:" sub-context label followed by `Tab` cycle tabs, `Shift+Tab` prev tab (used in Terminal tab since Tab is forwarded to the shell), `↑/↓` scroll diff.
 
 Key names are displayed in accent color (left-aligned, 16 chars wide); descriptions use primary text color. Section headers use secondary text color with bold modifier. Sub-context labels use tertiary text color and are indented.
@@ -672,10 +674,12 @@ A 2-step modal for adding a task to an existing batch, opened by pressing `Enter
 - `Esc` -- cancel the modal from step 1, or go back to step 1 from step 2 (restoring previously entered branch name)
 - `Left` / `Right` -- move cursor within the input field
 - `Backspace` -- delete character before cursor
+- `Alt+P` -- toggle per-task prefix (applies in both steps)
+- `Alt+S` -- toggle per-task suffix (applies in both steps)
 
-**Completion:** On completing step 2, the modal outputs an `AddTaskOutput` containing the batch index, branch name, and prompt. A `TaskEntry` is added to the corresponding batch via `TasksState::add_task()`.
+**Completion:** On completing step 2, the modal outputs an `AddTaskOutput` containing the batch index, branch name, prompt, `use_prefix`, and `use_suffix`. A `TaskEntry` is added to the corresponding batch via `TasksState::add_task()`.
 
-**Rendering:** The modal is rendered as a centered overlay (60 columns wide, 60% of terminal height) with a titled border showing the step number and batch title. The title for step 1 shows "Step 1/2 -- Branch name (batch title)" and step 2 shows "Step 2/2 -- Task prompt (batch title)". A hint line above the input provides navigation guidance. In step 2, the previously entered branch name is shown below the input as context. The prompt input uses word-wrap with scrolling support.
+**Rendering:** The modal is rendered as a centered overlay (60 columns wide, 60% of terminal height) with a titled border showing the step number and batch title. The title for step 1 shows "Step 1/2 -- Branch name (batch title)" and step 2 shows "Step 2/2 -- Task prompt (batch title)". A hint line above the input provides navigation guidance. In step 2, the previously entered branch name is shown below the input as context. The prompt input uses word-wrap with scrolling support. A status bar at the bottom of the modal shows prefix/suffix toggle indicators (checkmark when applied, cross when skipped) with an `Alt+P/S toggle` hint. The modal receives `has_prefix` and `has_suffix` flags from the batch to color the indicators appropriately (green when applied and the batch has a prefix/suffix, disabled color otherwise).
 
 ### Edit Field Modal
 

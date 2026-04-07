@@ -1632,6 +1632,8 @@ async fn handle_connection(
                             prompt: t.prompt.clone(),
                             status: crate::batch::HubTaskStatus::Idle,
                             agent_id: None,
+                            use_prefix: t.use_prefix,
+                            use_suffix: t.use_suffix,
                         })
                         .collect();
 
@@ -1653,9 +1655,9 @@ async fn handle_connection(
                     };
 
                     // Persist to database
-                    let task_data: Vec<(String, String)> = tasks
+                    let task_data: Vec<(String, String, bool, bool)> = tasks
                         .iter()
-                        .map(|t| (t.branch_name.clone(), t.prompt.clone()))
+                        .map(|t| (t.branch_name.clone(), t.prompt.clone(), t.use_prefix, t.use_suffix))
                         .collect();
                     {
                         let hub_state = state.lock().await;

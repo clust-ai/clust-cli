@@ -82,7 +82,7 @@ CREATE TABLE queued_batches (
 );
 ```
 
-#### `queued_batch_tasks` *(migration v5)*
+#### `queued_batch_tasks` *(migration v5, extended in v6)*
 
 Individual tasks within a queued batch. Each task maps to an agent that will be spawned in a worktree.
 
@@ -94,9 +94,13 @@ CREATE TABLE queued_batch_tasks (
     branch_name TEXT NOT NULL,
     prompt      TEXT NOT NULL,
     status      TEXT NOT NULL DEFAULT 'idle',  -- idle, active, done
-    agent_id    TEXT                            -- set when the task's agent is started
+    agent_id    TEXT,                           -- set when the task's agent is started
+    use_prefix  INTEGER NOT NULL DEFAULT 1,    -- per-task prefix toggle (1 = apply, 0 = skip); added in migration v6
+    use_suffix  INTEGER NOT NULL DEFAULT 1     -- per-task suffix toggle (1 = apply, 0 = skip); added in migration v6
 );
 ```
+
+Migration v6 adds `use_prefix` and `use_suffix` columns for per-task control over whether the batch's prompt prefix and suffix are applied when building the full prompt. Both default to 1 (true) for backward compatibility.
 
 #### `agent_history` *(deferred — future migration)*
 

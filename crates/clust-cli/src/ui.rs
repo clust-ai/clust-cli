@@ -2576,7 +2576,7 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                             }
                             AddTaskResult::Completed(output) => {
                                 add_task_modal = None;
-                                tasks_state.add_task(output.batch_idx, output.branch_name, output.prompt);
+                                tasks_state.add_task(output.batch_idx, output.branch_name, output.prompt, output.use_prefix, output.use_suffix);
                             }
                             AddTaskResult::Pending => {}
                         }
@@ -2616,6 +2616,8 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                             .map(|t| clust_ipc::QueuedTask {
                                                 branch_name: t.branch_name.clone(),
                                                 prompt: t.prompt.clone(),
+                                                use_prefix: t.use_prefix,
+                                                use_suffix: t.use_suffix,
                                             })
                                             .collect();
                                         let msg = CliMessage::QueueBatch {
@@ -2919,20 +2921,40 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                             import_batch_modal = Some(ImportBatchModal::new(repos.clone()));
                             show_help = false;
                         }
+                    } else if key.code == KeyCode::Char('p')
+                        && key.modifiers.contains(KeyModifiers::ALT)
+                        && active_tab == ActiveTab::Tasks
+                    {
+                        // Alt+P: toggle per-task prefix
+                        if let TasksFocus::BatchCard(batch_idx) = tasks_state.focus {
+                            if let Some(task_idx) = tasks_state.focused_task {
+                                tasks_state.toggle_task_use_prefix(batch_idx, task_idx);
+                            }
+                        }
                     } else if key.code == KeyCode::Char('s')
                         && key.modifiers.contains(KeyModifiers::ALT)
                         && active_tab == ActiveTab::Tasks
                     {
-                        // Alt+S: start a single task in a manual-mode batch
+                        // Alt+S: start a single task (manual mode) or toggle per-task suffix
                         if let TasksFocus::BatchCard(batch_idx) = tasks_state.focus {
                             if let Some(task_idx) = tasks_state.focused_task {
-                                if let Some(start_info) = tasks_state.start_single_task(batch_idx, task_idx) {
-                                    spawn_batch_tasks(
-                                        &tasks_state,
-                                        &start_info,
-                                        hub_name,
-                                        agent_start_tx.clone(),
-                                    );
+                                // If the task is idle in a manual-mode batch, start it;
+                                // otherwise toggle suffix.
+                                let can_start = tasks_state.batches.get(batch_idx).is_some_and(|b| {
+                                    b.launch_mode == tasks::LaunchMode::Manual
+                                        && b.tasks.get(task_idx).is_some_and(|t| t.status == tasks::TaskStatus::Idle)
+                                });
+                                if can_start {
+                                    if let Some(start_info) = tasks_state.start_single_task(batch_idx, task_idx) {
+                                        spawn_batch_tasks(
+                                            &tasks_state,
+                                            &start_info,
+                                            hub_name,
+                                            agent_start_tx.clone(),
+                                        );
+                                    }
+                                } else {
+                                    tasks_state.toggle_task_use_suffix(batch_idx, task_idx);
                                 }
                             } else {
                                 let mod_key = if cfg!(target_os = "macos") { "Opt" } else { "Alt" };
@@ -3454,7 +3476,12 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                     KeyCode::Enter => {
                                         if let TasksFocus::BatchCard(idx) = tasks_state.focus {
                                             if let Some(batch) = tasks_state.batches.get(idx) {
-                                                add_task_modal = Some(AddTaskModal::new(idx, batch.title.clone()));
+                                                add_task_modal = Some(AddTaskModal::new(
+                                                    idx,
+                                                    batch.title.clone(),
+                                                    batch.prompt_prefix.is_some(),
+                                                    batch.prompt_suffix.is_some(),
+                                                ));
                                                 show_help = false;
                                             }
                                         }
@@ -6488,6 +6515,8 @@ fn render_help_overlay(frame: &mut Frame, area: Rect, active_tab: ActiveTab, in_
         lines.push(binding_line("Enter", "Add task to batch"));
         lines.push(binding_line("p", "Edit prompt prefix"));
         lines.push(binding_line("s", "Edit prompt suffix"));
+        lines.push(binding_line("Alt+P", "Toggle task prefix"));
+        lines.push(binding_line("Alt+S", "Toggle task suffix / start"));
         lines.push(binding_line("Del / Backspace", "Remove batch"));
     }
 
@@ -7364,7 +7393,14 @@ fn spawn_batch_tasks(
     let built_prompts: Vec<_> = start_info
         .tasks_to_start
         .iter()
-        .map(|(_, _, raw_prompt)| batch.build_prompt(raw_prompt))
+        .map(|(idx, _, raw_prompt)| {
+            let (use_prefix, use_suffix) = batch
+                .tasks
+                .get(*idx)
+                .map(|t| (t.use_prefix, t.use_suffix))
+                .unwrap_or((true, true));
+            batch.build_prompt(raw_prompt, use_prefix, use_suffix)
+        })
         .collect();
     let batch_plan_mode = batch.plan_mode;
     let batch_allow_bypass = batch.allow_bypass;
