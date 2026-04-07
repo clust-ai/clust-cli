@@ -213,6 +213,12 @@ impl TasksState {
         }
     }
 
+    pub fn remove_done_tasks(&mut self, batch_idx: usize) {
+        if let Some(batch) = self.batches.get_mut(batch_idx) {
+            batch.tasks.retain(|t| t.status != TaskStatus::Done);
+        }
+    }
+
     pub fn visible_batch_count(&self, width: u16) -> usize {
         if width == 0 || self.batches.is_empty() {
             return 0;
@@ -338,7 +344,7 @@ fn render_options_bar(frame: &mut Frame, area: Rect, state: &TasksState) {
                 .bg(theme::R_BG_RAISED),
         ),
         Span::styled(
-            format!("  {mod_key}+T create batch  Space toggle status"),
+            format!("  {mod_key}+T create batch  Space toggle status  d clear done"),
             Style::default()
                 .fg(theme::R_TEXT_TERTIARY)
                 .bg(theme::R_BG_RAISED),

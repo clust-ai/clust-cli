@@ -3311,6 +3311,11 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                             }
                                         }
                                     }
+                                    KeyCode::Char('d') => {
+                                        if let TasksFocus::BatchCard(idx) = tasks_state.focus {
+                                            tasks_state.remove_done_tasks(idx);
+                                        }
+                                    }
                                     _ => {}
                                 }
                             }
