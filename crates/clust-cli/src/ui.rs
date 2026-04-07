@@ -25,6 +25,7 @@ use crate::{
     create_batch_modal::{CreateBatchModal, BatchModalResult},
     detached_agent_modal::{DetachedAgentModal, DetachedModalResult},
     edit_field_modal::{EditFieldModal, EditFieldResult},
+    import_batch_modal::{ImportBatchModal, ImportBatchResult},
     timer_modal::{TimerModal, TimerResult},
     format::{format_attached, format_started},
     ipc,
@@ -959,6 +960,7 @@ pub fn run(hub_name: &str) -> io::Result<()> {
     let mut create_modal: Option<CreateAgentModal> = None;
     // Create-batch modal state
     let mut create_batch_modal: Option<CreateBatchModal> = None;
+    let mut import_batch_modal: Option<ImportBatchModal> = None;
     let mut add_task_modal: Option<AddTaskModal> = None;
     let mut edit_field_modal: Option<EditFieldModal> = None;
     let mut edit_field_target: Option<(usize, bool)> = None; // (batch_idx, is_suffix)
@@ -1308,7 +1310,7 @@ pub fn run(hub_name: &str) -> io::Result<()> {
             .collect();
 
         let mut click_map = ClickMap::default();
-        let show_modal = create_modal.is_some() || create_batch_modal.is_some() || add_task_modal.is_some() || edit_field_modal.is_some() || timer_modal.is_some() || detached_modal.is_some() || repo_modal.is_some();
+        let show_modal = create_modal.is_some() || create_batch_modal.is_some() || import_batch_modal.is_some() || add_task_modal.is_some() || edit_field_modal.is_some() || timer_modal.is_some() || detached_modal.is_some() || repo_modal.is_some();
         let show_search = search_modal.is_some();
         let purge_ref = &purge_progress;
         let clone_ref = &clone_progress;
@@ -1445,6 +1447,9 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                     modal.render(frame, content_area);
                 }
                 if let Some(ref modal) = create_batch_modal {
+                    modal.render(frame, content_area);
+                }
+                if let Some(ref modal) = import_batch_modal {
                     modal.render(frame, content_area);
                 }
                 if let Some(ref modal) = add_task_modal {
@@ -2513,6 +2518,55 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                             }
                             BatchModalResult::Pending => {}
                         }
+                    // Import-batch modal takes priority over all other input
+                    } else if let Some(ref mut modal) = import_batch_modal {
+                        match modal.handle_key(key) {
+                            ImportBatchResult::Cancelled => {
+                                import_batch_modal = None;
+                            }
+                            ImportBatchResult::Completed(output) => {
+                                import_batch_modal = None;
+                                let launch_mode = crate::import_batch_modal::parse_launch_mode(
+                                    output.batch_json.launch_mode.as_deref(),
+                                );
+                                let batch_output = crate::create_batch_modal::BatchModalOutput {
+                                    repo_path: output.repo_path,
+                                    repo_name: output.repo_name,
+                                    branch_name: output.branch_name,
+                                    title: output.batch_json.title.clone(),
+                                    max_concurrent: output.batch_json.max_concurrent,
+                                    launch_mode,
+                                };
+                                tasks_state.add_batch(batch_output);
+                                let batch_idx = tasks_state.batches.len() - 1;
+                                // Apply prefix/suffix
+                                if let Some(ref prefix) = output.batch_json.prefix {
+                                    tasks_state.set_prompt_prefix(batch_idx, prefix.clone());
+                                }
+                                if let Some(ref suffix) = output.batch_json.suffix {
+                                    tasks_state.set_prompt_suffix(batch_idx, suffix.clone());
+                                }
+                                // Apply plan_mode and allow_bypass
+                                if output.batch_json.plan_mode {
+                                    tasks_state.toggle_plan_mode(batch_idx);
+                                }
+                                if output.batch_json.allow_bypass {
+                                    tasks_state.toggle_allow_bypass(batch_idx);
+                                }
+                                // Add all tasks
+                                for task in &output.batch_json.tasks {
+                                    tasks_state.add_task(batch_idx, task.branch.clone(), task.prompt.clone());
+                                }
+                                active_tab = ActiveTab::Tasks;
+                                let task_count = output.batch_json.tasks.len();
+                                status_message = Some(StatusMessage {
+                                    text: format!("Imported batch with {task_count} task{}", if task_count == 1 { "" } else { "s" }),
+                                    level: StatusLevel::Success,
+                                    created: Instant::now(),
+                                });
+                            }
+                            ImportBatchResult::Pending => {}
+                        }
                     // Add-task modal takes priority over all other input
                     } else if let Some(ref mut modal) = add_task_modal {
                         match modal.handle_key(key) {
@@ -2854,6 +2908,14 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                         // Global shortcut: Alt+T opens create-batch modal
                         if !repos.is_empty() {
                             create_batch_modal = Some(CreateBatchModal::new(repos.clone()));
+                            show_help = false;
+                        }
+                    } else if key.code == KeyCode::Char('i')
+                        && key.modifiers.contains(KeyModifiers::ALT)
+                    {
+                        // Global shortcut: Alt+I opens import-batch modal
+                        if !repos.is_empty() {
+                            import_batch_modal = Some(ImportBatchModal::new(repos.clone()));
                             show_help = false;
                         }
                     } else if key.code == KeyCode::Char('s')
@@ -3732,6 +3794,8 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                     if let Some(ref mut modal) = create_modal {
                         modal.handle_paste(text);
                     } else if let Some(ref mut modal) = create_batch_modal {
+                        modal.handle_paste(text);
+                    } else if let Some(ref mut modal) = import_batch_modal {
                         modal.handle_paste(text);
                     } else if let Some(ref mut modal) = add_task_modal {
                         modal.handle_paste(text);
@@ -6219,7 +6283,7 @@ fn render_status_bar(
                 }
             }
         } else if active_tab == ActiveTab::Tasks {
-            format!("{mod_key}+T new batch  \u{2190}/\u{2192} navigate  Space toggle  Enter add task  p prefix  s suffix  Del remove  q quit  ? keys")
+            format!("{mod_key}+T new batch  {mod_key}+I import  \u{2190}/\u{2192} navigate  Space toggle  Enter add task  p prefix  s suffix  Del remove  q quit  ? keys")
         } else {
             format!("{mod_key}+N new repo  {mod_key}+R new agent  q quit  Q stop+quit  ? keys")
         };
@@ -6318,6 +6382,7 @@ fn render_help_overlay(frame: &mut Frame, area: Rect, active_tab: ActiveTab, in_
     lines.push(binding_line("Alt+V", "Open in editor"));
     lines.push(binding_line("Alt+B", "Toggle bypass permissions"));
     lines.push(binding_line("Alt+T", "Create batch"));
+    lines.push(binding_line("Alt+I", "Import batch from JSON"));
 
     // -- Repositories --
     if active_tab == ActiveTab::Repositories {

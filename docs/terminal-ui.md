@@ -178,7 +178,7 @@ A batch management tab that displays created batch definitions as horizontal car
 
 **Layout:**
 
-- **Options bar (1 row):** A single-line bar at the top showing the batch count (e.g., "3 batches") and hints `Opt+T create batch`, `Space toggle status`, `M mode`, `B bypass`, and `d clear done`. The bar uses `R_BG_RAISED` background.
+- **Options bar (1 row):** A single-line bar at the top showing the batch count (e.g., "3 batches") and hints `Opt+T create`, `Opt+I import`, `Space toggle`, `T timer`, `Opt+S start`, `M mode`, `B bypass`, and `d clear done`. The bar uses `R_BG_RAISED` background.
 - **Batch cards (horizontal):** Dynamically sized columns distributed evenly across the available width. The minimum card width is 40 columns. Cards use ratio-based constraints so they fill the screen evenly. A single card never exceeds half the screen width (minimum 2 slots). When more batches exist than fit on screen, horizontal scrolling is enabled via `Shift+Left`/`Shift+Right`.
 
 Each batch card has:
@@ -291,6 +291,7 @@ On startup, `clust ui` automatically connects to the hub daemon, starting it if 
 | `Opt+B` (macOS) / `Alt+B` | Toggle bypass permissions (global, persisted in SQLite) |
 | `Opt+N` (macOS) / `Alt+N` | Open the add-repository modal |
 | `Opt+T` (macOS) / `Alt+T` | Open the create-batch modal (only when repos are registered) |
+| `Opt+I` (macOS) / `Alt+I` | Open the import-batch modal (only when repos are registered) |
 | `Opt+V` (macOS) / `Alt+V` | Open in editor (see Editor Integration below) |
 | `Cmd+1` | Switch to Repositories tab (dismisses context menus, exits focus mode) |
 | `Cmd+2` | Switch to Overview tab (dismisses context menus, exits focus mode) |
@@ -511,7 +512,7 @@ The agent's `working_dir`, `repo_path`, and `branch_name` are passed to `open_ag
 
 The `?` key toggles a keyboard shortcut overlay rendered as a centered modal (44 columns wide) anchored to the bottom of the content area. The modal is organized into sections with bold secondary-colored headers and context-aware visibility:
 
-- **Global section (always shown):** `q / Esc×2`, `Q`, `Ctrl+C`, `Tab`, `Shift+Tab`, `?`, `F2`, `Alt+M`, `Alt+E`, `Alt+D`, `Alt+F`, `Alt+N`, `Alt+V`, `Alt+B`, `Alt+T`, `Cmd+1`, `Cmd+2`.
+- **Global section (always shown):** `q / Esc×2`, `Q`, `Ctrl+C`, `Tab`, `Shift+Tab`, `?`, `F2`, `Alt+M`, `Alt+E`, `Alt+D`, `Alt+F`, `Alt+N`, `Alt+V`, `Alt+B`, `Alt+T`, `Alt+I`, `Cmd+1`, `Cmd+2`.
 - **Repositories section (shown when Repositories tab is active):** `↑/↓` navigate, `Shift+↑/↓` jump repos, `←/→` navigate tree, `Shift+←/→` switch panel, `Enter` open menu/focus agent, `Space` collapse/expand, `v` toggle grouping.
 - **Overview section (shown when Overview tab is active):** `Shift+←/→` scroll panels, `Shift+↓` enter terminal, plus an "In terminal:" sub-context label followed by `Shift+↑` back to options bar, `Shift+↓` enter focus mode, `Shift+←/→` switch agent, `PgUp/PgDn` scroll terminal.
 - **Jobs section (shown when Jobs tab is active):** `←/→` navigate batches, `↑/↓` navigate tasks within a batch, `Shift+←/→` scroll batches, `Space` toggle batch status (or cancel queued), `t` set timer (queue batch), `Alt+S` start selected task (manual), `Enter` add task to batch, `p` edit prompt prefix, `s` edit prompt suffix, `d` clear done tasks, `Del/Backspace` remove batch.
@@ -703,6 +704,41 @@ A single-field modal for setting a scheduled start time on a batch, opened by pr
 
 **Implementation:** `timer_modal.rs` contains the `TimerModal` struct, `TimerResult` enum (`Pending`, `Cancelled`, `Completed(rfc3339)`), duration/time parsing helpers, and the `format_countdown()` function used by the batch card renderer.
 
+### Import Batch Modal
+
+A 3-step modal for importing batch definitions from JSON files, opened globally with `Opt+I` (macOS) / `Alt+I`. The modal is only available when at least one repository is registered.
+
+| Step | Title | Description |
+|------|-------|-------------|
+| 1/3 | Select batch JSON file | A file browser starting in `~/Downloads`. Shows directories and `.json` files. Hidden files (starting with `.`) are excluded. Fuzzy search filters by filename. |
+| 2/3 | Select repository | Choose from registered repos. Fuzzy search filters by name and path. Same pattern as Create Batch Modal. |
+| 3/3 | Select branch | Choose a local branch from the selected repo. Fuzzy search filters by name. Same pattern as Create Batch Modal. |
+
+**File browser navigation:**
+- `Tab` or `Enter` on a directory -- enter that directory
+- `Enter` on a `.json` file -- parse and validate the file, then advance to step 2
+- `Backspace` (when input is empty) -- navigate to the parent directory
+- `Esc` -- cancel the modal (from step 1) or go back to the previous step (from steps 2/3)
+- Type to fuzzy-filter the file list
+
+**JSON validation:** The selected file is parsed using `serde_json` into a `BatchJson` struct. Validation errors (malformed JSON, missing required fields) and files with zero tasks are rejected with an error message displayed below the file list.
+
+**JSON schema (`BatchJson` / `TaskJson`):**
+- `title` (string, optional) -- batch name, falls back to auto-naming
+- `prefix` (string, optional) -- prompt prefix prepended to every task
+- `suffix` (string, optional) -- prompt suffix appended to every task
+- `launch_mode` (string, optional) -- `"auto"` (default) or `"manual"`
+- `max_concurrent` (number, optional) -- max concurrent agents, null = unlimited
+- `plan_mode` (bool, default false) -- start agents in plan mode
+- `allow_bypass` (bool, default false) -- allow agents to bypass permission prompts
+- `tasks` (array, required) -- list of task objects with `branch` (string, required), `prompt` (string, required), and `depends_on` (array of strings, optional)
+
+**Completion:** On selecting a branch in step 3, the modal outputs an `ImportBatchOutput` containing the parsed `BatchJson`, repo path, repo name, and branch name. The batch is created with all tasks pre-populated, prefix/suffix applied, plan_mode and allow_bypass toggled as specified, and the active tab switches to the Tasks tab. A success status message shows the imported task count.
+
+**Rendering:** The modal is rendered as a centered overlay (60 columns wide, 60% of terminal height) with a titled border showing the current step and description. The file browser step shows the base path above the input field, with a scrollable list of directories (with `/` suffix) and `.json` files below. Parse errors are displayed in `R_ERROR` color at the bottom. Steps 2 and 3 follow the same rendering pattern as the Create Batch Modal.
+
+**Implementation:** `import_batch_modal.rs` contains the `ImportBatchModal` struct, `ImportBatchResult` enum (`Pending`, `Cancelled`, `Completed(Box<ImportBatchOutput>)`), and the `BatchJson`/`TaskJson` serde structs. The `parse_launch_mode()` helper converts the optional launch mode string to a `LaunchMode` enum value.
+
 ### Clone Progress Modal
 
 A centered overlay that shows real-time progress during a git clone operation. Displayed automatically when a clone is initiated from the add-repository modal.
@@ -716,7 +752,7 @@ A centered overlay that shows real-time progress during a git clone operation. D
 
 ### Text Input and Paste Handling
 
-All modal text inputs (Create Agent, Create Batch, Add Task, Edit Field, Timer, Search Agent, Detached Agent, Add Repository, and the Branch Picker in focus mode) track cursor position as a **byte offset** into the UTF-8 `String`, not a character index. This ensures correct behavior when the input contains multi-byte UTF-8 characters (e.g., em-dash, en-dash, accented characters):
+All modal text inputs (Create Agent, Create Batch, Import Batch, Add Task, Edit Field, Timer, Search Agent, Detached Agent, Add Repository, and the Branch Picker in focus mode) track cursor position as a **byte offset** into the UTF-8 `String`, not a character index. This ensures correct behavior when the input contains multi-byte UTF-8 characters (e.g., em-dash, en-dash, accented characters):
 
 - **Insert:** advances `cursor_pos` by `c.len_utf8()`
 - **Backspace / Left arrow:** retreats `cursor_pos` to the previous character boundary via `char_indices().next_back()`
