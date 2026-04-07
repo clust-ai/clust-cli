@@ -57,6 +57,21 @@ enum AgentStartResult {
         is_worktree: bool,
     },
     Failed(String),
+    #[allow(dead_code)]
+    BatchTaskStarted {
+        batch_id: usize,
+        task_index: usize,
+        agent_id: String,
+        agent_binary: String,
+        working_dir: String,
+        repo_path: Option<String>,
+        branch_name: Option<String>,
+    },
+    BatchTaskFailed {
+        batch_id: usize,
+        task_index: usize,
+        message: String,
+    },
 }
 
 enum StatusLevel {
@@ -957,7 +972,7 @@ pub fn run(hub_name: &str) -> io::Result<()> {
     // Cached list of installed editors (detected once at startup)
     let editors_cache = crate::editor::detect_installed_editors();
     let (agent_start_tx, mut agent_start_rx) =
-        tokio::sync::mpsc::channel::<AgentStartResult>(4);
+        tokio::sync::mpsc::channel::<AgentStartResult>(16);
     let (status_tx, mut status_rx) =
         tokio::sync::mpsc::channel::<StatusMessage>(4);
 
@@ -1012,8 +1027,8 @@ pub fn run(hub_name: &str) -> io::Result<()> {
             }
         }
 
-        // Check for completed agent start requests
-        if let Ok(result) = agent_start_rx.try_recv() {
+        // Check for completed agent start requests (drain all pending)
+        while let Ok(result) = agent_start_rx.try_recv() {
             match result {
                 AgentStartResult::Started {
                     agent_id,
@@ -1053,6 +1068,43 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                 AgentStartResult::Failed(msg) => {
                     status_message = Some(StatusMessage {
                         text: msg,
+                        level: StatusLevel::Error,
+                        created: Instant::now(),
+                    });
+                }
+                AgentStartResult::BatchTaskStarted {
+                    batch_id,
+                    task_index,
+                    agent_id: _,
+                    agent_binary: _,
+                    working_dir: _,
+                    repo_path: _,
+                    branch_name,
+                } => {
+                    if let Some(batch) = tasks_state.batch_by_id_mut(batch_id) {
+                        if let Some(task) = batch.tasks.get_mut(task_index) {
+                            task.status = tasks::TaskStatus::Active;
+                        }
+                    }
+                    let label = branch_name.as_deref().unwrap_or("batch task");
+                    status_message = Some(StatusMessage {
+                        text: format!("Batch agent started: {label}"),
+                        level: StatusLevel::Success,
+                        created: Instant::now(),
+                    });
+                }
+                AgentStartResult::BatchTaskFailed {
+                    batch_id,
+                    task_index,
+                    message,
+                } => {
+                    if let Some(batch) = tasks_state.batch_by_id_mut(batch_id) {
+                        if let Some(task) = batch.tasks.get_mut(task_index) {
+                            task.status = tasks::TaskStatus::Idle;
+                        }
+                    }
+                    status_message = Some(StatusMessage {
+                        text: message,
                         level: StatusLevel::Error,
                         created: Instant::now(),
                     });
@@ -3146,6 +3198,116 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                                 ));
                                                 edit_field_target = Some((idx, true));
                                                 show_help = false;
+                                            }
+                                        }
+                                    }
+                                    KeyCode::Char(' ') => {
+                                        if let TasksFocus::BatchCard(idx) = tasks_state.focus {
+                                            if let Some(start_info) = tasks_state.toggle_batch_status(idx) {
+                                                // Build full prompts using the batch's prompt builder
+                                                // (prefix + task prompt + suffix)
+                                                let batch = &tasks_state.batches[idx];
+                                                let built_prompts: Vec<_> = start_info.tasks_to_start.iter()
+                                                    .map(|(_, _, raw_prompt)| batch.build_prompt(raw_prompt))
+                                                    .collect();
+                                                let hub = hub_name.to_string();
+                                                let (cols, rows) =
+                                                    crossterm::terminal::size()
+                                                        .unwrap_or((80, 24));
+                                                for ((task_index, new_branch, _), full_prompt) in start_info.tasks_to_start.into_iter().zip(built_prompts) {
+                                                    let tx = agent_start_tx.clone();
+                                                    let hub = hub.clone();
+                                                    let rp = start_info.repo_path.clone();
+                                                    let tb = start_info.target_branch.clone();
+                                                    let batch_id = start_info.batch_id;
+                                                    tokio::spawn(async move {
+                                                        let mut stream =
+                                                            match ipc::try_connect().await {
+                                                                Ok(s) => s,
+                                                                Err(e) => {
+                                                                    let _ = tx.send(AgentStartResult::BatchTaskFailed {
+                                                                        batch_id,
+                                                                        task_index,
+                                                                        message: format!("Agent create failed: hub connect error: {e}"),
+                                                                    }).await;
+                                                                    return;
+                                                                }
+                                                            };
+                                                        let msg =
+                                                            CliMessage::CreateWorktreeAgent {
+                                                                repo_path: rp,
+                                                                target_branch: Some(tb),
+                                                                new_branch: Some(new_branch),
+                                                                prompt: Some(full_prompt),
+                                                                agent_binary: None,
+                                                                cols,
+                                                                rows: rows
+                                                                    .saturating_sub(2)
+                                                                    .max(1),
+                                                                accept_edits: false,
+                                                                hub,
+                                                            };
+                                                        if let Err(e) = clust_ipc::send_message(
+                                                            &mut stream,
+                                                            &msg,
+                                                        )
+                                                        .await
+                                                        {
+                                                            let _ = tx.send(AgentStartResult::BatchTaskFailed {
+                                                                batch_id,
+                                                                task_index,
+                                                                message: format!("Agent create failed: send error: {e}"),
+                                                            }).await;
+                                                            return;
+                                                        }
+                                                        match clust_ipc::recv_message::<HubMessage>(
+                                                            &mut stream,
+                                                        )
+                                                        .await
+                                                        {
+                                                            Ok(HubMessage::WorktreeAgentStarted {
+                                                                id,
+                                                                agent_binary,
+                                                                working_dir,
+                                                                repo_path,
+                                                                branch_name,
+                                                            }) => {
+                                                                let _ = tx
+                                                                    .send(AgentStartResult::BatchTaskStarted {
+                                                                        batch_id,
+                                                                        task_index,
+                                                                        agent_id: id,
+                                                                        agent_binary,
+                                                                        working_dir,
+                                                                        repo_path,
+                                                                        branch_name,
+                                                                    })
+                                                                    .await;
+                                                            }
+                                                            Ok(HubMessage::Error { message }) => {
+                                                                let _ = tx.send(AgentStartResult::BatchTaskFailed {
+                                                                    batch_id,
+                                                                    task_index,
+                                                                    message: format!("Agent create failed: {message}"),
+                                                                }).await;
+                                                            }
+                                                            Ok(_) => {
+                                                                let _ = tx.send(AgentStartResult::BatchTaskFailed {
+                                                                    batch_id,
+                                                                    task_index,
+                                                                    message: "Agent create failed: unexpected hub response".to_string(),
+                                                                }).await;
+                                                            }
+                                                            Err(e) => {
+                                                                let _ = tx.send(AgentStartResult::BatchTaskFailed {
+                                                                    batch_id,
+                                                                    task_index,
+                                                                    message: format!("Agent create failed: recv error: {e}"),
+                                                                }).await;
+                                                            }
+                                                        }
+                                                    });
+                                                }
                                             }
                                         }
                                     }
@@ -5841,7 +6003,7 @@ fn render_status_bar(
                 }
             }
         } else if active_tab == ActiveTab::Tasks {
-            format!("{mod_key}+T new batch  \u{2190}/\u{2192} navigate  Enter add task  p prefix  s suffix  Del remove  q quit  ? keys")
+            format!("{mod_key}+T new batch  \u{2190}/\u{2192} navigate  Space toggle  Enter add task  p prefix  s suffix  Del remove  q quit  ? keys")
         } else {
             format!("{mod_key}+N new repo  {mod_key}+R new agent  q quit  Q stop+quit  ? keys")
         };
@@ -5972,6 +6134,7 @@ fn render_help_overlay(frame: &mut Frame, area: Rect, active_tab: ActiveTab, in_
         lines.push(header_line("Tasks"));
         lines.push(binding_line("\u{2190} / \u{2192}", "Navigate batches"));
         lines.push(binding_line("Shift+\u{2190}/\u{2192}", "Scroll batches"));
+        lines.push(binding_line("Space", "Toggle batch status"));
         lines.push(binding_line("Enter", "Add task to batch"));
         lines.push(binding_line("p", "Edit prompt prefix"));
         lines.push(binding_line("s", "Edit prompt suffix"));

@@ -23,11 +23,25 @@ const MIN_CARD_WIDTH: u16 = 40;
 // Data types
 // ---------------------------------------------------------------------------
 
-/// A single task within a batch.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum BatchStatus {
+    Idle,
+    Active,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
 #[allow(dead_code)]
+pub enum TaskStatus {
+    Idle,
+    Active,
+    Done,
+}
+
+/// A single task within a batch.
 pub struct TaskEntry {
     pub branch_name: String,
     pub prompt: String,
+    pub status: TaskStatus,
 }
 
 /// A single batch definition (UI-only, no execution).
@@ -42,13 +56,13 @@ pub struct BatchInfo {
     pub prompt_prefix: Option<String>,
     pub prompt_suffix: Option<String>,
     pub tasks: Vec<TaskEntry>,
+    pub status: BatchStatus,
     pub created_at: Instant,
 }
 
 impl BatchInfo {
     /// Builds the full prompt for a task by combining the batch prefix,
     /// the task-specific prompt, and the batch suffix.
-    #[allow(dead_code)]
     pub fn build_prompt(&self, task_prompt: &str) -> String {
         let mut parts = Vec::new();
         if let Some(ref prefix) = self.prompt_prefix {
@@ -60,6 +74,14 @@ impl BatchInfo {
         }
         parts.join("\n\n")
     }
+}
+
+/// Info returned when a batch transitions to Active, describing which tasks to start.
+pub struct BatchStartInfo {
+    pub batch_id: usize,
+    pub repo_path: String,
+    pub target_branch: String,
+    pub tasks_to_start: Vec<(usize, String, String)>, // (task_index, branch_name, prompt)
 }
 
 /// Focus state within the Tasks tab.
@@ -105,6 +127,7 @@ impl TasksState {
             prompt_prefix: None,
             prompt_suffix: None,
             tasks: Vec::new(),
+            status: BatchStatus::Idle,
             created_at: Instant::now(),
         });
         self.next_id += 1;
@@ -112,7 +135,11 @@ impl TasksState {
 
     pub fn add_task(&mut self, batch_idx: usize, branch_name: String, prompt: String) {
         if let Some(batch) = self.batches.get_mut(batch_idx) {
-            batch.tasks.push(TaskEntry { branch_name, prompt });
+            batch.tasks.push(TaskEntry {
+                branch_name,
+                prompt,
+                status: TaskStatus::Idle,
+            });
         }
     }
 
@@ -126,6 +153,50 @@ impl TasksState {
         if let Some(batch) = self.batches.get_mut(batch_idx) {
             batch.prompt_suffix = if value.is_empty() { None } else { Some(value) };
         }
+    }
+
+    /// Toggle the focused batch status. If transitioning to Active, returns
+    /// the info needed to start agents for idle tasks (up to max_concurrent).
+    pub fn toggle_batch_status(&mut self, batch_idx: usize) -> Option<BatchStartInfo> {
+        let batch = self.batches.get_mut(batch_idx)?;
+        match batch.status {
+            BatchStatus::Active => {
+                batch.status = BatchStatus::Idle;
+                None
+            }
+            BatchStatus::Idle => {
+                batch.status = BatchStatus::Active;
+                let active_count = batch
+                    .tasks
+                    .iter()
+                    .filter(|t| t.status == TaskStatus::Active)
+                    .count();
+                let max = batch.max_concurrent.unwrap_or(usize::MAX);
+                let slots = max.saturating_sub(active_count);
+                let tasks_to_start: Vec<_> = batch
+                    .tasks
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, t)| t.status == TaskStatus::Idle)
+                    .take(slots)
+                    .map(|(i, t)| (i, t.branch_name.clone(), t.prompt.clone()))
+                    .collect();
+                if tasks_to_start.is_empty() {
+                    return None;
+                }
+                Some(BatchStartInfo {
+                    batch_id: batch.id,
+                    repo_path: batch.repo_path.clone(),
+                    target_branch: batch.branch_name.clone(),
+                    tasks_to_start,
+                })
+            }
+        }
+    }
+
+    /// Find a batch by its unique id.
+    pub fn batch_by_id_mut(&mut self, id: usize) -> Option<&mut BatchInfo> {
+        self.batches.iter_mut().find(|b| b.id == id)
     }
 
     pub fn remove_batch(&mut self, idx: usize) {
@@ -267,7 +338,7 @@ fn render_options_bar(frame: &mut Frame, area: Rect, state: &TasksState) {
                 .bg(theme::R_BG_RAISED),
         ),
         Span::styled(
-            format!("  {mod_key}+T create batch"),
+            format!("  {mod_key}+T create batch  Space toggle status"),
             Style::default()
                 .fg(theme::R_TEXT_TERTIARY)
                 .bg(theme::R_BG_RAISED),
@@ -346,7 +417,19 @@ fn render_batch_card(
     let label_style = Style::default().fg(theme::R_TEXT_TERTIARY);
     let value_style = Style::default().fg(theme::R_TEXT_SECONDARY);
 
-    let lines = vec![
+    let status_span = match batch.status {
+        BatchStatus::Idle => {
+            Span::styled("Idle", Style::default().fg(theme::R_TEXT_DISABLED))
+        }
+        BatchStatus::Active => Span::styled(
+            "Active",
+            Style::default()
+                .fg(theme::R_SUCCESS)
+                .add_modifier(Modifier::BOLD),
+        ),
+    };
+
+    let mut lines = vec![
         Line::from(vec![
             Span::styled("Repo      ", label_style),
             Span::styled(&batch.repo_name, Style::default().fg(repo_color_val)),
@@ -383,9 +466,43 @@ fn render_batch_card(
         ]),
         Line::from(vec![
             Span::styled("Status    ", label_style),
-            Span::styled("Not started", Style::default().fg(theme::R_TEXT_DISABLED)),
+            status_span,
         ]),
     ];
+
+    // Task list with per-task status
+    let max_task_lines = (inner.height as usize).saturating_sub(lines.len() + 1);
+    if !batch.tasks.is_empty() {
+        lines.push(Line::from(""));
+        for (i, task) in batch.tasks.iter().enumerate().take(max_task_lines) {
+            let task_status = match task.status {
+                TaskStatus::Idle => {
+                    Span::styled("Idle   ", Style::default().fg(theme::R_TEXT_DISABLED))
+                }
+                TaskStatus::Active => Span::styled(
+                    "Active ",
+                    Style::default()
+                        .fg(theme::R_SUCCESS)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                TaskStatus::Done => {
+                    Span::styled("Done   ", Style::default().fg(theme::R_WARNING))
+                }
+            };
+            let max_branch_len =
+                (inner.width as usize).saturating_sub(12);
+            let branch_display = if task.branch_name.len() > max_branch_len {
+                format!("{}\u{2026}", &task.branch_name[..max_branch_len.saturating_sub(1)])
+            } else {
+                task.branch_name.clone()
+            };
+            lines.push(Line::from(vec![
+                Span::styled(format!(" {}. ", i + 1), label_style),
+                task_status,
+                Span::styled(branch_display, value_style),
+            ]));
+        }
+    }
 
     frame.render_widget(Paragraph::new(lines), inner);
 }
