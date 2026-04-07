@@ -1374,7 +1374,8 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                         );
                     }
                     ActiveTab::Overview => {
-                        overview::render_overview(frame, content_area, &mut overview_state, &mut click_map, &repo_colors, &repos);
+                        let batch_map = tasks_state.batch_agent_map();
+                        overview::render_overview(frame, content_area, &mut overview_state, &mut click_map, &repo_colors, &repos, &batch_map);
                     }
                     ActiveTab::Tasks => {
                         let terminal_previews = build_task_terminal_previews(&tasks_state, &overview_state);
