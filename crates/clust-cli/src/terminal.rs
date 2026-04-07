@@ -278,7 +278,7 @@ impl AttachedSession {
                             Some(ScrollCommand::ExitScrollback) => {
                                 let (_, total_rows) = terminal::size().unwrap_or((80, 24));
                                 let vp_rows = total_rows.saturating_sub(1).max(1);
-                                exit_scrollback_mode(vp_rows);
+                                exit_scrollback_mode(&scrollback_out, vp_rows);
                                 draw_status_bar(
                                     &agent_id_for_bar,
                                     &agent_binary_for_bar,
@@ -850,12 +850,28 @@ fn render_scrollback(
     let _ = stdout.flush();
 }
 
-/// Clear the viewport when exiting scrollback mode.
-fn exit_scrollback_mode(viewport_rows: u16) {
+/// Render the live screen from the shadow VT when exiting scrollback mode.
+/// Instead of clearing the viewport (which causes a blank flash), we paint
+/// the current agent screen so the transition is seamless.
+fn exit_scrollback_mode(
+    scrollback: &Arc<Mutex<TerminalEmulator>>,
+    viewport_rows: u16,
+) {
+    let mut vt = scrollback.lock().unwrap();
+    let lines = vt.to_ansi_lines_scrolled(0);
+    drop(vt);
+
     let mut stdout = io::stdout().lock();
-    for row in 1..=viewport_rows {
+    let _ = write!(stdout, "\x1b[?25l");
+    for (i, line) in lines.iter().enumerate() {
+        let row = i + 1;
+        let _ = write!(stdout, "\x1b[{row};1H\x1b[0m\x1b[2K{line}");
+    }
+    // Clear any remaining rows below the content
+    for i in lines.len()..(viewport_rows as usize) {
+        let row = i + 1;
         let _ = write!(stdout, "\x1b[{row};1H\x1b[2K");
     }
-    let _ = write!(stdout, "\x1b[1;1H");
+    let _ = write!(stdout, "\x1b[1;1H\x1b[?25h");
     let _ = stdout.flush();
 }
