@@ -24,6 +24,7 @@ use crate::{
     create_agent_modal::{CreateAgentModal, ModalResult},
     create_batch_modal::{CreateBatchModal, BatchModalResult},
     detached_agent_modal::{DetachedAgentModal, DetachedModalResult},
+    edit_field_modal::{EditFieldModal, EditFieldResult},
     format::{format_attached, format_started},
     ipc,
     overview::{self, OverviewFocus, OverviewState},
@@ -937,6 +938,8 @@ pub fn run(hub_name: &str) -> io::Result<()> {
     // Create-batch modal state
     let mut create_batch_modal: Option<CreateBatchModal> = None;
     let mut add_task_modal: Option<AddTaskModal> = None;
+    let mut edit_field_modal: Option<EditFieldModal> = None;
+    let mut edit_field_target: Option<(usize, bool)> = None; // (batch_idx, is_suffix)
     // Tasks tab state
     let mut tasks_state = TasksState::new();
     // Search-agent modal state
@@ -1180,7 +1183,7 @@ pub fn run(hub_name: &str) -> io::Result<()> {
             .collect();
 
         let mut click_map = ClickMap::default();
-        let show_modal = create_modal.is_some() || create_batch_modal.is_some() || add_task_modal.is_some() || detached_modal.is_some() || repo_modal.is_some();
+        let show_modal = create_modal.is_some() || create_batch_modal.is_some() || add_task_modal.is_some() || edit_field_modal.is_some() || detached_modal.is_some() || repo_modal.is_some();
         let show_search = search_modal.is_some();
         let purge_ref = &purge_progress;
         let clone_ref = &clone_progress;
@@ -1319,6 +1322,9 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                     modal.render(frame, content_area);
                 }
                 if let Some(ref modal) = add_task_modal {
+                    modal.render(frame, content_area);
+                }
+                if let Some(ref modal) = edit_field_modal {
                     modal.render(frame, content_area);
                 }
                 if let Some(ref modal) = detached_modal {
@@ -2380,6 +2386,25 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                             }
                             AddTaskResult::Pending => {}
                         }
+                    // Edit-field modal takes priority over all other input
+                    } else if let Some(ref mut modal) = edit_field_modal {
+                        match modal.handle_key(key) {
+                            EditFieldResult::Cancelled => {
+                                edit_field_modal = None;
+                                edit_field_target = None;
+                            }
+                            EditFieldResult::Completed(value) => {
+                                if let Some((batch_idx, is_suffix)) = edit_field_target.take() {
+                                    if is_suffix {
+                                        tasks_state.set_prompt_suffix(batch_idx, value);
+                                    } else {
+                                        tasks_state.set_prompt_prefix(batch_idx, value);
+                                    }
+                                }
+                                edit_field_modal = None;
+                            }
+                            EditFieldResult::Pending => {}
+                        }
                     // Search-agent modal takes priority over all other input
                     } else if let Some(ref mut modal) = search_modal {
                         match modal.handle_key(key) {
@@ -3096,6 +3121,34 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                             }
                                         }
                                     }
+                                    KeyCode::Char('p') => {
+                                        if let TasksFocus::BatchCard(idx) = tasks_state.focus {
+                                            if let Some(batch) = tasks_state.batches.get(idx) {
+                                                let current = batch.prompt_prefix.clone().unwrap_or_default();
+                                                edit_field_modal = Some(EditFieldModal::new(
+                                                    format!("Edit Prefix \u{2014} {}", batch.title),
+                                                    "Enter prompt prefix, Enter to save, Esc to cancel".to_string(),
+                                                    current,
+                                                ));
+                                                edit_field_target = Some((idx, false));
+                                                show_help = false;
+                                            }
+                                        }
+                                    }
+                                    KeyCode::Char('s') => {
+                                        if let TasksFocus::BatchCard(idx) = tasks_state.focus {
+                                            if let Some(batch) = tasks_state.batches.get(idx) {
+                                                let current = batch.prompt_suffix.clone().unwrap_or_default();
+                                                edit_field_modal = Some(EditFieldModal::new(
+                                                    format!("Edit Suffix \u{2014} {}", batch.title),
+                                                    "Enter prompt suffix, Enter to save, Esc to cancel".to_string(),
+                                                    current,
+                                                ));
+                                                edit_field_target = Some((idx, true));
+                                                show_help = false;
+                                            }
+                                        }
+                                    }
                                     _ => {}
                                 }
                             }
@@ -3348,6 +3401,8 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                     } else if let Some(ref mut modal) = create_batch_modal {
                         modal.handle_paste(text);
                     } else if let Some(ref mut modal) = add_task_modal {
+                        modal.handle_paste(text);
+                    } else if let Some(ref mut modal) = edit_field_modal {
                         modal.handle_paste(text);
                     } else if let Some(ref mut modal) = search_modal {
                         modal.handle_paste(text);
@@ -5786,7 +5841,7 @@ fn render_status_bar(
                 }
             }
         } else if active_tab == ActiveTab::Tasks {
-            format!("{mod_key}+T new batch  \u{2190}/\u{2192} navigate  Enter add task  Del remove  q quit  ? keys")
+            format!("{mod_key}+T new batch  \u{2190}/\u{2192} navigate  Enter add task  p prefix  s suffix  Del remove  q quit  ? keys")
         } else {
             format!("{mod_key}+N new repo  {mod_key}+R new agent  q quit  Q stop+quit  ? keys")
         };
@@ -5918,6 +5973,8 @@ fn render_help_overlay(frame: &mut Frame, area: Rect, active_tab: ActiveTab, in_
         lines.push(binding_line("\u{2190} / \u{2192}", "Navigate batches"));
         lines.push(binding_line("Shift+\u{2190}/\u{2192}", "Scroll batches"));
         lines.push(binding_line("Enter", "Add task to batch"));
+        lines.push(binding_line("p", "Edit prompt prefix"));
+        lines.push(binding_line("s", "Edit prompt suffix"));
         lines.push(binding_line("Del / Backspace", "Remove batch"));
     }
 
