@@ -19,6 +19,21 @@ use crate::ui::ClickMap;
 
 const MIN_CARD_WIDTH: u16 = 40;
 
+/// Set to `false` to disable terminal output previews in task boxes.
+pub const SHOW_TERMINAL_PREVIEW: bool = true;
+
+/// Number of terminal output lines shown in active task preview.
+pub const TASK_TERMINAL_PREVIEW_LINES: usize = 4;
+
+/// Height of a task box without terminal preview (separator + header + prompt).
+const TASK_BOX_BASE_HEIGHT: u16 = 3;
+
+/// Extra height added for terminal preview in active task boxes.
+const TASK_BOX_PREVIEW_HEIGHT: u16 = TASK_TERMINAL_PREVIEW_LINES as u16;
+
+/// Pre-extracted terminal output lines for active tasks, keyed by agent_id.
+pub type TerminalPreviewMap = HashMap<String, Vec<Line<'static>>>;
+
 // ---------------------------------------------------------------------------
 // Data types
 // ---------------------------------------------------------------------------
@@ -42,6 +57,8 @@ pub struct TaskEntry {
     pub branch_name: String,
     pub prompt: String,
     pub status: TaskStatus,
+    /// Agent ID linking this task to its AgentPanel in OverviewState (set when started).
+    pub agent_id: Option<String>,
 }
 
 /// A single batch definition (UI-only, no execution).
@@ -139,6 +156,7 @@ impl TasksState {
                 branch_name,
                 prompt,
                 status: TaskStatus::Idle,
+                agent_id: None,
             });
         }
     }
@@ -274,6 +292,7 @@ pub fn render_tasks(
     state: &mut TasksState,
     click_map: &mut ClickMap,
     repo_colors: &HashMap<String, String>,
+    terminal_previews: &TerminalPreviewMap,
 ) {
     // Split into options bar (1 row) + cards area
     let [options_area, cards_area] = Layout::vertical([
@@ -317,7 +336,7 @@ pub fn render_tasks(
             .get(batch.repo_path.as_str())
             .map(|c| theme::repo_color(c));
 
-        render_batch_card(frame, card_areas[i], batch, is_focused, repo_color);
+        render_batch_card(frame, card_areas[i], batch, is_focused, repo_color, terminal_previews);
 
         click_map.tasks_batch_cards.push((card_areas[i], batch_idx));
     }
@@ -384,6 +403,7 @@ fn render_batch_card(
     batch: &BatchInfo,
     focused: bool,
     repo_color: Option<ratatui::style::Color>,
+    terminal_previews: &TerminalPreviewMap,
 ) {
     let border_color = match (focused, repo_color) {
         (true, Some(c)) => c,
@@ -441,7 +461,7 @@ fn render_batch_card(
         ),
     };
 
-    let mut lines = vec![
+    let metadata_lines = vec![
         Line::from(vec![
             Span::styled("Repo      ", label_style),
             Span::styled(&batch.repo_name, Style::default().fg(repo_color_val)),
@@ -482,39 +502,201 @@ fn render_batch_card(
         ]),
     ];
 
-    // Task list with per-task status
-    let max_task_lines = (inner.height as usize).saturating_sub(lines.len() + 1);
+    // Split inner area: metadata on top, task boxes below
+    let metadata_height = metadata_lines.len() as u16 + 1; // +1 for blank separator
+    let [metadata_area, tasks_area] = Layout::vertical([
+        Constraint::Length(metadata_height),
+        Constraint::Min(0),
+    ])
+    .areas(inner);
+
+    frame.render_widget(Paragraph::new(metadata_lines), metadata_area);
+
     if !batch.tasks.is_empty() {
-        lines.push(Line::from(""));
-        for (i, task) in batch.tasks.iter().enumerate().take(max_task_lines) {
-            let task_status = match task.status {
-                TaskStatus::Idle => {
-                    Span::styled("Idle   ", Style::default().fg(theme::R_TEXT_DISABLED))
+        render_task_boxes(frame, tasks_area, batch, terminal_previews);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Task box rendering
+// ---------------------------------------------------------------------------
+
+/// Height of a single task box based on its status and available preview data.
+fn task_box_height(task: &TaskEntry, terminal_previews: &TerminalPreviewMap) -> u16 {
+    if task.status == TaskStatus::Active && SHOW_TERMINAL_PREVIEW {
+        let has_preview = task
+            .agent_id
+            .as_ref()
+            .and_then(|id| terminal_previews.get(id))
+            .is_some_and(|lines| !lines.is_empty());
+        if has_preview {
+            return TASK_BOX_BASE_HEIGHT + TASK_BOX_PREVIEW_HEIGHT;
+        }
+    }
+    TASK_BOX_BASE_HEIGHT
+}
+
+/// Render task boxes vertically within the given area, sorted by status.
+fn render_task_boxes(
+    frame: &mut Frame,
+    area: Rect,
+    batch: &BatchInfo,
+    terminal_previews: &TerminalPreviewMap,
+) {
+    if area.height < 2 || batch.tasks.is_empty() {
+        return;
+    }
+
+    // Sort: Active first, then Idle, then Done
+    let mut sorted_indices: Vec<usize> = (0..batch.tasks.len()).collect();
+    sorted_indices.sort_by_key(|&i| match batch.tasks[i].status {
+        TaskStatus::Active => 0,
+        TaskStatus::Idle => 1,
+        TaskStatus::Done => 2,
+    });
+
+    // Calculate how many task boxes fit in the available height
+    let mut constraints: Vec<Constraint> = Vec::new();
+    let mut total_height: u16 = 0;
+    let mut visible_count = 0;
+
+    for &idx in &sorted_indices {
+        let task = &batch.tasks[idx];
+        let h = task_box_height(task, terminal_previews);
+        if total_height + h > area.height {
+            break;
+        }
+        constraints.push(Constraint::Length(h));
+        total_height += h;
+        visible_count += 1;
+    }
+
+    if visible_count == 0 {
+        return;
+    }
+
+    // Flexible spacer pushes boxes to top
+    if total_height < area.height {
+        constraints.push(Constraint::Min(0));
+    }
+
+    let box_areas = Layout::vertical(constraints).split(area);
+
+    for (vi, &idx) in sorted_indices.iter().take(visible_count).enumerate() {
+        let task = &batch.tasks[idx];
+        render_single_task_box(frame, box_areas[vi], task, idx, terminal_previews);
+    }
+}
+
+/// Render a single task as a box with separator, header, prompt, and optional terminal preview.
+fn render_single_task_box(
+    frame: &mut Frame,
+    area: Rect,
+    task: &TaskEntry,
+    original_index: usize,
+    terminal_previews: &TerminalPreviewMap,
+) {
+    if area.height < 2 || area.width < 4 {
+        return;
+    }
+
+    let label_style = Style::default().fg(theme::R_TEXT_TERTIARY);
+    let value_style = Style::default().fg(theme::R_TEXT_SECONDARY);
+
+    // Status styling
+    let (status_text, status_style) = match task.status {
+        TaskStatus::Idle => ("Idle", Style::default().fg(theme::R_TEXT_DISABLED)),
+        TaskStatus::Active => (
+            "Active",
+            Style::default()
+                .fg(theme::R_SUCCESS)
+                .add_modifier(Modifier::BOLD),
+        ),
+        TaskStatus::Done => ("Done", Style::default().fg(theme::R_WARNING)),
+    };
+
+    // Separator color based on status
+    let sep_color = match task.status {
+        TaskStatus::Active => theme::R_SUCCESS,
+        TaskStatus::Idle => theme::R_TEXT_DISABLED,
+        TaskStatus::Done => theme::R_TEXT_TERTIARY,
+    };
+
+    // Top separator line
+    let separator = Line::from(Span::styled(
+        "\u{2500}".repeat(area.width as usize),
+        Style::default().fg(sep_color),
+    ));
+    frame.render_widget(
+        Paragraph::new(separator),
+        Rect {
+            height: 1,
+            ..area
+        },
+    );
+
+    let content_area = Rect {
+        x: area.x + 1,
+        y: area.y + 1,
+        width: area.width.saturating_sub(2),
+        height: area.height.saturating_sub(1),
+    };
+
+    if content_area.height < 1 || content_area.width < 4 {
+        return;
+    }
+
+    // Line 1: task number + status + branch name
+    let max_branch = (content_area.width as usize).saturating_sub(12);
+    let branch_display = if task.branch_name.len() > max_branch {
+        format!(
+            "{}\u{2026}",
+            &task.branch_name[..max_branch.saturating_sub(1)]
+        )
+    } else {
+        task.branch_name.clone()
+    };
+
+    let header_line = Line::from(vec![
+        Span::styled(format!("{}.", original_index + 1), label_style),
+        Span::raw(" "),
+        Span::styled(status_text, status_style),
+        Span::raw(" "),
+        Span::styled(branch_display, value_style),
+    ]);
+
+    let mut lines = vec![header_line];
+
+    // Line 2: truncated prompt
+    let max_prompt = content_area.width as usize;
+    let prompt_first_line = task.prompt.lines().next().unwrap_or("");
+    let prompt_display = if prompt_first_line.len() > max_prompt {
+        format!(
+            "{}\u{2026}",
+            &prompt_first_line[..max_prompt.saturating_sub(1)]
+        )
+    } else {
+        prompt_first_line.to_string()
+    };
+    lines.push(Line::from(Span::styled(
+        prompt_display,
+        Style::default().fg(theme::R_TEXT_TERTIARY),
+    )));
+
+    // Terminal preview for active tasks
+    if task.status == TaskStatus::Active && SHOW_TERMINAL_PREVIEW {
+        if let Some(preview_lines) = task
+            .agent_id
+            .as_ref()
+            .and_then(|id| terminal_previews.get(id))
+        {
+            if !preview_lines.is_empty() {
+                for line in preview_lines {
+                    lines.push(line.clone());
                 }
-                TaskStatus::Active => Span::styled(
-                    "Active ",
-                    Style::default()
-                        .fg(theme::R_SUCCESS)
-                        .add_modifier(Modifier::BOLD),
-                ),
-                TaskStatus::Done => {
-                    Span::styled("Done   ", Style::default().fg(theme::R_WARNING))
-                }
-            };
-            let max_branch_len =
-                (inner.width as usize).saturating_sub(12);
-            let branch_display = if task.branch_name.len() > max_branch_len {
-                format!("{}\u{2026}", &task.branch_name[..max_branch_len.saturating_sub(1)])
-            } else {
-                task.branch_name.clone()
-            };
-            lines.push(Line::from(vec![
-                Span::styled(format!(" {}. ", i + 1), label_style),
-                task_status,
-                Span::styled(branch_display, value_style),
-            ]));
+            }
         }
     }
 
-    frame.render_widget(Paragraph::new(lines), inner);
+    frame.render_widget(Paragraph::new(lines), content_area);
 }
