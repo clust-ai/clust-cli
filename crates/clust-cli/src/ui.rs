@@ -1075,7 +1075,7 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                 AgentStartResult::BatchTaskStarted {
                     batch_id,
                     task_index,
-                    agent_id: _,
+                    agent_id,
                     agent_binary: _,
                     working_dir: _,
                     repo_path: _,
@@ -1084,6 +1084,7 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                     if let Some(batch) = tasks_state.batch_by_id_mut(batch_id) {
                         if let Some(task) = batch.tasks.get_mut(task_index) {
                             task.status = tasks::TaskStatus::Active;
+                            task.agent_id = Some(agent_id);
                         }
                     }
                     let label = branch_name.as_deref().unwrap_or("batch task");
@@ -1304,7 +1305,8 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                         overview::render_overview(frame, content_area, &mut overview_state, &mut click_map, &repo_colors, &repos);
                     }
                     ActiveTab::Tasks => {
-                        tasks::render_tasks(frame, content_area, &mut tasks_state, &mut click_map, &repo_colors);
+                        let terminal_previews = build_task_terminal_previews(&tasks_state, &overview_state);
+                        tasks::render_tasks(frame, content_area, &mut tasks_state, &mut click_map, &repo_colors, &terminal_previews);
                     }
                 }
             }
@@ -5871,6 +5873,41 @@ fn render_agent_card(
     }
 
     frame.render_widget(Paragraph::new(lines), inner);
+}
+
+fn build_task_terminal_previews(
+    tasks_state: &tasks::TasksState,
+    overview_state: &overview::OverviewState,
+) -> tasks::TerminalPreviewMap {
+    let mut map = HashMap::new();
+    if !tasks::SHOW_TERMINAL_PREVIEW {
+        return map;
+    }
+    for batch in &tasks_state.batches {
+        for task in &batch.tasks {
+            if task.status != tasks::TaskStatus::Active {
+                continue;
+            }
+            let Some(ref agent_id) = task.agent_id else { continue };
+            let Some(panel) = overview_state.panels.iter().find(|p| p.id == *agent_id) else {
+                continue;
+            };
+            let all_lines = panel.vterm.to_ratatui_lines();
+            let preview: Vec<_> = all_lines
+                .into_iter()
+                .rev()
+                .filter(|l| l.width() > 0)
+                .take(tasks::TASK_TERMINAL_PREVIEW_LINES)
+                .collect::<Vec<_>>()
+                .into_iter()
+                .rev()
+                .collect();
+            if !preview.is_empty() {
+                map.insert(agent_id.clone(), preview);
+            }
+        }
+    }
+    map
 }
 
 fn state_to_agent_info(
