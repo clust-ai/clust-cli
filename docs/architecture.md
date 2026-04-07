@@ -141,7 +141,7 @@ CLI -> Hub:
   ResizeTerminal { id: String, cols: u16, rows: u16 }
   StopTerminal { id: String }
   QueueBatch { repo_path: String, target_branch: String, title: String, max_concurrent: Option<usize>, prompt_prefix: Option<String>, prompt_suffix: Option<String>, plan_mode: bool, allow_bypass: bool, agent_binary: Option<String>, hub: String, tasks: Vec<QueuedTask>, scheduled_at: String }
-  CancelQueuedBatch { batch_id: String }
+  CancelQueuedBatch { batch_id: String, cleanup_mode: BatchCleanupMode }
   ListQueuedBatches
   RegisterBatch { repo_path: String, target_branch: String, title: String, max_concurrent: Option<usize>, prompt_prefix: Option<String>, prompt_suffix: Option<String>, plan_mode: bool, allow_bypass: bool, agent_binary: Option<String>, hub: String, launch_mode: String, tasks: Vec<QueuedTask> }
   AddBatchTask { batch_id: String, branch_name: String, prompt: String }
