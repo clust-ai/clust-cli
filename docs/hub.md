@@ -44,7 +44,7 @@ Triggered by `clust -s` / `clust --stop` (no argument).
 
 ### Crash Recovery
 
-Since the hub is ephemeral (no state survives restart):
+Since the hub is mostly ephemeral (queued batches are the exception -- they are persisted in SQLite and reloaded on startup):
 
 - If the hub crashes, the socket file may be stale
 - On next startup, the hub removes any existing socket file before binding
@@ -343,6 +343,66 @@ When the hub receives a `PurgeRepo` message:
 
 Each phase sends a `PurgeProgress` IPC message to the client before execution, allowing the TUI to display real-time progress. The hub awaits agent stops before proceeding to worktree removal to prevent race conditions.
 
+## Queued Batch Engine
+
+The hub includes a batch scheduling engine (`batch.rs`) that allows users to queue batches for future execution. Queued batches are persisted in SQLite and survive hub restarts.
+
+### IPC Messages
+
+- **QueueBatch**: Creates a new queued batch with a scheduled start time. The batch and its tasks are persisted to the `queued_batches` and `queued_batch_tasks` tables. Returns `BatchQueued { batch_id, scheduled_at }`.
+- **CancelQueuedBatch**: Cancels a queued batch by ID. Removes it from both memory and the database. Returns `BatchCancelled { batch_id }`.
+- **ListQueuedBatches**: Returns a list of all non-completed queued batches as `QueuedBatchList { batches: Vec<QueuedBatchInfo> }`.
+
+### Timer Task
+
+A background tokio task (`spawn_batch_timer`) runs on a 5-second interval. On each tick it:
+
+1. Checks all scheduled batches for expired timers. If a batch's `scheduled_at` time has passed, transitions it from `Scheduled` to `Running`.
+2. For running batches, checks if any active task agents have exited (by comparing agent IDs against the hub's agent map). Exited agents' tasks are marked as `Done`.
+3. If all tasks in a batch are done, marks the batch as `Completed`.
+4. Collects idle tasks that can be started (respecting `max_concurrent`) and spawns agents for them using the shared `create_worktree_and_spawn_agent()` helper.
+
+Agent spawning happens outside the hub state lock to avoid blocking other operations during slow worktree creation.
+
+### Agent Exit Hook
+
+When an agent exits (`on_agent_exited`), the batch engine marks the matching queued batch task as `Done` and updates the database. Actual task advancement (starting next idle tasks) happens on the next timer tick to avoid performing slow worktree operations in the PTY reader thread.
+
+### Shared Worktree Helper
+
+The `create_worktree_and_spawn_agent()` function extracts the worktree creation and agent spawning logic previously inline in the `CreateWorktreeAgent` IPC handler. It accepts a `CreateWorktreeParams` struct and is used by both the IPC handler and the batch timer task. The function:
+
+1. Sanitizes the branch name.
+2. Creates or checks out a git worktree (outside the lock).
+3. Detects git info from the new worktree.
+4. Spawns an agent in the worktree (under the lock).
+5. Auto-registers the repository in SQLite.
+
+### Batch Lifecycle
+
+```
+CLI sends QueueBatch (scheduled_at = future time)
+    |
+    v
+Hub persists batch (status: Scheduled)
+    |
+    v
+Timer tick: scheduled_at <= now
+    --> Batch transitions to Running
+    --> Start tasks up to max_concurrent
+    |
+    v
+Agent exits --> Task marked Done
+    --> Next timer tick starts more tasks
+    |
+    v
+All tasks Done --> Batch transitions to Completed
+```
+
+### Hub Startup Recovery
+
+On startup, the hub loads all non-completed queued batches from SQLite. Any tasks that were `Active` but whose agents no longer exist (due to hub restart) are marked as `Done` in both memory and the database. The batch timer then handles starting new tasks on the next tick.
+
 ## In-Memory State
 
 ```rust
@@ -352,6 +412,7 @@ struct HubState {
     default_agent: Option<String>,         // loaded from SQLite on startup; None if unset
     bypass_permissions: bool,              // loaded from SQLite on startup; false if unset
     db: Option<rusqlite::Connection>,      // open SQLite connection; Some after init_db()
+    queued_batches: Vec<HubBatchEntry>,    // loaded from SQLite on startup; managed by batch engine
 }
 
 struct AgentEntry {
@@ -391,4 +452,4 @@ struct TerminalEntry {
 }
 ```
 
-This state is entirely in-memory. Nothing here survives a hub restart.
+This state is mostly in-memory and does not survive a hub restart. The exception is `queued_batches`, which are persisted in SQLite and reloaded on startup (see Queued Batch Engine section above).

@@ -38,10 +38,13 @@ pub type TerminalPreviewMap = HashMap<String, Vec<Line<'static>>>;
 // Data types
 // ---------------------------------------------------------------------------
 
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum BatchStatus {
     Idle,
     Active,
+    /// Queued for scheduled execution. Contains the RFC 3339 `scheduled_at` timestamp
+    /// and the hub-side batch ID.
+    Queued { scheduled_at: String, batch_id: String },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -225,8 +228,13 @@ impl TasksState {
         if batch.launch_mode == LaunchMode::Manual {
             return None;
         }
-        match batch.status {
+        match &batch.status {
             BatchStatus::Active => {
+                batch.status = BatchStatus::Idle;
+                None
+            }
+            BatchStatus::Queued { .. } => {
+                // Cancel queued status — revert to idle (hub cancellation handled by caller)
                 batch.status = BatchStatus::Idle;
                 None
             }
@@ -277,7 +285,7 @@ impl TasksState {
             task.status = TaskStatus::Done;
         }
 
-        if batch.status != BatchStatus::Active {
+        if !matches!(batch.status, BatchStatus::Active) {
             return None;
         }
 
@@ -480,7 +488,7 @@ fn render_options_bar(frame: &mut Frame, area: Rect, state: &TasksState) {
                 .bg(theme::R_BG_RAISED),
         ),
         Span::styled(
-            format!("  {mod_key}+T create batch  Space toggle status  {mod_key}+S start task  M mode  B bypass  d clear done"),
+            format!("  {mod_key}+T create batch  Space toggle status  T timer  {mod_key}+S start task  M mode  B bypass  d clear done"),
             Style::default()
                 .fg(theme::R_TEXT_TERTIARY)
                 .bg(theme::R_BG_RAISED),
@@ -570,7 +578,7 @@ fn render_batch_card(
     let status_span = if batch.launch_mode == LaunchMode::Manual {
         Span::styled("Manual", Style::default().fg(theme::R_INFO))
     } else {
-        match batch.status {
+        match &batch.status {
             BatchStatus::Idle => {
                 Span::styled("Idle", Style::default().fg(theme::R_TEXT_DISABLED))
             }
@@ -580,6 +588,15 @@ fn render_batch_card(
                     .fg(theme::R_SUCCESS)
                     .add_modifier(Modifier::BOLD),
             ),
+            BatchStatus::Queued { scheduled_at, .. } => {
+                let countdown = crate::timer_modal::format_countdown(scheduled_at);
+                Span::styled(
+                    format!("Queued {}", countdown),
+                    Style::default()
+                        .fg(theme::R_INFO)
+                        .add_modifier(Modifier::BOLD),
+                )
+            }
         }
     };
 

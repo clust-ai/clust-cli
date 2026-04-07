@@ -53,6 +53,9 @@ fn run_migrations(conn: &Connection) -> Result<(), String> {
     if current_version < 4 {
         migrate_v4(conn)?;
     }
+    if current_version < 5 {
+        migrate_v5(conn)?;
+    }
 
     Ok(())
 }
@@ -117,6 +120,228 @@ fn migrate_v4(conn: &Connection) -> Result<(), String> {
          INSERT INTO schema_version (version) VALUES (4);",
     )
     .map_err(|e| format!("migration v4 failed: {e}"))?;
+    Ok(())
+}
+
+/// Migration v5: create queued_batches and queued_batch_tasks tables.
+fn migrate_v5(conn: &Connection) -> Result<(), String> {
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS queued_batches (
+            id              TEXT PRIMARY KEY,
+            title           TEXT NOT NULL,
+            repo_path       TEXT NOT NULL,
+            target_branch   TEXT NOT NULL,
+            max_concurrent  INTEGER,
+            prompt_prefix   TEXT,
+            prompt_suffix   TEXT,
+            plan_mode       INTEGER NOT NULL DEFAULT 0,
+            allow_bypass    INTEGER NOT NULL DEFAULT 0,
+            agent_binary    TEXT,
+            hub             TEXT NOT NULL,
+            scheduled_at    TEXT NOT NULL,
+            status          TEXT NOT NULL DEFAULT 'scheduled',
+            created_at      TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS queued_batch_tasks (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            batch_id    TEXT NOT NULL REFERENCES queued_batches(id) ON DELETE CASCADE,
+            task_index  INTEGER NOT NULL,
+            branch_name TEXT NOT NULL,
+            prompt      TEXT NOT NULL,
+            status      TEXT NOT NULL DEFAULT 'idle',
+            agent_id    TEXT,
+            UNIQUE(batch_id, task_index)
+        );
+        INSERT INTO schema_version (version) VALUES (5);",
+    )
+    .map_err(|e| format!("migration v5 failed: {e}"))
+}
+
+// ---------------------------------------------------------------------------
+// Queued batch CRUD
+// ---------------------------------------------------------------------------
+
+/// A row from the queued_batches table.
+pub struct QueuedBatchRow {
+    pub id: String,
+    pub title: String,
+    pub repo_path: String,
+    pub target_branch: String,
+    pub max_concurrent: Option<usize>,
+    pub prompt_prefix: Option<String>,
+    pub prompt_suffix: Option<String>,
+    pub plan_mode: bool,
+    pub allow_bypass: bool,
+    pub agent_binary: Option<String>,
+    pub hub: String,
+    pub scheduled_at: String,
+    pub status: String,
+}
+
+/// A row from the queued_batch_tasks table.
+pub struct QueuedBatchTaskRow {
+    pub task_index: usize,
+    pub branch_name: String,
+    pub prompt: String,
+    pub status: String,
+    pub agent_id: Option<String>,
+}
+
+/// Insert a new queued batch and its tasks.
+pub fn insert_queued_batch(
+    conn: &Connection,
+    batch: &QueuedBatchRow,
+    tasks: &[(String, String)],
+) -> Result<(), String> {
+    conn.execute(
+        "INSERT INTO queued_batches (id, title, repo_path, target_branch, max_concurrent,
+         prompt_prefix, prompt_suffix, plan_mode, allow_bypass, agent_binary, hub,
+         scheduled_at, status, created_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
+        rusqlite::params![
+            batch.id,
+            batch.title,
+            batch.repo_path,
+            batch.target_branch,
+            batch.max_concurrent.map(|v| v as i64),
+            batch.prompt_prefix,
+            batch.prompt_suffix,
+            batch.plan_mode as i32,
+            batch.allow_bypass as i32,
+            batch.agent_binary,
+            batch.hub,
+            batch.scheduled_at,
+            batch.status,
+            chrono::Utc::now().to_rfc3339(),
+        ],
+    )
+    .map_err(|e| format!("failed to insert queued batch: {e}"))?;
+
+    for (i, (branch_name, prompt)) in tasks.iter().enumerate() {
+        conn.execute(
+            "INSERT INTO queued_batch_tasks (batch_id, task_index, branch_name, prompt, status)
+             VALUES (?1, ?2, ?3, ?4, 'idle')",
+            rusqlite::params![batch.id, i as i64, branch_name, prompt],
+        )
+        .map_err(|e| format!("failed to insert queued batch task: {e}"))?;
+    }
+    Ok(())
+}
+
+/// Load all non-completed queued batches with their tasks.
+pub fn load_queued_batches(
+    conn: &Connection,
+) -> Result<Vec<(QueuedBatchRow, Vec<QueuedBatchTaskRow>)>, String> {
+    let mut stmt = conn
+        .prepare(
+            "SELECT id, title, repo_path, target_branch, max_concurrent,
+                    prompt_prefix, prompt_suffix, plan_mode, allow_bypass,
+                    agent_binary, hub, scheduled_at, status
+             FROM queued_batches
+             WHERE status IN ('scheduled', 'running')
+             ORDER BY scheduled_at",
+        )
+        .map_err(|e| format!("failed to prepare queued batch query: {e}"))?;
+
+    let batches: Vec<QueuedBatchRow> = stmt
+        .query_map([], |row| {
+            Ok(QueuedBatchRow {
+                id: row.get(0)?,
+                title: row.get(1)?,
+                repo_path: row.get(2)?,
+                target_branch: row.get(3)?,
+                max_concurrent: row
+                    .get::<_, Option<i64>>(4)?
+                    .map(|v| v as usize),
+                prompt_prefix: row.get(5)?,
+                prompt_suffix: row.get(6)?,
+                plan_mode: row.get::<_, i32>(7)? != 0,
+                allow_bypass: row.get::<_, i32>(8)? != 0,
+                agent_binary: row.get(9)?,
+                hub: row.get(10)?,
+                scheduled_at: row.get(11)?,
+                status: row.get(12)?,
+            })
+        })
+        .map_err(|e| format!("failed to query queued batches: {e}"))?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| format!("failed to collect queued batches: {e}"))?;
+
+    let mut result = Vec::new();
+    for batch in batches {
+        let tasks = load_batch_tasks(conn, &batch.id)?;
+        result.push((batch, tasks));
+    }
+    Ok(result)
+}
+
+/// Load tasks for a specific batch.
+fn load_batch_tasks(
+    conn: &Connection,
+    batch_id: &str,
+) -> Result<Vec<QueuedBatchTaskRow>, String> {
+    let mut stmt = conn
+        .prepare(
+            "SELECT task_index, branch_name, prompt, status, agent_id
+             FROM queued_batch_tasks
+             WHERE batch_id = ?1
+             ORDER BY task_index",
+        )
+        .map_err(|e| format!("failed to prepare task query: {e}"))?;
+
+    let rows: Vec<QueuedBatchTaskRow> = stmt
+        .query_map([batch_id], |row| {
+            Ok(QueuedBatchTaskRow {
+                task_index: row.get::<_, i64>(0)? as usize,
+                branch_name: row.get(1)?,
+                prompt: row.get(2)?,
+                status: row.get(3)?,
+                agent_id: row.get(4)?,
+            })
+        })
+        .map_err(|e| format!("failed to query tasks: {e}"))?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| format!("failed to collect tasks: {e}"))?;
+    Ok(rows)
+}
+
+/// Update the status of a queued batch.
+pub fn update_batch_status(conn: &Connection, id: &str, status: &str) -> Result<(), String> {
+    conn.execute(
+        "UPDATE queued_batches SET status = ?1 WHERE id = ?2",
+        rusqlite::params![status, id],
+    )
+    .map_err(|e| format!("failed to update batch status: {e}"))?;
+    Ok(())
+}
+
+/// Update a task's status and agent_id within a queued batch.
+pub fn update_task_status(
+    conn: &Connection,
+    batch_id: &str,
+    task_index: usize,
+    status: &str,
+    agent_id: Option<&str>,
+) -> Result<(), String> {
+    conn.execute(
+        "UPDATE queued_batch_tasks SET status = ?1, agent_id = ?2
+         WHERE batch_id = ?3 AND task_index = ?4",
+        rusqlite::params![status, agent_id, batch_id, task_index as i64],
+    )
+    .map_err(|e| format!("failed to update task status: {e}"))?;
+    Ok(())
+}
+
+/// Delete a queued batch and its tasks (cascade).
+pub fn delete_queued_batch(conn: &Connection, id: &str) -> Result<(), String> {
+    // Delete tasks first (SQLite foreign key cascade may not be enabled)
+    conn.execute(
+        "DELETE FROM queued_batch_tasks WHERE batch_id = ?1",
+        [id],
+    )
+    .map_err(|e| format!("failed to delete batch tasks: {e}"))?;
+    conn.execute("DELETE FROM queued_batches WHERE id = ?1", [id])
+        .map_err(|e| format!("failed to delete batch: {e}"))?;
     Ok(())
 }
 

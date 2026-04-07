@@ -174,7 +174,7 @@ A multi-agent terminal overview that displays all active agents side-by-side wit
 
 #### Tasks Tab
 
-A batch management tab that displays created batch definitions as horizontal cards. Batches have a launch mode (Auto or Manual). Auto-mode batches can be toggled between Idle and Active status, and when activated, automatically start agents for their tasks via `CreateWorktreeAgent` IPC. Manual-mode batches display "Manual" status and allow starting individual tasks one at a time via `Opt+S` / `Alt+S`.
+A batch management tab that displays created batch definitions as horizontal cards. Batches have a launch mode (Auto or Manual). Auto-mode batches can be toggled between Idle and Active status, and when activated, automatically start agents for their tasks via `CreateWorktreeAgent` IPC. Manual-mode batches display "Manual" status and allow starting individual tasks one at a time via `Opt+S` / `Alt+S`. Auto-mode Idle batches can also be queued for scheduled execution via the `t` keybinding, which sends a `QueueBatch` IPC message to the hub daemon. Queued batches display a live countdown until their scheduled start time and can be cancelled with `Space`.
 
 **Layout:**
 
@@ -184,7 +184,7 @@ A batch management tab that displays created batch definitions as horizontal car
 Each batch card has:
 - **Box-drawing borders** using the repo's assigned color (bright when focused, dimmed when unfocused via `dim_color()`). Cards without a repo fall back to accent blue when focused and tertiary text color when unfocused.
 - **Title** displayed in the border using the repo's assigned color (bright when focused, dimmed when unfocused via `dim_color()`). Cards without a repo fall back to accent bright when focused and accent when unfocused.
-- **Card body** showing: Repo name (in repo color), Branch name, Workers (concurrency limit or infinity symbol, for Auto-mode batches) or Mode ("Manual" in info color, for Manual-mode batches), Tasks (count of tasks added to the batch), Prefix (prompt prefix or "(none)"), Suffix (prompt suffix or "(none)"), Mode ("Plan" in warning/bold when plan_mode is enabled, "Normal" in disabled text otherwise), Bypass ("Allowed" in warning/bold when allow_bypass is enabled, "Off" in disabled text otherwise), Status (Idle in disabled/gray, Active in green/bold for Auto-mode; "Manual" in info color for Manual-mode), and a task box list below the metadata.
+- **Card body** showing: Repo name (in repo color), Branch name, Workers (concurrency limit or infinity symbol, for Auto-mode batches) or Mode ("Manual" in info color, for Manual-mode batches), Tasks (count of tasks added to the batch), Prefix (prompt prefix or "(none)"), Suffix (prompt suffix or "(none)"), Mode ("Plan" in warning/bold when plan_mode is enabled, "Normal" in disabled text otherwise), Bypass ("Allowed" in warning/bold when allow_bypass is enabled, "Off" in disabled text otherwise), Status (Idle in disabled/gray, Active in green/bold for Auto-mode, "Queued HH:MM (Xh Ym)" in info color with live countdown for queued batches; "Manual" in info color for Manual-mode), and a task box list below the metadata.
 - **Task boxes:** Each task is rendered as a full-width box within the batch card, separated by horizontal lines colored by status (green for Active, gray for Idle, tertiary for Done; accent bright when the task is focused). Each task box displays: focus indicator (`>` when focused), task number, status indicator, branch name (truncated with ellipsis if too long), and truncated first line of the prompt. Tasks are sorted with Active tasks above Idle and Done tasks.
 - **Terminal preview:** Active task boxes optionally show a small terminal output preview (last 4 lines of the agent's terminal output). The preview is gated behind the `SHOW_TERMINAL_PREVIEW` constant in `tasks/mod.rs` for easy toggling. Preview data is extracted from the corresponding `AgentPanel` via the task's `agent_id` field.
 - Focused cards use `R_BG_SURFACE` background; unfocused cards use `R_BG_BASE`.
@@ -208,7 +208,8 @@ Each batch card has:
 | `Up` | Navigate to the previous task within a focused batch card, or return to batch list focus when no task is focused |
 | `Delete` / `Backspace` | Remove the focused batch card |
 | `Enter` | Open the Add Task modal for the focused batch card |
-| `Space` | Toggle focused batch status between Idle and Active (Auto-mode batches only; no-op for Manual-mode) |
+| `Space` | Toggle focused batch status between Idle and Active (Auto-mode batches only; no-op for Manual-mode). If the batch is Queued, cancels the queue via `CancelQueuedBatch` IPC and reverts to Idle. |
+| `t` | Open the Timer modal to set a scheduled start time for the focused batch (Auto-mode Idle batches only). Sends `QueueBatch` IPC to the hub daemon. |
 | `Opt+S` (macOS) / `Alt+S` | Start the focused task in a Manual-mode batch (only when a task is focused and the task is Idle) |
 | `m` | Toggle plan mode on the focused batch card |
 | `b` | Toggle allow bypass on the focused batch card |
@@ -227,7 +228,7 @@ Each batch card has:
 - `TerminalPreviewMap` (type alias for `HashMap<String, Vec<Line>>`) maps agent IDs to their last N terminal output lines, built by `build_task_terminal_previews()` in `ui.rs` each render frame.
 - `SHOW_TERMINAL_PREVIEW` constant (default `true`) gates whether terminal output previews are shown in active task boxes.
 - `TASK_TERMINAL_PREVIEW_LINES` constant (default `4`) controls how many terminal output lines are shown in the preview.
-- `BatchStatus` enum: `Idle` (default, gray/disabled text) and `Active` (green bold text).
+- `BatchStatus` enum: `Idle` (default, gray/disabled text), `Active` (green bold text), and `Queued { scheduled_at: String, batch_id: String }` (info color with live countdown). Queued batches display a formatted countdown (e.g., "Queued 16:00 (1h 30m)") that updates each render frame via `timer_modal::format_countdown()`.
 - `TaskStatus` enum: `Idle` (gray/disabled text), `Active` (green bold text), and `Done` (amber/warning text).
 - `add_task()` adds a `TaskEntry` (with `Idle` status) to a specific batch by index.
 - `remove_done_tasks()` removes all tasks with `Done` status from a batch by index (retains only non-Done tasks).
@@ -513,7 +514,7 @@ The `?` key toggles a keyboard shortcut overlay rendered as a centered modal (44
 - **Global section (always shown):** `q / Esc×2`, `Q`, `Ctrl+C`, `Tab`, `Shift+Tab`, `?`, `F2`, `Alt+M`, `Alt+E`, `Alt+D`, `Alt+F`, `Alt+N`, `Alt+V`, `Alt+B`, `Alt+T`, `Cmd+1`, `Cmd+2`.
 - **Repositories section (shown when Repositories tab is active):** `↑/↓` navigate, `Shift+↑/↓` jump repos, `←/→` navigate tree, `Shift+←/→` switch panel, `Enter` open menu/focus agent, `Space` collapse/expand, `v` toggle grouping.
 - **Overview section (shown when Overview tab is active):** `Shift+←/→` scroll panels, `Shift+↓` enter terminal, plus an "In terminal:" sub-context label followed by `Shift+↑` back to options bar, `Shift+↓` enter focus mode, `Shift+←/→` switch agent, `PgUp/PgDn` scroll terminal.
-- **Tasks section (shown when Tasks tab is active):** `←/→` navigate batches, `↑/↓` navigate tasks within a batch, `Shift+←/→` scroll batches, `Space` toggle batch status, `Alt+S` start selected task (manual), `Enter` add task to batch, `p` edit prompt prefix, `s` edit prompt suffix, `d` clear done tasks, `Del/Backspace` remove batch.
+- **Tasks section (shown when Tasks tab is active):** `←/→` navigate batches, `↑/↓` navigate tasks within a batch, `Shift+←/→` scroll batches, `Space` toggle batch status (or cancel queued), `t` set timer (queue batch), `Alt+S` start selected task (manual), `Enter` add task to batch, `p` edit prompt prefix, `s` edit prompt suffix, `d` clear done tasks, `Del/Backspace` remove batch.
 - **Focus Mode section (shown when in focus mode):** `Shift+↑` exit, `Shift+←/→` switch panel, `Shift+PgUp/PgDn` scroll terminal, plus a "Left panel:" sub-context label followed by `Tab` cycle tabs, `Shift+Tab` prev tab (used in Terminal tab since Tab is forwarded to the shell), `↑/↓` scroll diff.
 
 Key names are displayed in accent color (left-aligned, 16 chars wide); descriptions use primary text color. Section headers use secondary text color with bold modifier. Sub-context labels use tertiary text color and are indented.
@@ -682,6 +683,26 @@ A reusable single-field text editor modal for editing a text value. Currently us
 
 **Rendering:** The modal is rendered as a centered overlay (60 columns wide, 60% of terminal height) with a titled border showing the field context (e.g., "Edit Prefix -- My Batch"). A hint line above the input provides navigation guidance. The input field uses multi-line word-wrap with scrolling support. The modal is pre-filled with the current value when opened.
 
+### Timer Modal
+
+A single-field modal for setting a scheduled start time on a batch, opened by pressing `t` when a batch card is focused on the Tasks tab. Only available for Auto-mode Idle batches.
+
+**Input formats:**
+- **Duration**: `2h`, `30m`, `1h30m`, `45s`, or a bare number treated as minutes (e.g., `90` = 90 minutes)
+- **Absolute time**: `16:00`, `9:30` (24-hour format; if the time has passed today, schedules for tomorrow)
+
+**Navigation:**
+- `Enter` -- set the timer and close the modal. Sends a `QueueBatch` IPC message to the hub with the batch definition and all its tasks. The batch status changes to `Queued` with a live countdown.
+- `Esc` -- cancel and close the modal without setting a timer
+- `Left` / `Right` -- move cursor within the input field
+- `Backspace` -- delete character before cursor
+
+**Live preview:** As the user types, the modal parses the input and shows a green preview line (e.g., "Starts at 16:00 (in 1h 30m)") or a hint message if the input is not yet valid.
+
+**Rendering:** The modal is rendered as a centered overlay (60 columns wide, 8 rows tall) with a titled border showing "Set Timer -- {batch title}". A hint line explains the accepted formats. The input field shows a `>` prompt with a visible cursor. Below the input, a preview line shows the parsed result in green (`R_SUCCESS`) or an error hint in tertiary text.
+
+**Implementation:** `timer_modal.rs` contains the `TimerModal` struct, `TimerResult` enum (`Pending`, `Cancelled`, `Completed(rfc3339)`), duration/time parsing helpers, and the `format_countdown()` function used by the batch card renderer.
+
 ### Clone Progress Modal
 
 A centered overlay that shows real-time progress during a git clone operation. Displayed automatically when a clone is initiated from the add-repository modal.
@@ -695,7 +716,7 @@ A centered overlay that shows real-time progress during a git clone operation. D
 
 ### Text Input and Paste Handling
 
-All modal text inputs (Create Agent, Create Batch, Add Task, Edit Field, Search Agent, Detached Agent, Add Repository, and the Branch Picker in focus mode) track cursor position as a **byte offset** into the UTF-8 `String`, not a character index. This ensures correct behavior when the input contains multi-byte UTF-8 characters (e.g., em-dash, en-dash, accented characters):
+All modal text inputs (Create Agent, Create Batch, Add Task, Edit Field, Timer, Search Agent, Detached Agent, Add Repository, and the Branch Picker in focus mode) track cursor position as a **byte offset** into the UTF-8 `String`, not a character index. This ensures correct behavior when the input contains multi-byte UTF-8 characters (e.g., em-dash, en-dash, accented characters):
 
 - **Insert:** advances `cursor_pos` by `c.len_utf8()`
 - **Backspace / Left arrow:** retreats `cursor_pos` to the previous character boundary via `char_indices().next_back()`
