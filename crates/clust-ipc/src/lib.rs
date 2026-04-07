@@ -16,6 +16,17 @@ pub const DEFAULT_HUB: &str = "default_hub";
 /// Bump this whenever `CliMessage` or `HubMessage` enum shapes change.
 pub const PROTOCOL_VERSION: u32 = 6;
 
+/// Cleanup mode when cancelling/deleting a batch.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub enum BatchCleanupMode {
+    /// Remove the batch record but don't stop agents or remove worktrees.
+    NoCleanup,
+    /// Stop all agents associated with this batch.
+    StopAgents,
+    /// Stop agents and remove their worktrees + local branches.
+    StopAgentsAndRemoveBranches,
+}
+
 /// Messages sent from CLI to Hub.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum CliMessage {
@@ -159,7 +170,7 @@ pub enum CliMessage {
         tasks: Vec<QueuedTask>,
         scheduled_at: String,
     },
-    CancelQueuedBatch { batch_id: String },
+    CancelQueuedBatch { batch_id: String, cleanup_mode: BatchCleanupMode },
     ListQueuedBatches,
     /// Register a batch with the hub for persistence (status = idle, no timer).
     RegisterBatch {

@@ -348,6 +348,19 @@ enum ActiveMenu {
         editor: crate::editor::DetectedEditor,
         menu: ContextMenu,
     },
+    /// Batch cleanup confirmation dialog shown when deleting a batch.
+    BatchCleanup {
+        batch_idx: usize,
+        /// Hub batch ID (for queued batches).
+        hub_batch_id: Option<String>,
+        /// Repo path for worktree removal.
+        repo_path: String,
+        /// Branch names of tasks (for worktree/branch cleanup).
+        branch_names: Vec<String>,
+        /// Agent IDs of active tasks (for stopping agents).
+        agent_ids: Vec<String>,
+        menu: ContextMenu,
+    },
 }
 
 // ---------------------------------------------------------------------------
@@ -1481,6 +1494,7 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                     ActiveMenu::WorktreeCleanup { ref menu, .. } => menu,
                     ActiveMenu::EditorPicker { ref menu, .. } => menu,
                     ActiveMenu::EditorRemember { ref menu, .. } => menu,
+                    ActiveMenu::BatchCleanup { ref menu, .. } => menu,
                 };
                 let (modal_rect, inner_rect) = menu.render(frame, content_area);
                 click_map.menu_modal_rect = modal_rect;
@@ -1619,6 +1633,7 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                             ActiveMenu::WorktreeCleanup { ref mut menu, .. } => menu.handle_key(key.code),
                             ActiveMenu::EditorPicker { ref mut menu, .. } => menu.handle_key(key.code),
                             ActiveMenu::EditorRemember { ref mut menu, .. } => menu.handle_key(key.code),
+                            ActiveMenu::BatchCleanup { ref mut menu, .. } => menu.handle_key(key.code),
                         };
                         match result {
                             MenuResult::Selected(idx) => {
@@ -2452,11 +2467,107 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                             2 => {
                                                 // For all repositories
                                                 set_default_editor_ipc(&editor.binary);
-                                                // Update local cache so all repos without
-                                                // a per-repo editor pick this up next time
-                                                // repos are refreshed from the hub.
                                             }
                                             _ => {} // Just this time
+                                        }
+                                    }
+                                    ActiveMenu::BatchCleanup { batch_idx, hub_batch_id, repo_path, branch_names, agent_ids, .. } => {
+                                        match idx {
+                                            0 => {
+                                                // Cancel — do nothing, batch survives
+                                            }
+                                            1 => {
+                                                // Don't clean up — remove batch only
+                                                if let Some(ref bid) = hub_batch_id {
+                                                    let bid = bid.clone();
+                                                    tokio::spawn(async move {
+                                                        if let Ok(mut stream) = ipc::try_connect().await {
+                                                            let msg = CliMessage::CancelQueuedBatch {
+                                                                batch_id: bid,
+                                                                cleanup_mode: clust_ipc::BatchCleanupMode::NoCleanup,
+                                                            };
+                                                            let _ = clust_ipc::send_message(&mut stream, &msg).await;
+                                                        }
+                                                    });
+                                                }
+                                                tasks_state.remove_batch(batch_idx);
+                                                status_message = Some(StatusMessage {
+                                                    text: "Batch removed".to_string(),
+                                                    level: StatusLevel::Info,
+                                                    created: Instant::now(),
+                                                });
+                                            }
+                                            2 => {
+                                                // Stop agents
+                                                if let Some(ref bid) = hub_batch_id {
+                                                    let bid = bid.clone();
+                                                    tokio::spawn(async move {
+                                                        if let Ok(mut stream) = ipc::try_connect().await {
+                                                            let msg = CliMessage::CancelQueuedBatch {
+                                                                batch_id: bid,
+                                                                cleanup_mode: clust_ipc::BatchCleanupMode::StopAgents,
+                                                            };
+                                                            let _ = clust_ipc::send_message(&mut stream, &msg).await;
+                                                        }
+                                                    });
+                                                } else {
+                                                    // Local batch — stop agents directly
+                                                    for aid in &agent_ids {
+                                                        let aid = aid.clone();
+                                                        tokio::spawn(async move {
+                                                            if let Ok(mut stream) = ipc::try_connect().await {
+                                                                let msg = CliMessage::StopAgent { id: aid };
+                                                                let _ = clust_ipc::send_message(&mut stream, &msg).await;
+                                                            }
+                                                        });
+                                                    }
+                                                }
+                                                tasks_state.remove_batch(batch_idx);
+                                                last_agent_fetch = Instant::now() - Duration::from_secs(10);
+                                                status_message = Some(StatusMessage {
+                                                    text: "Batch removed, agents stopped".to_string(),
+                                                    level: StatusLevel::Info,
+                                                    created: Instant::now(),
+                                                });
+                                            }
+                                            3 => {
+                                                // Stop agents and remove branches
+                                                if let Some(ref bid) = hub_batch_id {
+                                                    let bid = bid.clone();
+                                                    tokio::spawn(async move {
+                                                        if let Ok(mut stream) = ipc::try_connect().await {
+                                                            let msg = CliMessage::CancelQueuedBatch {
+                                                                batch_id: bid,
+                                                                cleanup_mode: clust_ipc::BatchCleanupMode::StopAgentsAndRemoveBranches,
+                                                            };
+                                                            let _ = clust_ipc::send_message(&mut stream, &msg).await;
+                                                        }
+                                                    });
+                                                } else {
+                                                    // Local batch — stop agents + remove worktrees/branches
+                                                    for aid in &agent_ids {
+                                                        let aid = aid.clone();
+                                                        tokio::spawn(async move {
+                                                            if let Ok(mut stream) = ipc::try_connect().await {
+                                                                let msg = CliMessage::StopAgent { id: aid };
+                                                                let _ = clust_ipc::send_message(&mut stream, &msg).await;
+                                                            }
+                                                        });
+                                                    }
+                                                    for branch in &branch_names {
+                                                        remove_worktree_ipc(&repo_path, branch, true, true);
+                                                    }
+                                                }
+                                                tasks_state.remove_batch(batch_idx);
+                                                last_agent_fetch = Instant::now() - Duration::from_secs(10);
+                                                last_repo_fetch = Instant::now() - Duration::from_secs(10);
+                                                status_message = Some(StatusMessage {
+                                                    text: "Batch removed, agents stopped, branches cleaned up".to_string(),
+                                                    level: StatusLevel::Info,
+                                                    created: Instant::now(),
+                                                });
+                                            }
+                                            _ => {}
                                         }
                                     }
                                 }
@@ -3594,19 +3705,28 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                     }
                                     KeyCode::Delete | KeyCode::Backspace => {
                                         if let TasksFocus::BatchCard(idx) = tasks_state.focus {
-                                            // Delete from hub
                                             if let Some(batch) = tasks_state.batches.get(idx) {
-                                                if let Some(ref hub_id) = batch.hub_batch_id {
-                                                    let msg = CliMessage::DeleteBatch { batch_id: hub_id.clone() };
-                                                    tokio::spawn(async move {
-                                                        if let Ok(mut stream) = ipc::try_connect().await {
-                                                            let _ = clust_ipc::send_message(&mut stream, &msg).await;
-                                                            let _ = clust_ipc::recv_message::<HubMessage>(&mut stream).await;
-                                                        }
-                                                    });
-                                                }
+                                                let hub_batch_id = batch.hub_batch_id.clone();
+                                                let rp = batch.repo_path.clone();
+                                                let bnames: Vec<String> = batch.tasks.iter().map(|t| t.branch_name.clone()).collect();
+                                                let aids: Vec<String> = batch.tasks.iter().filter_map(|t| t.agent_id.clone()).collect();
+                                                active_menu = Some(ActiveMenu::BatchCleanup {
+                                                    batch_idx: idx,
+                                                    hub_batch_id,
+                                                    repo_path: rp,
+                                                    branch_names: bnames,
+                                                    agent_ids: aids,
+                                                    menu: ContextMenu::new(
+                                                        "Delete Batch",
+                                                        vec![
+                                                            "Cancel".to_string(),
+                                                            "Don't clean up".to_string(),
+                                                            "Stop agents".to_string(),
+                                                            "Stop agents and remove branches".to_string(),
+                                                        ],
+                                                    ).with_description("Choose cleanup action for this batch:".to_string()),
+                                                });
                                             }
-                                            tasks_state.remove_batch(idx);
                                         }
                                     }
                                     KeyCode::Enter => {
@@ -3678,7 +3798,7 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                                 let bid = hub_batch_id.clone();
                                                 tokio::spawn(async move {
                                                     if let Ok(mut stream) = ipc::try_connect().await {
-                                                        let msg = CliMessage::CancelQueuedBatch { batch_id: bid.clone() };
+                                                        let msg = CliMessage::CancelQueuedBatch { batch_id: bid, cleanup_mode: clust_ipc::BatchCleanupMode::StopAgents };
                                                         let _ = clust_ipc::send_message(&mut stream, &msg).await;
                                                         let _ = clust_ipc::recv_message::<HubMessage>(&mut stream).await;
                                                     }
@@ -4159,6 +4279,7 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                 ActiveMenu::WorktreeCleanup { menu, .. } => menu.items.len(),
                                 ActiveMenu::EditorPicker { menu, .. } => menu.items.len(),
                                 ActiveMenu::EditorRemember { menu, .. } => menu.items.len(),
+                                ActiveMenu::BatchCleanup { menu, .. } => menu.items.len(),
                             };
                             if idx < item_count {
                                 // Highlight the clicked item then select it
@@ -4171,6 +4292,7 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                     ActiveMenu::WorktreeCleanup { menu, .. } => menu.selected_idx = idx,
                                     ActiveMenu::EditorPicker { menu, .. } => menu.selected_idx = idx,
                                     ActiveMenu::EditorRemember { menu, .. } => menu.selected_idx = idx,
+                                    ActiveMenu::BatchCleanup { menu, .. } => menu.selected_idx = idx,
                                 }
                                 let taken = active_menu.take().unwrap();
                                 match taken {
@@ -5006,6 +5128,77 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                             _ => {}
                                         }
                                     }
+                                    ActiveMenu::BatchCleanup { batch_idx, hub_batch_id, repo_path, branch_names, agent_ids, .. } => {
+                                        match idx {
+                                            0 => {} // Cancel
+                                            1 => {
+                                                if let Some(ref bid) = hub_batch_id {
+                                                    let bid = bid.clone();
+                                                    tokio::spawn(async move {
+                                                        if let Ok(mut stream) = ipc::try_connect().await {
+                                                            let msg = CliMessage::CancelQueuedBatch { batch_id: bid, cleanup_mode: clust_ipc::BatchCleanupMode::NoCleanup };
+                                                            let _ = clust_ipc::send_message(&mut stream, &msg).await;
+                                                        }
+                                                    });
+                                                }
+                                                tasks_state.remove_batch(batch_idx);
+                                                status_message = Some(StatusMessage { text: "Batch removed".to_string(), level: StatusLevel::Info, created: Instant::now() });
+                                            }
+                                            2 => {
+                                                if let Some(ref bid) = hub_batch_id {
+                                                    let bid = bid.clone();
+                                                    tokio::spawn(async move {
+                                                        if let Ok(mut stream) = ipc::try_connect().await {
+                                                            let msg = CliMessage::CancelQueuedBatch { batch_id: bid, cleanup_mode: clust_ipc::BatchCleanupMode::StopAgents };
+                                                            let _ = clust_ipc::send_message(&mut stream, &msg).await;
+                                                        }
+                                                    });
+                                                } else {
+                                                    for aid in &agent_ids {
+                                                        let aid = aid.clone();
+                                                        tokio::spawn(async move {
+                                                            if let Ok(mut stream) = ipc::try_connect().await {
+                                                                let msg = CliMessage::StopAgent { id: aid };
+                                                                let _ = clust_ipc::send_message(&mut stream, &msg).await;
+                                                            }
+                                                        });
+                                                    }
+                                                }
+                                                tasks_state.remove_batch(batch_idx);
+                                                last_agent_fetch = Instant::now() - Duration::from_secs(10);
+                                                status_message = Some(StatusMessage { text: "Batch removed, agents stopped".to_string(), level: StatusLevel::Info, created: Instant::now() });
+                                            }
+                                            3 => {
+                                                if let Some(ref bid) = hub_batch_id {
+                                                    let bid = bid.clone();
+                                                    tokio::spawn(async move {
+                                                        if let Ok(mut stream) = ipc::try_connect().await {
+                                                            let msg = CliMessage::CancelQueuedBatch { batch_id: bid, cleanup_mode: clust_ipc::BatchCleanupMode::StopAgentsAndRemoveBranches };
+                                                            let _ = clust_ipc::send_message(&mut stream, &msg).await;
+                                                        }
+                                                    });
+                                                } else {
+                                                    for aid in &agent_ids {
+                                                        let aid = aid.clone();
+                                                        tokio::spawn(async move {
+                                                            if let Ok(mut stream) = ipc::try_connect().await {
+                                                                let msg = CliMessage::StopAgent { id: aid };
+                                                                let _ = clust_ipc::send_message(&mut stream, &msg).await;
+                                                            }
+                                                        });
+                                                    }
+                                                    for branch in &branch_names {
+                                                        remove_worktree_ipc(&repo_path, branch, true, true);
+                                                    }
+                                                }
+                                                tasks_state.remove_batch(batch_idx);
+                                                last_agent_fetch = Instant::now() - Duration::from_secs(10);
+                                                last_repo_fetch = Instant::now() - Duration::from_secs(10);
+                                                status_message = Some(StatusMessage { text: "Batch removed, agents stopped, branches cleaned up".to_string(), level: StatusLevel::Info, created: Instant::now() });
+                                            }
+                                            _ => {}
+                                        }
+                                    }
                                 }
                             }
                         } else if !click_map.menu_modal_rect.contains(pos) {
@@ -5142,7 +5335,8 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                             | ActiveMenu::ConfirmAction { menu, .. }
                             | ActiveMenu::WorktreeCleanup { menu, .. }
                             | ActiveMenu::EditorPicker { menu, .. }
-                            | ActiveMenu::EditorRemember { menu, .. } => {
+                            | ActiveMenu::EditorRemember { menu, .. }
+                            | ActiveMenu::BatchCleanup { menu, .. } => {
                                 menu.selected_idx = menu.selected_idx.saturating_sub(1);
                             }
                         }
@@ -5185,7 +5379,8 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                             | ActiveMenu::ConfirmAction { menu, .. }
                             | ActiveMenu::WorktreeCleanup { menu, .. }
                             | ActiveMenu::EditorPicker { menu, .. }
-                            | ActiveMenu::EditorRemember { menu, .. } => {
+                            | ActiveMenu::EditorRemember { menu, .. }
+                            | ActiveMenu::BatchCleanup { menu, .. } => {
                                 if !menu.items.is_empty() {
                                     menu.selected_idx = (menu.selected_idx + 1).min(menu.items.len() - 1);
                                 }

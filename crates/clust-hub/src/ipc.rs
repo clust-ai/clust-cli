@@ -1709,7 +1709,7 @@ async fn handle_connection(
                 }
             }
         }
-        CliMessage::CancelQueuedBatch { batch_id } => {
+        CliMessage::CancelQueuedBatch { batch_id, cleanup_mode } => {
             let found = {
                 let hub_state = state.lock().await;
                 hub_state
@@ -1718,26 +1718,45 @@ async fn handle_connection(
                     .any(|b| b.id == batch_id)
             };
             if found {
-                // Stop any active agents belonging to this batch
-                let agent_ids: Vec<String> = {
+                // Collect info needed for cleanup
+                let (agent_ids, branch_cleanup): (Vec<String>, Vec<(String, String)>) = {
                     let hub_state = state.lock().await;
-                    hub_state
+                    let batch = hub_state
                         .queued_batches
                         .iter()
-                        .find(|b| b.id == batch_id)
-                        .map(|b| {
-                            b.tasks
+                        .find(|b| b.id == batch_id);
+                    match batch {
+                        Some(b) => {
+                            let aids: Vec<String> = b
+                                .tasks
                                 .iter()
-                                .filter(|t| {
-                                    t.status == crate::batch::HubTaskStatus::Active
-                                })
+                                .filter(|t| t.status == crate::batch::HubTaskStatus::Active)
                                 .filter_map(|t| t.agent_id.clone())
-                                .collect()
-                        })
-                        .unwrap_or_default()
+                                .collect();
+                            let branches: Vec<(String, String)> = b
+                                .tasks
+                                .iter()
+                                .map(|t| (b.repo_path.clone(), t.branch_name.clone()))
+                                .collect();
+                            (aids, branches)
+                        }
+                        None => (Vec::new(), Vec::new()),
+                    }
                 };
-                for aid in &agent_ids {
-                    let _ = agent::stop_agent(&state, aid).await;
+
+                // Stop agents if requested
+                if cleanup_mode != clust_ipc::BatchCleanupMode::NoCleanup {
+                    for aid in &agent_ids {
+                        let _ = agent::stop_agent(&state, aid).await;
+                    }
+                }
+
+                // Remove worktrees and branches if requested
+                if cleanup_mode == clust_ipc::BatchCleanupMode::StopAgentsAndRemoveBranches {
+                    for (repo_path, branch_name) in &branch_cleanup {
+                        let repo_root = std::path::Path::new(repo_path.as_str());
+                        let _ = crate::repo::remove_worktree(repo_root, branch_name, true, true);
+                    }
                 }
 
                 // Remove from state and database
