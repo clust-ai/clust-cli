@@ -143,6 +143,13 @@ CLI -> Hub:
   QueueBatch { repo_path: String, target_branch: String, title: String, max_concurrent: Option<usize>, prompt_prefix: Option<String>, prompt_suffix: Option<String>, plan_mode: bool, allow_bypass: bool, agent_binary: Option<String>, hub: String, tasks: Vec<QueuedTask>, scheduled_at: String }
   CancelQueuedBatch { batch_id: String }
   ListQueuedBatches
+  RegisterBatch { repo_path: String, target_branch: String, title: String, max_concurrent: Option<usize>, prompt_prefix: Option<String>, prompt_suffix: Option<String>, plan_mode: bool, allow_bypass: bool, agent_binary: Option<String>, hub: String, launch_mode: String, tasks: Vec<QueuedTask> }
+  AddBatchTask { batch_id: String, branch_name: String, prompt: String }
+  UpdateBatchTask { batch_id: String, task_index: usize, status: String, agent_id: Option<String> }
+  UpdateBatchConfig { batch_id: String, prompt_prefix: Option<String>, prompt_suffix: Option<String>, plan_mode: bool, allow_bypass: bool }
+  UpdateBatchStatus { batch_id: String, status: String }
+  RemoveDoneBatchTasks { batch_id: String }
+  DeleteBatch { batch_id: String }
   Ping { protocol_version: u32 }
 
 Hub -> CLI:
@@ -189,6 +196,7 @@ Hub -> CLI:
   BatchQueued { batch_id: String, scheduled_at: String }
   BatchCancelled { batch_id: String }
   QueuedBatchList { batches: Vec<QueuedBatchInfo> }
+  BatchRegistered { batch_id: String }
   Pong { protocol_version: u32 }
 ```
 

@@ -44,7 +44,7 @@ Triggered by `clust -s` / `clust --stop` (no argument).
 
 ### Crash Recovery
 
-Since the hub is mostly ephemeral (queued batches are the exception -- they are persisted in SQLite and reloaded on startup):
+Since the hub is mostly ephemeral (batches are the exception -- idle, scheduled, and running batches are persisted in SQLite and reloaded on startup):
 
 - If the hub crashes, the socket file may be stale
 - On next startup, the hub removes any existing socket file before binding
@@ -346,15 +346,22 @@ When the hub receives a `PurgeRepo` message:
 
 Each phase sends a `PurgeProgress` IPC message to the client before execution, allowing the TUI to display real-time progress. The hub awaits agent stops before proceeding to worktree removal to prevent race conditions.
 
-## Queued Batch Engine
+## Batch Engine
 
-The hub includes a batch scheduling engine (`batch.rs`) that allows users to queue batches for future execution. Queued batches are persisted in SQLite and survive hub restarts.
+The hub includes a batch engine (`batch.rs`) that manages batch persistence and scheduled execution. Batches in all non-completed states (idle, scheduled, running) are persisted in SQLite and survive hub restarts. The CLI registers batches with the hub immediately upon creation, and all subsequent mutations (adding tasks, changing config, toggling status) are synced to the hub in real time.
 
 ### IPC Messages
 
 - **QueueBatch**: Creates a new queued batch with a scheduled start time. The batch and its tasks are persisted to the `queued_batches` and `queued_batch_tasks` tables. Returns `BatchQueued { batch_id, scheduled_at }`.
 - **CancelQueuedBatch**: Cancels a queued batch by ID. Removes it from both memory and the database. Returns `BatchCancelled { batch_id }`.
-- **ListQueuedBatches**: Returns a list of all non-completed queued batches as `QueuedBatchList { batches: Vec<QueuedBatchInfo> }`.
+- **ListQueuedBatches**: Returns a list of all non-completed queued batches as `QueuedBatchList { batches: Vec<QueuedBatchInfo> }`. Each `QueuedBatchInfo` includes full per-task detail (`tasks: Vec<QueuedBatchTaskInfo>`), `launch_mode`, `max_concurrent`, `prompt_prefix`, `prompt_suffix`, `plan_mode`, `allow_bypass`, and `agent_binary` so the CLI can fully reconstruct batch state.
+- **RegisterBatch**: Registers a new batch with the hub for persistence without scheduling it (status = `idle`). Used by the CLI when a batch is created in the Tasks tab. The batch and its tasks are persisted immediately. Returns `BatchRegistered { batch_id }`.
+- **AddBatchTask**: Adds a task to an existing registered batch. The hub appends the task to the `queued_batch_tasks` table with the next available `task_index`. Returns `Ok`.
+- **UpdateBatchTask**: Updates the status and/or `agent_id` of a specific task within a batch (identified by `batch_id` and `task_index`). Returns `Ok`.
+- **UpdateBatchConfig**: Updates batch configuration fields (`prompt_prefix`, `prompt_suffix`, `plan_mode`, `allow_bypass`). Returns `Ok`.
+- **UpdateBatchStatus**: Updates the top-level status of a batch (e.g., transitioning from `idle` to `running`). Returns `Ok`.
+- **RemoveDoneBatchTasks**: Removes all tasks with status `done` from a batch and re-indexes the remaining tasks to maintain contiguous indices. Returns `Ok`.
+- **DeleteBatch**: Deletes a batch and all its tasks from both memory and the database. Returns `Ok`.
 
 ### Timer Task
 
@@ -383,28 +390,33 @@ The `create_worktree_and_spawn_agent()` function extracts the worktree creation 
 
 ### Batch Lifecycle
 
+Batches can enter the system through two paths: direct registration (idle) or scheduled queueing.
+
 ```
-CLI sends QueueBatch (scheduled_at = future time)
-    |
-    v
-Hub persists batch (status: Scheduled)
-    |
-    v
-Timer tick: scheduled_at <= now
-    --> Batch transitions to Running
-    --> Start tasks up to max_concurrent
-    |
-    v
+CLI sends RegisterBatch (no timer)       CLI sends QueueBatch (scheduled_at = future time)
+    |                                        |
+    v                                        v
+Hub persists batch (status: Idle)        Hub persists batch (status: Scheduled)
+    |                                        |
+    v                                        v
+CLI toggles status to Running            Timer tick: scheduled_at <= now
+    --> UpdateBatchStatus(running)           --> Batch transitions to Running
+    --> Start tasks up to max_concurrent     --> Start tasks up to max_concurrent
+    |                                        |
+    └────────────────┬───────────────────────┘
+                     v
 Agent exits --> Task marked Done
     --> Next timer tick starts more tasks
-    |
-    v
+                     |
+                     v
 All tasks Done --> Batch transitions to Completed
 ```
 
+The CLI can also mutate batches at any point via `AddBatchTask`, `UpdateBatchTask`, `UpdateBatchConfig`, `RemoveDoneBatchTasks`, and `DeleteBatch`. All mutations are persisted to SQLite immediately.
+
 ### Hub Startup Recovery
 
-On startup, the hub loads all non-completed queued batches from SQLite. Any tasks that were `Active` but whose agents no longer exist (due to hub restart) are marked as `Done` in both memory and the database. The batch timer then handles starting new tasks on the next tick.
+On startup, the hub loads all non-completed batches (idle, scheduled, and running) from SQLite. Any tasks that were `Active` but whose agents no longer exist (due to hub restart) are marked as `Done` in both memory and the database. The batch timer then handles starting new tasks on the next tick. Idle batches are preserved as-is, allowing the CLI to reconstruct its Tasks tab state via `ListQueuedBatches`.
 
 ## In-Memory State
 
@@ -455,4 +467,4 @@ struct TerminalEntry {
 }
 ```
 
-This state is mostly in-memory and does not survive a hub restart. The exception is `queued_batches`, which are persisted in SQLite and reloaded on startup (see Queued Batch Engine section above).
+This state is mostly in-memory and does not survive a hub restart. The exception is `queued_batches`, which are persisted in SQLite and reloaded on startup (see Batch Engine section above). The `HubBatchStatus` enum includes `Idle`, `Scheduled`, `Running`, and `Completed` states, with `Idle` being used for batches registered from the CLI that have not yet been scheduled or started.
