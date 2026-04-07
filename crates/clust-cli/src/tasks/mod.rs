@@ -434,6 +434,23 @@ impl TasksState {
     pub fn clear_focused_task(&mut self) {
         self.focused_task = None;
     }
+
+    /// Returns (batch_idx, task_idx, agent_id, batch_title) for the currently
+    /// focused task if it is Active and has an agent_id.
+    pub fn focused_active_agent(&self) -> Option<(usize, usize, &str, &str)> {
+        let batch_idx = match self.focus {
+            TasksFocus::BatchCard(idx) => idx,
+            _ => return None,
+        };
+        let task_idx = self.focused_task?;
+        let batch = self.batches.get(batch_idx)?;
+        let task = batch.tasks.get(task_idx)?;
+        if task.status != TaskStatus::Active {
+            return None;
+        }
+        let agent_id = task.agent_id.as_deref()?;
+        Some((batch_idx, task_idx, agent_id, &batch.title))
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -882,14 +899,24 @@ fn render_single_task_box(
         task.branch_name.clone()
     };
 
-    let header_line = Line::from(vec![
+    let mut header_spans = vec![
         Span::styled(indicator, indicator_style),
         Span::styled(format!("{}.", original_index + 1), label_style),
         Span::raw(" "),
         Span::styled(status_text, status_style),
         Span::raw(" "),
         Span::styled(branch_display, branch_style),
-    ]);
+    ];
+
+    // Show focus-mode hint on focused active tasks
+    if is_focused && task.status == TaskStatus::Active && task.agent_id.is_some() {
+        header_spans.push(Span::styled(
+            "  Shift+\u{2193} focus",
+            Style::default().fg(theme::R_ACCENT),
+        ));
+    }
+
+    let header_line = Line::from(header_spans);
 
     let mut lines = vec![header_line];
 

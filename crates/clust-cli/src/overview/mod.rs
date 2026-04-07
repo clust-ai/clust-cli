@@ -1721,6 +1721,14 @@ impl BranchPicker {
     }
 }
 
+/// Metadata about the batch a focus-mode agent belongs to.
+#[derive(Clone, Debug)]
+pub struct BatchOrigin {
+    pub batch_title: String,
+    pub batch_idx: usize,
+    pub task_idx: usize,
+}
+
 /// State for the single-agent focus mode view.
 pub struct FocusModeState {
     pub panel: Option<AgentPanel>,
@@ -1728,6 +1736,8 @@ pub struct FocusModeState {
     output_tx: mpsc::Sender<AgentOutputEvent>,
     panel_cols: u16,
     panel_rows: u16,
+    /// Set when the agent was opened from a batch task.
+    pub batch_origin: Option<BatchOrigin>,
     // Left panel state
     pub focus_side: FocusSide,
     pub left_tab: LeftPanelTab,
@@ -1770,6 +1780,7 @@ impl FocusModeState {
             output_tx,
             panel_cols: 80,
             panel_rows: 24,
+            batch_origin: None,
             focus_side: FocusSide::Right,
             left_tab: LeftPanelTab::Changes,
             diff: None,
@@ -1815,6 +1826,7 @@ impl FocusModeState {
 
         self.panel_cols = cols;
         self.panel_rows = rows;
+        self.batch_origin = None;
         self.focus_side = FocusSide::Right;
         self.left_tab = LeftPanelTab::Changes;
         self.diff = None;
