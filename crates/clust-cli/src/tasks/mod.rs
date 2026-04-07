@@ -23,6 +23,13 @@ const MIN_CARD_WIDTH: u16 = 40;
 // Data types
 // ---------------------------------------------------------------------------
 
+/// A single task within a batch.
+#[allow(dead_code)]
+pub struct TaskEntry {
+    pub branch_name: String,
+    pub prompt: String,
+}
+
 /// A single batch definition (UI-only, no execution).
 #[allow(dead_code)]
 pub struct BatchInfo {
@@ -32,6 +39,7 @@ pub struct BatchInfo {
     pub repo_name: String,
     pub branch_name: String,
     pub max_concurrent: Option<usize>,
+    pub tasks: Vec<TaskEntry>,
     pub created_at: Instant,
 }
 
@@ -75,9 +83,16 @@ impl TasksState {
             repo_name: output.repo_name,
             branch_name: output.branch_name,
             max_concurrent: output.max_concurrent,
+            tasks: Vec::new(),
             created_at: Instant::now(),
         });
         self.next_id += 1;
+    }
+
+    pub fn add_task(&mut self, batch_idx: usize, branch_name: String, prompt: String) {
+        if let Some(batch) = self.batches.get_mut(batch_idx) {
+            batch.tasks.push(TaskEntry { branch_name, prompt });
+        }
     }
 
     pub fn remove_batch(&mut self, idx: usize) {
@@ -310,6 +325,10 @@ fn render_batch_card(
         Line::from(vec![
             Span::styled("Workers   ", label_style),
             Span::styled(concurrency_text, value_style),
+        ]),
+        Line::from(vec![
+            Span::styled("Tasks     ", label_style),
+            Span::styled(batch.tasks.len().to_string(), value_style),
         ]),
         Line::from(vec![
             Span::styled("Status    ", label_style),

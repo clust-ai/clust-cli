@@ -19,6 +19,7 @@ use ratatui::{
 use clust_ipc::{AgentInfo, CliMessage, HubMessage, RepoInfo, DEFAULT_HUB};
 
 use crate::{
+    add_task_modal::{AddTaskModal, AddTaskResult},
     context_menu::{ContextMenu, ContextMenuItem, MenuResult},
     create_agent_modal::{CreateAgentModal, ModalResult},
     create_batch_modal::{CreateBatchModal, BatchModalResult},
@@ -935,6 +936,7 @@ pub fn run(hub_name: &str) -> io::Result<()> {
     let mut create_modal: Option<CreateAgentModal> = None;
     // Create-batch modal state
     let mut create_batch_modal: Option<CreateBatchModal> = None;
+    let mut add_task_modal: Option<AddTaskModal> = None;
     // Tasks tab state
     let mut tasks_state = TasksState::new();
     // Search-agent modal state
@@ -1178,7 +1180,7 @@ pub fn run(hub_name: &str) -> io::Result<()> {
             .collect();
 
         let mut click_map = ClickMap::default();
-        let show_modal = create_modal.is_some() || create_batch_modal.is_some() || detached_modal.is_some() || repo_modal.is_some();
+        let show_modal = create_modal.is_some() || create_batch_modal.is_some() || add_task_modal.is_some() || detached_modal.is_some() || repo_modal.is_some();
         let show_search = search_modal.is_some();
         let purge_ref = &purge_progress;
         let clone_ref = &clone_progress;
@@ -1314,6 +1316,9 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                     modal.render(frame, content_area);
                 }
                 if let Some(ref modal) = create_batch_modal {
+                    modal.render(frame, content_area);
+                }
+                if let Some(ref modal) = add_task_modal {
                     modal.render(frame, content_area);
                 }
                 if let Some(ref modal) = detached_modal {
@@ -2363,6 +2368,18 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                             }
                             BatchModalResult::Pending => {}
                         }
+                    // Add-task modal takes priority over all other input
+                    } else if let Some(ref mut modal) = add_task_modal {
+                        match modal.handle_key(key) {
+                            AddTaskResult::Cancelled => {
+                                add_task_modal = None;
+                            }
+                            AddTaskResult::Completed(output) => {
+                                add_task_modal = None;
+                                tasks_state.add_task(output.batch_idx, output.branch_name, output.prompt);
+                            }
+                            AddTaskResult::Pending => {}
+                        }
                     // Search-agent modal takes priority over all other input
                     } else if let Some(ref mut modal) = search_modal {
                         match modal.handle_key(key) {
@@ -3071,6 +3088,14 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                             tasks_state.remove_batch(idx);
                                         }
                                     }
+                                    KeyCode::Enter => {
+                                        if let TasksFocus::BatchCard(idx) = tasks_state.focus {
+                                            if let Some(batch) = tasks_state.batches.get(idx) {
+                                                add_task_modal = Some(AddTaskModal::new(idx, batch.title.clone()));
+                                                show_help = false;
+                                            }
+                                        }
+                                    }
                                     _ => {}
                                 }
                             }
@@ -3321,6 +3346,8 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                     if let Some(ref mut modal) = create_modal {
                         modal.handle_paste(text);
                     } else if let Some(ref mut modal) = create_batch_modal {
+                        modal.handle_paste(text);
+                    } else if let Some(ref mut modal) = add_task_modal {
                         modal.handle_paste(text);
                     } else if let Some(ref mut modal) = search_modal {
                         modal.handle_paste(text);
@@ -5759,7 +5786,7 @@ fn render_status_bar(
                 }
             }
         } else if active_tab == ActiveTab::Tasks {
-            format!("{mod_key}+T new batch  \u{2190}/\u{2192} navigate  Del remove  q quit  ? keys")
+            format!("{mod_key}+T new batch  \u{2190}/\u{2192} navigate  Enter add task  Del remove  q quit  ? keys")
         } else {
             format!("{mod_key}+N new repo  {mod_key}+R new agent  q quit  Q stop+quit  ? keys")
         };
@@ -5890,6 +5917,7 @@ fn render_help_overlay(frame: &mut Frame, area: Rect, active_tab: ActiveTab, in_
         lines.push(header_line("Tasks"));
         lines.push(binding_line("\u{2190} / \u{2192}", "Navigate batches"));
         lines.push(binding_line("Shift+\u{2190}/\u{2192}", "Scroll batches"));
+        lines.push(binding_line("Enter", "Add task to batch"));
         lines.push(binding_line("Del / Backspace", "Remove batch"));
     }
 
