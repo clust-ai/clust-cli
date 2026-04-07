@@ -54,10 +54,11 @@ impl ReplayBuffer {
 /// Shared hub state, accessible from all IPC handler tasks.
 pub type SharedHubState = Arc<Mutex<HubState>>;
 
-/// Top-level hub state holding all running agents.
+/// Top-level hub state holding all running agents and terminal sessions.
 #[derive(Default)]
 pub struct HubState {
     pub agents: HashMap<String, AgentEntry>,
+    pub terminals: HashMap<String, TerminalEntry>,
     pub default_agent: Option<String>,
     pub bypass_permissions: bool,
     pub db: Option<rusqlite::Connection>,
@@ -371,6 +372,211 @@ pub async fn stop_agent(state: &SharedHubState, id: &str) -> Result<(), String> 
     Ok(())
 }
 
+// ---------------------------------------------------------------------------
+// Terminal session management
+// ---------------------------------------------------------------------------
+
+/// A running terminal shell session managed by the hub.
+pub struct TerminalEntry {
+    pub id: String,
+    pub working_dir: String,
+    pub pid: Option<u32>,
+    pub pty_master: Box<dyn MasterPty + Send>,
+    pub pty_writer: Box<dyn std::io::Write + Send>,
+    pub output_tx: broadcast::Sender<AgentEvent>,
+    pub replay_buffer: Arc<std::sync::Mutex<ReplayBuffer>>,
+    pub attached_count: Arc<AtomicUsize>,
+    pub client_sizes: HashMap<u64, (u16, u16)>,
+    pub current_pty_size: (u16, u16),
+    pub active_client_id: Option<u64>,
+    pub(crate) next_client_id: AtomicU64,
+}
+
+impl TerminalEntry {
+    pub fn next_client_id(&self) -> u64 {
+        self.next_client_id.fetch_add(1, Ordering::Relaxed)
+    }
+
+    pub fn resize_pty_if_needed(&mut self, cols: u16, rows: u16) -> bool {
+        if self.current_pty_size == (cols, rows) {
+            return false;
+        }
+        let result = self.pty_master.resize(PtySize {
+            rows,
+            cols,
+            pixel_width: 0,
+            pixel_height: 0,
+        });
+        if result.is_ok() {
+            self.current_pty_size = (cols, rows);
+            true
+        } else {
+            false
+        }
+    }
+}
+
+/// Generate a unique terminal ID with "t" prefix.
+pub fn generate_terminal_id(existing: &HashMap<String, TerminalEntry>) -> String {
+    use rand::Rng;
+    let mut rng = rand::thread_rng();
+    loop {
+        let bytes: [u8; 3] = rng.gen();
+        let id = format!("t{:02x}{:02x}{:02x}", bytes[0], bytes[1], bytes[2]);
+        if !existing.contains_key(&id) {
+            return id;
+        }
+    }
+}
+
+/// Spawn a terminal shell session inside a PTY.
+pub fn spawn_terminal(
+    state: &mut HubState,
+    working_dir: String,
+    cols: u16,
+    rows: u16,
+    shared_state: SharedHubState,
+) -> Result<String, String> {
+    let id = generate_terminal_id(&state.terminals);
+
+    let shell = std::env::var("SHELL")
+        .unwrap_or_else(|_| "/bin/zsh".to_string());
+
+    let pty_system = portable_pty::native_pty_system();
+    let pair = pty_system
+        .openpty(PtySize {
+            rows,
+            cols,
+            pixel_width: 0,
+            pixel_height: 0,
+        })
+        .map_err(|e| format!("PTY open failed: {e}"))?;
+
+    let mut cmd = CommandBuilder::new(&shell);
+    cmd.arg("-l");
+    cmd.cwd(&working_dir);
+
+    let child = pair
+        .slave
+        .spawn_command(cmd)
+        .map_err(|e| format!("spawn failed: {e}"))?;
+
+    let pid = child.process_id();
+    drop(pair.slave);
+
+    let writer = pair
+        .master
+        .take_writer()
+        .map_err(|e| format!("take writer failed: {e}"))?;
+
+    let reader = pair
+        .master
+        .try_clone_reader()
+        .map_err(|e| format!("clone reader failed: {e}"))?;
+
+    let (output_tx, _) = broadcast::channel::<AgentEvent>(1024);
+    let replay_buffer = Arc::new(std::sync::Mutex::new(ReplayBuffer::new()));
+
+    spawn_terminal_pty_reader(
+        reader,
+        child,
+        output_tx.clone(),
+        replay_buffer.clone(),
+        id.clone(),
+        shared_state,
+    );
+
+    let entry = TerminalEntry {
+        id: id.clone(),
+        working_dir,
+        pid,
+        pty_master: pair.master,
+        pty_writer: writer,
+        output_tx,
+        replay_buffer,
+        attached_count: Arc::new(AtomicUsize::new(0)),
+        client_sizes: HashMap::new(),
+        current_pty_size: (cols, rows),
+        active_client_id: None,
+        next_client_id: AtomicU64::new(0),
+    };
+
+    state.terminals.insert(id.clone(), entry);
+    Ok(id)
+}
+
+/// Background task that reads terminal PTY output and broadcasts it.
+fn spawn_terminal_pty_reader(
+    mut reader: Box<dyn Read + Send>,
+    mut child: Box<dyn portable_pty::Child + Send>,
+    output_tx: broadcast::Sender<AgentEvent>,
+    replay_buf: Arc<std::sync::Mutex<ReplayBuffer>>,
+    terminal_id: String,
+    state: SharedHubState,
+) {
+    tokio::task::spawn_blocking(move || {
+        let mut buf = [0u8; 4096];
+        loop {
+            match reader.read(&mut buf) {
+                Ok(0) => break,
+                Ok(n) => {
+                    let chunk = buf[..n].to_vec();
+                    replay_buf.lock().unwrap().push(&chunk);
+                    let _ = output_tx.send(AgentEvent::Output(chunk));
+                }
+                Err(_) => break,
+            }
+        }
+
+        let exit_code = match child.wait() {
+            Ok(status) => {
+                if status.success() {
+                    0
+                } else {
+                    1
+                }
+            }
+            Err(_) => -1,
+        };
+
+        let _ = output_tx.send(AgentEvent::Exited(exit_code));
+
+        let handle = tokio::runtime::Handle::current();
+        handle.block_on(async {
+            let mut hub = state.lock().await;
+            hub.terminals.remove(&terminal_id);
+        });
+    });
+}
+
+/// Terminate a terminal session by ID.
+pub async fn stop_terminal(state: &SharedHubState, id: &str) -> Result<(), String> {
+    let pid = {
+        let hub = state.lock().await;
+        let entry = hub
+            .terminals
+            .get(id)
+            .ok_or_else(|| format!("terminal {id} not found"))?;
+        entry
+            .pid
+            .ok_or_else(|| format!("terminal {id} has no PID"))?
+    };
+
+    unsafe {
+        libc::kill(pid as i32, libc::SIGTERM);
+    }
+
+    tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+
+    if unsafe { libc::kill(pid as i32, 0) } == 0 {
+        unsafe {
+            libc::kill(pid as i32, libc::SIGKILL);
+        }
+    }
+
+    Ok(())
+}
+
 /// Terminate all running agents during hub shutdown.
 ///
 /// 1. Notify all attached CLI clients via broadcast channels
@@ -381,10 +587,15 @@ pub async fn shutdown_agents(state: &SharedHubState) {
     let pids: Vec<u32>;
     {
         let hub = state.lock().await;
-        pids = hub.agents.values().filter_map(|e| e.pid).collect();
+        let mut all_pids: Vec<u32> = hub.agents.values().filter_map(|e| e.pid).collect();
+        all_pids.extend(hub.terminals.values().filter_map(|e| e.pid));
+        pids = all_pids;
 
         // Notify all attached clients that the hub is shutting down
         for entry in hub.agents.values() {
+            let _ = entry.output_tx.send(AgentEvent::HubShutdown);
+        }
+        for entry in hub.terminals.values() {
             let _ = entry.output_tx.send(AgentEvent::HubShutdown);
         }
     }
