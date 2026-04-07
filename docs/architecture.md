@@ -134,6 +134,12 @@ CLI -> Hub:
   CloneRepo { url: String, parent_dir: String, name: Option<String> }
   SetBypassPermissions { enabled: bool }
   GetBypassPermissions
+  StartTerminal { working_dir: String, cols: u16, rows: u16 }
+  AttachTerminal { id: String }
+  DetachTerminal { id: String }
+  TerminalInput { id: String, data: Vec<u8> }
+  ResizeTerminal { id: String, cols: u16, rows: u16 }
+  StopTerminal { id: String }
   Ping { protocol_version: u32 }
 
 Hub -> CLI:
@@ -171,12 +177,18 @@ Hub -> CLI:
   RepoCloned { path: String, name: String }
   CloneProgress { step: String }
   BypassPermissions { enabled: bool }
+  TerminalStarted { id: String }
+  TerminalAttached { id: String }
+  TerminalOutput { id: String, data: Vec<u8> }
+  TerminalExited { id: String, exit_code: i32 }
+  TerminalReplayComplete { id: String }
+  TerminalStopped { id: String }
   Pong { protocol_version: u32 }
 ```
 
 ### Protocol Versioning
 
-The IPC protocol includes a version check to detect stale hubs. `clust-ipc` exports a `PROTOCOL_VERSION` constant (currently `2`) that must be bumped whenever the `CliMessage` or `HubMessage` enum shapes change (since `rmp-serde` uses numeric enum indices).
+The IPC protocol includes a version check to detect stale hubs. `clust-ipc` exports a `PROTOCOL_VERSION` constant (currently `3`) that must be bumped whenever the `CliMessage` or `HubMessage` enum shapes change (since `rmp-serde` uses numeric enum indices).
 
 On connection, the CLI sends a `Ping { protocol_version }` message. The hub replies with `Pong { protocol_version }` carrying its own version. If versions mismatch, the CLI stops the stale hub and spawns a fresh one before proceeding.
 

@@ -326,7 +326,7 @@ When focus mode is active, the 1-row tab bar is replaced by a back-bar that show
 ```
 ┌─────────────────────────────────────────────────────┐
 │ ← Shift+↑  Back to Overview  a3f8c1 · claude · myrepo/main        Shift+←/→ panels │
-│ Changes │ Compare │ Panel 3 │┌────────────────────┐│
+│ Changes │ Compare │ Terminal │┌────────────────────┐│
 │                               ││ a3f8c1 · claude ●  ││
 │      1      1│fn main() {     ││                    ││
 │      2       │-  old_code();  ││ Agent PTY output   ││
@@ -340,7 +340,7 @@ When focus mode is active, the 1-row tab bar is replaced by a back-bar that show
 
 **Left panel:**
 
-The left panel has a tab bar at the top with three tabs: `Changes`, `Compare`, `Panel 3`. The `Changes` tab shows a unified inline diff viewer showing uncommitted changes (`git diff HEAD`). The `Compare` tab shows a branch comparison diff viewer where users can select any local branch and view the diff between it and the agent's current branch. `Panel 3` is a placeholder for future content. When the agent has no `repo_path` (non-repository agent), the left panel renders a simplified state: the tab bar and diff viewer are replaced by a centered "Agent not running inside repository" message in tertiary text color on the base background. The diff refresh background task is not spawned for non-repository agents.
+The left panel has a tab bar at the top with three tabs: `Changes`, `Compare`, `Terminal`. The `Changes` tab shows a unified inline diff viewer showing uncommitted changes (`git diff HEAD`). The `Compare` tab shows a branch comparison diff viewer where users can select any local branch and view the diff between it and the agent's current branch. The `Terminal` tab provides an interactive shell session running inside the agent's worktree directory, allowing users to run shell commands alongside the agent. When the agent has no `repo_path` (non-repository agent), the left panel renders a simplified state: the tab bar and diff viewer are replaced by a centered "Agent not running inside repository" message in tertiary text color on the base background. The diff refresh background task is not spawned for non-repository agents.
 
 **Diff viewer (Changes tab):**
 
@@ -371,6 +371,26 @@ The left panel has a tab bar at the top with three tabs: `Changes`, `Compare`, `
 - The diff viewer rendering is shared with the Changes tab via a parameterized `render_diff_viewer()` function
 - Mouse scroll within the left panel area is tab-aware, routing to `compare_scroll_up/down` when the Compare tab is active
 
+**Terminal tab:**
+
+- Provides an interactive shell session running inside the agent's worktree directory
+- On entering focus mode (`open_agent()`), a terminal session is automatically started via the hub's `StartTerminal` IPC message
+- The shell is spawned by the hub as a PTY process (using `$SHELL` or `/bin/zsh` as fallback) with the agent's `working_dir` as the working directory
+- Terminal output is rendered using a `TerminalEmulator` (same `vt100`-backed emulator used for agent panels), supporting full ANSI escape sequences, colors, cursor movement, and alternate screen buffer
+- The terminal connection runs as a background tokio task (`terminal_connection_task`) with its own IPC streaming connection to the hub, independent of the agent panel connection
+- All keyboard input is forwarded directly to the terminal shell when the Terminal tab is focused, including `Tab` (which is why `Shift+Tab` / `BackTab` is used as "previous tab" to navigate away from the Terminal tab)
+- `Esc` is forwarded to the shell process (not intercepted by the UI)
+- Paste events (bracketed paste) are forwarded to the terminal shell
+- Scrollback is supported via `Shift+PageUp` / `Shift+PageDown` with the same scrollback mechanism as agent panels
+- Mouse scroll within the left panel area scrolls the terminal scrollback when the Terminal tab is active
+- On terminal resize, the terminal PTY is resized via `ResizeTerminal` IPC message. The terminal dimensions are calculated as 60% of the content area width by the content area height minus 2 rows (for the tab bar)
+- `TerminalPanel` struct manages the terminal state: ID, `TerminalEmulator`, command channel, exited flag, and scroll offset
+- `TerminalOutputEvent` enum carries output, exited, and connection-lost events from the background task to the UI thread via an `mpsc` channel
+- `drain_terminal_events()` is called each frame in the main event loop alongside `drain_output_events()` and `drain_diff_events()`
+- When the terminal session exits, the tab displays "Terminal session ended" in tertiary text
+- When the terminal is starting (before the first output), the tab displays "Starting terminal..."
+- On focus mode exit (`close_panel()`), the terminal session is cleaned up: a `DetachTerminal` message is sent and the background task is aborted
+
 **Panel focus:**
 
 The focus view has a concept of which side (left or right) has keyboard focus. The focused side is indicated by visual cues (tab bar highlight, panel border accent). `Shift+←` and `Shift+→` switch focus between the left and right panels. `Shift+↑` exits focus mode from either panel. When the right panel is focused, `Esc` is forwarded to the agent process. When the agent has no `repo_path` (non-repository agent), `Shift+←` from the right panel is blocked (the left panel cannot receive focus), and mouse clicks on the left panel area do not switch focus to the left panel. Clicking the right panel area still works normally.
@@ -386,10 +406,10 @@ The agent's `working_dir`, `repo_path`, and `branch_name` are passed to `open_ag
 
 **Implementation:**
 
-- `FocusModeState` manages a single `AgentPanel` with its own IPC background task, output channel, and `TerminalEmulator`. It also tracks `branch_name` (in addition to `working_dir` and `repo_path`) to support worktree cleanup dialogs when exiting focus mode.
+- `FocusModeState` manages a single `AgentPanel` with its own IPC background task, output channel, and `TerminalEmulator`. It also manages an optional `TerminalPanel` for the Terminal tab, with its own IPC background task, output channel, and `TerminalEmulator`. It also tracks `branch_name` (in addition to `working_dir` and `repo_path`) to support worktree cleanup dialogs when exiting focus mode.
 - The panel dimensions are calculated as 40% of the content area width (minus borders) by the content area height (minus header).
 - `FocusSide` enum tracks which panel has keyboard focus (`Left` or `Right`).
-- `LeftPanelTab` enum tracks the active tab in the left panel (`Changes`, `Compare`, `Panel3`) with `next()` for cycling.
+- `LeftPanelTab` enum tracks the active tab in the left panel (`Changes`, `Compare`, `Terminal`) with `next()` and `prev()` for cycling in both directions.
 - Diff state is managed via `ParsedDiff` (lines, file start indices, file names), `diff_scroll` (current scroll position), and `diff_error` (error message if `git diff` failed).
 - A background diff refresh task (`spawn_diff_task`) runs every 2 seconds and sends `DiffEvent::Updated` or `DiffEvent::Error` via an `mpsc` channel. A `watch` channel signals the task to stop. The diff task is only spawned when `repo_path` is `Some` (i.e., the agent is running inside a git repository).
 - `drain_diff_events()` is called each frame in the main event loop alongside `drain_output_events()`.
@@ -397,7 +417,7 @@ The agent's `working_dir`, `repo_path`, and `branch_name` are passed to `open_ag
 - On terminal resize, the focus mode panel is resized via `TerminalEmulator::resize()` (preserving scrollback history) and the hub is notified via `ResizeAgent`. On `FocusGained` events, dimensions are also re-sent unconditionally to account for PTY resizes by other clients while the window was unfocused.
 - Focus mode is orthogonal to tab cycling -- `Tab` / `Shift+Tab` cycles between `Repositories`, `Overview`, and `Tasks` (3 tabs). Focus mode is only entered explicitly via the entry points above.
 - State is tracked by an `in_focus_mode: bool` flag rather than a `previous_tab` option. The `ActiveTab` enum no longer has a `FocusMode` variant.
-- On exit (via `close_panel()`), the diff task is stopped via the watch channel and aborted, diff state is cleared, and the panel's connection is detached.
+- On exit (via `close_panel()`), the diff task is stopped via the watch channel and aborted, diff state is cleared, the terminal session is closed (detach message sent, background task aborted), and the panel's connection is detached.
 
 **Keyboard shortcuts (focus mode, right panel focused):**
 
@@ -440,6 +460,19 @@ The agent's `working_dir`, `repo_path`, and `branch_name` are passed to `open_ag
 | `Backspace` | Delete character before cursor |
 | `←` / `→` | Move cursor within search input |
 
+**Keyboard shortcuts (focus mode, left panel focused, Terminal tab):**
+
+| Shortcut | Action |
+|----------|--------|
+| `Shift+↑` | Exit focus mode, return to originating tab |
+| `Shift+→` | Switch focus to right panel |
+| `Shift+Tab` (`BackTab`) | Cycle to previous left panel tab |
+| `Shift+PageUp` | Scroll terminal scrollback up by one page |
+| `Shift+PageDown` | Scroll terminal scrollback down by one page |
+| `Esc` | Forwarded to the terminal shell |
+| `Tab` | Forwarded to the terminal shell |
+| All other keys | Forwarded to the terminal shell's PTY |
+
 ### Help Overlay (`?`)
 
 The `?` key toggles a keyboard shortcut overlay rendered as a centered modal (44 columns wide) anchored to the bottom of the content area. The modal is organized into sections with bold secondary-colored headers and context-aware visibility:
@@ -448,7 +481,7 @@ The `?` key toggles a keyboard shortcut overlay rendered as a centered modal (44
 - **Repositories section (shown when Repositories tab is active):** `↑/↓` navigate, `Shift+↑/↓` jump repos, `←/→` navigate tree, `Shift+←/→` switch panel, `Enter` open menu/focus agent, `Space` collapse/expand, `v` toggle grouping.
 - **Overview section (shown when Overview tab is active):** `Shift+←/→` scroll panels, `Shift+↓` enter terminal, plus an "In terminal:" sub-context label followed by `Shift+↑` back to options bar, `Shift+↓` enter focus mode, `Shift+←/→` switch agent, `PgUp/PgDn` scroll terminal.
 - **Tasks section (shown when Tasks tab is active):** `←/→` navigate batches, `Shift+←/→` scroll batches, `Del/Backspace` remove batch.
-- **Focus Mode section (shown when in focus mode):** `Shift+↑` exit, `Shift+←/→` switch panel, `Shift+PgUp/PgDn` scroll terminal, plus a "Left panel:" sub-context label followed by `Tab` cycle tabs, `↑/↓` scroll diff.
+- **Focus Mode section (shown when in focus mode):** `Shift+↑` exit, `Shift+←/→` switch panel, `Shift+PgUp/PgDn` scroll terminal, plus a "Left panel:" sub-context label followed by `Tab` cycle tabs, `Shift+Tab` prev tab (used in Terminal tab since Tab is forwarded to the shell), `↑/↓` scroll diff.
 
 Key names are displayed in accent color (left-aligned, 16 chars wide); descriptions use primary text color. Section headers use secondary text color with bold modifier. Sub-context labels use tertiary text color and are indented.
 
@@ -706,7 +739,7 @@ Clicking anywhere in the tree area (including empty space) sets keyboard focus t
 
 | Click Target | Action |
 |--------------|--------|
-| Left panel tab (Changes/Compare/Panel 3) | Switch to that tab and focus the left panel (only when agent has a repo) |
+| Left panel tab (Changes/Compare/Terminal) | Switch to that tab and focus the left panel (only when agent has a repo) |
 | Left panel area | Switch keyboard focus to left panel (only when agent has a repo) |
 | Right panel area | Switch keyboard focus to right panel |
 
