@@ -29,6 +29,8 @@ pub struct AddTaskOutput {
     pub batch_idx: usize,
     pub branch_name: String,
     pub prompt: String,
+    pub use_prefix: bool,
+    pub use_suffix: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -43,10 +45,14 @@ pub struct AddTaskModal {
     batch_idx: usize,
     batch_title: String,
     branch_name: String,
+    use_prefix: bool,
+    use_suffix: bool,
+    has_prefix: bool,
+    has_suffix: bool,
 }
 
 impl AddTaskModal {
-    pub fn new(batch_idx: usize, batch_title: String) -> Self {
+    pub fn new(batch_idx: usize, batch_title: String, has_prefix: bool, has_suffix: bool) -> Self {
         Self {
             step: AddTaskStep::EnterBranch,
             input: String::new(),
@@ -54,6 +60,10 @@ impl AddTaskModal {
             batch_idx,
             batch_title,
             branch_name: String::new(),
+            use_prefix: true,
+            use_suffix: true,
+            has_prefix,
+            has_suffix,
         }
     }
 
@@ -104,9 +114,15 @@ impl AddTaskModal {
                 AddTaskResult::Pending
             }
             KeyCode::Char(c) => {
-                if key.modifiers.contains(KeyModifiers::ALT)
-                    || key.modifiers.contains(KeyModifiers::CONTROL)
-                {
+                if key.modifiers.contains(KeyModifiers::ALT) {
+                    match c {
+                        'p' => self.use_prefix = !self.use_prefix,
+                        's' => self.use_suffix = !self.use_suffix,
+                        _ => {}
+                    }
+                    return AddTaskResult::Pending;
+                }
+                if key.modifiers.contains(KeyModifiers::CONTROL) {
                     return AddTaskResult::Pending;
                 }
                 self.input.insert(self.cursor_pos, c);
@@ -139,6 +155,8 @@ impl AddTaskModal {
                     batch_idx: self.batch_idx,
                     branch_name: self.branch_name.clone(),
                     prompt: trimmed,
+                    use_prefix: self.use_prefix,
+                    use_suffix: self.use_suffix,
                 })
             }
         }
@@ -202,11 +220,13 @@ impl AddTaskModal {
             Constraint::Length(1)
         };
 
-        let [hint_area, input_area, _gap, info_area] = Layout::vertical([
+        let [hint_area, input_area, _gap, info_area, _spacer, status_area] = Layout::vertical([
             Constraint::Length(1),
             input_height,
             Constraint::Length(1),
             Constraint::Min(0),
+            Constraint::Length(1),
+            Constraint::Length(1),
         ])
         .areas(inner);
 
@@ -246,6 +266,55 @@ impl AddTaskModal {
                 );
             }
         }
+
+        // Status bar: prefix/suffix toggle indicators
+        self.render_status_bar(frame, status_area);
+    }
+
+    fn render_status_bar(&self, frame: &mut Frame, area: Rect) {
+        let mod_key = if cfg!(target_os = "macos") { "Opt" } else { "Alt" };
+        let mut spans: Vec<Span> = Vec::new();
+
+        if self.use_prefix {
+            spans.push(Span::styled(
+                "\u{2713} Prefix applied",
+                if self.has_prefix {
+                    Style::default().fg(theme::R_SUCCESS)
+                } else {
+                    Style::default().fg(theme::R_TEXT_DISABLED)
+                },
+            ));
+        } else {
+            spans.push(Span::styled(
+                "\u{2717} Prefix skipped",
+                Style::default().fg(theme::R_TEXT_DISABLED),
+            ));
+        }
+
+        spans.push(Span::styled("  ", Style::default()));
+
+        if self.use_suffix {
+            spans.push(Span::styled(
+                "\u{2713} Suffix applied",
+                if self.has_suffix {
+                    Style::default().fg(theme::R_SUCCESS)
+                } else {
+                    Style::default().fg(theme::R_TEXT_DISABLED)
+                },
+            ));
+        } else {
+            spans.push(Span::styled(
+                "\u{2717} Suffix skipped",
+                Style::default().fg(theme::R_TEXT_DISABLED),
+            ));
+        }
+
+        spans.push(Span::styled(
+            format!("  {mod_key}+P/S toggle"),
+            Style::default().fg(theme::R_TEXT_DISABLED),
+        ));
+
+        frame.render_widget(Paragraph::new(Line::from(spans)), area);
     }
 
     fn render_input(&self, frame: &mut Frame, area: Rect) {
