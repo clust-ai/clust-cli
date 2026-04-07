@@ -92,7 +92,7 @@ A 1-row bar at the top of the terminal with three tabs:
 |-----|-------------|
 | `Repositories` | Two-panel view with repo tree and agent cards (default) |
 | `Overview` | Multi-agent terminal overview with horizontal panels |
-| `Tasks` | Batch creation and task management with horizontal batch cards |
+| `Jobs` | Batch creation and task management with horizontal batch cards |
 
 The active tab is highlighted with the accent color. A `Tab/Shift+Tab` hint is shown to the right of the tabs. Focus mode is not a tab -- it is an overlay state entered explicitly from either tab (see Focus Mode section below). When focus mode is active, the tab bar is replaced by a back-bar header.
 
@@ -172,7 +172,7 @@ A multi-agent terminal overview that displays all active agents side-by-side wit
 - Each panel has a `panel_scroll_offset` for scrolling through the combined scrollback + live grid. When scrolled, a `↑N` indicator appears in the panel header.
 - On exit, all connections are detached and background tasks are aborted.
 
-#### Tasks Tab
+#### Jobs Tab
 
 A batch management tab that displays created batch definitions as horizontal cards. Batches have a launch mode (Auto or Manual). Auto-mode batches can be toggled between Idle and Active status, and when activated, automatically start agents for their tasks via `CreateWorktreeAgent` IPC. Manual-mode batches display "Manual" status and allow starting individual tasks one at a time via `Opt+S` / `Alt+S`. Auto-mode Idle batches can also be queued for scheduled execution via the `t` keybinding, which sends a `QueueBatch` IPC message to the hub daemon. Queued batches display a live countdown until their scheduled start time and can be cancelled with `Space`.
 
@@ -198,7 +198,7 @@ Each batch card has:
 | BatchList | Default. No card is focused. |
 | BatchCard(N) | A specific batch card is focused and can be deleted. |
 
-**Keyboard shortcuts (Tasks tab):**
+**Keyboard shortcuts (Jobs tab):**
 
 | Shortcut | Action |
 |----------|--------|
@@ -269,7 +269,7 @@ On startup, `clust ui` automatically connects to the hub daemon, starting it if 
 
 **Status messages:** Temporary status messages override the keybinding hints area. Messages are displayed for 5 seconds before auto-dismissing, after which the keybinding hints reappear. Two severity levels exist: `Error` (displayed in `R_ERROR` color) and `Success` (displayed in `R_SUCCESS` color). Status messages are used to surface feedback from async operations such as agent creation, branch pulls, and remote branch checkout -- both success confirmations (e.g., "Agent started on feature-branch", "Pulled main: Already up to date.", "Checked out feature-branch") and error details (e.g., "Agent create failed: hub connect error: ...", "Pull failed: ...", "Checkout failed: ..."). The `StatusMessage` struct tracks the message text, level, and creation `Instant` for auto-dismissal timing. Status messages are delivered from background tokio tasks to the main event loop via a dedicated `mpsc` channel (`status_tx` / `status_rx`), separate from the `AgentStartResult` channel used for agent creation results.
 
-**Keybinding hints (when no status message is active):** Context-aware hints: on Repositories tab shows `q quit`, `Q stop+quit`, navigation hints; on Overview tab shows focus-dependent hints (e.g., `Shift+↓ enter terminal` or `Shift+↑ options`); on Tasks tab shows `Opt+T new batch`, `Left/Right navigate`, `Up/Down tasks`, `Space toggle`, `Opt+S start task`, `M mode`, `B bypass`, `Enter add task`, `p prefix`, `s suffix`, `d clear done`, `Del remove`, `q quit`, `? keys`; in focus mode shows `Shift+←/→ switch panel`, `Shift+↑ exit`.
+**Keybinding hints (when no status message is active):** Context-aware hints: on Repositories tab shows `q quit`, `Q stop+quit`, navigation hints; on Overview tab shows focus-dependent hints (e.g., `Shift+↓ enter terminal` or `Shift+↑ options`); on Jobs tab shows `Opt+T new batch`, `Left/Right navigate`, `Up/Down tasks`, `Space toggle`, `Opt+S start task`, `M mode`, `B bypass`, `Enter add task`, `p prefix`, `s suffix`, `d clear done`, `Del remove`, `q quit`, `? keys`; in focus mode shows `Shift+←/→ switch panel`, `Shift+↑ exit`.
 
 ### Keyboard Shortcuts
 
@@ -294,7 +294,7 @@ On startup, `clust ui` automatically connects to the hub daemon, starting it if 
 | `Opt+V` (macOS) / `Alt+V` | Open in editor (see Editor Integration below) |
 | `Cmd+1` | Switch to Repositories tab (dismisses context menus, exits focus mode) |
 | `Cmd+2` | Switch to Overview tab (dismisses context menus, exits focus mode) |
-| `Cmd+3` | Switch to Tasks tab (dismisses context menus, exits focus mode) |
+| `Cmd+3` | Switch to Jobs tab (dismisses context menus, exits focus mode) |
 
 **Repositories tab:**
 
@@ -449,7 +449,7 @@ The agent's `working_dir`, `repo_path`, and `branch_name` are passed to `open_ag
 - `drain_diff_events()` is called each frame in the main event loop alongside `drain_output_events()`.
 - `parse_unified_diff()` parses raw `git diff HEAD` output into structured `DiffLine` entries with kind (FileHeader, HunkHeader, Context, Add, Delete, FileMetadata, Separator), content, line numbers, and file index. Separator lines are automatically inserted between files during parsing.
 - On terminal resize, the focus mode panel is resized via `TerminalEmulator::resize()` (preserving scrollback history) and the hub is notified via `ResizeAgent`. On `FocusGained` events, dimensions are also re-sent unconditionally to account for PTY resizes by other clients while the window was unfocused.
-- Focus mode is orthogonal to tab cycling -- `Tab` / `Shift+Tab` cycles between `Repositories`, `Overview`, and `Tasks` (3 tabs). Focus mode is only entered explicitly via the entry points above.
+- Focus mode is orthogonal to tab cycling -- `Tab` / `Shift+Tab` cycles between `Repositories`, `Overview`, and `Jobs` (3 tabs). Focus mode is only entered explicitly via the entry points above.
 - State is tracked by an `in_focus_mode: bool` flag rather than a `previous_tab` option. The `ActiveTab` enum no longer has a `FocusMode` variant.
 - On exit (via `close_panel()`), the diff task is stopped via the watch channel and aborted, diff state is cleared, the terminal session is closed (detach message sent, background task aborted), and the panel's connection is detached.
 
@@ -514,7 +514,7 @@ The `?` key toggles a keyboard shortcut overlay rendered as a centered modal (44
 - **Global section (always shown):** `q / Esc×2`, `Q`, `Ctrl+C`, `Tab`, `Shift+Tab`, `?`, `F2`, `Alt+M`, `Alt+E`, `Alt+D`, `Alt+F`, `Alt+N`, `Alt+V`, `Alt+B`, `Alt+T`, `Cmd+1`, `Cmd+2`.
 - **Repositories section (shown when Repositories tab is active):** `↑/↓` navigate, `Shift+↑/↓` jump repos, `←/→` navigate tree, `Shift+←/→` switch panel, `Enter` open menu/focus agent, `Space` collapse/expand, `v` toggle grouping.
 - **Overview section (shown when Overview tab is active):** `Shift+←/→` scroll panels, `Shift+↓` enter terminal, plus an "In terminal:" sub-context label followed by `Shift+↑` back to options bar, `Shift+↓` enter focus mode, `Shift+←/→` switch agent, `PgUp/PgDn` scroll terminal.
-- **Tasks section (shown when Tasks tab is active):** `←/→` navigate batches, `↑/↓` navigate tasks within a batch, `Shift+←/→` scroll batches, `Space` toggle batch status (or cancel queued), `t` set timer (queue batch), `Alt+S` start selected task (manual), `Enter` add task to batch, `p` edit prompt prefix, `s` edit prompt suffix, `d` clear done tasks, `Del/Backspace` remove batch.
+- **Jobs section (shown when Jobs tab is active):** `←/→` navigate batches, `↑/↓` navigate tasks within a batch, `Shift+←/→` scroll batches, `Space` toggle batch status (or cancel queued), `t` set timer (queue batch), `Alt+S` start selected task (manual), `Enter` add task to batch, `p` edit prompt prefix, `s` edit prompt suffix, `d` clear done tasks, `Del/Backspace` remove batch.
 - **Focus Mode section (shown when in focus mode):** `Shift+↑` exit, `Shift+←/→` switch panel, `Shift+PgUp/PgDn` scroll terminal, plus a "Left panel:" sub-context label followed by `Tab` cycle tabs, `Shift+Tab` prev tab (used in Terminal tab since Tab is forwarded to the shell), `↑/↓` scroll diff.
 
 Key names are displayed in accent color (left-aligned, 16 chars wide); descriptions use primary text color. Section headers use secondary text color with bold modifier. Sub-context labels use tertiary text color and are indented.
@@ -646,13 +646,13 @@ A multi-step modal for creating prompt batch definitions, opened globally with `
 - `Enter` -- confirm and complete the modal
 - `Esc` -- go back to the launch mode step
 
-**Completion:** On completing the final step, the modal outputs a `BatchModalOutput` containing the selected repo path, repo name, branch name, optional title, optional max concurrent value, and launch mode. The batch is added to `TasksState` and the active tab switches to the Tasks tab.
+**Completion:** On completing the final step, the modal outputs a `BatchModalOutput` containing the selected repo path, repo name, branch name, optional title, optional max concurrent value, and launch mode. The batch is added to `TasksState` and the active tab switches to the Jobs tab.
 
 **Rendering:** The modal is rendered as a centered overlay (60 columns wide, 60% of terminal height) with a titled border, input field with visible cursor, and a scrollable list with fuzzy-matched results. The selected item is indicated with a `>` prefix and bold text. In the launch mode step, two options ("Auto" and "Manual") are displayed with descriptions, using a `>` prefix for the selected option. In the concurrency step, the input shows the current value (or infinity symbol for unlimited) with arrow hint text below.
 
 ### Add Task Modal
 
-A 2-step modal for adding a task to an existing batch, opened by pressing `Enter` when a batch card is focused on the Tasks tab.
+A 2-step modal for adding a task to an existing batch, opened by pressing `Enter` when a batch card is focused on the Jobs tab.
 
 | Step | Title | Description |
 |------|-------|-------------|
@@ -671,7 +671,7 @@ A 2-step modal for adding a task to an existing batch, opened by pressing `Enter
 
 ### Edit Field Modal
 
-A reusable single-field text editor modal for editing a text value. Currently used for editing batch prompt prefix (`p` key) and prompt suffix (`s` key) when a batch card is focused on the Tasks tab.
+A reusable single-field text editor modal for editing a text value. Currently used for editing batch prompt prefix (`p` key) and prompt suffix (`s` key) when a batch card is focused on the Jobs tab.
 
 **Navigation:**
 - `Enter` -- save the current value and close the modal (empty input clears the field)
@@ -685,7 +685,7 @@ A reusable single-field text editor modal for editing a text value. Currently us
 
 ### Timer Modal
 
-A single-field modal for setting a scheduled start time on a batch, opened by pressing `t` when a batch card is focused on the Tasks tab. Only available for Auto-mode Idle batches.
+A single-field modal for setting a scheduled start time on a batch, opened by pressing `t` when a batch card is focused on the Jobs tab. Only available for Auto-mode Idle batches.
 
 **Input formats:**
 - **Duration**: `2h`, `30m`, `1h30m`, `45s`, or a bare number treated as minutes (e.g., `90` = 90 minutes)
@@ -747,7 +747,7 @@ GUI editors (Generic, JetBrains) are opened directly via their binary. Terminal 
 | Repositories tab (repo selected) | Repository root path |
 | Repositories tab (branch selected) | Worktree directory (if worktree), otherwise repo root |
 | Overview tab (terminal focused) | Agent's working directory |
-| Tasks tab | No target (editor shortcut is a no-op) |
+| Jobs tab | No target (editor shortcut is a no-op) |
 
 **Flow:**
 
@@ -790,7 +790,7 @@ A `ClickMap` struct is populated during each render pass and consumed during mou
 - `focus_left_tabs` -- Focus mode left panel tab regions mapped to `LeftPanelTab` values
 - `overview_content_areas` -- Overview tab terminal content areas (inner area excluding borders/header) mapped to global panel indices, used for Cmd+click URL detection
 - `focus_right_content_area` -- Focus mode right panel terminal content area (inner area excluding borders/header), used for Cmd+click URL detection
-- `tasks_batch_cards` -- Tasks tab batch card regions mapped to batch indices (click to focus batch card)
+- `tasks_batch_cards` -- Jobs tab batch card regions mapped to batch indices (click to focus batch card)
 
 #### Mouse Click Behavior
 
@@ -822,7 +822,7 @@ Clicking anywhere in the tree area (including empty space) sets keyboard focus t
 | Agent indicator (within repo block) | Focus that agent's terminal panel (`OverviewFocus::Terminal(idx)`) |
 | Agent panel | Focus that terminal panel (`OverviewFocus::Terminal(idx)`) |
 
-**Tasks tab:**
+**Jobs tab:**
 
 | Click Target | Action |
 |--------------|--------|
