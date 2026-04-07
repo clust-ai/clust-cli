@@ -3,6 +3,7 @@ mod cli;
 mod context_menu;
 mod create_agent_modal;
 mod create_batch_modal;
+mod import_batch_modal;
 mod detached_agent_modal;
 mod edit_field_modal;
 mod editor;
