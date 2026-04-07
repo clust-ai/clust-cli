@@ -217,6 +217,46 @@ impl TasksState {
         self.batches.iter_mut().find(|b| b.id == id)
     }
 
+    /// Mark the task associated with the given agent_id as Done.
+    /// If the batch is still Active and has Idle tasks remaining, returns
+    /// a `BatchStartInfo` describing the next task(s) to start.
+    pub fn mark_agent_done(&mut self, agent_id: &str) -> Option<BatchStartInfo> {
+        let batch = self.batches.iter_mut().find(|b| {
+            b.tasks.iter().any(|t| t.agent_id.as_deref() == Some(agent_id))
+        })?;
+
+        if let Some(task) = batch.tasks.iter_mut().find(|t| t.agent_id.as_deref() == Some(agent_id)) {
+            task.status = TaskStatus::Done;
+        }
+
+        if batch.status != BatchStatus::Active {
+            return None;
+        }
+
+        let active_count = batch.tasks.iter().filter(|t| t.status == TaskStatus::Active).count();
+        let max = batch.max_concurrent.unwrap_or(usize::MAX);
+        let slots = max.saturating_sub(active_count);
+        let tasks_to_start: Vec<_> = batch
+            .tasks
+            .iter()
+            .enumerate()
+            .filter(|(_, t)| t.status == TaskStatus::Idle)
+            .take(slots)
+            .map(|(i, t)| (i, t.branch_name.clone(), t.prompt.clone()))
+            .collect();
+
+        if tasks_to_start.is_empty() {
+            return None;
+        }
+
+        Some(BatchStartInfo {
+            batch_id: batch.id,
+            repo_path: batch.repo_path.clone(),
+            target_branch: batch.branch_name.clone(),
+            tasks_to_start,
+        })
+    }
+
     pub fn remove_batch(&mut self, idx: usize) {
         if idx < self.batches.len() {
             self.batches.remove(idx);

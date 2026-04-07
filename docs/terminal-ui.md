@@ -230,9 +230,12 @@ Each batch card has:
 - `BatchInfo::build_prompt(task_prompt)` combines the batch prefix, task prompt, and batch suffix into a single string (joined with double newlines). Used by the agent spawner when starting batch tasks.
 - `toggle_batch_status()` toggles a batch between Idle and Active. When transitioning to Active, returns a `BatchStartInfo` containing the tasks to start (up to `max_concurrent` minus already-active tasks). Only Idle tasks are started.
 - `batch_by_id_mut()` finds a batch by its unique id for updating task statuses after agent start results.
+- `mark_agent_done(agent_id)` finds the task associated with the given agent_id, marks it as Done, and if the batch is still Active with Idle tasks remaining, returns a `BatchStartInfo` describing the next task(s) to start (respecting `max_concurrent`).
 - `BatchStartInfo` struct carries batch_id, repo_path, target_branch, and a list of (task_index, branch_name, prompt) tuples for tasks that need agents started.
 - Auto-naming: when no title is provided, batches are named sequentially ("Batch 1", "Batch 2", etc.).
 - Click support: clicking a batch card focuses it via the `tasks_batch_cards` click map.
+- Agent exit detection: on each agent list refresh, the main UI loop checks if any Active batch task agents have disappeared from the hub's agent list. For each exited agent, `mark_agent_done()` is called which marks the task as Done and returns the next Idle tasks to start (if any). This provides automatic task progression within a batch.
+- `spawn_batch_tasks()` is a helper function that spawns worktree agents for each entry in a `BatchStartInfo`. It builds full prompts using the batch's prefix/suffix via `build_prompt()`, then spawns a tokio task per entry that sends `CreateWorktreeAgent` IPC to the hub. Results are sent back via the `agent_start_tx` channel. This function is used both when toggling a batch to Active and when auto-starting next tasks after agent exit.
 
 ### Auto-connect
 
