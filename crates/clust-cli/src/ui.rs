@@ -2893,14 +2893,18 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                             if shift {
                                 match key.code {
                                     KeyCode::Up => {
-                                        // Exit focus mode
-                                        focus_mode_state.shutdown();
-                                        in_focus_mode = false;
-                                        if active_tab == ActiveTab::Overview
+                                        // Exit focus mode — return to batch screen if opened from one
+                                        if let Some(origin) = focus_mode_state.batch_origin.take() {
+                                            active_tab = ActiveTab::Tasks;
+                                            tasks_state.focus = tasks::TasksFocus::BatchCard(origin.batch_idx);
+                                            tasks_state.focused_task = Some(origin.task_idx);
+                                        } else if active_tab == ActiveTab::Overview
                                             && overview_state.initialized
                                         {
                                             overview_state.force_resize_all();
                                         }
+                                        focus_mode_state.shutdown();
+                                        in_focus_mode = false;
                                     }
                                     KeyCode::Right => {
                                         focus_mode_state.focus_side =
@@ -3028,14 +3032,18 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                             if shift {
                                 match key.code {
                                     KeyCode::Up => {
-                                        // Exit focus mode
-                                        focus_mode_state.shutdown();
-                                        in_focus_mode = false;
-                                        if active_tab == ActiveTab::Overview
+                                        // Exit focus mode — return to batch screen if opened from one
+                                        if let Some(origin) = focus_mode_state.batch_origin.take() {
+                                            active_tab = ActiveTab::Tasks;
+                                            tasks_state.focus = tasks::TasksFocus::BatchCard(origin.batch_idx);
+                                            tasks_state.focused_task = Some(origin.task_idx);
+                                        } else if active_tab == ActiveTab::Overview
                                             && overview_state.initialized
                                         {
                                             overview_state.force_resize_all();
                                         }
+                                        focus_mode_state.shutdown();
+                                        in_focus_mode = false;
                                     }
                                     KeyCode::Left if focus_mode_state.repo_path.is_some() => {
                                         focus_mode_state.focus_side =
@@ -3319,6 +3327,41 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                     }
                                     KeyCode::Right if shift => {
                                         tasks_state.scroll_right(last_content_area.width);
+                                    }
+                                    KeyCode::Down if shift => {
+                                        // Open focused active task in focus mode
+                                        if let Some((batch_idx, task_idx, agent_id, batch_title)) =
+                                            tasks_state.focused_active_agent()
+                                        {
+                                            let aid = agent_id.to_string();
+                                            let btitle = batch_title.to_string();
+                                            if let Some(agent) = agents.iter().find(|a| a.id == aid) {
+                                                let fm_cols = (last_content_area.width * 40 / 100)
+                                                    .saturating_sub(2)
+                                                    .max(1);
+                                                let fm_rows = last_content_area
+                                                    .height
+                                                    .saturating_sub(3)
+                                                    .max(1);
+                                                focus_mode_state.open_agent(
+                                                    &aid,
+                                                    &agent.agent_binary,
+                                                    fm_cols,
+                                                    fm_rows,
+                                                    &agent.working_dir,
+                                                    agent.repo_path.as_deref(),
+                                                    agent.branch_name.as_deref(),
+                                                    agent.is_worktree,
+                                                );
+                                                focus_mode_state.batch_origin =
+                                                    Some(overview::BatchOrigin {
+                                                        batch_title: btitle,
+                                                        batch_idx,
+                                                        task_idx,
+                                                    });
+                                                in_focus_mode = true;
+                                            }
+                                        }
                                     }
                                     KeyCode::Left => {
                                         tasks_state.focus_prev_card();
@@ -4723,13 +4766,17 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                     } else if in_focus_mode {
                         // Focus mode click handling
                         if click_map.focus_back_button.contains(pos) {
-                            focus_mode_state.shutdown();
-                            in_focus_mode = false;
-                            if active_tab == ActiveTab::Overview
+                            if let Some(origin) = focus_mode_state.batch_origin.take() {
+                                active_tab = ActiveTab::Tasks;
+                                tasks_state.focus = tasks::TasksFocus::BatchCard(origin.batch_idx);
+                                tasks_state.focused_task = Some(origin.task_idx);
+                            } else if active_tab == ActiveTab::Overview
                                 && overview_state.initialized
                             {
                                 overview_state.force_resize_all();
                             }
+                            focus_mode_state.shutdown();
+                            in_focus_mode = false;
                         } else if focus_mode_state.repo_path.is_some() {
                             if let Some((_, tab)) = click_map.focus_left_tabs.iter().find(|(r, _)| r.contains(pos)) {
                                 focus_mode_state.left_tab = *tab;
@@ -5081,7 +5128,8 @@ fn render_focus_back_bar(
             .bg(theme::R_BG_RAISED)
             .add_modifier(Modifier::BOLD),
     ));
-    let back_label = format!("  Back to {}", origin_tab.label());
+    let back_target = if state.batch_origin.is_some() { "Tasks" } else { origin_tab.label() };
+    let back_label = format!("  Back to {}", back_target);
     spans.push(Span::styled(
         &back_label,
         Style::default()
@@ -5099,6 +5147,24 @@ fn render_focus_back_bar(
     };
     cursor_x += back_width;
     let _ = cursor_x; // suppress unused warning
+
+    // Batch badge (when opened from a batch task)
+    if let Some(ref origin) = state.batch_origin {
+        spans.push(Span::styled("  ", bg));
+        spans.push(Span::styled(
+            format!(" {} ", origin.batch_title),
+            Style::default()
+                .fg(theme::R_BG_BASE)
+                .bg(theme::R_INFO)
+                .add_modifier(Modifier::BOLD),
+        ));
+        spans.push(Span::styled(
+            format!(" task {}", origin.task_idx + 1),
+            Style::default()
+                .fg(theme::R_INFO)
+                .bg(theme::R_BG_RAISED),
+        ));
+    }
 
     // Center: agent info
     if let Some(panel) = &state.panel {
