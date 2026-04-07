@@ -39,8 +39,27 @@ pub struct BatchInfo {
     pub repo_name: String,
     pub branch_name: String,
     pub max_concurrent: Option<usize>,
+    pub prompt_prefix: Option<String>,
+    pub prompt_suffix: Option<String>,
     pub tasks: Vec<TaskEntry>,
     pub created_at: Instant,
+}
+
+impl BatchInfo {
+    /// Builds the full prompt for a task by combining the batch prefix,
+    /// the task-specific prompt, and the batch suffix.
+    #[allow(dead_code)]
+    pub fn build_prompt(&self, task_prompt: &str) -> String {
+        let mut parts = Vec::new();
+        if let Some(ref prefix) = self.prompt_prefix {
+            parts.push(prefix.as_str());
+        }
+        parts.push(task_prompt);
+        if let Some(ref suffix) = self.prompt_suffix {
+            parts.push(suffix.as_str());
+        }
+        parts.join("\n\n")
+    }
 }
 
 /// Focus state within the Tasks tab.
@@ -83,6 +102,8 @@ impl TasksState {
             repo_name: output.repo_name,
             branch_name: output.branch_name,
             max_concurrent: output.max_concurrent,
+            prompt_prefix: None,
+            prompt_suffix: None,
             tasks: Vec::new(),
             created_at: Instant::now(),
         });
@@ -92,6 +113,18 @@ impl TasksState {
     pub fn add_task(&mut self, batch_idx: usize, branch_name: String, prompt: String) {
         if let Some(batch) = self.batches.get_mut(batch_idx) {
             batch.tasks.push(TaskEntry { branch_name, prompt });
+        }
+    }
+
+    pub fn set_prompt_prefix(&mut self, batch_idx: usize, value: String) {
+        if let Some(batch) = self.batches.get_mut(batch_idx) {
+            batch.prompt_prefix = if value.is_empty() { None } else { Some(value) };
+        }
+    }
+
+    pub fn set_prompt_suffix(&mut self, batch_idx: usize, value: String) {
+        if let Some(batch) = self.batches.get_mut(batch_idx) {
+            batch.prompt_suffix = if value.is_empty() { None } else { Some(value) };
         }
     }
 
@@ -329,6 +362,24 @@ fn render_batch_card(
         Line::from(vec![
             Span::styled("Tasks     ", label_style),
             Span::styled(batch.tasks.len().to_string(), value_style),
+        ]),
+        Line::from(vec![
+            Span::styled("Prefix    ", label_style),
+            Span::styled(
+                batch.prompt_prefix.as_deref().unwrap_or("(none)"),
+                if batch.prompt_prefix.is_some() { value_style } else {
+                    Style::default().fg(theme::R_TEXT_DISABLED)
+                },
+            ),
+        ]),
+        Line::from(vec![
+            Span::styled("Suffix    ", label_style),
+            Span::styled(
+                batch.prompt_suffix.as_deref().unwrap_or("(none)"),
+                if batch.prompt_suffix.is_some() { value_style } else {
+                    Style::default().fg(theme::R_TEXT_DISABLED)
+                },
+            ),
         ]),
         Line::from(vec![
             Span::styled("Status    ", label_style),

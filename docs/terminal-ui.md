@@ -184,7 +184,7 @@ A batch management tab that displays created batch definitions as horizontal car
 Each batch card has:
 - **Box-drawing borders** using the repo's assigned color (bright when focused, dimmed when unfocused via `dim_color()`). Cards without a repo fall back to accent blue when focused and tertiary text color when unfocused.
 - **Title** displayed in the border (accent bright when focused, accent when unfocused).
-- **Card body** showing: Repo name (in repo color), Branch name, Workers (concurrency limit or infinity symbol), Tasks (count of tasks added to the batch), and Status ("Not started").
+- **Card body** showing: Repo name (in repo color), Branch name, Workers (concurrency limit or infinity symbol), Tasks (count of tasks added to the batch), Prefix (prompt prefix or "(none)"), Suffix (prompt suffix or "(none)"), and Status ("Not started").
 - Focused cards use `R_BG_SURFACE` background; unfocused cards use `R_BG_BASE`.
 
 **Empty state:** When no batches exist, a centered message is displayed: "No batches defined -- press Opt+T to create one".
@@ -206,14 +206,18 @@ Each batch card has:
 | `Up` | Return to batch list focus |
 | `Delete` / `Backspace` | Remove the focused batch card |
 | `Enter` | Open the Add Task modal for the focused batch card |
+| `p` | Open the Edit Field modal to edit the prompt prefix of the focused batch |
+| `s` | Open the Edit Field modal to edit the prompt suffix of the focused batch |
 
 **State management:**
 
 - `TasksState` manages the batch list, focus state, scroll offset, and ID generation.
 - `TasksFocus` enum tracks whether the batch list or a specific card is focused.
-- `BatchInfo` stores: id, title, repo_path, repo_name, branch_name, max_concurrent, tasks (list of `TaskEntry`), and created_at timestamp.
+- `BatchInfo` stores: id, title, repo_path, repo_name, branch_name, max_concurrent, prompt_prefix, prompt_suffix, tasks (list of `TaskEntry`), and created_at timestamp.
 - `TaskEntry` stores: branch_name and prompt for a single task within a batch.
 - `add_task()` adds a `TaskEntry` to a specific batch by index.
+- `set_prompt_prefix()` / `set_prompt_suffix()` update the prompt prefix/suffix for a batch (empty string clears to `None`).
+- `BatchInfo::build_prompt(task_prompt)` combines the batch prefix, task prompt, and batch suffix into a single string (joined with double newlines), for use by future agent startup code.
 - Auto-naming: when no title is provided, batches are named sequentially ("Batch 1", "Batch 2", etc.).
 - Click support: clicking a batch card focuses it via the `tasks_batch_cards` click map.
 
@@ -238,7 +242,7 @@ On startup, `clust ui` automatically connects to the hub daemon, starting it if 
 
 **Status messages:** Temporary status messages override the keybinding hints area. Messages are displayed for 5 seconds before auto-dismissing, after which the keybinding hints reappear. Two severity levels exist: `Error` (displayed in `R_ERROR` color) and `Success` (displayed in `R_SUCCESS` color). Status messages are used to surface feedback from async operations such as agent creation, branch pulls, and remote branch checkout -- both success confirmations (e.g., "Agent started on feature-branch", "Pulled main: Already up to date.", "Checked out feature-branch") and error details (e.g., "Agent create failed: hub connect error: ...", "Pull failed: ...", "Checkout failed: ..."). The `StatusMessage` struct tracks the message text, level, and creation `Instant` for auto-dismissal timing. Status messages are delivered from background tokio tasks to the main event loop via a dedicated `mpsc` channel (`status_tx` / `status_rx`), separate from the `AgentStartResult` channel used for agent creation results.
 
-**Keybinding hints (when no status message is active):** Context-aware hints: on Repositories tab shows `q quit`, `Q stop+quit`, navigation hints; on Overview tab shows focus-dependent hints (e.g., `Shift+↓ enter terminal` or `Shift+↑ options`); on Tasks tab shows `Opt+T new batch`, `Left/Right navigate`, `Enter add task`, `Del remove`, `q quit`, `? keys`; in focus mode shows `Shift+←/→ switch panel`, `Shift+↑ exit`.
+**Keybinding hints (when no status message is active):** Context-aware hints: on Repositories tab shows `q quit`, `Q stop+quit`, navigation hints; on Overview tab shows focus-dependent hints (e.g., `Shift+↓ enter terminal` or `Shift+↑ options`); on Tasks tab shows `Opt+T new batch`, `Left/Right navigate`, `Enter add task`, `p prefix`, `s suffix`, `Del remove`, `q quit`, `? keys`; in focus mode shows `Shift+←/→ switch panel`, `Shift+↑ exit`.
 
 ### Keyboard Shortcuts
 
@@ -483,7 +487,7 @@ The `?` key toggles a keyboard shortcut overlay rendered as a centered modal (44
 - **Global section (always shown):** `q / Esc×2`, `Q`, `Ctrl+C`, `Tab`, `Shift+Tab`, `?`, `F2`, `Alt+M`, `Alt+E`, `Alt+D`, `Alt+F`, `Alt+N`, `Alt+V`, `Alt+B`, `Alt+T`, `Cmd+1`, `Cmd+2`.
 - **Repositories section (shown when Repositories tab is active):** `↑/↓` navigate, `Shift+↑/↓` jump repos, `←/→` navigate tree, `Shift+←/→` switch panel, `Enter` open menu/focus agent, `Space` collapse/expand, `v` toggle grouping.
 - **Overview section (shown when Overview tab is active):** `Shift+←/→` scroll panels, `Shift+↓` enter terminal, plus an "In terminal:" sub-context label followed by `Shift+↑` back to options bar, `Shift+↓` enter focus mode, `Shift+←/→` switch agent, `PgUp/PgDn` scroll terminal.
-- **Tasks section (shown when Tasks tab is active):** `←/→` navigate batches, `Shift+←/→` scroll batches, `Enter` add task to batch, `Del/Backspace` remove batch.
+- **Tasks section (shown when Tasks tab is active):** `←/→` navigate batches, `Shift+←/→` scroll batches, `Enter` add task to batch, `p` edit prompt prefix, `s` edit prompt suffix, `Del/Backspace` remove batch.
 - **Focus Mode section (shown when in focus mode):** `Shift+↑` exit, `Shift+←/→` switch panel, `Shift+PgUp/PgDn` scroll terminal, plus a "Left panel:" sub-context label followed by `Tab` cycle tabs, `Shift+Tab` prev tab (used in Terminal tab since Tab is forwarded to the shell), `↑/↓` scroll diff.
 
 Key names are displayed in accent color (left-aligned, 16 chars wide); descriptions use primary text color. Section headers use secondary text color with bold modifier. Sub-context labels use tertiary text color and are indented.
@@ -632,6 +636,20 @@ A 2-step modal for adding a task to an existing batch, opened by pressing `Enter
 
 **Rendering:** The modal is rendered as a centered overlay (60 columns wide, 60% of terminal height) with a titled border showing the step number and batch title. The title for step 1 shows "Step 1/2 -- Branch name (batch title)" and step 2 shows "Step 2/2 -- Task prompt (batch title)". A hint line above the input provides navigation guidance. In step 2, the previously entered branch name is shown below the input as context. The prompt input uses word-wrap with scrolling support.
 
+### Edit Field Modal
+
+A reusable single-field text editor modal for editing a text value. Currently used for editing batch prompt prefix (`p` key) and prompt suffix (`s` key) when a batch card is focused on the Tasks tab.
+
+**Navigation:**
+- `Enter` -- save the current value and close the modal (empty input clears the field)
+- `Esc` -- cancel and close the modal without saving
+- `Left` / `Right` -- move cursor within the input field
+- `Backspace` -- delete character before cursor
+
+**Completion:** On pressing Enter, the modal outputs the trimmed input string. The caller applies it via `TasksState::set_prompt_prefix()` or `TasksState::set_prompt_suffix()`. An empty string clears the field to `None`.
+
+**Rendering:** The modal is rendered as a centered overlay (60 columns wide, 60% of terminal height) with a titled border showing the field context (e.g., "Edit Prefix -- My Batch"). A hint line above the input provides navigation guidance. The input field uses multi-line word-wrap with scrolling support. The modal is pre-filled with the current value when opened.
+
 ### Clone Progress Modal
 
 A centered overlay that shows real-time progress during a git clone operation. Displayed automatically when a clone is initiated from the add-repository modal.
@@ -645,7 +663,7 @@ A centered overlay that shows real-time progress during a git clone operation. D
 
 ### Text Input and Paste Handling
 
-All modal text inputs (Create Agent, Create Batch, Add Task, Search Agent, Detached Agent, Add Repository, and the Branch Picker in focus mode) track cursor position as a **byte offset** into the UTF-8 `String`, not a character index. This ensures correct behavior when the input contains multi-byte UTF-8 characters (e.g., em-dash, en-dash, accented characters):
+All modal text inputs (Create Agent, Create Batch, Add Task, Edit Field, Search Agent, Detached Agent, Add Repository, and the Branch Picker in focus mode) track cursor position as a **byte offset** into the UTF-8 `String`, not a character index. This ensures correct behavior when the input contains multi-byte UTF-8 characters (e.g., em-dash, en-dash, accented characters):
 
 - **Insert:** advances `cursor_pos` by `c.len_utf8()`
 - **Backspace / Left arrow:** retreats `cursor_pos` to the previous character boundary via `char_indices().next_back()`
