@@ -161,6 +161,64 @@ The TUI dashboard (`clust ui`) has two tabs:
 
 Mouse support includes click navigation, scroll, and Cmd+click to open URLs.
 
+## Batch JSON Import
+
+Batches can be imported from JSON files using `Alt+I` in the TUI. The file browser opens in `~/Downloads` by default and filters for `.json` files.
+
+### Structure
+
+```json
+{
+  "title": "My Batch",
+  "prefix": "You are working on the auth module.",
+  "suffix": "Run tests before finishing.",
+  "launch_mode": "auto",
+  "max_concurrent": 2,
+  "plan_mode": false,
+  "allow_bypass": false,
+  "tasks": [
+    {
+      "branch": "feat/login-form",
+      "prompt": "Implement the login form component",
+      "depends_on": []
+    },
+    {
+      "branch": "feat/login-api",
+      "prompt": "Add the login API endpoint",
+      "depends_on": []
+    },
+    {
+      "branch": "feat/login-tests",
+      "prompt": "Write integration tests for the login flow",
+      "depends_on": ["feat/login-form", "feat/login-api"]
+    }
+  ]
+}
+```
+
+### Fields
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `title` | string | No | Batch name. Auto-generates "Batch N" if omitted. |
+| `prefix` | string | No | Prompt prefix prepended to every task. |
+| `suffix` | string | No | Prompt suffix appended to every task. |
+| `launch_mode` | string | No | `"auto"` (default) or `"manual"`. |
+| `max_concurrent` | number | No | Max concurrent agents (auto mode). Null = unlimited. |
+| `plan_mode` | boolean | No | Start agents in plan mode. Default `false`. |
+| `allow_bypass` | boolean | No | Allow agents to bypass permission prompts. Default `false`. |
+| `tasks` | array | Yes | List of task objects (at least one required). |
+
+**Task fields:**
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `branch` | string | Yes | Branch name for the worktree. |
+| `prompt` | string | Yes | The prompt for the agent. |
+| `depends_on` | array | No | Branch names this task depends on (for ordering/documentation). |
+
+After selecting a JSON file, you'll be prompted to choose a repository and branch. The batch is created with all tasks pre-populated.
+
 ## Architecture
 
 Three crates in a Cargo workspace:

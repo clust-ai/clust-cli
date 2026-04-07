@@ -361,6 +361,8 @@ dependencies = [
  "fuzzy-matcher",
  "predicates",
  "ratatui",
+ "serde",
+ "serde_json",
  "syntect",
  "tokio",
  "vt100",
