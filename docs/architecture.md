@@ -77,7 +77,7 @@ The CLI is a thin client. It does NOT manage agent processes directly.
 - Protocol version constant (`PROTOCOL_VERSION`) for detecting stale hubs after rebuilds
 - Split-stream variants for bidirectional sessions
 - Socket path and clust directory helpers
-- Known agent registry (`KNOWN_AGENTS`) with accept-edits and bypass-permissions metadata
+- Known agent registry (`KNOWN_AGENTS`) with accept-edits, bypass-permissions, plan-mode, and allow-bypass metadata
 - Branch name sanitization (`sanitize_branch_name`) for converting user input into valid git branch names
 
 ## IPC Design
@@ -102,7 +102,7 @@ Serialization uses **MessagePack** via `rmp-serde` (compact, fast, schema-friend
 
 ```
 CLI -> Hub:
-  StartAgent { prompt: Option<String>, agent_binary: Option<String>, working_dir: String, cols: u16, rows: u16, accept_edits: bool, hub: String }
+  StartAgent { prompt: Option<String>, agent_binary: Option<String>, working_dir: String, cols: u16, rows: u16, accept_edits: bool, plan_mode: bool, allow_bypass: bool, hub: String }
   AttachAgent { id: String }
   DetachAgent { id: String }
   AgentInput { id: String, data: Vec<u8> }
@@ -123,7 +123,7 @@ CLI -> Hub:
   AddWorktree { working_dir: Option<String>, repo_name: Option<String>, branch_name: String, base_branch: Option<String>, checkout_existing: bool }
   RemoveWorktree { working_dir: Option<String>, repo_name: Option<String>, branch_name: String, delete_local_branch: bool, force: bool }
   GetWorktreeInfo { working_dir: Option<String>, repo_name: Option<String>, branch_name: String }
-  CreateWorktreeAgent { repo_path: String, target_branch: Option<String>, new_branch: Option<String>, prompt: Option<String>, agent_binary: Option<String>, cols: u16, rows: u16, accept_edits: bool, hub: String }
+  CreateWorktreeAgent { repo_path: String, target_branch: Option<String>, new_branch: Option<String>, prompt: Option<String>, agent_binary: Option<String>, cols: u16, rows: u16, accept_edits: bool, plan_mode: bool, allow_bypass: bool, hub: String }
   DeleteLocalBranch { working_dir: Option<String>, repo_name: Option<String>, branch_name: String, force: bool }
   DeleteRemoteBranch { working_dir: Option<String>, repo_name: Option<String>, branch_name: String }
   CheckoutRemoteBranch { working_dir: Option<String>, repo_name: Option<String>, remote_branch: String }
@@ -188,7 +188,7 @@ Hub -> CLI:
 
 ### Protocol Versioning
 
-The IPC protocol includes a version check to detect stale hubs. `clust-ipc` exports a `PROTOCOL_VERSION` constant (currently `3`) that must be bumped whenever the `CliMessage` or `HubMessage` enum shapes change (since `rmp-serde` uses numeric enum indices).
+The IPC protocol includes a version check to detect stale hubs. `clust-ipc` exports a `PROTOCOL_VERSION` constant (currently `4`) that must be bumped whenever the `CliMessage` or `HubMessage` enum shapes change (since `rmp-serde` uses numeric enum indices).
 
 On connection, the CLI sends a `Ping { protocol_version }` message. The hub replies with `Pong { protocol_version }` carrying its own version. If versions mismatch, the CLI stops the stale hub and spawns a fresh one before proceeding.
 

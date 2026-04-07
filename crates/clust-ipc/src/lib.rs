@@ -14,7 +14,7 @@ pub const DEFAULT_HUB: &str = "default_hub";
 
 /// Protocol version for IPC compatibility checks.
 /// Bump this whenever `CliMessage` or `HubMessage` enum shapes change.
-pub const PROTOCOL_VERSION: u32 = 3;
+pub const PROTOCOL_VERSION: u32 = 4;
 
 /// Messages sent from CLI to Hub.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -26,6 +26,8 @@ pub enum CliMessage {
         cols: u16,
         rows: u16,
         accept_edits: bool,
+        plan_mode: bool,
+        allow_bypass: bool,
         hub: String,
     },
     AttachAgent { id: String },
@@ -74,6 +76,8 @@ pub enum CliMessage {
         cols: u16,
         rows: u16,
         accept_edits: bool,
+        plan_mode: bool,
+        allow_bypass: bool,
         hub: String,
     },
     DeleteLocalBranch {
@@ -392,6 +396,8 @@ mod tests {
             cols: 120,
             rows: 40,
             accept_edits: false,
+            plan_mode: false,
+            allow_bypass: false,
             hub: DEFAULT_HUB.into(),
         })
         .await;
@@ -406,6 +412,8 @@ mod tests {
             cols: 80,
             rows: 24,
             accept_edits: false,
+            plan_mode: false,
+            allow_bypass: false,
             hub: DEFAULT_HUB.into(),
         })
         .await;
@@ -420,6 +428,8 @@ mod tests {
             cols: 120,
             rows: 40,
             accept_edits: true,
+            plan_mode: false,
+            allow_bypass: false,
             hub: DEFAULT_HUB.into(),
         })
         .await;
@@ -434,6 +444,8 @@ mod tests {
             cols: 80,
             rows: 24,
             accept_edits: false,
+            plan_mode: false,
+            allow_bypass: false,
             hub: "my_feature".into(),
         })
         .await;
@@ -1178,6 +1190,8 @@ mod tests {
             cols: 120,
             rows: 40,
             accept_edits: true,
+            plan_mode: false,
+            allow_bypass: false,
             hub: DEFAULT_HUB.into(),
         })
         .await;
@@ -1194,6 +1208,8 @@ mod tests {
             cols: 80,
             rows: 24,
             accept_edits: false,
+            plan_mode: false,
+            allow_bypass: false,
             hub: DEFAULT_HUB.into(),
         })
         .await;

@@ -92,7 +92,8 @@ When the hub receives a `StartAgent` message:
 3. Allocate a PTY pair (master/slave) via `portable-pty`
 4. Spawn the agent process in the slave PTY
    - If `prompt` is provided, pass it as an argument to the agent binary
-   - If `bypass_permissions` is enabled globally, append the agent's bypass-permissions args (e.g., `--dangerously-skip-permissions` for Claude). Bypass supersedes `accept_edits` (strictly more permissive).
+   - If `bypass_permissions` is enabled globally, append the agent's bypass-permissions args (e.g., `--dangerously-skip-permissions` for Claude). Global bypass supersedes all per-agent flags.
+   - Otherwise, if `plan_mode` is requested, append the agent's plan-mode args (e.g., `--permission-mode plan` for Claude). If `allow_bypass` is also set, additionally append the agent's allow-bypass args (e.g., `--allow-dangerously-skip-permissions` for Claude).
    - Otherwise, if `accept_edits` is requested, append the agent's accept-edits args (e.g., `--permission-mode acceptEdits` for Claude).
    - Set working directory to the directory the CLI was invoked from (passed in the StartAgent message)
 5. Store agent metadata in memory:

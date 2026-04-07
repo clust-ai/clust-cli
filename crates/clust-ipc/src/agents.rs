@@ -9,6 +9,12 @@ pub struct KnownAgent {
     /// CLI args to append when bypass-permissions mode is enabled globally.
     /// `None` means this agent does not support the feature.
     pub bypass_permissions_args: Option<&'static [&'static str]>,
+    /// CLI args to append when plan mode is requested.
+    /// `None` means this agent does not support the feature.
+    pub plan_mode_args: Option<&'static [&'static str]>,
+    /// CLI args to append to allow bypass-permissions after exiting plan mode.
+    /// `None` means this agent does not support the feature.
+    pub allow_bypass_args: Option<&'static [&'static str]>,
     /// Whether this agent has been tested with clust.
     pub tested: bool,
 }
@@ -20,6 +26,8 @@ pub const KNOWN_AGENTS: &[KnownAgent] = &[
         display_name: "Claude Code",
         accept_edits_args: Some(&["--permission-mode", "acceptEdits"]),
         bypass_permissions_args: Some(&["--dangerously-skip-permissions"]),
+        plan_mode_args: Some(&["--permission-mode", "plan"]),
+        allow_bypass_args: Some(&["--allow-dangerously-skip-permissions"]),
         tested: true,
     },
     KnownAgent {
@@ -27,6 +35,8 @@ pub const KNOWN_AGENTS: &[KnownAgent] = &[
         display_name: "Open Code",
         accept_edits_args: None,
         bypass_permissions_args: None,
+        plan_mode_args: None,
+        allow_bypass_args: None,
         tested: false,
     },
     KnownAgent {
@@ -34,6 +44,8 @@ pub const KNOWN_AGENTS: &[KnownAgent] = &[
         display_name: "Aider",
         accept_edits_args: None,
         bypass_permissions_args: None,
+        plan_mode_args: None,
+        allow_bypass_args: None,
         tested: false,
     },
     KnownAgent {
@@ -41,6 +53,8 @@ pub const KNOWN_AGENTS: &[KnownAgent] = &[
         display_name: "Codex",
         accept_edits_args: None,
         bypass_permissions_args: None,
+        plan_mode_args: None,
+        allow_bypass_args: None,
         tested: false,
     },
 ];
@@ -61,6 +75,24 @@ pub fn bypass_permissions_args_for(binary: &str) -> Option<&'static [&'static st
         .iter()
         .find(|a| a.binary == binary)
         .and_then(|a| a.bypass_permissions_args)
+}
+
+/// Look up the plan-mode CLI args for a known agent binary.
+/// Returns `None` if the binary is unknown or does not support the feature.
+pub fn plan_mode_args_for(binary: &str) -> Option<&'static [&'static str]> {
+    KNOWN_AGENTS
+        .iter()
+        .find(|a| a.binary == binary)
+        .and_then(|a| a.plan_mode_args)
+}
+
+/// Look up the allow-bypass CLI args for a known agent binary.
+/// Returns `None` if the binary is unknown or does not support the feature.
+pub fn allow_bypass_args_for(binary: &str) -> Option<&'static [&'static str]> {
+    KNOWN_AGENTS
+        .iter()
+        .find(|a| a.binary == binary)
+        .and_then(|a| a.allow_bypass_args)
 }
 
 #[cfg(test)]
@@ -112,6 +144,47 @@ mod tests {
     fn bypass_permissions_args_for_unknown_agent_returns_none() {
         assert_eq!(bypass_permissions_args_for("unknown-binary"), None);
         assert_eq!(bypass_permissions_args_for(""), None);
+    }
+
+    #[test]
+    fn plan_mode_args_for_claude_returns_args() {
+        let args = plan_mode_args_for("claude");
+        assert_eq!(args, Some(["--permission-mode", "plan"].as_slice()));
+    }
+
+    #[test]
+    fn plan_mode_args_for_agent_without_support_returns_none() {
+        assert_eq!(plan_mode_args_for("aider"), None);
+        assert_eq!(plan_mode_args_for("opencode"), None);
+        assert_eq!(plan_mode_args_for("codex"), None);
+    }
+
+    #[test]
+    fn plan_mode_args_for_unknown_agent_returns_none() {
+        assert_eq!(plan_mode_args_for("unknown-binary"), None);
+        assert_eq!(plan_mode_args_for(""), None);
+    }
+
+    #[test]
+    fn allow_bypass_args_for_claude_returns_args() {
+        let args = allow_bypass_args_for("claude");
+        assert_eq!(
+            args,
+            Some(["--allow-dangerously-skip-permissions"].as_slice())
+        );
+    }
+
+    #[test]
+    fn allow_bypass_args_for_agent_without_support_returns_none() {
+        assert_eq!(allow_bypass_args_for("aider"), None);
+        assert_eq!(allow_bypass_args_for("opencode"), None);
+        assert_eq!(allow_bypass_args_for("codex"), None);
+    }
+
+    #[test]
+    fn allow_bypass_args_for_unknown_agent_returns_none() {
+        assert_eq!(allow_bypass_args_for("unknown-binary"), None);
+        assert_eq!(allow_bypass_args_for(""), None);
     }
 
     #[test]

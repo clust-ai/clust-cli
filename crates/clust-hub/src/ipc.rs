@@ -78,6 +78,8 @@ async fn handle_connection(
             cols,
             rows,
             accept_edits,
+            plan_mode,
+            allow_bypass,
             hub,
         } => {
             // Detect git info BEFORE acquiring the lock (avoid holding lock during I/O)
@@ -102,6 +104,8 @@ async fn handle_connection(
                         cols,
                         rows,
                         accept_edits,
+                        plan_mode,
+                        allow_bypass,
                         hub,
                         repo_path,
                         branch_name,
@@ -936,6 +940,8 @@ async fn handle_connection(
             cols,
             rows,
             accept_edits,
+            plan_mode,
+            allow_bypass,
             hub,
         } => {
             // Determine branch name and whether to create or checkout.
@@ -1026,6 +1032,8 @@ async fn handle_connection(
                         cols,
                         rows,
                         accept_edits,
+                        plan_mode,
+                        allow_bypass,
                         hub,
                         repo_path: wt_repo_path,
                         branch_name: wt_branch_name,
