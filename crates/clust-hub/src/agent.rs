@@ -179,6 +179,8 @@ pub struct SpawnAgentParams {
     pub cols: u16,
     pub rows: u16,
     pub accept_edits: bool,
+    pub plan_mode: bool,
+    pub allow_bypass: bool,
     pub hub: String,
     pub repo_path: Option<String>,
     pub branch_name: Option<String>,
@@ -212,10 +214,23 @@ pub fn spawn_agent(
         cmd.arg(p);
     }
     if state.bypass_permissions {
-        // bypass_permissions supersedes accept_edits (strictly more permissive)
+        // Global bypass_permissions supersedes all per-agent flags
         if let Some(args) = clust_ipc::agents::bypass_permissions_args_for(&binary) {
             for arg in args {
                 cmd.arg(arg);
+            }
+        }
+    } else if params.plan_mode {
+        if let Some(args) = clust_ipc::agents::plan_mode_args_for(&binary) {
+            for arg in args {
+                cmd.arg(arg);
+            }
+        }
+        if params.allow_bypass {
+            if let Some(args) = clust_ipc::agents::allow_bypass_args_for(&binary) {
+                for arg in args {
+                    cmd.arg(arg);
+                }
             }
         }
     } else if params.accept_edits {

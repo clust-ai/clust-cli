@@ -143,6 +143,8 @@ async fn bidirectional_streaming_over_split_socket() {
             cols: 80,
             rows: 24,
             accept_edits: false,
+            plan_mode: false,
+            allow_bypass: false,
             hub: clust_ipc::DEFAULT_HUB.into(),
         },
     )

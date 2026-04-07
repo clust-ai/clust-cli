@@ -1699,6 +1699,8 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                                                     .saturating_sub(2)
                                                                     .max(1),
                                                                 accept_edits: false,
+                                                                plan_mode: false,
+                                                                allow_bypass: false,
                                                                 hub,
                                                             };
                                                         if let Err(e) = clust_ipc::send_message(
@@ -1780,6 +1782,8 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                                                 .saturating_sub(2)
                                                                 .max(1),
                                                             accept_edits: false,
+                                                            plan_mode: false,
+                                                            allow_bypass: false,
                                                             hub,
                                                         };
                                                         if let Err(e) = clust_ipc::send_message(
@@ -2042,6 +2046,8 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                                                         .saturating_sub(2)
                                                                         .max(1),
                                                                     accept_edits: false,
+                                                                    plan_mode: false,
+                                                                    allow_bypass: false,
                                                                     hub,
                                                                 };
                                                             if let Err(e) = clust_ipc::send_message(
@@ -2229,6 +2235,8 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                                                     .saturating_sub(2)
                                                                     .max(1),
                                                                 accept_edits: false,
+                                                                plan_mode: false,
+                                                                allow_bypass: false,
                                                                 hub,
                                                             };
                                                         if let Err(e) = clust_ipc::send_message(
@@ -2389,6 +2397,8 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                         cols,
                                         rows: rows.saturating_sub(2).max(1),
                                         accept_edits: false,
+                                        plan_mode: false,
+                                        allow_bypass: false,
                                         hub,
                                     };
                                     if let Err(e) =
@@ -2542,6 +2552,8 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                         cols,
                                         rows: rows.saturating_sub(2).max(1),
                                         accept_edits: false,
+                                        plan_mode: false,
+                                        allow_bypass: false,
                                         hub,
                                     };
                                     if let Err(e) =
@@ -3260,6 +3272,16 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                             }
                                         }
                                     }
+                                    KeyCode::Char('m') => {
+                                        if let TasksFocus::BatchCard(idx) = tasks_state.focus {
+                                            tasks_state.toggle_plan_mode(idx);
+                                        }
+                                    }
+                                    KeyCode::Char('b') => {
+                                        if let TasksFocus::BatchCard(idx) = tasks_state.focus {
+                                            tasks_state.toggle_allow_bypass(idx);
+                                        }
+                                    }
                                     KeyCode::Char(' ') => {
                                         if let TasksFocus::BatchCard(idx) = tasks_state.focus {
                                             if let Some(batch) = tasks_state.batches.get(idx) {
@@ -3857,6 +3879,8 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                                                     .saturating_sub(2)
                                                                     .max(1),
                                                                 accept_edits: false,
+                                                                plan_mode: false,
+                                                                allow_bypass: false,
                                                                 hub,
                                                             };
                                                         if let Err(e) = clust_ipc::send_message(
@@ -3938,6 +3962,8 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                                                 .saturating_sub(2)
                                                                 .max(1),
                                                             accept_edits: false,
+                                                            plan_mode: false,
+                                                            allow_bypass: false,
                                                             hub,
                                                         };
                                                         if let Err(e) = clust_ipc::send_message(
@@ -4200,6 +4226,8 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                                                         .saturating_sub(2)
                                                                         .max(1),
                                                                     accept_edits: false,
+                                                                    plan_mode: false,
+                                                                    allow_bypass: false,
                                                                     hub,
                                                                 };
                                                             if let Err(e) = clust_ipc::send_message(
@@ -4387,6 +4415,8 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                                                     .saturating_sub(2)
                                                                     .max(1),
                                                                 accept_edits: false,
+                                                                plan_mode: false,
+                                                                allow_bypass: false,
                                                                 hub,
                                                             };
                                                         if let Err(e) = clust_ipc::send_message(
@@ -7006,6 +7036,8 @@ fn spawn_batch_tasks(
         .iter()
         .map(|(_, _, raw_prompt)| batch.build_prompt(raw_prompt))
         .collect();
+    let batch_plan_mode = batch.plan_mode;
+    let batch_allow_bypass = batch.allow_bypass;
     let hub = hub_name.to_string();
     let (cols, rows) = crossterm::terminal::size().unwrap_or((80, 24));
     for ((task_index, new_branch, _), full_prompt) in
@@ -7041,6 +7073,8 @@ fn spawn_batch_tasks(
                 cols,
                 rows: rows.saturating_sub(2).max(1),
                 accept_edits: false,
+                plan_mode: batch_plan_mode,
+                allow_bypass: batch_allow_bypass,
                 hub,
             };
             if let Err(e) = clust_ipc::send_message(&mut stream, &msg).await {
