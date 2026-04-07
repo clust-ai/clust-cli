@@ -84,6 +84,7 @@ When entering scrollback mode, the current `total_lines` is recorded as an ancho
 - **Mouse scroll up/down** (scrollback mode): navigates by `SCROLL_STEP` lines. Scrolling down to offset 0 exits scrollback mode.
 - **Any other keypress** while in scrollback: exits scrollback mode, triggers agent redraw via `ResizeAgent`, and forwards the keypress.
 - **Terminal resize** while in scrollback: exits scrollback mode. The shadow terminal is resized via `resize()` which preserves scrollback history.
+- **Exiting scrollback** renders the shadow VT's live content (offset 0) to the viewport using the same `to_ansi_lines_scrolled()` pattern, writing each line with cursor positioning and clearing any leftover rows below the content. This avoids clearing the viewport, which would cause a visible blank flash until the agent redraws via SIGWINCH.
 - Output arriving while in scrollback mode is stored in the shadow VT and the scroll offset is adjusted, but not rendered to stdout until the user returns to live mode.
 - Scrollback rendering uses `to_ansi_lines_scrolled()` which converts the shadow terminal's cell grid to strings with embedded ANSI SGR escape codes for direct stdout output.
 
