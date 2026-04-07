@@ -14,7 +14,7 @@ pub const DEFAULT_HUB: &str = "default_hub";
 
 /// Protocol version for IPC compatibility checks.
 /// Bump this whenever `CliMessage` or `HubMessage` enum shapes change.
-pub const PROTOCOL_VERSION: u32 = 2;
+pub const PROTOCOL_VERSION: u32 = 3;
 
 /// Messages sent from CLI to Hub.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -126,6 +126,17 @@ pub enum CliMessage {
         enabled: bool,
     },
     GetBypassPermissions,
+    // Terminal session management
+    StartTerminal {
+        working_dir: String,
+        cols: u16,
+        rows: u16,
+    },
+    AttachTerminal { id: String },
+    DetachTerminal { id: String },
+    TerminalInput { id: String, data: Vec<u8> },
+    ResizeTerminal { id: String, cols: u16, rows: u16 },
+    StopTerminal { id: String },
 }
 
 /// Info about a running agent, returned in AgentList.
@@ -271,6 +282,13 @@ pub enum HubMessage {
     BypassPermissions {
         enabled: bool,
     },
+    // Terminal session messages
+    TerminalStarted { id: String },
+    TerminalAttached { id: String },
+    TerminalOutput { id: String, data: Vec<u8> },
+    TerminalExited { id: String, exit_code: i32 },
+    TerminalReplayComplete { id: String },
+    TerminalStopped { id: String },
 }
 
 /// Returns the clust data directory: `~/.clust/`.

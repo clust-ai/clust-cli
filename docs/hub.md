@@ -37,8 +37,8 @@ Triggered by `clust -s` / `clust --stop` (no argument).
 
 1. Hub receives `StopHub` message over IPC
 2. Hub replies `Ok` to the requesting CLI
-3. Hub notifies all attached CLI clients via broadcast channels (`HubShutdown` event)
-4. Hub sends SIGTERM to all agent processes, waits 3 seconds, then SIGKILL any survivors
+3. Hub notifies all attached CLI clients via broadcast channels (`HubShutdown` event) for both agents and terminal sessions
+4. Hub sends SIGTERM to all agent and terminal processes, waits 3 seconds, then SIGKILL any survivors
 5. Hub removes the socket file (`~/.clust/clust.sock`)
 6. Hub signals the tao event loop to exit
 
@@ -144,6 +144,55 @@ All PTY output is recorded in the agent's replay buffer as it arrives. When a cl
 ### Input Routing
 
 Any attached client can send input. The hub writes it directly to the agent's PTY master. Multiple clients sending input simultaneously is allowed (agent sees interleaved input).
+
+## Terminal Session Management
+
+The hub manages interactive terminal (shell) sessions independently from agent sessions. Terminal sessions are used by the focus mode Terminal tab to provide a shell running inside the agent's worktree directory.
+
+### Spawning a Terminal
+
+When the hub receives a `StartTerminal` message:
+
+1. Generate a unique terminal ID with "t" prefix (6-char hex, e.g., `t3f8c1a`)
+2. Determine the shell binary from `$SHELL` environment variable (fallback: `/bin/zsh`)
+3. Allocate a PTY pair via `portable-pty`
+4. Spawn the shell as a login shell (`-l` flag) in the specified `working_dir`
+5. Store terminal metadata in the `terminals` HashMap
+6. Begin reading from PTY master, buffer output, forward to attached clients
+7. Return `TerminalStarted { id }` to the requesting CLI
+8. Immediately enter an attached streaming session (`handle_attached_terminal_session`)
+
+### Terminal Attach Flow
+
+The attach flow mirrors agent attach but uses Terminal message variants:
+
+1. CLI sends `StartTerminal` (or `AttachTerminal` for reattach)
+2. Hub replays the terminal's replay buffer as `TerminalOutput` messages
+3. Hub sends `TerminalReplayComplete { id }` sentinel
+4. Hub begins live-streaming new `TerminalOutput` messages
+5. CLI forwards keyboard input via `TerminalInput` messages
+6. CLI sends `ResizeTerminal` for PTY dimension changes
+7. On disconnect, CLI sends `DetachTerminal`
+
+### Terminal Exit
+
+When the hub detects a terminal shell process has exited:
+
+1. Capture exit code
+2. Notify all attached CLI clients with `TerminalExited { id, exit_code }`
+3. Remove terminal from the in-memory `terminals` map
+
+### Terminal Stop
+
+When the hub receives a `StopTerminal` message:
+
+1. Send SIGTERM to the terminal process
+2. Wait 3 seconds
+3. If still running, send SIGKILL
+
+### Terminal Output Multiplexing
+
+Terminal sessions use the same output multiplexing infrastructure as agents: broadcast channel (capacity 1024), replay buffer (512 KB ring buffer), per-client size tracking, and active-client-based PTY resizing. The `TerminalEntry` struct mirrors `AgentEntry` for these fields.
 
 ## Worktree Management
 
@@ -298,6 +347,7 @@ Each phase sends a `PurgeProgress` IPC message to the client before execution, a
 ```rust
 struct HubState {
     agents: HashMap<String, AgentEntry>,
+    terminals: HashMap<String, TerminalEntry>,
     default_agent: Option<String>,         // loaded from SQLite on startup; None if unset
     bypass_permissions: bool,              // loaded from SQLite on startup; false if unset
     db: Option<rusqlite::Connection>,      // open SQLite connection; Some after init_db()
@@ -322,6 +372,21 @@ struct AgentEntry {
     repo_path: Option<String>,             // git repo root (None if not in a git repo)
     branch_name: Option<String>,           // current git branch
     is_worktree: bool,                     // whether working_dir is a git worktree
+}
+
+struct TerminalEntry {
+    id: String,                            // "t" prefix + 6-char hex (e.g., "t3f8c1a")
+    working_dir: String,
+    pid: Option<u32>,                      // OS process ID (for SIGTERM/SIGKILL)
+    pty_master: Box<dyn MasterPty + Send>,
+    pty_writer: Box<dyn Write + Send>,
+    output_tx: broadcast::Sender<AgentEvent>,
+    replay_buffer: Arc<Mutex<ReplayBuffer>>, // 512 KB ring buffer of recent PTY output
+    attached_count: Arc<AtomicUsize>,
+    client_sizes: HashMap<u64, (u16, u16)>,// per-client terminal sizes
+    current_pty_size: (u16, u16),          // current PTY dimensions (skip redundant resizes)
+    active_client_id: Option<u64>,         // most recently active client
+    next_client_id: AtomicU64,             // monotonic counter for client IDs
 }
 ```
 

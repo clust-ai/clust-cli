@@ -1558,6 +1558,78 @@ async fn handle_connection(
             }
         }
 
+        // Terminal session management
+        CliMessage::StartTerminal { working_dir, cols, rows } => {
+            let result = {
+                let mut hub_state = state.lock().await;
+                agent::spawn_terminal(&mut hub_state, working_dir, cols, rows, state.clone())
+            };
+            match result {
+                Ok(id) => {
+                    clust_ipc::send_message_write(
+                        &mut writer,
+                        &HubMessage::TerminalStarted { id: id.clone() },
+                    )
+                    .await?;
+                    handle_attached_terminal_session(&id, reader, writer, state).await?;
+                }
+                Err(e) => {
+                    clust_ipc::send_message_write(
+                        &mut writer,
+                        &HubMessage::Error { message: e },
+                    )
+                    .await?;
+                }
+            }
+        }
+        CliMessage::AttachTerminal { id } => {
+            let exists = {
+                let hub = state.lock().await;
+                hub.terminals.contains_key(&id)
+            };
+            if exists {
+                clust_ipc::send_message_write(
+                    &mut writer,
+                    &HubMessage::TerminalAttached { id: id.clone() },
+                )
+                .await?;
+                handle_attached_terminal_session(&id, reader, writer, state).await?;
+            } else {
+                clust_ipc::send_message_write(
+                    &mut writer,
+                    &HubMessage::Error {
+                        message: format!("terminal {id} not found"),
+                    },
+                )
+                .await?;
+            }
+        }
+        CliMessage::StopTerminal { id } => {
+            let exists = {
+                let hub = state.lock().await;
+                hub.terminals.contains_key(&id)
+            };
+            if exists {
+                clust_ipc::send_message_write(
+                    &mut writer,
+                    &HubMessage::TerminalStopped { id: id.clone() },
+                )
+                .await?;
+                let state = state.clone();
+                tokio::spawn(async move {
+                    let _ = agent::stop_terminal(&state, &id).await;
+                });
+            } else {
+                clust_ipc::send_message_write(
+                    &mut writer,
+                    &HubMessage::Error {
+                        message: format!("terminal {id} not found"),
+                    },
+                )
+                .await?;
+            }
+        }
+
         _ => {
             clust_ipc::send_message_write(
                 &mut writer,
@@ -1754,6 +1826,181 @@ async fn handle_attached_session(
     // Decrement attached count and remove client from size tracking
     let mut hub = state_for_cleanup.lock().await;
     if let Some(entry) = hub.agents.get_mut(&agent_id_for_cleanup) {
+        entry.attached_count.fetch_sub(1, Ordering::Relaxed);
+        entry.client_sizes.remove(&client_id);
+        if entry.active_client_id == Some(client_id) {
+            entry.active_client_id = None;
+        }
+    }
+
+    Ok(())
+}
+
+/// Handle a bidirectional streaming session for an attached terminal client.
+///
+/// Same pattern as `handle_attached_session` but uses Terminal message variants
+/// and looks up `state.terminals` instead of `state.agents`.
+async fn handle_attached_terminal_session(
+    terminal_id: &str,
+    mut reader: OwnedReadHalf,
+    mut writer: OwnedWriteHalf,
+    state: SharedHubState,
+) -> io::Result<()> {
+    let (mut output_rx, client_id, replay_buf) = {
+        let hub = state.lock().await;
+        let entry = hub.terminals.get(terminal_id).ok_or_else(|| {
+            io::Error::new(io::ErrorKind::NotFound, "terminal not found")
+        })?;
+        entry.attached_count.fetch_add(1, Ordering::Relaxed);
+        let cid = entry.next_client_id();
+        (entry.output_tx.subscribe(), cid, entry.replay_buffer.clone())
+    };
+
+    let terminal_id_owned = terminal_id.to_string();
+
+    // Replay buffered output before starting the live stream.
+    {
+        let replay_data = replay_buf.lock().unwrap().snapshot();
+        const REPLAY_CHUNK_SIZE: usize = 32 * 1024;
+        for chunk in replay_data.chunks(REPLAY_CHUNK_SIZE) {
+            clust_ipc::send_message_write(
+                &mut writer,
+                &HubMessage::TerminalOutput {
+                    id: terminal_id_owned.clone(),
+                    data: chunk.to_vec(),
+                },
+            )
+            .await?;
+        }
+        clust_ipc::send_message_write(
+            &mut writer,
+            &HubMessage::TerminalReplayComplete {
+                id: terminal_id_owned.clone(),
+            },
+        )
+        .await?;
+    }
+
+    let state_for_cleanup = state.clone();
+    let terminal_id_for_cleanup = terminal_id_owned.clone();
+
+    // Task 1: Read from broadcast channel, send HubMessages to CLI
+    let terminal_id_for_output = terminal_id_owned.clone();
+    let replay_buf_for_output = replay_buf.clone();
+    let output_task = tokio::spawn(async move {
+        loop {
+            match output_rx.recv().await {
+                Ok(AgentEvent::Output(data)) => {
+                    if clust_ipc::send_message_write(
+                        &mut writer,
+                        &HubMessage::TerminalOutput {
+                            id: terminal_id_for_output.clone(),
+                            data,
+                        },
+                    )
+                    .await
+                    .is_err()
+                    {
+                        break;
+                    }
+                }
+                Ok(AgentEvent::Exited(code)) => {
+                    let _ = clust_ipc::send_message_write(
+                        &mut writer,
+                        &HubMessage::TerminalExited {
+                            id: terminal_id_for_output.clone(),
+                            exit_code: code,
+                        },
+                    )
+                    .await;
+                    break;
+                }
+                Ok(AgentEvent::HubShutdown) => {
+                    let _ = clust_ipc::send_message_write(
+                        &mut writer,
+                        &HubMessage::HubShutdown,
+                    )
+                    .await;
+                    break;
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+                    let replay_data = replay_buf_for_output.lock().unwrap().snapshot();
+                    const REPLAY_CHUNK_SIZE: usize = 32 * 1024;
+                    for chunk in replay_data.chunks(REPLAY_CHUNK_SIZE) {
+                        if clust_ipc::send_message_write(
+                            &mut writer,
+                            &HubMessage::TerminalOutput {
+                                id: terminal_id_for_output.clone(),
+                                data: chunk.to_vec(),
+                            },
+                        )
+                        .await
+                        .is_err()
+                        {
+                            return;
+                        }
+                    }
+                    continue;
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                    let _ = clust_ipc::send_message_write(
+                        &mut writer,
+                        &HubMessage::TerminalExited {
+                            id: terminal_id_for_output.clone(),
+                            exit_code: -1,
+                        },
+                    )
+                    .await;
+                    break;
+                }
+            }
+        }
+    });
+
+    // Task 2: Read CliMessages from CLI, route input to terminal PTY
+    let terminal_id_for_input = terminal_id_owned.clone();
+    let state_for_input = state.clone();
+    let input_task = tokio::spawn(async move {
+        loop {
+            match clust_ipc::recv_message_read::<CliMessage>(&mut reader).await {
+                Ok(CliMessage::TerminalInput { data, .. }) => {
+                    let mut hub = state_for_input.lock().await;
+                    if let Some(entry) = hub.terminals.get_mut(&terminal_id_for_input) {
+                        if entry.active_client_id != Some(client_id) {
+                            if let Some(&(cols, rows)) = entry.client_sizes.get(&client_id) {
+                                entry.resize_pty_if_needed(cols, rows);
+                            }
+                            entry.active_client_id = Some(client_id);
+                        }
+                        let _ = entry.pty_writer.write_all(&data);
+                    }
+                }
+                Ok(CliMessage::ResizeTerminal { cols, rows, .. }) => {
+                    let mut hub = state_for_input.lock().await;
+                    if let Some(entry) = hub.terminals.get_mut(&terminal_id_for_input) {
+                        entry.client_sizes.insert(client_id, (cols, rows));
+                        entry.active_client_id = Some(client_id);
+                        entry.resize_pty_if_needed(cols, rows);
+                    }
+                }
+                Ok(CliMessage::DetachTerminal { .. }) => {
+                    break;
+                }
+                Ok(_) => {}
+                Err(_) => {
+                    break;
+                }
+            }
+        }
+    });
+
+    tokio::select! {
+        _ = output_task => {}
+        _ = input_task => {}
+    }
+
+    let mut hub = state_for_cleanup.lock().await;
+    if let Some(entry) = hub.terminals.get_mut(&terminal_id_for_cleanup) {
         entry.attached_count.fetch_sub(1, Ordering::Relaxed);
         entry.client_sizes.remove(&client_id);
         if entry.active_client_id == Some(client_id) {

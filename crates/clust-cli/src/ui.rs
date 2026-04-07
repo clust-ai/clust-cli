@@ -962,6 +962,7 @@ pub fn run(hub_name: &str) -> io::Result<()> {
         focus_mode_state.drain_output_events();
         focus_mode_state.drain_diff_events();
         focus_mode_state.drain_compare_diff_events();
+        focus_mode_state.drain_terminal_events();
 
         // Re-enable mouse capture after passthrough timer expires
         if let Some(deadline) = mouse_passthrough_until {
@@ -2622,7 +2623,7 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                         if focus_mode_state.focus_side
                             == overview::FocusSide::Left
                         {
-                            // Left panel focused: arrow keys scroll diff
+                            // Left panel focused
                             if shift {
                                 match key.code {
                                     KeyCode::Up => {
@@ -2638,6 +2639,52 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                     KeyCode::Right => {
                                         focus_mode_state.focus_side =
                                             overview::FocusSide::Right;
+                                    }
+                                    KeyCode::BackTab => {
+                                        focus_mode_state.left_tab =
+                                            focus_mode_state.left_tab.prev();
+                                    }
+                                    KeyCode::PageUp
+                                        if focus_mode_state.left_tab
+                                            == overview::LeftPanelTab::Terminal =>
+                                    {
+                                        if let Some(panel) =
+                                            &mut focus_mode_state.terminal_panel
+                                        {
+                                            let page = panel.vterm.rows();
+                                            let max =
+                                                panel.vterm.scrollback_len();
+                                            panel.scroll_offset =
+                                                (panel.scroll_offset + page)
+                                                    .min(max);
+                                        }
+                                    }
+                                    KeyCode::PageDown
+                                        if focus_mode_state.left_tab
+                                            == overview::LeftPanelTab::Terminal =>
+                                    {
+                                        if let Some(panel) =
+                                            &mut focus_mode_state.terminal_panel
+                                        {
+                                            let page = panel.vterm.rows();
+                                            panel.scroll_offset = panel
+                                                .scroll_offset
+                                                .saturating_sub(page);
+                                        }
+                                    }
+                                    _ if focus_mode_state.left_tab
+                                        == overview::LeftPanelTab::Terminal =>
+                                    {
+                                        // Forward shifted keys to terminal
+                                        // (e.g. Shift+A for uppercase)
+                                        if let Some(bytes) =
+                                            overview::input::key_event_to_bytes(
+                                                &key,
+                                            )
+                                        {
+                                            focus_mode_state
+                                                .send_terminal_input(bytes);
+                                        }
                                     }
                                     _ => {}
                                 }
@@ -2694,10 +2741,18 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                             }
                                         }
                                     }
-                                    overview::LeftPanelTab::Panel3 => {
-                                        if key.code == KeyCode::Tab {
-                                            focus_mode_state.left_tab =
-                                                focus_mode_state.left_tab.next();
+                                    overview::LeftPanelTab::Terminal => {
+                                        // All keys forwarded to terminal
+                                        if key.code == KeyCode::Esc {
+                                            focus_mode_state
+                                                .send_terminal_input(vec![0x1b]);
+                                        } else if let Some(bytes) =
+                                            overview::input::key_event_to_bytes(
+                                                &key,
+                                            )
+                                        {
+                                            focus_mode_state
+                                                .send_terminal_input(bytes);
                                         }
                                     }
                                 }
@@ -3287,6 +3342,16 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                         bytes.extend_from_slice(text.as_bytes());
                         bytes.extend_from_slice(b"\x1b[201~");
                         focus_mode_state.send_input(bytes);
+                    } else if in_focus_mode
+                        && focus_mode_state.is_active()
+                        && focus_mode_state.focus_side == overview::FocusSide::Left
+                        && focus_mode_state.left_tab == overview::LeftPanelTab::Terminal
+                    {
+                        let mut bytes = Vec::new();
+                        bytes.extend_from_slice(b"\x1b[200~");
+                        bytes.extend_from_slice(text.as_bytes());
+                        bytes.extend_from_slice(b"\x1b[201~");
+                        focus_mode_state.send_terminal_input(bytes);
                     } else if active_tab == ActiveTab::Overview
                         && matches!(overview_state.focus, overview::OverviewFocus::Terminal(_))
                     {
@@ -3317,6 +3382,12 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                         let fm_rows =
                             new_content_area.height.saturating_sub(3).max(1);
                         focus_mode_state.handle_resize(fm_cols, fm_rows);
+                        let term_cols =
+                            (new_content_area.width * 60 / 100).max(1);
+                        let term_rows =
+                            new_content_area.height.saturating_sub(2).max(1);
+                        focus_mode_state
+                            .handle_terminal_resize(term_cols, term_rows);
                     }
                 }
                 Event::FocusGained => {
@@ -3343,6 +3414,12 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                 new_content_area.height.saturating_sub(3).max(1);
                             focus_mode_state.handle_resize(fm_cols, fm_rows);
                             focus_mode_state.force_resize();
+                            let term_cols =
+                                (new_content_area.width * 60 / 100).max(1);
+                            let term_rows =
+                                new_content_area.height.saturating_sub(2).max(1);
+                            focus_mode_state
+                                .handle_terminal_resize(term_cols, term_rows);
                         }
                     }
                 }
@@ -4359,6 +4436,12 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                             }
                         } else if click_map.focus_left_area.contains(pos) {
                             match focus_mode_state.left_tab {
+                                overview::LeftPanelTab::Terminal => {
+                                    if let Some(panel) = &mut focus_mode_state.terminal_panel {
+                                        let max = panel.vterm.scrollback_len();
+                                        panel.scroll_offset = (panel.scroll_offset + 3).min(max);
+                                    }
+                                }
                                 overview::LeftPanelTab::Compare => focus_mode_state.compare_scroll_up(),
                                 _ => focus_mode_state.diff_scroll_up(),
                             }
@@ -4397,6 +4480,11 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                             }
                         } else if click_map.focus_left_area.contains(pos) {
                             match focus_mode_state.left_tab {
+                                overview::LeftPanelTab::Terminal => {
+                                    if let Some(panel) = &mut focus_mode_state.terminal_panel {
+                                        panel.scroll_offset = panel.scroll_offset.saturating_sub(3);
+                                    }
+                                }
                                 overview::LeftPanelTab::Compare => focus_mode_state.compare_scroll_down(),
                                 _ => focus_mode_state.diff_scroll_down(),
                             }

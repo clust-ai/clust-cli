@@ -61,6 +61,23 @@ pub enum AgentOutputEvent {
     ConnectionLost { id: String },
 }
 
+/// Events received from terminal connection tasks.
+pub enum TerminalOutputEvent {
+    Output { id: String, data: Vec<u8> },
+    Exited { id: String },
+    ConnectionLost { id: String },
+}
+
+/// A terminal shell panel in focus mode.
+pub struct TerminalPanel {
+    pub id: String,
+    pub vterm: TerminalEmulator,
+    pub command_tx: mpsc::Sender<PanelCommand>,
+    pub exited: bool,
+    pub scroll_offset: usize,
+    task_handle: JoinHandle<()>,
+}
+
 /// A single agent panel in the overview.
 pub struct AgentPanel {
     pub id: String,
@@ -689,6 +706,181 @@ async fn agent_connection_task(
 }
 
 // ---------------------------------------------------------------------------
+// Terminal connection task
+// ---------------------------------------------------------------------------
+
+async fn terminal_connection_task(
+    working_dir: String,
+    cols: u16,
+    rows: u16,
+    event_tx: mpsc::Sender<TerminalOutputEvent>,
+    mut command_rx: mpsc::Receiver<PanelCommand>,
+) {
+    let stream = match ipc::try_connect().await {
+        Ok(s) => s,
+        Err(_) => {
+            let _ = event_tx
+                .send(TerminalOutputEvent::ConnectionLost {
+                    id: String::new(),
+                })
+                .await;
+            return;
+        }
+    };
+
+    let (mut reader, mut writer) = stream.into_split();
+
+    // Send StartTerminal
+    if clust_ipc::send_message_write(
+        &mut writer,
+        &CliMessage::StartTerminal {
+            working_dir,
+            cols,
+            rows,
+        },
+    )
+    .await
+    .is_err()
+    {
+        let _ = event_tx
+            .send(TerminalOutputEvent::ConnectionLost {
+                id: String::new(),
+            })
+            .await;
+        return;
+    }
+
+    // Read response
+    let terminal_id = match clust_ipc::recv_message_read::<HubMessage>(&mut reader).await {
+        Ok(HubMessage::TerminalStarted { id }) => id,
+        _ => {
+            let _ = event_tx
+                .send(TerminalOutputEvent::ConnectionLost {
+                    id: String::new(),
+                })
+                .await;
+            return;
+        }
+    };
+
+    // Consume replay data
+    loop {
+        match clust_ipc::recv_message_read::<HubMessage>(&mut reader).await {
+            Ok(HubMessage::TerminalOutput { data, .. }) => {
+                let _ = event_tx
+                    .send(TerminalOutputEvent::Output {
+                        id: terminal_id.clone(),
+                        data,
+                    })
+                    .await;
+            }
+            Ok(HubMessage::TerminalReplayComplete { .. }) => break,
+            Ok(HubMessage::TerminalExited { .. }) => {
+                let _ = event_tx
+                    .send(TerminalOutputEvent::Exited {
+                        id: terminal_id.clone(),
+                    })
+                    .await;
+                return;
+            }
+            _ => {
+                let _ = event_tx
+                    .send(TerminalOutputEvent::ConnectionLost {
+                        id: terminal_id,
+                    })
+                    .await;
+                return;
+            }
+        }
+    }
+
+    // Send initial resize
+    let _ = clust_ipc::send_message_write(
+        &mut writer,
+        &CliMessage::ResizeTerminal {
+            id: terminal_id.clone(),
+            cols,
+            rows,
+        },
+    )
+    .await;
+
+    // Main loop: read output from hub + forward commands from UI
+    loop {
+        tokio::select! {
+            msg = clust_ipc::recv_message_read::<HubMessage>(&mut reader) => {
+                match msg {
+                    Ok(HubMessage::TerminalOutput { data, .. }) => {
+                        if event_tx
+                            .send(TerminalOutputEvent::Output {
+                                id: terminal_id.clone(),
+                                data,
+                            })
+                            .await
+                            .is_err()
+                        {
+                            return;
+                        }
+                    }
+                    Ok(HubMessage::TerminalExited { .. }) => {
+                        let _ = event_tx
+                            .send(TerminalOutputEvent::Exited {
+                                id: terminal_id.clone(),
+                            })
+                            .await;
+                        return;
+                    }
+                    Ok(HubMessage::HubShutdown) | Err(_) => {
+                        let _ = event_tx
+                            .send(TerminalOutputEvent::ConnectionLost {
+                                id: terminal_id.clone(),
+                            })
+                            .await;
+                        return;
+                    }
+                    _ => {}
+                }
+            }
+            cmd = command_rx.recv() => {
+                match cmd {
+                    Some(PanelCommand::Input(data)) => {
+                        let _ = clust_ipc::send_message_write(
+                            &mut writer,
+                            &CliMessage::TerminalInput {
+                                id: terminal_id.clone(),
+                                data,
+                            },
+                        )
+                        .await;
+                    }
+                    Some(PanelCommand::Resize { cols, rows }) => {
+                        let _ = clust_ipc::send_message_write(
+                            &mut writer,
+                            &CliMessage::ResizeTerminal {
+                                id: terminal_id.clone(),
+                                cols,
+                                rows,
+                            },
+                        )
+                        .await;
+                    }
+                    Some(PanelCommand::Detach) | None => {
+                        let _ = clust_ipc::send_message_write(
+                            &mut writer,
+                            &CliMessage::DetachTerminal {
+                                id: terminal_id.clone(),
+                            },
+                        )
+                        .await;
+                        return;
+                    }
+                }
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Rendering
 // ---------------------------------------------------------------------------
 
@@ -1248,15 +1440,23 @@ pub enum FocusSide {
 pub enum LeftPanelTab {
     Changes,
     Compare,
-    Panel3,
+    Terminal,
 }
 
 impl LeftPanelTab {
     pub fn next(self) -> Self {
         match self {
             Self::Changes => Self::Compare,
-            Self::Compare => Self::Panel3,
-            Self::Panel3 => Self::Changes,
+            Self::Compare => Self::Terminal,
+            Self::Terminal => Self::Changes,
+        }
+    }
+
+    pub fn prev(self) -> Self {
+        match self {
+            Self::Changes => Self::Terminal,
+            Self::Compare => Self::Changes,
+            Self::Terminal => Self::Compare,
         }
     }
 
@@ -1264,12 +1464,12 @@ impl LeftPanelTab {
         match self {
             Self::Changes => "Changes",
             Self::Compare => "Compare",
-            Self::Panel3 => "Panel 3",
+            Self::Terminal => "Terminal",
         }
     }
 
     fn all() -> &'static [LeftPanelTab] {
-        &[Self::Changes, Self::Compare, Self::Panel3]
+        &[Self::Changes, Self::Compare, Self::Terminal]
     }
 }
 
@@ -1471,6 +1671,12 @@ pub struct FocusModeState {
     compare_diff_tx: mpsc::Sender<gitdiff::DiffEvent>,
     compare_diff_stop_tx: Option<watch::Sender<bool>>,
     compare_diff_task: Option<JoinHandle<()>>,
+    // Terminal tab state
+    pub terminal_panel: Option<TerminalPanel>,
+    terminal_output_rx: mpsc::Receiver<TerminalOutputEvent>,
+    terminal_output_tx: mpsc::Sender<TerminalOutputEvent>,
+    terminal_cols: u16,
+    terminal_rows: u16,
 }
 
 impl FocusModeState {
@@ -1478,6 +1684,7 @@ impl FocusModeState {
         let (output_tx, output_rx) = mpsc::channel(512);
         let (diff_tx, diff_rx) = mpsc::channel(16);
         let (compare_diff_tx, compare_diff_rx) = mpsc::channel(16);
+        let (terminal_output_tx, terminal_output_rx) = mpsc::channel(512);
         Self {
             panel: None,
             output_rx,
@@ -1504,6 +1711,11 @@ impl FocusModeState {
             compare_diff_tx,
             compare_diff_stop_tx: None,
             compare_diff_task: None,
+            terminal_panel: None,
+            terminal_output_rx,
+            terminal_output_tx,
+            terminal_cols: 80,
+            terminal_rows: 24,
         }
     }
 
@@ -1570,6 +1782,9 @@ impl FocusModeState {
             self.diff_stop_tx = Some(stop_tx);
             self.diff_task = Some(diff_handle);
         }
+
+        // Start terminal session
+        self.open_terminal(working_dir, self.terminal_cols, self.terminal_rows);
     }
 
     /// Drain all pending output events from the background task.
@@ -1687,6 +1902,8 @@ impl FocusModeState {
         self.repo_path = None;
         // Stop compare diff task
         self.stop_compare_diff();
+        // Stop terminal
+        self.close_terminal();
     }
 
     /// Stop the branch compare diff background task.
@@ -1700,6 +1917,89 @@ impl FocusModeState {
         self.compare_diff = None;
         self.compare_diff_scroll = 0;
         self.compare_diff_error = None;
+    }
+
+    // Terminal session management
+
+    fn open_terminal(&mut self, working_dir: &str, cols: u16, rows: u16) {
+        self.close_terminal();
+        self.terminal_cols = cols;
+        self.terminal_rows = rows;
+
+        let event_tx = self.terminal_output_tx.clone();
+        let (command_tx, command_rx) = mpsc::channel::<PanelCommand>(64);
+        let wd = working_dir.to_string();
+
+        let handle = tokio::task::spawn(async move {
+            terminal_connection_task(wd, cols, rows, event_tx, command_rx).await;
+        });
+
+        self.terminal_panel = Some(TerminalPanel {
+            id: String::new(),
+            vterm: TerminalEmulator::new(cols as usize, rows as usize),
+            command_tx,
+            exited: false,
+            scroll_offset: 0,
+            task_handle: handle,
+        });
+    }
+
+    fn close_terminal(&mut self) {
+        if let Some(panel) = self.terminal_panel.take() {
+            let _ = panel.command_tx.try_send(PanelCommand::Detach);
+            panel.task_handle.abort();
+        }
+    }
+
+    /// Drain terminal output events into the vterm.
+    pub fn drain_terminal_events(&mut self) {
+        while let Ok(event) = self.terminal_output_rx.try_recv() {
+            match event {
+                TerminalOutputEvent::Output { id, data } => {
+                    if let Some(panel) = self.terminal_panel.as_mut() {
+                        if panel.id.is_empty() || panel.id == id {
+                            if panel.id.is_empty() {
+                                panel.id = id;
+                            }
+                            panel.vterm.process(&data);
+                        }
+                    }
+                }
+                TerminalOutputEvent::Exited { id }
+                | TerminalOutputEvent::ConnectionLost { id } => {
+                    if let Some(panel) = self.terminal_panel.as_mut() {
+                        if panel.id.is_empty() || panel.id == id {
+                            panel.exited = true;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// Send input bytes to the terminal.
+    pub fn send_terminal_input(&self, data: Vec<u8>) {
+        if let Some(panel) = &self.terminal_panel {
+            let _ = panel.command_tx.try_send(PanelCommand::Input(data));
+        }
+    }
+
+    /// Handle terminal panel resize.
+    pub fn handle_terminal_resize(&mut self, cols: u16, rows: u16) {
+        if cols == self.terminal_cols && rows == self.terminal_rows {
+            return;
+        }
+        self.terminal_cols = cols;
+        self.terminal_rows = rows;
+        if let Some(panel) = &mut self.terminal_panel {
+            if panel
+                .command_tx
+                .try_send(PanelCommand::Resize { cols, rows })
+                .is_ok()
+            {
+                panel.vterm.resize(cols as usize, rows as usize);
+            }
+        }
     }
 
     /// Start the branch compare diff background task for the selected branch.
@@ -1806,7 +2106,7 @@ pub fn render_focus_mode(frame: &mut Frame, area: Rect, state: &mut FocusModeSta
     }
 }
 
-fn render_left_panel(frame: &mut Frame, area: Rect, state: &FocusModeState, click_map: &mut ClickMap, repo_color: Option<Color>) {
+fn render_left_panel(frame: &mut Frame, area: Rect, state: &mut FocusModeState, click_map: &mut ClickMap, repo_color: Option<Color>) {
     if area.height < 2 {
         frame.render_widget(
             Block::default().style(Style::default().bg(theme::R_BG_BASE)),
@@ -1837,15 +2137,44 @@ fn render_left_panel(frame: &mut Frame, area: Rect, state: &FocusModeState, clic
             repo_color,
         ),
         LeftPanelTab::Compare => render_compare_tab(frame, content_area, state, repo_color),
-        LeftPanelTab::Panel3 => {
+        LeftPanelTab::Terminal => {
+            render_terminal_tab(frame, content_area, state);
+        }
+    }
+}
+
+fn render_terminal_tab(frame: &mut Frame, area: Rect, state: &mut FocusModeState) {
+    match &mut state.terminal_panel {
+        Some(panel) if !panel.exited => {
+            let lines = if panel.scroll_offset > 0 {
+                panel.vterm.to_ratatui_lines_scrolled(panel.scroll_offset)
+            } else {
+                panel.vterm.to_ratatui_lines()
+            };
+            let paragraph = Paragraph::new(lines)
+                .style(Style::default().bg(theme::R_BG_BASE));
+            frame.render_widget(paragraph, area);
+        }
+        Some(_) => {
             frame.render_widget(
                 Paragraph::new(Line::from(Span::styled(
-                    format!("{} (coming soon)", state.left_tab.label()),
+                    "Terminal session ended",
                     Style::default().fg(theme::R_TEXT_TERTIARY),
                 )))
                 .alignment(ratatui::layout::Alignment::Center)
                 .style(Style::default().bg(theme::R_BG_BASE)),
-                content_area,
+                area,
+            );
+        }
+        None => {
+            frame.render_widget(
+                Paragraph::new(Line::from(Span::styled(
+                    "Starting terminal...",
+                    Style::default().fg(theme::R_TEXT_TERTIARY),
+                )))
+                .alignment(ratatui::layout::Alignment::Center)
+                .style(Style::default().bg(theme::R_BG_BASE)),
+                area,
             );
         }
     }
