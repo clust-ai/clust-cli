@@ -25,8 +25,8 @@ pub const SHOW_TERMINAL_PREVIEW: bool = true;
 /// Number of terminal output lines shown in active task preview.
 pub const TASK_TERMINAL_PREVIEW_LINES: usize = 4;
 
-/// Height of a task box without terminal preview (separator + header + prompt).
-const TASK_BOX_BASE_HEIGHT: u16 = 3;
+/// Height of a task box without terminal preview (separator + header + prompt + status bar).
+const TASK_BOX_BASE_HEIGHT: u16 = 4;
 
 /// Extra height added for terminal preview in active task boxes.
 const TASK_BOX_PREVIEW_HEIGHT: u16 = TASK_TERMINAL_PREVIEW_LINES as u16;
@@ -68,6 +68,10 @@ pub struct TaskEntry {
     pub status: TaskStatus,
     /// Agent ID linking this task to its AgentPanel in OverviewState (set when started).
     pub agent_id: Option<String>,
+    /// Whether the batch prompt prefix should be applied to this task.
+    pub use_prefix: bool,
+    /// Whether the batch prompt suffix should be applied to this task.
+    pub use_suffix: bool,
 }
 
 /// Batch membership info for an agent displayed in the overview.
@@ -99,15 +103,19 @@ pub struct BatchInfo {
 
 impl BatchInfo {
     /// Builds the full prompt for a task by combining the batch prefix,
-    /// the task-specific prompt, and the batch suffix.
-    pub fn build_prompt(&self, task_prompt: &str) -> String {
+    /// the task-specific prompt, and the batch suffix, respecting per-task flags.
+    pub fn build_prompt(&self, task_prompt: &str, use_prefix: bool, use_suffix: bool) -> String {
         let mut parts = Vec::new();
-        if let Some(ref prefix) = self.prompt_prefix {
-            parts.push(prefix.as_str());
+        if use_prefix {
+            if let Some(ref prefix) = self.prompt_prefix {
+                parts.push(prefix.as_str());
+            }
         }
         parts.push(task_prompt);
-        if let Some(ref suffix) = self.prompt_suffix {
-            parts.push(suffix.as_str());
+        if use_suffix {
+            if let Some(ref suffix) = self.prompt_suffix {
+                parts.push(suffix.as_str());
+            }
         }
         parts.join("\n\n")
     }
@@ -197,13 +205,15 @@ impl TasksState {
         self.next_id += 1;
     }
 
-    pub fn add_task(&mut self, batch_idx: usize, branch_name: String, prompt: String) {
+    pub fn add_task(&mut self, batch_idx: usize, branch_name: String, prompt: String, use_prefix: bool, use_suffix: bool) {
         if let Some(batch) = self.batches.get_mut(batch_idx) {
             batch.tasks.push(TaskEntry {
                 branch_name,
                 prompt,
                 status: TaskStatus::Idle,
                 agent_id: None,
+                use_prefix,
+                use_suffix,
             });
         }
     }
@@ -247,6 +257,22 @@ impl TasksState {
     pub fn toggle_allow_bypass(&mut self, batch_idx: usize) {
         if let Some(batch) = self.batches.get_mut(batch_idx) {
             batch.allow_bypass = !batch.allow_bypass;
+        }
+    }
+
+    pub fn toggle_task_use_prefix(&mut self, batch_idx: usize, task_idx: usize) {
+        if let Some(batch) = self.batches.get_mut(batch_idx) {
+            if let Some(task) = batch.tasks.get_mut(task_idx) {
+                task.use_prefix = !task.use_prefix;
+            }
+        }
+    }
+
+    pub fn toggle_task_use_suffix(&mut self, batch_idx: usize, task_idx: usize) {
+        if let Some(batch) = self.batches.get_mut(batch_idx) {
+            if let Some(task) = batch.tasks.get_mut(task_idx) {
+                task.use_suffix = !task.use_suffix;
+            }
         }
     }
 
@@ -802,20 +828,26 @@ fn render_task_boxes(
 
     let box_areas = Layout::vertical(constraints).split(area);
 
+    let has_prefix = batch.prompt_prefix.is_some();
+    let has_suffix = batch.prompt_suffix.is_some();
+
     for (vi, &idx) in sorted_indices.iter().take(visible_count).enumerate() {
         let task = &batch.tasks[idx];
         let is_focused = focused_task == Some(idx);
-        render_single_task_box(frame, box_areas[vi], task, idx, is_focused, terminal_previews);
+        render_single_task_box(frame, box_areas[vi], task, idx, is_focused, has_prefix, has_suffix, terminal_previews);
     }
 }
 
-/// Render a single task as a box with separator, header, prompt, and optional terminal preview.
+/// Render a single task as a box with separator, header, prompt, status bar, and optional terminal preview.
+#[allow(clippy::too_many_arguments)]
 fn render_single_task_box(
     frame: &mut Frame,
     area: Rect,
     task: &TaskEntry,
     original_index: usize,
     is_focused: bool,
+    has_prefix: bool,
+    has_suffix: bool,
     terminal_previews: &TerminalPreviewMap,
 ) {
     if area.height < 2 || area.width < 4 {
@@ -935,6 +967,55 @@ fn render_single_task_box(
         prompt_display,
         Style::default().fg(theme::R_TEXT_TERTIARY),
     )));
+
+    // Status bar: prefix/suffix applied indicators
+    {
+        let mod_key = if cfg!(target_os = "macos") { "Opt" } else { "Alt" };
+        let mut status_spans: Vec<Span> = Vec::new();
+
+        if task.use_prefix {
+            status_spans.push(Span::styled(
+                "\u{2713} Prefix applied",
+                if has_prefix {
+                    Style::default().fg(theme::R_SUCCESS)
+                } else {
+                    Style::default().fg(theme::R_TEXT_DISABLED)
+                },
+            ));
+        } else {
+            status_spans.push(Span::styled(
+                "\u{2717} Prefix skipped",
+                Style::default().fg(theme::R_TEXT_DISABLED),
+            ));
+        }
+
+        status_spans.push(Span::styled("  ", Style::default()));
+
+        if task.use_suffix {
+            status_spans.push(Span::styled(
+                "\u{2713} Suffix applied",
+                if has_suffix {
+                    Style::default().fg(theme::R_SUCCESS)
+                } else {
+                    Style::default().fg(theme::R_TEXT_DISABLED)
+                },
+            ));
+        } else {
+            status_spans.push(Span::styled(
+                "\u{2717} Suffix skipped",
+                Style::default().fg(theme::R_TEXT_DISABLED),
+            ));
+        }
+
+        if is_focused {
+            status_spans.push(Span::styled(
+                format!("  {mod_key}+P/S toggle"),
+                Style::default().fg(theme::R_TEXT_DISABLED),
+            ));
+        }
+
+        lines.push(Line::from(status_spans));
+    }
 
     // Terminal preview for active tasks
     if task.status == TaskStatus::Active && SHOW_TERMINAL_PREVIEW {

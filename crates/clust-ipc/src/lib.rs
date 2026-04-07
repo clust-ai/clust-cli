@@ -209,11 +209,19 @@ pub struct WorktreeEntry {
     pub active_agents: Vec<AgentInfo>,
 }
 
+fn default_true() -> bool {
+    true
+}
+
 /// A single task within a queued batch.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct QueuedTask {
     pub branch_name: String,
     pub prompt: String,
+    #[serde(default = "default_true")]
+    pub use_prefix: bool,
+    #[serde(default = "default_true")]
+    pub use_suffix: bool,
 }
 
 /// Summary info about a queued batch, returned in QueuedBatchList.

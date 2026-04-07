@@ -54,6 +54,8 @@ pub struct HubTaskEntry {
     pub prompt: String,
     pub status: HubTaskStatus,
     pub agent_id: Option<String>,
+    pub use_prefix: bool,
+    pub use_suffix: bool,
 }
 
 pub struct HubBatchEntry {
@@ -74,15 +76,20 @@ pub struct HubBatchEntry {
 }
 
 impl HubBatchEntry {
-    /// Build the full prompt for a task using the batch prefix/suffix.
-    pub fn build_prompt(&self, task_prompt: &str) -> String {
+    /// Build the full prompt for a task using the batch prefix/suffix,
+    /// respecting per-task flags.
+    pub fn build_prompt(&self, task: &HubTaskEntry) -> String {
         let mut parts = Vec::new();
-        if let Some(ref prefix) = self.prompt_prefix {
-            parts.push(prefix.as_str());
+        if task.use_prefix {
+            if let Some(ref prefix) = self.prompt_prefix {
+                parts.push(prefix.as_str());
+            }
         }
-        parts.push(task_prompt);
-        if let Some(ref suffix) = self.prompt_suffix {
-            parts.push(suffix.as_str());
+        parts.push(task.prompt.as_str());
+        if task.use_suffix {
+            if let Some(ref suffix) = self.prompt_suffix {
+                parts.push(suffix.as_str());
+            }
         }
         parts.join("\n\n")
     }
@@ -189,7 +196,7 @@ async fn check_and_advance_batches(state: &SharedHubState) {
                         repo_path: batch.repo_path.clone(),
                         target_branch: batch.target_branch.clone(),
                         branch_name: task.branch_name.clone(),
-                        prompt: batch.build_prompt(&task.prompt),
+                        prompt: batch.build_prompt(task),
                         agent_binary: batch.agent_binary.clone(),
                         plan_mode: batch.plan_mode,
                         allow_bypass: batch.allow_bypass,
@@ -484,6 +491,8 @@ pub fn load_batches_from_db(hub: &HubState) -> Vec<HubBatchEntry> {
                     prompt: t.prompt,
                     status: HubTaskStatus::parse_status(&t.status),
                     agent_id: t.agent_id,
+                    use_prefix: t.use_prefix,
+                    use_suffix: t.use_suffix,
                 })
                 .collect();
 
