@@ -195,7 +195,7 @@ impl ActiveTab {
         match self {
             Self::Repositories => "Repositories",
             Self::Overview => "Overview",
-            Self::Tasks => "Tasks",
+            Self::Tasks => "Jobs",
         }
     }
 }
@@ -6347,7 +6347,7 @@ fn render_help_overlay(frame: &mut Frame, area: Rect, active_tab: ActiveTab, in_
     // -- Tasks --
     if active_tab == ActiveTab::Tasks {
         lines.push(Line::from(""));
-        lines.push(header_line("Tasks"));
+        lines.push(header_line("Jobs"));
         lines.push(binding_line("\u{2190} / \u{2192}", "Navigate batches"));
         lines.push(binding_line("Shift+\u{2190}/\u{2192}", "Scroll batches"));
         lines.push(binding_line("\u{2191} / \u{2193}", "Navigate tasks in batch"));
@@ -8007,7 +8007,7 @@ mod tests {
     fn active_tab_labels() {
         assert_eq!(ActiveTab::Repositories.label(), "Repositories");
         assert_eq!(ActiveTab::Overview.label(), "Overview");
-        assert_eq!(ActiveTab::Tasks.label(), "Tasks");
+        assert_eq!(ActiveTab::Tasks.label(), "Jobs");
     }
 
     #[test]
