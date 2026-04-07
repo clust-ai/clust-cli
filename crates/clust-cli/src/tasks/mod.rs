@@ -70,6 +70,14 @@ pub struct TaskEntry {
     pub agent_id: Option<String>,
 }
 
+/// Batch membership info for an agent displayed in the overview.
+pub struct BatchAgentInfo {
+    pub batch_title: String,
+    pub batch_id: usize,
+    pub task_index: usize,
+    pub task_count: usize,
+}
+
 /// A single batch definition (UI-only, no execution).
 #[allow(dead_code)]
 pub struct BatchInfo {
@@ -140,6 +148,28 @@ impl TasksState {
             next_id: 1,
             next_auto_name: 1,
         }
+    }
+
+    /// Build a mapping from agent_id to batch membership info.
+    pub fn batch_agent_map(&self) -> HashMap<String, BatchAgentInfo> {
+        let mut map = HashMap::new();
+        for batch in &self.batches {
+            let task_count = batch.tasks.len();
+            for (i, task) in batch.tasks.iter().enumerate() {
+                if let Some(ref agent_id) = task.agent_id {
+                    map.insert(
+                        agent_id.clone(),
+                        BatchAgentInfo {
+                            batch_title: batch.title.clone(),
+                            batch_id: batch.id,
+                            task_index: i,
+                            task_count,
+                        },
+                    );
+                }
+            }
+        }
+        map
     }
 
     pub fn add_batch(&mut self, output: BatchModalOutput) {
