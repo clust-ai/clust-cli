@@ -423,6 +423,8 @@ async fn handle_start(
             cols: term_cols,
             rows: agent_rows,
             accept_edits,
+            plan_mode: false,
+            allow_bypass: false,
             hub,
         },
     )

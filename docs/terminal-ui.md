@@ -178,13 +178,13 @@ A batch management tab that displays created batch definitions as horizontal car
 
 **Layout:**
 
-- **Options bar (1 row):** A single-line bar at the top showing the batch count (e.g., "3 batches") and hints `Opt+T create batch` and `Space toggle status`. The bar uses `R_BG_RAISED` background.
+- **Options bar (1 row):** A single-line bar at the top showing the batch count (e.g., "3 batches") and hints `Opt+T create batch`, `Space toggle status`, `M mode`, `B bypass`, and `d clear done`. The bar uses `R_BG_RAISED` background.
 - **Batch cards (horizontal):** Dynamically sized columns distributed evenly across the available width. The minimum card width is 40 columns. Cards use ratio-based constraints so they fill the screen evenly. A single card never exceeds half the screen width (minimum 2 slots). When more batches exist than fit on screen, horizontal scrolling is enabled via `Shift+Left`/`Shift+Right`.
 
 Each batch card has:
 - **Box-drawing borders** using the repo's assigned color (bright when focused, dimmed when unfocused via `dim_color()`). Cards without a repo fall back to accent blue when focused and tertiary text color when unfocused.
 - **Title** displayed in the border using the repo's assigned color (bright when focused, dimmed when unfocused via `dim_color()`). Cards without a repo fall back to accent bright when focused and accent when unfocused.
-- **Card body** showing: Repo name (in repo color), Branch name, Workers (concurrency limit or infinity symbol, for Auto-mode batches) or Mode ("Manual" in info color, for Manual-mode batches), Tasks (count of tasks added to the batch), Prefix (prompt prefix or "(none)"), Suffix (prompt suffix or "(none)"), Status (Idle in disabled/gray, Active in green/bold for Auto-mode; "Manual" in info color for Manual-mode), and a task box list below the metadata.
+- **Card body** showing: Repo name (in repo color), Branch name, Workers (concurrency limit or infinity symbol, for Auto-mode batches) or Mode ("Manual" in info color, for Manual-mode batches), Tasks (count of tasks added to the batch), Prefix (prompt prefix or "(none)"), Suffix (prompt suffix or "(none)"), Mode ("Plan" in warning/bold when plan_mode is enabled, "Normal" in disabled text otherwise), Bypass ("Allowed" in warning/bold when allow_bypass is enabled, "Off" in disabled text otherwise), Status (Idle in disabled/gray, Active in green/bold for Auto-mode; "Manual" in info color for Manual-mode), and a task box list below the metadata.
 - **Task boxes:** Each task is rendered as a full-width box within the batch card, separated by horizontal lines colored by status (green for Active, gray for Idle, tertiary for Done; accent bright when the task is focused). Each task box displays: focus indicator (`>` when focused), task number, status indicator, branch name (truncated with ellipsis if too long), and truncated first line of the prompt. Tasks are sorted with Active tasks above Idle and Done tasks.
 - **Terminal preview:** Active task boxes optionally show a small terminal output preview (last 4 lines of the agent's terminal output). The preview is gated behind the `SHOW_TERMINAL_PREVIEW` constant in `tasks/mod.rs` for easy toggling. Preview data is extracted from the corresponding `AgentPanel` via the task's `agent_id` field.
 - Focused cards use `R_BG_SURFACE` background; unfocused cards use `R_BG_BASE`.
@@ -210,6 +210,8 @@ Each batch card has:
 | `Enter` | Open the Add Task modal for the focused batch card |
 | `Space` | Toggle focused batch status between Idle and Active (Auto-mode batches only; no-op for Manual-mode) |
 | `Opt+S` (macOS) / `Alt+S` | Start the focused task in a Manual-mode batch (only when a task is focused and the task is Idle) |
+| `m` | Toggle plan mode on the focused batch card |
+| `b` | Toggle allow bypass on the focused batch card |
 | `p` | Open the Edit Field modal to edit the prompt prefix of the focused batch |
 | `s` | Open the Edit Field modal to edit the prompt suffix of the focused batch |
 | `d` | Remove all tasks with Done status from the focused batch card |
@@ -219,7 +221,7 @@ Each batch card has:
 - `TasksState` manages the batch list, focus state, task-level focus, scroll offset, and ID generation.
 - `TasksFocus` enum tracks whether the batch list or a specific card is focused.
 - `focused_task: Option<usize>` tracks which task within a focused batch card has task-level focus. `None` means no task is focused; `Some(i)` means task at index `i` is focused. Reset when navigating between batch cards.
-- `BatchInfo` stores: id, title, repo_path, repo_name, branch_name, max_concurrent, launch_mode (`LaunchMode`), prompt_prefix, prompt_suffix, tasks (list of `TaskEntry`), status (`BatchStatus`: Idle or Active), and created_at timestamp.
+- `BatchInfo` stores: id, title, repo_path, repo_name, branch_name, max_concurrent, launch_mode (`LaunchMode`), prompt_prefix, prompt_suffix, tasks (list of `TaskEntry`), status (`BatchStatus`: Idle or Active), plan_mode (bool), allow_bypass (bool), and created_at timestamp.
 - `LaunchMode` enum: `Auto` (default, batches use concurrency-based toggling) and `Manual` (tasks are started individually).
 - `TaskEntry` stores: branch_name, prompt, status (`TaskStatus`: Idle, Active, or Done), and an optional `agent_id` (set when the task's agent is started, linking it to its `AgentPanel` in `OverviewState`) for a single task within a batch.
 - `TerminalPreviewMap` (type alias for `HashMap<String, Vec<Line>>`) maps agent IDs to their last N terminal output lines, built by `build_task_terminal_previews()` in `ui.rs` each render frame.
@@ -229,9 +231,11 @@ Each batch card has:
 - `TaskStatus` enum: `Idle` (gray/disabled text), `Active` (green bold text), and `Done` (amber/warning text).
 - `add_task()` adds a `TaskEntry` (with `Idle` status) to a specific batch by index.
 - `remove_done_tasks()` removes all tasks with `Done` status from a batch by index (retains only non-Done tasks).
+- `toggle_plan_mode()` toggles plan mode on a batch by index.
+- `toggle_allow_bypass()` toggles allow bypass on a batch by index.
 - `set_prompt_prefix()` / `set_prompt_suffix()` update the prompt prefix/suffix for a batch (empty string clears to `None`).
 - `BatchInfo::build_prompt(task_prompt)` combines the batch prefix, task prompt, and batch suffix into a single string (joined with double newlines). Used by the agent spawner when starting batch tasks.
-- `toggle_batch_status()` toggles a batch between Idle and Active. Returns `None` for Manual-mode batches. When transitioning an Auto-mode batch to Active, returns a `BatchStartInfo` containing the tasks to start (up to `max_concurrent` minus already-active tasks). Only Idle tasks are started.
+- `toggle_batch_status()` toggles a batch between Idle and Active. Returns `None` for Manual-mode batches. When transitioning an Auto-mode batch to Active, returns a `BatchStartInfo` containing the tasks to start (up to `max_concurrent` minus already-active tasks). Only Idle tasks are started. The batch's `plan_mode` and `allow_bypass` settings are passed through to the `CreateWorktreeAgent` IPC message for each spawned agent.
 - `start_single_task()` starts a single task by index within a Manual-mode batch. Returns `None` if the batch is not Manual-mode or the task is not Idle. Returns a `BatchStartInfo` with exactly one task to start.
 - `focus_task_down()` / `focus_task_up()` navigate task-level focus within a focused batch card. Down enters task focus from None to first task; Up from the first task exits task focus back to None.
 - `batch_by_id_mut()` finds a batch by its unique id for updating task statuses after agent start results.
@@ -264,7 +268,7 @@ On startup, `clust ui` automatically connects to the hub daemon, starting it if 
 
 **Status messages:** Temporary status messages override the keybinding hints area. Messages are displayed for 5 seconds before auto-dismissing, after which the keybinding hints reappear. Two severity levels exist: `Error` (displayed in `R_ERROR` color) and `Success` (displayed in `R_SUCCESS` color). Status messages are used to surface feedback from async operations such as agent creation, branch pulls, and remote branch checkout -- both success confirmations (e.g., "Agent started on feature-branch", "Pulled main: Already up to date.", "Checked out feature-branch") and error details (e.g., "Agent create failed: hub connect error: ...", "Pull failed: ...", "Checkout failed: ..."). The `StatusMessage` struct tracks the message text, level, and creation `Instant` for auto-dismissal timing. Status messages are delivered from background tokio tasks to the main event loop via a dedicated `mpsc` channel (`status_tx` / `status_rx`), separate from the `AgentStartResult` channel used for agent creation results.
 
-**Keybinding hints (when no status message is active):** Context-aware hints: on Repositories tab shows `q quit`, `Q stop+quit`, navigation hints; on Overview tab shows focus-dependent hints (e.g., `Shift+↓ enter terminal` or `Shift+↑ options`); on Tasks tab shows `Opt+T new batch`, `Left/Right navigate`, `Up/Down tasks`, `Space toggle`, `Opt+S start task`, `Enter add task`, `p prefix`, `s suffix`, `d clear done`, `Del remove`, `q quit`, `? keys`; in focus mode shows `Shift+←/→ switch panel`, `Shift+↑ exit`.
+**Keybinding hints (when no status message is active):** Context-aware hints: on Repositories tab shows `q quit`, `Q stop+quit`, navigation hints; on Overview tab shows focus-dependent hints (e.g., `Shift+↓ enter terminal` or `Shift+↑ options`); on Tasks tab shows `Opt+T new batch`, `Left/Right navigate`, `Up/Down tasks`, `Space toggle`, `Opt+S start task`, `M mode`, `B bypass`, `Enter add task`, `p prefix`, `s suffix`, `d clear done`, `Del remove`, `q quit`, `? keys`; in focus mode shows `Shift+←/→ switch panel`, `Shift+↑ exit`.
 
 ### Keyboard Shortcuts
 

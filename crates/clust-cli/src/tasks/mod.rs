@@ -81,6 +81,8 @@ pub struct BatchInfo {
     pub prompt_suffix: Option<String>,
     pub tasks: Vec<TaskEntry>,
     pub status: BatchStatus,
+    pub plan_mode: bool,
+    pub allow_bypass: bool,
     pub created_at: Instant,
 }
 
@@ -155,6 +157,8 @@ impl TasksState {
             prompt_suffix: None,
             tasks: Vec::new(),
             status: BatchStatus::Idle,
+            plan_mode: false,
+            allow_bypass: false,
             created_at: Instant::now(),
         });
         self.next_id += 1;
@@ -199,6 +203,18 @@ impl TasksState {
             target_branch: batch.branch_name.clone(),
             tasks_to_start: vec![(task_idx, task.branch_name.clone(), task.prompt.clone())],
         })
+    }
+
+    pub fn toggle_plan_mode(&mut self, batch_idx: usize) {
+        if let Some(batch) = self.batches.get_mut(batch_idx) {
+            batch.plan_mode = !batch.plan_mode;
+        }
+    }
+
+    pub fn toggle_allow_bypass(&mut self, batch_idx: usize) {
+        if let Some(batch) = self.batches.get_mut(batch_idx) {
+            batch.allow_bypass = !batch.allow_bypass;
+        }
     }
 
     /// Toggle the focused batch status. If transitioning to Active, returns
@@ -464,7 +480,7 @@ fn render_options_bar(frame: &mut Frame, area: Rect, state: &TasksState) {
                 .bg(theme::R_BG_RAISED),
         ),
         Span::styled(
-            format!("  {mod_key}+T create batch  Space toggle status  {mod_key}+S start task  d clear done"),
+            format!("  {mod_key}+T create batch  Space toggle status  {mod_key}+S start task  M mode  B bypass  d clear done"),
             Style::default()
                 .fg(theme::R_TEXT_TERTIARY)
                 .bg(theme::R_BG_RAISED),
@@ -608,6 +624,32 @@ fn render_batch_card(
                     Style::default().fg(theme::R_TEXT_DISABLED)
                 },
             ),
+        ]),
+        Line::from(vec![
+            Span::styled("Mode      ", label_style),
+            if batch.plan_mode {
+                Span::styled(
+                    "Plan",
+                    Style::default()
+                        .fg(theme::R_WARNING)
+                        .add_modifier(Modifier::BOLD),
+                )
+            } else {
+                Span::styled("Normal", Style::default().fg(theme::R_TEXT_DISABLED))
+            },
+        ]),
+        Line::from(vec![
+            Span::styled("Bypass    ", label_style),
+            if batch.allow_bypass {
+                Span::styled(
+                    "Allowed",
+                    Style::default()
+                        .fg(theme::R_WARNING)
+                        .add_modifier(Modifier::BOLD),
+                )
+            } else {
+                Span::styled("Off", Style::default().fg(theme::R_TEXT_DISABLED))
+            },
         ]),
         Line::from(vec![
             Span::styled("Status    ", label_style),
