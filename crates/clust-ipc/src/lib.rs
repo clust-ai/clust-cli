@@ -14,7 +14,7 @@ pub const DEFAULT_HUB: &str = "default_hub";
 
 /// Protocol version for IPC compatibility checks.
 /// Bump this whenever `CliMessage` or `HubMessage` enum shapes change.
-pub const PROTOCOL_VERSION: u32 = 5;
+pub const PROTOCOL_VERSION: u32 = 6;
 
 /// Messages sent from CLI to Hub.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -34,7 +34,10 @@ pub enum CliMessage {
     DetachAgent { id: String },
     AgentInput { id: String, data: Vec<u8> },
     ResizeAgent { id: String, cols: u16, rows: u16 },
-    ListAgents { hub: Option<String> },
+    ListAgents {
+        hub: Option<String>,
+        batch: Option<String>,
+    },
     StopHub,
     StopAgent { id: String },
     SetDefault { agent_binary: String },
@@ -172,6 +175,8 @@ pub struct AgentInfo {
     pub repo_path: Option<String>,
     pub branch_name: Option<String>,
     pub is_worktree: bool,
+    pub batch_id: Option<String>,
+    pub batch_title: Option<String>,
 }
 
 /// Info about a registered repository, returned in RepoList.
@@ -511,13 +516,18 @@ mod tests {
 
     #[tokio::test]
     async fn cli_list_agents_no_filter() {
-        assert_cli_round_trip(CliMessage::ListAgents { hub: None }).await;
+        assert_cli_round_trip(CliMessage::ListAgents {
+            hub: None,
+            batch: None,
+        })
+        .await;
     }
 
     #[tokio::test]
     async fn cli_list_agents_with_hub_filter() {
         assert_cli_round_trip(CliMessage::ListAgents {
             hub: Some("my_feature".into()),
+            batch: None,
         })
         .await;
     }
@@ -611,6 +621,8 @@ mod tests {
                     repo_path: Some("/tmp/project".into()),
                     branch_name: Some("main".into()),
                     is_worktree: false,
+                    batch_id: None,
+                    batch_title: None,
                 },
                 AgentInfo {
                     id: "bbb222".into(),
@@ -622,6 +634,8 @@ mod tests {
                     repo_path: None,
                     branch_name: None,
                     is_worktree: false,
+                    batch_id: None,
+                    batch_title: None,
                 },
             ],
         })
@@ -677,7 +691,10 @@ mod tests {
         let (mut a, mut b) = UnixStream::pair().unwrap();
 
         let msgs = vec![
-            CliMessage::ListAgents { hub: None },
+            CliMessage::ListAgents {
+                hub: None,
+                batch: None,
+            },
             CliMessage::StopHub,
             CliMessage::SetDefault {
                 agent_binary: "claude".into(),
@@ -1125,6 +1142,8 @@ mod tests {
                         repo_path: Some("/home/user/project".into()),
                         branch_name: Some("feature/auth".into()),
                         is_worktree: true,
+                        batch_id: None,
+                        batch_title: None,
                     }],
                 },
             ],

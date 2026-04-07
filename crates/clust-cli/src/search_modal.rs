@@ -20,7 +20,7 @@ use crate::theme;
 pub enum SearchResult {
     Pending,
     Cancelled,
-    Selected(AgentInfo),
+    Selected(Box<AgentInfo>),
 }
 
 // ---------------------------------------------------------------------------
@@ -57,7 +57,7 @@ impl SearchModal {
             KeyCode::Enter => {
                 let filtered = self.filtered_agents();
                 if let Some(&(idx, _)) = filtered.get(self.selected_idx) {
-                    SearchResult::Selected(self.agents[idx].clone())
+                    SearchResult::Selected(Box::new(self.agents[idx].clone()))
                 } else {
                     SearchResult::Pending
                 }

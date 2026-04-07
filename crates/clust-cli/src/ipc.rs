@@ -99,9 +99,15 @@ pub async fn count_hubs() -> usize {
     let Ok(mut stream) = try_connect().await else {
         return 1;
     };
-    if clust_ipc::send_message(&mut stream, &CliMessage::ListAgents { hub: None })
-        .await
-        .is_err()
+    if clust_ipc::send_message(
+        &mut stream,
+        &CliMessage::ListAgents {
+            hub: None,
+            batch: None,
+        },
+    )
+    .await
+    .is_err()
     {
         return 1;
     }
@@ -191,9 +197,15 @@ pub async fn fetch_agent_list() -> Vec<clust_ipc::AgentInfo> {
     let Ok(mut stream) = try_connect().await else {
         return vec![];
     };
-    if clust_ipc::send_message(&mut stream, &CliMessage::ListAgents { hub: None })
-        .await
-        .is_err()
+    if clust_ipc::send_message(
+        &mut stream,
+        &CliMessage::ListAgents {
+            hub: None,
+            batch: None,
+        },
+    )
+    .await
+    .is_err()
     {
         return vec![];
     }

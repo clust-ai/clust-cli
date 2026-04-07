@@ -77,9 +77,12 @@ clust ls
 
 # List only agents in a specific hub
 clust ls -H my_feature
+
+# List only agents belonging to a batch
+clust ls -B refactor
 ```
 
-The TUI (`clust ui`) shows hub names in the left sidebar and groups agent cards by hub in the main panel.
+The TUI (`clust ui`) shows hub names in the left sidebar and groups agent cards by hub in the main panel. The `clust ls` output includes a BATCH column showing which batch each agent belongs to (if any).
 
 ## Agent Management
 

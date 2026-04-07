@@ -49,6 +49,10 @@ pub enum Commands {
         /// Filter agents by hub name
         #[arg(short = 'H', long = "hub")]
         hub: Option<String>,
+
+        /// Filter agents by batch ID or title
+        #[arg(short = 'B', long = "batch")]
+        batch: Option<String>,
     },
     /// Open the Clust terminal UI
     Ui,
@@ -260,7 +264,8 @@ mod tests {
             cli.command,
             Some(Commands::Ls {
                 select: false,
-                hub: None
+                hub: None,
+                batch: None,
             })
         ));
     }
@@ -272,7 +277,8 @@ mod tests {
             cli.command,
             Some(Commands::Ls {
                 select: true,
-                hub: None
+                hub: None,
+                batch: None,
             })
         ));
     }
@@ -284,7 +290,8 @@ mod tests {
             cli.command,
             Some(Commands::Ls {
                 select: true,
-                hub: None
+                hub: None,
+                batch: None,
             })
         ));
     }
@@ -538,7 +545,7 @@ mod tests {
     fn parse_ls_hub_short() {
         let cli = Cli::try_parse_from(["clust", "ls", "-H", "my_feature"]).unwrap();
         match cli.command {
-            Some(Commands::Ls { select, hub }) => {
+            Some(Commands::Ls { select, hub, .. }) => {
                 assert!(!select);
                 assert_eq!(hub.as_deref(), Some("my_feature"));
             }
@@ -550,7 +557,7 @@ mod tests {
     fn parse_ls_hub_long() {
         let cli = Cli::try_parse_from(["clust", "ls", "--hub", "my_feature"]).unwrap();
         match cli.command {
-            Some(Commands::Ls { select, hub }) => {
+            Some(Commands::Ls { select, hub, .. }) => {
                 assert!(!select);
                 assert_eq!(hub.as_deref(), Some("my_feature"));
             }
@@ -562,7 +569,7 @@ mod tests {
     fn parse_ls_hub_with_select() {
         let cli = Cli::try_parse_from(["clust", "ls", "-i", "-H", "my_feature"]).unwrap();
         match cli.command {
-            Some(Commands::Ls { select, hub }) => {
+            Some(Commands::Ls { select, hub, .. }) => {
                 assert!(select);
                 assert_eq!(hub.as_deref(), Some("my_feature"));
             }
