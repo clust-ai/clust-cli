@@ -41,6 +41,9 @@ async fn run(
         eprintln!("global git exclude setup failed: {e}");
     }
 
+    // Start the batch timer task for queued/scheduled batch execution
+    crate::batch::spawn_batch_timer(state.clone());
+
     let sock_path = clust_ipc::socket_path();
 
     // Remove stale socket file if it exists (crash recovery per docs/hub.md)
@@ -939,124 +942,38 @@ async fn handle_connection(
             agent_binary,
             cols,
             rows,
-            accept_edits,
+            accept_edits: _,
             plan_mode,
             allow_bypass,
             hub,
         } => {
-            // Determine branch name and whether to create or checkout.
-            // Sanitize new_branch (user input) but not target_branch (from git).
-            let sanitized_new = new_branch
-                .as_deref()
-                .map(clust_ipc::branch::sanitize_branch_name);
-            let branch_name = sanitized_new
-                .as_deref()
-                .or(target_branch.as_deref())
-                .ok_or("either target_branch or new_branch must be provided");
-
-            let branch_name = match branch_name {
-                Ok(b) => b.to_string(),
-                Err(e) => {
-                    clust_ipc::send_message_write(
-                        &mut writer,
-                        &HubMessage::Error { message: e.to_string() },
-                    )
-                    .await?;
-                    return Ok(());
-                }
-            };
-
-            // Use the existing add_worktree which places worktrees at
-            // <repo>/.clust/worktrees/<serialized_branch>/
-            let repo_root = std::path::Path::new(&repo_path);
-            let checkout_existing = new_branch.is_none();
-            let base = if new_branch.is_some() {
-                target_branch.as_deref()
-            } else {
-                None
-            };
-
-            let worktree_path = match crate::repo::add_worktree(
-                repo_root,
-                &branch_name,
-                base,
-                checkout_existing,
-            ) {
-                Ok(path) => path,
-                Err(e) => {
-                    let message = if e.contains("already checked out") {
-                        format!(
-                            "Branch '{}' is already checked out and cannot be used as a worktree. \
-                             Use 'Start Agent (in place)' from the context menu, or create a new branch.",
-                            branch_name
-                        )
-                    } else {
-                        e
-                    };
-                    clust_ipc::send_message_write(
-                        &mut writer,
-                        &HubMessage::Error { message },
-                    )
-                    .await?;
-                    return Ok(());
-                }
-            };
-
-            let working_dir = worktree_path.to_string_lossy().into_owned();
-
-            // Detect git info from the new worktree
-            let (wt_repo_path, wt_branch_name, is_worktree) =
-                match crate::repo::detect_git_root(&working_dir) {
-                    Some(root) => {
-                        let rp = root.to_string_lossy().into_owned();
-                        let (bn, iw) =
-                            crate::repo::detect_branch_and_worktree(&working_dir);
-                        (Some(rp), bn.or(Some(branch_name)), iw)
-                    }
-                    None => (Some(repo_path.clone()), Some(branch_name), true),
-                };
-
-            // Clone git info before moving into SpawnAgentParams
-            let response_repo_path = wt_repo_path.clone();
-            let response_branch_name = wt_branch_name.clone();
-
-            // Spawn agent in the worktree
-            let result = {
-                let mut hub_state = state.lock().await;
-                agent::spawn_agent(
-                    &mut hub_state,
-                    agent::SpawnAgentParams {
-                        prompt,
-                        agent_binary,
-                        working_dir: working_dir.clone(),
-                        cols,
-                        rows,
-                        accept_edits,
-                        plan_mode,
-                        allow_bypass,
-                        hub,
-                        repo_path: wt_repo_path,
-                        branch_name: wt_branch_name,
-                        is_worktree,
-                    },
-                    state.clone(),
-                )
-            };
-
-            match result {
-                Ok((id, binary)) => {
-                    // Auto-register repo
-                    {
+            match crate::batch::create_worktree_and_spawn_agent(
+                crate::batch::CreateWorktreeParams {
+                    state: &state,
+                    repo_path: &repo_path,
+                    target_branch: target_branch.as_deref(),
+                    new_branch: new_branch.as_deref(),
+                    prompt,
+                    agent_binary,
+                    plan_mode,
+                    allow_bypass,
+                    hub: &hub,
+                    cols,
+                    rows,
+                },
+            )
+            .await
+            {
+                Ok((id, binary, working_dir)) => {
+                    // Read git info for the response
+                    let (response_repo_path, response_branch_name) = {
                         let hub_state = state.lock().await;
-                        if let Some(ref db) = hub_state.db {
-                            let name = std::path::Path::new(&repo_path)
-                                .file_name()
-                                .map(|n| n.to_string_lossy().into_owned())
-                                .unwrap_or_else(|| repo_path.clone());
-                            let _ = crate::db::register_repo(db, &repo_path, &name, "");
+                        if let Some(entry) = hub_state.agents.get(&id) {
+                            (entry.repo_path.clone(), entry.branch_name.clone())
+                        } else {
+                            (None, None)
                         }
-                    }
-                    // One-shot response (no streaming — TUI attaches separately)
+                    };
                     clust_ipc::send_message_write(
                         &mut writer,
                         &HubMessage::WorktreeAgentStarted {
@@ -1638,6 +1555,215 @@ async fn handle_connection(
             }
         }
 
+        CliMessage::QueueBatch {
+            repo_path,
+            target_branch,
+            title,
+            max_concurrent,
+            prompt_prefix,
+            prompt_suffix,
+            plan_mode,
+            allow_bypass,
+            agent_binary,
+            hub,
+            tasks,
+            scheduled_at,
+        } => {
+            let parsed_time = chrono::DateTime::parse_from_rfc3339(&scheduled_at);
+            match parsed_time {
+                Ok(dt) => {
+                    let batch_id = {
+                        let hub_state = state.lock().await;
+                        // Generate unique batch ID
+                        let mut id;
+                        loop {
+                            id = format!("b{:05x}", rand::random::<u32>() & 0xFFFFF);
+                            if !hub_state
+                                .queued_batches
+                                .iter()
+                                .any(|b| b.id == id)
+                            {
+                                break;
+                            }
+                        }
+                        id
+                    };
+
+                    let hub_tasks: Vec<crate::batch::HubTaskEntry> = tasks
+                        .iter()
+                        .map(|t| crate::batch::HubTaskEntry {
+                            branch_name: t.branch_name.clone(),
+                            prompt: t.prompt.clone(),
+                            status: crate::batch::HubTaskStatus::Idle,
+                            agent_id: None,
+                        })
+                        .collect();
+
+                    let batch_entry = crate::batch::HubBatchEntry {
+                        id: batch_id.clone(),
+                        title: title.clone(),
+                        repo_path: repo_path.clone(),
+                        target_branch: target_branch.clone(),
+                        max_concurrent,
+                        prompt_prefix: prompt_prefix.clone(),
+                        prompt_suffix: prompt_suffix.clone(),
+                        plan_mode,
+                        allow_bypass,
+                        agent_binary: agent_binary.clone(),
+                        hub: hub.clone(),
+                        tasks: hub_tasks,
+                        scheduled_at: dt.with_timezone(&chrono::Utc),
+                        status: crate::batch::HubBatchStatus::Scheduled,
+                    };
+
+                    // Persist to database
+                    let task_data: Vec<(String, String)> = tasks
+                        .iter()
+                        .map(|t| (t.branch_name.clone(), t.prompt.clone()))
+                        .collect();
+                    {
+                        let hub_state = state.lock().await;
+                        if let Some(ref db) = hub_state.db {
+                            let row = crate::db::QueuedBatchRow {
+                                id: batch_id.clone(),
+                                title,
+                                repo_path,
+                                target_branch,
+                                max_concurrent,
+                                prompt_prefix,
+                                prompt_suffix,
+                                plan_mode,
+                                allow_bypass,
+                                agent_binary,
+                                hub,
+                                scheduled_at: scheduled_at.clone(),
+                                status: "scheduled".to_string(),
+                            };
+                            let _ = crate::db::insert_queued_batch(db, &row, &task_data);
+                        }
+                    }
+
+                    // Add to in-memory state
+                    {
+                        let mut hub_state = state.lock().await;
+                        hub_state.queued_batches.push(batch_entry);
+                    }
+
+                    clust_ipc::send_message_write(
+                        &mut writer,
+                        &HubMessage::BatchQueued {
+                            batch_id,
+                            scheduled_at,
+                        },
+                    )
+                    .await?;
+                }
+                Err(e) => {
+                    clust_ipc::send_message_write(
+                        &mut writer,
+                        &HubMessage::Error {
+                            message: format!("invalid scheduled_at timestamp: {e}"),
+                        },
+                    )
+                    .await?;
+                }
+            }
+        }
+        CliMessage::CancelQueuedBatch { batch_id } => {
+            let found = {
+                let hub_state = state.lock().await;
+                hub_state
+                    .queued_batches
+                    .iter()
+                    .any(|b| b.id == batch_id)
+            };
+            if found {
+                // Stop any active agents belonging to this batch
+                let agent_ids: Vec<String> = {
+                    let hub_state = state.lock().await;
+                    hub_state
+                        .queued_batches
+                        .iter()
+                        .find(|b| b.id == batch_id)
+                        .map(|b| {
+                            b.tasks
+                                .iter()
+                                .filter(|t| {
+                                    t.status == crate::batch::HubTaskStatus::Active
+                                })
+                                .filter_map(|t| t.agent_id.clone())
+                                .collect()
+                        })
+                        .unwrap_or_default()
+                };
+                for aid in &agent_ids {
+                    let _ = agent::stop_agent(&state, aid).await;
+                }
+
+                // Remove from state and database
+                {
+                    let mut hub_state = state.lock().await;
+                    hub_state
+                        .queued_batches
+                        .retain(|b| b.id != batch_id);
+                    if let Some(ref db) = hub_state.db {
+                        let _ = crate::db::delete_queued_batch(db, &batch_id);
+                    }
+                }
+                clust_ipc::send_message_write(
+                    &mut writer,
+                    &HubMessage::BatchCancelled {
+                        batch_id,
+                    },
+                )
+                .await?;
+            } else {
+                clust_ipc::send_message_write(
+                    &mut writer,
+                    &HubMessage::Error {
+                        message: format!("queued batch {batch_id} not found"),
+                    },
+                )
+                .await?;
+            }
+        }
+        CliMessage::ListQueuedBatches => {
+            let batches = {
+                let hub_state = state.lock().await;
+                hub_state
+                    .queued_batches
+                    .iter()
+                    .map(|b| clust_ipc::QueuedBatchInfo {
+                        batch_id: b.id.clone(),
+                        title: b.title.clone(),
+                        repo_path: b.repo_path.clone(),
+                        target_branch: b.target_branch.clone(),
+                        scheduled_at: b.scheduled_at.to_rfc3339(),
+                        status: b.status.as_str().to_string(),
+                        task_count: b.tasks.len(),
+                        tasks_done: b
+                            .tasks
+                            .iter()
+                            .filter(|t| {
+                                t.status == crate::batch::HubTaskStatus::Done
+                            })
+                            .count(),
+                        tasks_active: b
+                            .tasks
+                            .iter()
+                            .filter(|t| {
+                                t.status == crate::batch::HubTaskStatus::Active
+                            })
+                            .count(),
+                    })
+                    .collect()
+            };
+            clust_ipc::send_message_write(
+                &mut writer,
+                &HubMessage::QueuedBatchList { batches },
+            )
+            .await?;
+        }
         _ => {
             clust_ipc::send_message_write(
                 &mut writer,

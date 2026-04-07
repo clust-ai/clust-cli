@@ -140,6 +140,9 @@ CLI -> Hub:
   TerminalInput { id: String, data: Vec<u8> }
   ResizeTerminal { id: String, cols: u16, rows: u16 }
   StopTerminal { id: String }
+  QueueBatch { repo_path: String, target_branch: String, title: String, max_concurrent: Option<usize>, prompt_prefix: Option<String>, prompt_suffix: Option<String>, plan_mode: bool, allow_bypass: bool, agent_binary: Option<String>, hub: String, tasks: Vec<QueuedTask>, scheduled_at: String }
+  CancelQueuedBatch { batch_id: String }
+  ListQueuedBatches
   Ping { protocol_version: u32 }
 
 Hub -> CLI:
@@ -183,12 +186,15 @@ Hub -> CLI:
   TerminalExited { id: String, exit_code: i32 }
   TerminalReplayComplete { id: String }
   TerminalStopped { id: String }
+  BatchQueued { batch_id: String, scheduled_at: String }
+  BatchCancelled { batch_id: String }
+  QueuedBatchList { batches: Vec<QueuedBatchInfo> }
   Pong { protocol_version: u32 }
 ```
 
 ### Protocol Versioning
 
-The IPC protocol includes a version check to detect stale hubs. `clust-ipc` exports a `PROTOCOL_VERSION` constant (currently `4`) that must be bumped whenever the `CliMessage` or `HubMessage` enum shapes change (since `rmp-serde` uses numeric enum indices).
+The IPC protocol includes a version check to detect stale hubs. `clust-ipc` exports a `PROTOCOL_VERSION` constant (currently `5`) that must be bumped whenever the `CliMessage` or `HubMessage` enum shapes change (since `rmp-serde` uses numeric enum indices).
 
 On connection, the CLI sends a `Ping { protocol_version }` message. The hub replies with `Pong { protocol_version }` carrying its own version. If versions mismatch, the CLI stops the stale hub and spawns a fresh one before proceeding.
 
