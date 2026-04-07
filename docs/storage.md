@@ -59,9 +59,9 @@ Migration v3 adds the `color` column and backfills existing repos with cycling c
 
 Migration v4 adds the `editor` column for per-repository editor preferences. When set, the TUI skips the editor picker modal and opens the repository directly in the saved editor.
 
-#### `queued_batches` *(migration v5)*
+#### `queued_batches` *(migration v5, extended in v6)*
 
-Batches scheduled for future execution by the hub daemon. Persisted so batches survive hub restarts.
+Batches persisted by the hub daemon. Includes idle batches (registered from the CLI Tasks tab), scheduled batches (with a timer), and running batches. Persisted so batches survive hub restarts.
 
 ```sql
 CREATE TABLE queued_batches (
@@ -76,11 +76,14 @@ CREATE TABLE queued_batches (
     allow_bypass    INTEGER NOT NULL DEFAULT 0,
     agent_binary    TEXT,
     hub             TEXT NOT NULL,
-    scheduled_at    TEXT NOT NULL,       -- RFC 3339 timestamp
-    status          TEXT NOT NULL DEFAULT 'scheduled',  -- scheduled, running, completed
-    created_at      TEXT NOT NULL        -- RFC 3339 timestamp
+    scheduled_at    TEXT,                -- RFC 3339 timestamp; NULL for idle batches
+    status          TEXT NOT NULL DEFAULT 'scheduled',  -- idle, scheduled, running, completed
+    created_at      TEXT NOT NULL,       -- RFC 3339 timestamp
+    launch_mode     TEXT NOT NULL DEFAULT 'auto'  -- auto or manual; added in migration v6
 );
 ```
+
+Migration v7 adds the `launch_mode` column (with default `'auto'`) and makes `scheduled_at` effectively nullable for idle batches that have no scheduled start time.
 
 #### `queued_batch_tasks` *(migration v5, extended in v6)*
 
