@@ -1,5 +1,4 @@
 use std::collections::HashMap;
-use std::time::Instant;
 
 use ratatui::{
     layout::{Alignment, Constraint, Layout, Rect},
@@ -82,7 +81,7 @@ pub struct BatchAgentInfo {
     pub task_count: usize,
 }
 
-/// A single batch definition (UI-only, no execution).
+/// A single batch definition.
 #[allow(dead_code)]
 pub struct BatchInfo {
     pub id: usize,
@@ -98,7 +97,8 @@ pub struct BatchInfo {
     pub status: BatchStatus,
     pub plan_mode: bool,
     pub allow_bypass: bool,
-    pub created_at: Instant,
+    /// Hub-assigned persistent batch ID (set after registration).
+    pub hub_batch_id: Option<String>,
 }
 
 impl BatchInfo {
@@ -180,12 +180,13 @@ impl TasksState {
         map
     }
 
-    pub fn add_batch(&mut self, output: BatchModalOutput) {
+    pub fn add_batch(&mut self, output: BatchModalOutput) -> usize {
         let title = output.title.unwrap_or_else(|| {
             let name = format!("Batch {}", self.next_auto_name);
             self.next_auto_name += 1;
             name
         });
+        let idx = self.batches.len();
         self.batches.push(BatchInfo {
             id: self.next_id,
             title,
@@ -200,9 +201,10 @@ impl TasksState {
             status: BatchStatus::Idle,
             plan_mode: false,
             allow_bypass: false,
-            created_at: Instant::now(),
+            hub_batch_id: None,
         });
         self.next_id += 1;
+        idx
     }
 
     pub fn add_task(&mut self, batch_idx: usize, branch_name: String, prompt: String, use_prefix: bool, use_suffix: bool) {
@@ -381,6 +383,173 @@ impl TasksState {
                 }
             }
         }
+    }
+
+    /// Find the index of a batch by its hub-assigned ID.
+    #[allow(dead_code)]
+    pub fn batch_idx_by_hub_id(&self, hub_id: &str) -> Option<usize> {
+        self.batches.iter().position(|b| b.hub_batch_id.as_deref() == Some(hub_id))
+    }
+
+    /// Load batches from hub info, replacing current state.
+    /// Called on CLI startup to restore persisted batches.
+    pub fn load_from_hub(&mut self, hub_batches: Vec<clust_ipc::QueuedBatchInfo>) {
+        self.batches.clear();
+        self.next_id = 1;
+        self.next_auto_name = 1;
+        self.focus = TasksFocus::BatchList;
+        self.focused_task = None;
+        self.scroll_offset = 0;
+
+        for info in hub_batches {
+            let launch_mode = if info.launch_mode == "manual" {
+                LaunchMode::Manual
+            } else {
+                LaunchMode::Auto
+            };
+
+            let status = match info.status.as_str() {
+                "running" => BatchStatus::Active,
+                "scheduled" => BatchStatus::Queued {
+                    scheduled_at: info.scheduled_at.clone().unwrap_or_default(),
+                    batch_id: info.batch_id.clone(),
+                },
+                _ => BatchStatus::Idle,
+            };
+
+            let tasks: Vec<TaskEntry> = info
+                .tasks
+                .iter()
+                .map(|t| TaskEntry {
+                    branch_name: t.branch_name.clone(),
+                    prompt: t.prompt.clone(),
+                    status: match t.status.as_str() {
+                        "active" => TaskStatus::Active,
+                        "done" => TaskStatus::Done,
+                        _ => TaskStatus::Idle,
+                    },
+                    agent_id: t.agent_id.clone(),
+                    use_prefix: t.use_prefix,
+                    use_suffix: t.use_suffix,
+                })
+                .collect();
+
+            // Derive repo_name from repo_path
+            let repo_name = std::path::Path::new(&info.repo_path)
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_else(|| info.repo_path.clone());
+
+            // Track auto-name counter
+            if info.title.starts_with("Batch ") {
+                if let Ok(n) = info.title[6..].parse::<usize>() {
+                    if n >= self.next_auto_name {
+                        self.next_auto_name = n + 1;
+                    }
+                }
+            }
+
+            self.batches.push(BatchInfo {
+                id: self.next_id,
+                title: info.title,
+                repo_path: info.repo_path,
+                repo_name,
+                branch_name: info.target_branch,
+                max_concurrent: info.max_concurrent,
+                launch_mode,
+                prompt_prefix: info.prompt_prefix,
+                prompt_suffix: info.prompt_suffix,
+                tasks,
+                status,
+                plan_mode: info.plan_mode,
+                allow_bypass: info.allow_bypass,
+                hub_batch_id: Some(info.batch_id),
+            });
+            self.next_id += 1;
+        }
+    }
+
+    /// Sync task statuses and agent_ids from hub data for all batches.
+    pub fn sync_from_hub(&mut self, hub_batches: &[clust_ipc::QueuedBatchInfo]) {
+        for hub_info in hub_batches {
+            let batch = match self.batches.iter_mut().find(|b| {
+                b.hub_batch_id.as_deref() == Some(&hub_info.batch_id)
+            }) {
+                Some(b) => b,
+                None => continue,
+            };
+
+            // Update batch status
+            match hub_info.status.as_str() {
+                "running" => {
+                    if !matches!(batch.status, BatchStatus::Active) {
+                        batch.status = BatchStatus::Active;
+                    }
+                }
+                "scheduled" => {
+                    // Keep the Queued state with its scheduled_at
+                    if !matches!(batch.status, BatchStatus::Queued { .. }) {
+                        batch.status = BatchStatus::Queued {
+                            scheduled_at: hub_info.scheduled_at.clone().unwrap_or_default(),
+                            batch_id: hub_info.batch_id.clone(),
+                        };
+                    }
+                }
+                "idle" => {
+                    if !matches!(batch.status, BatchStatus::Idle) {
+                        batch.status = BatchStatus::Idle;
+                    }
+                }
+                _ => {}
+            }
+
+            // Sync per-task status and agent_id
+            for (i, hub_task) in hub_info.tasks.iter().enumerate() {
+                if let Some(task) = batch.tasks.get_mut(i) {
+                    let new_status = match hub_task.status.as_str() {
+                        "active" => TaskStatus::Active,
+                        "done" => TaskStatus::Done,
+                        _ => TaskStatus::Idle,
+                    };
+                    task.status = new_status;
+                    if hub_task.agent_id.is_some() {
+                        task.agent_id = hub_task.agent_id.clone();
+                    }
+                }
+            }
+
+            // Add any new tasks from hub that we don't have locally
+            if hub_info.tasks.len() > batch.tasks.len() {
+                for hub_task in &hub_info.tasks[batch.tasks.len()..] {
+                    batch.tasks.push(TaskEntry {
+                        branch_name: hub_task.branch_name.clone(),
+                        prompt: hub_task.prompt.clone(),
+                        status: match hub_task.status.as_str() {
+                            "active" => TaskStatus::Active,
+                            "done" => TaskStatus::Done,
+                            _ => TaskStatus::Idle,
+                        },
+                        agent_id: hub_task.agent_id.clone(),
+                        use_prefix: hub_task.use_prefix,
+                        use_suffix: hub_task.use_suffix,
+                    });
+                }
+            }
+
+            // Update config
+            batch.prompt_prefix = hub_info.prompt_prefix.clone();
+            batch.prompt_suffix = hub_info.prompt_suffix.clone();
+            batch.plan_mode = hub_info.plan_mode;
+            batch.allow_bypass = hub_info.allow_bypass;
+        }
+
+        // Remove batches that are no longer in the hub (completed/deleted)
+        self.batches.retain(|b| {
+            match &b.hub_batch_id {
+                Some(id) => hub_batches.iter().any(|h| &h.batch_id == id),
+                None => true, // Keep unregistered batches
+            }
+        });
     }
 
     pub fn remove_done_tasks(&mut self, batch_idx: usize) {

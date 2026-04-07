@@ -1650,8 +1650,9 @@ async fn handle_connection(
                         agent_binary: agent_binary.clone(),
                         hub: hub.clone(),
                         tasks: hub_tasks,
-                        scheduled_at: dt.with_timezone(&chrono::Utc),
+                        scheduled_at: Some(dt.with_timezone(&chrono::Utc)),
                         status: crate::batch::HubBatchStatus::Scheduled,
+                        launch_mode: "auto".to_string(),
                     };
 
                     // Persist to database
@@ -1674,8 +1675,9 @@ async fn handle_connection(
                                 allow_bypass,
                                 agent_binary,
                                 hub,
-                                scheduled_at: scheduled_at.clone(),
+                                scheduled_at: Some(scheduled_at.clone()),
                                 status: "scheduled".to_string(),
+                                launch_mode: "auto".to_string(),
                             };
                             let _ = crate::db::insert_queued_batch(db, &row, &task_data);
                         }
@@ -1771,12 +1773,13 @@ async fn handle_connection(
                 hub_state
                     .queued_batches
                     .iter()
+                    .filter(|b| b.status != crate::batch::HubBatchStatus::Completed)
                     .map(|b| clust_ipc::QueuedBatchInfo {
                         batch_id: b.id.clone(),
                         title: b.title.clone(),
                         repo_path: b.repo_path.clone(),
                         target_branch: b.target_branch.clone(),
-                        scheduled_at: b.scheduled_at.to_rfc3339(),
+                        scheduled_at: b.scheduled_at.map(|t| t.to_rfc3339()),
                         status: b.status.as_str().to_string(),
                         task_count: b.tasks.len(),
                         tasks_done: b
@@ -1793,6 +1796,25 @@ async fn handle_connection(
                                 t.status == crate::batch::HubTaskStatus::Active
                             })
                             .count(),
+                        tasks: b
+                            .tasks
+                            .iter()
+                            .map(|t| clust_ipc::QueuedBatchTaskInfo {
+                                branch_name: t.branch_name.clone(),
+                                prompt: t.prompt.clone(),
+                                status: t.status.as_str().to_string(),
+                                agent_id: t.agent_id.clone(),
+                                use_prefix: t.use_prefix,
+                                use_suffix: t.use_suffix,
+                            })
+                            .collect(),
+                        launch_mode: b.launch_mode.clone(),
+                        max_concurrent: b.max_concurrent,
+                        prompt_prefix: b.prompt_prefix.clone(),
+                        prompt_suffix: b.prompt_suffix.clone(),
+                        plan_mode: b.plan_mode,
+                        allow_bypass: b.allow_bypass,
+                        agent_binary: b.agent_binary.clone(),
                     })
                     .collect()
             };
@@ -1801,6 +1823,270 @@ async fn handle_connection(
                 &HubMessage::QueuedBatchList { batches },
             )
             .await?;
+        }
+        CliMessage::RegisterBatch {
+            repo_path,
+            target_branch,
+            title,
+            max_concurrent,
+            prompt_prefix,
+            prompt_suffix,
+            plan_mode,
+            allow_bypass,
+            agent_binary,
+            hub,
+            launch_mode,
+            tasks,
+        } => {
+            let batch_id = {
+                let hub_state = state.lock().await;
+                let mut id;
+                loop {
+                    id = format!("b{:05x}", rand::random::<u32>() & 0xFFFFF);
+                    if !hub_state.queued_batches.iter().any(|b| b.id == id) {
+                        break;
+                    }
+                }
+                id
+            };
+
+            let hub_tasks: Vec<crate::batch::HubTaskEntry> = tasks
+                .iter()
+                .map(|t| crate::batch::HubTaskEntry {
+                    branch_name: t.branch_name.clone(),
+                    prompt: t.prompt.clone(),
+                    status: crate::batch::HubTaskStatus::Idle,
+                    agent_id: None,
+                    use_prefix: t.use_prefix,
+                    use_suffix: t.use_suffix,
+                })
+                .collect();
+
+            let batch_entry = crate::batch::HubBatchEntry {
+                id: batch_id.clone(),
+                title: title.clone(),
+                repo_path: repo_path.clone(),
+                target_branch: target_branch.clone(),
+                max_concurrent,
+                prompt_prefix: prompt_prefix.clone(),
+                prompt_suffix: prompt_suffix.clone(),
+                plan_mode,
+                allow_bypass,
+                agent_binary: agent_binary.clone(),
+                hub: hub.clone(),
+                tasks: hub_tasks,
+                scheduled_at: None,
+                status: crate::batch::HubBatchStatus::Idle,
+                launch_mode: launch_mode.clone(),
+            };
+
+            // Persist to database
+            let task_data: Vec<(String, String, bool, bool)> = tasks
+                .iter()
+                .map(|t| (t.branch_name.clone(), t.prompt.clone(), t.use_prefix, t.use_suffix))
+                .collect();
+            {
+                let hub_state = state.lock().await;
+                if let Some(ref db) = hub_state.db {
+                    let row = crate::db::QueuedBatchRow {
+                        id: batch_id.clone(),
+                        title,
+                        repo_path,
+                        target_branch,
+                        max_concurrent,
+                        prompt_prefix,
+                        prompt_suffix,
+                        plan_mode,
+                        allow_bypass,
+                        agent_binary,
+                        hub,
+                        scheduled_at: None,
+                        status: "idle".to_string(),
+                        launch_mode,
+                    };
+                    let _ = crate::db::insert_queued_batch(db, &row, &task_data);
+                }
+            }
+
+            // Add to in-memory state
+            {
+                let mut hub_state = state.lock().await;
+                hub_state.queued_batches.push(batch_entry);
+            }
+
+            clust_ipc::send_message_write(
+                &mut writer,
+                &HubMessage::BatchRegistered { batch_id },
+            )
+            .await?;
+        }
+        CliMessage::AddBatchTask {
+            batch_id,
+            branch_name,
+            prompt,
+        } => {
+            let mut hub_state = state.lock().await;
+            let mut ok = false;
+            if let Some(batch) = hub_state.queued_batches.iter_mut().find(|b| b.id == batch_id) {
+                batch.tasks.push(crate::batch::HubTaskEntry {
+                    branch_name: branch_name.clone(),
+                    prompt: prompt.clone(),
+                    status: crate::batch::HubTaskStatus::Idle,
+                    agent_id: None,
+                    use_prefix: true,
+                    use_suffix: true,
+                });
+                if let Some(ref db) = hub_state.db {
+                    let _ = crate::db::add_batch_task(db, &batch_id, &branch_name, &prompt);
+                }
+                ok = true;
+            }
+            if ok {
+                clust_ipc::send_message_write(&mut writer, &HubMessage::Ok).await?;
+            } else {
+                clust_ipc::send_message_write(
+                    &mut writer,
+                    &HubMessage::Error {
+                        message: format!("batch {batch_id} not found"),
+                    },
+                )
+                .await?;
+            }
+        }
+        CliMessage::UpdateBatchTask {
+            batch_id,
+            task_index,
+            status,
+            agent_id,
+        } => {
+            let mut hub_state = state.lock().await;
+            let mut ok = false;
+            if let Some(batch) = hub_state.queued_batches.iter_mut().find(|b| b.id == batch_id) {
+                if let Some(task) = batch.tasks.get_mut(task_index) {
+                    task.status = crate::batch::HubTaskStatus::parse_status(&status);
+                    task.agent_id = agent_id.clone();
+                    if let Some(ref db) = hub_state.db {
+                        let _ = crate::db::update_task_status(
+                            db,
+                            &batch_id,
+                            task_index,
+                            &status,
+                            agent_id.as_deref(),
+                        );
+                    }
+                    ok = true;
+                }
+            }
+            if ok {
+                clust_ipc::send_message_write(&mut writer, &HubMessage::Ok).await?;
+            } else {
+                clust_ipc::send_message_write(
+                    &mut writer,
+                    &HubMessage::Error {
+                        message: format!("batch/task {batch_id}/{task_index} not found"),
+                    },
+                )
+                .await?;
+            }
+        }
+        CliMessage::UpdateBatchConfig {
+            batch_id,
+            prompt_prefix,
+            prompt_suffix,
+            plan_mode,
+            allow_bypass,
+        } => {
+            let mut hub_state = state.lock().await;
+            let mut ok = false;
+            if let Some(batch) = hub_state.queued_batches.iter_mut().find(|b| b.id == batch_id) {
+                batch.prompt_prefix = prompt_prefix.clone();
+                batch.prompt_suffix = prompt_suffix.clone();
+                batch.plan_mode = plan_mode;
+                batch.allow_bypass = allow_bypass;
+                if let Some(ref db) = hub_state.db {
+                    let _ = crate::db::update_batch_config(
+                        db,
+                        &batch_id,
+                        prompt_prefix.as_deref(),
+                        prompt_suffix.as_deref(),
+                        plan_mode,
+                        allow_bypass,
+                    );
+                }
+                ok = true;
+            }
+            if ok {
+                clust_ipc::send_message_write(&mut writer, &HubMessage::Ok).await?;
+            } else {
+                clust_ipc::send_message_write(
+                    &mut writer,
+                    &HubMessage::Error {
+                        message: format!("batch {batch_id} not found"),
+                    },
+                )
+                .await?;
+            }
+        }
+        CliMessage::UpdateBatchStatus {
+            batch_id,
+            status,
+        } => {
+            let mut hub_state = state.lock().await;
+            let mut ok = false;
+            if let Some(batch) = hub_state.queued_batches.iter_mut().find(|b| b.id == batch_id) {
+                batch.status = crate::batch::HubBatchStatus::parse(&status);
+                if let Some(ref db) = hub_state.db {
+                    let _ = crate::db::update_batch_status(db, &batch_id, &status);
+                }
+                ok = true;
+            }
+            if ok {
+                clust_ipc::send_message_write(&mut writer, &HubMessage::Ok).await?;
+            } else {
+                clust_ipc::send_message_write(
+                    &mut writer,
+                    &HubMessage::Error {
+                        message: format!("batch {batch_id} not found"),
+                    },
+                )
+                .await?;
+            }
+        }
+        CliMessage::RemoveDoneBatchTasks { batch_id } => {
+            let mut hub_state = state.lock().await;
+            let mut ok = false;
+            if let Some(batch) = hub_state.queued_batches.iter_mut().find(|b| b.id == batch_id) {
+                batch
+                    .tasks
+                    .retain(|t| t.status != crate::batch::HubTaskStatus::Done);
+                if let Some(ref db) = hub_state.db {
+                    let _ = crate::db::remove_done_batch_tasks(db, &batch_id);
+                }
+                ok = true;
+            }
+            if ok {
+                clust_ipc::send_message_write(&mut writer, &HubMessage::Ok).await?;
+            } else {
+                clust_ipc::send_message_write(
+                    &mut writer,
+                    &HubMessage::Error {
+                        message: format!("batch {batch_id} not found"),
+                    },
+                )
+                .await?;
+            }
+        }
+        CliMessage::DeleteBatch { batch_id } => {
+            let mut hub_state = state.lock().await;
+            let len_before = hub_state.queued_batches.len();
+            hub_state.queued_batches.retain(|b| b.id != batch_id);
+            let removed = hub_state.queued_batches.len() < len_before;
+            if removed {
+                if let Some(ref db) = hub_state.db {
+                    let _ = crate::db::delete_queued_batch(db, &batch_id);
+                }
+            }
+            clust_ipc::send_message_write(&mut writer, &HubMessage::Ok).await?;
         }
         _ => {
             clust_ipc::send_message_write(

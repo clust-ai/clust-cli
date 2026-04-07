@@ -9,6 +9,7 @@ use crate::db;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum HubBatchStatus {
+    Idle,
     Scheduled,
     Running,
     Completed,
@@ -17,9 +18,19 @@ pub enum HubBatchStatus {
 impl HubBatchStatus {
     pub fn as_str(&self) -> &'static str {
         match self {
+            Self::Idle => "idle",
             Self::Scheduled => "scheduled",
             Self::Running => "running",
             Self::Completed => "completed",
+        }
+    }
+
+    pub fn parse(s: &str) -> Self {
+        match s {
+            "idle" => Self::Idle,
+            "running" => Self::Running,
+            "completed" => Self::Completed,
+            _ => Self::Scheduled,
         }
     }
 }
@@ -71,8 +82,9 @@ pub struct HubBatchEntry {
     pub agent_binary: Option<String>,
     pub hub: String,
     pub tasks: Vec<HubTaskEntry>,
-    pub scheduled_at: chrono::DateTime<chrono::Utc>,
+    pub scheduled_at: Option<chrono::DateTime<chrono::Utc>>,
     pub status: HubBatchStatus,
+    pub launch_mode: String,
 }
 
 impl HubBatchEntry {
@@ -158,7 +170,9 @@ async fn check_and_advance_batches(state: &SharedHubState) {
 
         for batch in hub.queued_batches.iter_mut() {
             // Transition scheduled → running if timer expired
-            if batch.status == HubBatchStatus::Scheduled && batch.scheduled_at <= now {
+            if batch.status == HubBatchStatus::Scheduled
+                && batch.scheduled_at.is_some_and(|t| t <= now)
+            {
                 batch.status = HubBatchStatus::Running;
                 db_updates.push(("running", batch.id.clone(), None));
             }
@@ -473,16 +487,14 @@ pub fn load_batches_from_db(hub: &HubState) -> Vec<HubBatchEntry> {
     };
 
     rows.into_iter()
-        .filter_map(|(batch_row, task_rows)| {
-            let scheduled_at = chrono::DateTime::parse_from_rfc3339(&batch_row.scheduled_at)
-                .ok()?
-                .with_timezone(&chrono::Utc);
+        .map(|(batch_row, task_rows)| {
+            let scheduled_at = batch_row.scheduled_at.as_ref().and_then(|s| {
+                chrono::DateTime::parse_from_rfc3339(s)
+                    .ok()
+                    .map(|dt| dt.with_timezone(&chrono::Utc))
+            });
 
-            let status = match batch_row.status.as_str() {
-                "running" => HubBatchStatus::Running,
-                "completed" => HubBatchStatus::Completed,
-                _ => HubBatchStatus::Scheduled,
-            };
+            let status = HubBatchStatus::parse(&batch_row.status);
 
             let tasks = task_rows
                 .into_iter()
@@ -496,7 +508,7 @@ pub fn load_batches_from_db(hub: &HubState) -> Vec<HubBatchEntry> {
                 })
                 .collect();
 
-            Some(HubBatchEntry {
+            HubBatchEntry {
                 id: batch_row.id,
                 title: batch_row.title,
                 repo_path: batch_row.repo_path,
@@ -511,7 +523,8 @@ pub fn load_batches_from_db(hub: &HubState) -> Vec<HubBatchEntry> {
                 tasks,
                 scheduled_at,
                 status,
-            })
+                launch_mode: batch_row.launch_mode,
+            }
         })
         .collect()
 }
