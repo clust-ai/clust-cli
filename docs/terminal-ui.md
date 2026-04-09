@@ -404,7 +404,8 @@ When a GitHub PR is detected for the agent's branch, a `PR #N` indicator is appe
 - File headers display clean file paths (e.g., `src/main.rs`) instead of raw `diff --git a/... b/...` lines
 - A gutter column (9 chars wide) shows old/new line numbers separated by a `│` divider; file headers and hunk headers suppress line numbers
 - The diff is refreshed every 2 seconds via a background tokio task that runs `git diff HEAD` in a `spawn_blocking` call
-- Scrolling is supported with `↑` / `↓` keys when the left panel is focused
+- **Cursor and selection:** When the left panel is focused, a cursor line is shown with `R_BG_ACTIVE` background. `↑` / `↓` move the cursor and auto-scroll the viewport. Pressing `v` toggles a selection anchor; while active, all lines between the anchor and cursor are highlighted with `R_SELECTION_BG`. `Enter` sends the selected lines (or the single cursor line if no selection) to the agent's terminal as a text payload prefixed with `# file:` headers for each file span. `Esc` cancels the selection. The cursor and selection are reset when the diff updates, when focus switches away from the left panel, or when switching tabs.
+- **Hint bar:** When the cursor is active (left panel focused), a 1-row hint bar is rendered below the diff body. It shows `v select  Enter send  Esc cancel` when no selection is active, or `arrows extend  Enter send  Esc cancel` when a selection is active. Uses `R_TEXT_TERTIARY` foreground on `R_BG_SURFACE` background
 - Error state shows the error message in `R_ERROR` color with word wrapping enabled (`.wrap(Wrap { trim: false })`) so long error messages do not overflow the terminal width
 - Empty state shows "No uncommitted changes"; loading state shows "Loading diff..."
 
@@ -414,14 +415,14 @@ When a GitHub PR is detected for the agent's branch, a `PR #N` indicator is appe
 - **Automatic PR detection:** When entering focus mode, a one-shot background task runs `gh pr view --json number,baseRefName,url` to detect an open GitHub PR for the agent's branch. If a PR is found, the Compare tab auto-selects the PR's base branch and starts the diff, and the left panel auto-switches to the Compare tab (unless the user has already navigated away from the default Changes tab). The `PrInfo` struct (defined in `gitdiff.rs`) holds the PR number, base branch name, and URL. The detection task is only spawned when the agent has both a `repo_path` and a `branch_name`. The base branch name is resolved via `resolve_branch_for_compare()`, which checks for a local branch first, then `origin/<name>`, and falls back to the raw name
 - Has two modes controlled by `BranchPickerMode`: `Searching` and `Selected`
 - **Searching mode:** Shows a text input field with fuzzy search filtering and a scrollable branch list below it. The agent's own branch is excluded from the list. Uses `SkimMatcherV2` for fuzzy matching, with results sorted by match score descending. Keyboard controls: `↑` / `↓` navigate the list, `Enter` selects a branch and switches to Selected mode, `Esc` cancels and returns to Selected mode, typing filters the list, `Backspace` deletes characters, `←` / `→` move the cursor within the input
-- **Selected mode:** Shows a label bar displaying the selected branch name (or "No branch selected" if none), followed by a diff viewer showing the output of `git diff <selected-branch> <agent-branch>`. Pressing `Enter` re-opens the search picker. `↑` / `↓` scroll the diff. `Tab` cycles to the next left panel tab
+- **Selected mode:** Shows a label bar displaying the selected branch name (or "No branch selected" if none), followed by a diff viewer showing the output of `git diff <selected-branch> <agent-branch>`. `↑` / `↓` move the cursor. `v` toggles selection, `Enter` sends the selection to the agent (or re-opens the search picker when no selection is active). `Tab` cycles to the next left panel tab
 - The diff is refreshed every 2 seconds via a background tokio task (`spawn_branch_diff_task`) that runs `git diff <base> <head>` in a `spawn_blocking` call, mirroring the Changes tab refresh mechanism
 - `BranchPicker` struct manages the picker state: input text, cursor position, selected index, selected branch name, branch list, and a `SkimMatcherV2` fuzzy matcher
 - Branch list is updated via `update_compare_branches()` which is called during the repo refresh path, pulling both local and remote branches from the matching `RepoInfo`. Remote branches are displayed with a `[remote]` badge in tertiary text color
 - When a branch is selected, `start_compare_diff()` stops any existing compare diff task and spawns a new one
 - `drain_compare_diff_events()` is called each frame in the main event loop to process background diff results
-- Scroll state, diff data, and error state are managed independently from the Changes tab (`compare_diff`, `compare_diff_scroll`, `compare_diff_error`)
-- The diff viewer rendering is shared with the Changes tab via a parameterized `render_diff_viewer()` function
+- Scroll state, diff data, cursor/selection state, and error state are managed independently from the Changes tab (`compare_diff`, `compare_diff_scroll`, `compare_cursor`, `compare_sel_anchor`, `compare_diff_error`)
+- The diff viewer rendering is shared with the Changes tab via a parameterized `render_diff_viewer()` function that accepts optional `cursor` and `sel_anchor` parameters for cursor/selection highlighting
 - Mouse scroll within the left panel area is tab-aware, routing to `compare_scroll_up/down` when the Compare tab is active
 
 **Terminal tab:**
@@ -447,7 +448,7 @@ When a GitHub PR is detected for the agent's branch, a `PR #N` indicator is appe
 
 **Panel focus:**
 
-The focus view has a concept of which side (left or right) has keyboard focus. The focused side is indicated by visual cues (tab bar highlight, panel border accent). `Shift+←` and `Shift+→` switch focus between the left and right panels. `Shift+↑` exits focus mode from either panel. When the right panel is focused, `Esc` is forwarded to the agent process. When the agent has no `repo_path` (non-repository agent), `Shift+←` from the right panel is blocked (the left panel cannot receive focus), and mouse clicks on the left panel area do not switch focus to the left panel. Clicking the right panel area still works normally.
+The focus view has a concept of which side (left or right) has keyboard focus. The focused side is indicated by visual cues (tab bar highlight, panel border accent). `Shift+←` and `Shift+→` switch focus between the left and right panels. `Shift+↑` exits focus mode from either panel. When the right panel is focused, `Esc` is forwarded to the agent process. When the agent has no `repo_path` (non-repository agent), `Shift+←` from the right panel is blocked (the left panel cannot receive focus), and mouse clicks on the left panel area do not switch focus to the left panel. Clicking the right panel area still works normally. When switching focus to the left panel (via `Shift+←` or `←` from the right panel), the diff cursor and compare cursor are positioned at the top of the current visible viewport.
 
 **Entry points:**
 
@@ -466,7 +467,7 @@ The agent's `working_dir`, `repo_path`, and `branch_name` are passed to `open_ag
 - The panel dimensions are calculated as 40% of the content area width (minus borders) by the content area height (minus header).
 - `FocusSide` enum tracks which panel has keyboard focus (`Left` or `Right`).
 - `LeftPanelTab` enum tracks the active tab in the left panel (`Changes`, `Compare`, `Terminal`) with `next()` and `prev()` for cycling in both directions.
-- Diff state is managed via `ParsedDiff` (lines, file start indices, file names), `diff_scroll` (current scroll position), and `diff_error` (error message if `git diff` failed).
+- Diff state is managed via `ParsedDiff` (lines, file start indices, file names), `diff_scroll` (current scroll position), `diff_cursor` (current cursor line index), `diff_sel_anchor` (optional selection anchor line index), and `diff_error` (error message if `git diff` failed). The Compare tab has corresponding `compare_cursor` and `compare_sel_anchor` fields. Cursor/selection state is reset on diff updates, tab switches, and focus changes.
 - A background diff refresh task (`spawn_diff_task`) runs every 2 seconds and sends `DiffEvent::Updated` or `DiffEvent::Error` via an `mpsc` channel. A `watch` channel signals the task to stop. The diff task is only spawned when `repo_path` is `Some` (i.e., the agent is running inside a git repository).
 - `drain_diff_events()` is called each frame in the main event loop alongside `drain_output_events()`.
 - `drain_pr_events()` is called each frame in the main event loop to process the one-shot PR detection result. When a PR is detected, it stores the `PrInfo`, resolves the base branch, auto-configures the compare picker, and optionally switches to the Compare tab.
@@ -491,20 +492,25 @@ The agent's `working_dir`, `repo_path`, and `branch_name` are passed to `open_ag
 
 | Shortcut | Action |
 |----------|--------|
-| `↑` / `↓` | Scroll diff up/down |
+| `↑` / `↓` | Move cursor up/down (auto-scrolls viewport) |
+| `v` | Toggle selection anchor at cursor position |
+| `Enter` | Send selected lines (or current cursor line) to the agent terminal, then cancel selection |
+| `Esc` | Cancel selection (clear anchor) |
 | `Shift+↑` | Exit focus mode, return to originating tab |
 | `Shift+→` | Switch focus to right panel |
-| `Tab` | Cycle to next left panel tab |
+| `Tab` | Cycle to next left panel tab (cancels selection) |
 
 **Keyboard shortcuts (focus mode, left panel focused, Compare tab -- Selected mode):**
 
 | Shortcut | Action |
 |----------|--------|
-| `↑` / `↓` | Scroll compare diff up/down |
-| `Enter` | Open branch search picker |
+| `↑` / `↓` | Move cursor up/down (auto-scrolls viewport) |
+| `v` | Toggle selection anchor at cursor position |
+| `Enter` | If selection is active: send selected lines to the agent terminal and cancel selection. Otherwise: open branch search picker |
+| `Esc` | Cancel selection (clear anchor) |
 | `Shift+↑` | Exit focus mode, return to originating tab |
 | `Shift+→` | Switch focus to right panel |
-| `Tab` | Cycle to next left panel tab |
+| `Tab` | Cycle to next left panel tab (cancels selection) |
 
 **Keyboard shortcuts (focus mode, left panel focused, Compare tab -- Searching mode):**
 
@@ -538,7 +544,7 @@ The `?` key toggles a keyboard shortcut overlay rendered as a centered modal (44
 - **Repositories section (shown when Repositories tab is active):** `↑/↓` navigate, `Shift+↑/↓` jump repos, `←/→` navigate tree, `Shift+←/→` switch panel, `Enter` open menu/focus agent, `Space` collapse/expand, `v` toggle grouping.
 - **Overview section (shown when Overview tab is active):** `Shift+←/→` scroll panels, `Shift+↓` enter terminal, plus an "In terminal:" sub-context label followed by `Shift+↑` back to options bar, `Shift+↓` enter focus mode, `Shift+←/→` switch agent, `PgUp/PgDn` scroll terminal.
 - **Batches section (shown when Batches tab is active):** `Shift+←/→` switch batch (with auto-scroll), `←/→` scroll viewport, `↑/↓` navigate tasks within a batch, `Shift+↓` open active task in focus mode, `Space` toggle batch status (or cancel queued), `Alt+S` start selected task (manual), `Enter` add task to batch, `p` edit prompt prefix, `s` edit prompt suffix, `c` copy batch JSON to clipboard, `Alt+P` toggle plan mode, `Alt+A` toggle task prefix, `Alt+S` toggle task suffix / start, `Del/Backspace` open batch cleanup modal.
-- **Focus Mode section (shown when in focus mode):** `Shift+↑` exit, `Shift+←/→` switch panel, `Shift+PgUp/PgDn` scroll terminal, plus a "Left panel:" sub-context label followed by `Tab` cycle tabs, `Shift+Tab` prev tab (used in Terminal tab since Tab is forwarded to the shell), `↑/↓` scroll diff.
+- **Focus Mode section (shown when in focus mode):** `Shift+↑` exit, `Shift+←/→` switch panel, `Shift+PgUp/PgDn` scroll terminal, plus a "Left panel:" sub-context label followed by `Tab` cycle tabs, `Shift+Tab` prev tab (used in Terminal tab since Tab is forwarded to the shell), `↑/↓` move cursor, `v` toggle selection, `Enter` send selection, `Esc` cancel selection.
 
 Key names are displayed in accent color (left-aligned, 16 chars wide); descriptions use primary text color. Section headers use secondary text color with bold modifier. Sub-context labels use tertiary text color and are indented.
 
