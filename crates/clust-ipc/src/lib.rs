@@ -14,7 +14,7 @@ pub const DEFAULT_HUB: &str = "default_hub";
 
 /// Protocol version for IPC compatibility checks.
 /// Bump this whenever `CliMessage` or `HubMessage` enum shapes change.
-pub const PROTOCOL_VERSION: u32 = 6;
+pub const PROTOCOL_VERSION: u32 = 7;
 
 /// Cleanup mode when cancelling/deleting a batch.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
@@ -144,6 +144,13 @@ pub enum CliMessage {
         enabled: bool,
     },
     GetBypassPermissions,
+    DetachHead {
+        repo_path: String,
+    },
+    CheckoutLocalBranch {
+        repo_path: String,
+        branch_name: String,
+    },
     // Terminal session management
     StartTerminal {
         working_dir: String,
@@ -414,6 +421,10 @@ pub enum HubMessage {
         summary: String,
     },
     RemoteBranchCheckedOut {
+        branch_name: String,
+    },
+    HeadDetached,
+    LocalBranchCheckedOut {
         branch_name: String,
     },
     RepoCreated {

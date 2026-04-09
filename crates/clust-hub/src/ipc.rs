@@ -1184,6 +1184,47 @@ async fn handle_connection(
                 }
             }
         }
+        CliMessage::DetachHead { repo_path } => {
+            let repo_root = std::path::Path::new(&repo_path);
+            match crate::repo::detach_head(repo_root) {
+                Ok(()) => {
+                    clust_ipc::send_message_write(
+                        &mut writer,
+                        &HubMessage::HeadDetached,
+                    )
+                    .await?;
+                }
+                Err(e) => {
+                    clust_ipc::send_message_write(
+                        &mut writer,
+                        &HubMessage::Error { message: e },
+                    )
+                    .await?;
+                }
+            }
+        }
+        CliMessage::CheckoutLocalBranch {
+            repo_path,
+            branch_name,
+        } => {
+            let repo_root = std::path::Path::new(&repo_path);
+            match crate::repo::checkout_local_branch(repo_root, &branch_name) {
+                Ok(()) => {
+                    clust_ipc::send_message_write(
+                        &mut writer,
+                        &HubMessage::LocalBranchCheckedOut { branch_name },
+                    )
+                    .await?;
+                }
+                Err(e) => {
+                    clust_ipc::send_message_write(
+                        &mut writer,
+                        &HubMessage::Error { message: e },
+                    )
+                    .await?;
+                }
+            }
+        }
         CliMessage::PurgeRepo { path } => {
             let git_root = crate::repo::detect_git_root(&path);
             match git_root {
