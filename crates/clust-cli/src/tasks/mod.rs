@@ -25,8 +25,8 @@ pub const SHOW_TERMINAL_PREVIEW: bool = true;
 /// Number of terminal output lines shown in active task preview.
 pub const TASK_TERMINAL_PREVIEW_LINES: usize = 4;
 
-/// Height of a task box without terminal preview (separator + header + prompt + status bar).
-const TASK_BOX_BASE_HEIGHT: u16 = 4;
+/// Maximum number of wrapped prompt lines shown in a task box.
+const MAX_PROMPT_LINES: usize = 3;
 
 /// Extra height added for terminal preview in active task boxes.
 const TASK_BOX_PREVIEW_HEIGHT: u16 = TASK_TERMINAL_PREVIEW_LINES as u16;
@@ -235,6 +235,8 @@ pub struct TasksState {
     pub focus: TasksFocus,
     pub focused_task: Option<usize>,
     pub scroll_offset: usize,
+    /// Vertical scroll offset for task boxes within the focused batch card.
+    pub task_scroll_offset: usize,
     next_id: usize,
     next_auto_name: usize,
 }
@@ -246,6 +248,7 @@ impl TasksState {
             focus: TasksFocus::BatchList,
             focused_task: None,
             scroll_offset: 0,
+            task_scroll_offset: 0,
             next_id: 1,
             next_auto_name: 1,
         }
@@ -674,6 +677,7 @@ impl TasksState {
     pub fn focus_first_card(&mut self) {
         if !self.batches.is_empty() {
             self.focus = TasksFocus::BatchCard(self.scroll_offset);
+            self.task_scroll_offset = 0;
         }
     }
 
@@ -681,6 +685,7 @@ impl TasksState {
         if let TasksFocus::BatchCard(idx) = self.focus {
             if idx + 1 < self.batches.len() {
                 self.focus = TasksFocus::BatchCard(idx + 1);
+                self.task_scroll_offset = 0;
             }
         }
     }
@@ -688,6 +693,7 @@ impl TasksState {
     pub fn focus_prev_card(&mut self) {
         if let TasksFocus::BatchCard(idx) = self.focus {
             self.focused_task = None;
+            self.task_scroll_offset = 0;
             if idx > 0 {
                 self.focus = TasksFocus::BatchCard(idx - 1);
             } else {
@@ -796,7 +802,8 @@ pub fn render_tasks(
             .map(|c| theme::repo_color(c));
 
         let ft = if is_focused { state.focused_task } else { None };
-        render_batch_card(frame, card_areas[i], batch, is_focused, repo_color, ft, terminal_previews);
+        let scroll = if is_focused { &mut state.task_scroll_offset } else { &mut 0 };
+        render_batch_card(frame, card_areas[i], batch, is_focused, repo_color, ft, terminal_previews, scroll);
 
         click_map.tasks_batch_cards.push((card_areas[i], batch_idx));
     }
@@ -857,6 +864,7 @@ fn render_empty_state(frame: &mut Frame, area: Rect) {
     );
 }
 
+#[allow(clippy::too_many_arguments)]
 fn render_batch_card(
     frame: &mut Frame,
     area: Rect,
@@ -865,6 +873,7 @@ fn render_batch_card(
     repo_color: Option<ratatui::style::Color>,
     focused_task: Option<usize>,
     terminal_previews: &TerminalPreviewMap,
+    task_scroll_offset: &mut usize,
 ) {
     let border_color = match (focused, repo_color) {
         (true, Some(c)) => c,
@@ -1054,7 +1063,7 @@ fn render_batch_card(
     frame.render_widget(Paragraph::new(metadata_lines), metadata_area);
 
     if !batch.tasks.is_empty() {
-        render_task_boxes(frame, tasks_area, batch, focused_task, terminal_previews);
+        render_task_boxes(frame, tasks_area, batch, focused_task, terminal_previews, task_scroll_offset);
     }
 }
 
@@ -1062,8 +1071,94 @@ fn render_batch_card(
 // Task box rendering
 // ---------------------------------------------------------------------------
 
-/// Height of a single task box based on its status and available preview data.
-fn task_box_height(task: &TaskEntry, terminal_previews: &TerminalPreviewMap) -> u16 {
+/// Count how many visual lines a prompt occupies when wrapped to `width` chars,
+/// capped at `MAX_PROMPT_LINES`.
+fn wrapped_prompt_line_count(prompt: &str, width: usize) -> usize {
+    if width == 0 {
+        return 1;
+    }
+    let mut count = 0usize;
+    for line in prompt.lines() {
+        let len = line.chars().count();
+        if len == 0 {
+            count += 1;
+        } else {
+            count += len.div_ceil(width);
+        }
+        if count >= MAX_PROMPT_LINES {
+            return MAX_PROMPT_LINES;
+        }
+    }
+    count.max(1)
+}
+
+/// Build the wrapped prompt lines for display, capped at `MAX_PROMPT_LINES`.
+/// Adds an ellipsis to the last line if the prompt was truncated.
+fn wrap_prompt_text(prompt: &str, width: usize) -> Vec<String> {
+    if width == 0 {
+        return vec![String::new()];
+    }
+    let mut result: Vec<String> = Vec::new();
+    let mut exhausted = true;
+
+    'outer: for line in prompt.lines() {
+        let chars: Vec<char> = line.chars().collect();
+        if chars.is_empty() {
+            result.push(String::new());
+            if result.len() >= MAX_PROMPT_LINES {
+                exhausted = false;
+                break;
+            }
+            continue;
+        }
+        for chunk in chars.chunks(width) {
+            result.push(chunk.iter().collect());
+            if result.len() >= MAX_PROMPT_LINES {
+                // Check if there's more text after this chunk
+                exhausted = false;
+                break 'outer;
+            }
+        }
+    }
+
+    // Check if we consumed everything
+    if exhausted {
+        // Verify no remaining lines
+        let total_chars: usize = prompt.lines().map(|l| l.chars().count().max(1)).sum::<usize>();
+        let rendered_chars: usize = result.iter().map(|l| l.chars().count().max(1)).sum::<usize>();
+        if rendered_chars < total_chars {
+            exhausted = false;
+        }
+    }
+
+    if !exhausted {
+        // Add ellipsis to the last line
+        if let Some(last) = result.last_mut() {
+            let last_chars: Vec<char> = last.chars().collect();
+            if last_chars.len() >= width {
+                // Replace last char with ellipsis
+                let truncated: String = last_chars[..width - 1].iter().collect();
+                *last = format!("{truncated}\u{2026}");
+            } else {
+                last.push('\u{2026}');
+            }
+        }
+    }
+
+    if result.is_empty() {
+        result.push(String::new());
+    }
+    result
+}
+
+/// Height of a single task box based on its status, prompt length, and available preview data.
+fn task_box_height(task: &TaskEntry, terminal_previews: &TerminalPreviewMap, width: u16) -> u16 {
+    // content_width = area.width - 2 (1px padding each side)
+    let content_width = width.saturating_sub(2) as usize;
+    let prompt_lines = wrapped_prompt_line_count(&task.prompt, content_width) as u16;
+    // separator(1) + header(1) + prompt_lines + status(1)
+    let base = 2 + prompt_lines + 1;
+
     if task.status == TaskStatus::Active && SHOW_TERMINAL_PREVIEW {
         let has_preview = task
             .agent_id
@@ -1071,19 +1166,21 @@ fn task_box_height(task: &TaskEntry, terminal_previews: &TerminalPreviewMap) -> 
             .and_then(|id| terminal_previews.get(id))
             .is_some_and(|lines| !lines.is_empty());
         if has_preview {
-            return TASK_BOX_BASE_HEIGHT + TASK_BOX_PREVIEW_HEIGHT;
+            return base + TASK_BOX_PREVIEW_HEIGHT;
         }
     }
-    TASK_BOX_BASE_HEIGHT
+    base
 }
 
-/// Render task boxes vertically within the given area, sorted by status.
+/// Render task boxes vertically within the given area, sorted by status,
+/// with vertical scrolling when tasks overflow.
 fn render_task_boxes(
     frame: &mut Frame,
     area: Rect,
     batch: &BatchInfo,
     focused_task: Option<usize>,
     terminal_previews: &TerminalPreviewMap,
+    task_scroll_offset: &mut usize,
 ) {
     if area.height < 2 || batch.tasks.is_empty() {
         return;
@@ -1097,14 +1194,56 @@ fn render_task_boxes(
         TaskStatus::Done => 2,
     });
 
-    // Calculate how many task boxes fit in the available height
+    // Compute heights for all sorted tasks
+    let heights: Vec<u16> = sorted_indices
+        .iter()
+        .map(|&idx| task_box_height(&batch.tasks[idx], terminal_previews, area.width))
+        .collect();
+
+    // Auto-scroll to keep focused task visible
+    if let Some(ft) = focused_task {
+        if let Some(focused_sorted_pos) = sorted_indices.iter().position(|&idx| idx == ft) {
+            // Scroll up if focused task is above viewport
+            if focused_sorted_pos < *task_scroll_offset {
+                *task_scroll_offset = focused_sorted_pos;
+            }
+
+            // Scroll down if focused task is below viewport
+            let mut running = 0u16;
+            // Find last visible from current scroll
+            let mut last_visible = *task_scroll_offset;
+            for (i, &h) in heights.iter().enumerate().skip(*task_scroll_offset) {
+                if running + h > area.height {
+                    break;
+                }
+                running += h;
+                last_visible = i;
+            }
+            if focused_sorted_pos > last_visible {
+                // Scroll so focused task is the last visible
+                let mut h = 0u16;
+                let mut new_start = focused_sorted_pos;
+                for i in (0..=focused_sorted_pos).rev() {
+                    if h + heights[i] > area.height {
+                        break;
+                    }
+                    h += heights[i];
+                    new_start = i;
+                }
+                *task_scroll_offset = new_start;
+            }
+        }
+    }
+
+    // Clamp scroll offset
+    *task_scroll_offset = (*task_scroll_offset).min(sorted_indices.len().saturating_sub(1));
+
+    // Calculate which task boxes fit starting from scroll offset
     let mut constraints: Vec<Constraint> = Vec::new();
     let mut total_height: u16 = 0;
     let mut visible_count = 0;
 
-    for &idx in &sorted_indices {
-        let task = &batch.tasks[idx];
-        let h = task_box_height(task, terminal_previews);
+    for &h in heights.iter().skip(*task_scroll_offset) {
         if total_height + h > area.height {
             break;
         }
@@ -1114,7 +1253,13 @@ fn render_task_boxes(
     }
 
     if visible_count == 0 {
-        return;
+        // Even one task doesn't fit — show it clipped
+        if !sorted_indices.is_empty() {
+            constraints.push(Constraint::Length(area.height));
+            visible_count = 1;
+        } else {
+            return;
+        }
     }
 
     // Flexible spacer pushes boxes to top
@@ -1127,10 +1272,37 @@ fn render_task_boxes(
     let has_prefix = batch.prompt_prefix.is_some();
     let has_suffix = batch.prompt_suffix.is_some();
 
-    for (vi, &idx) in sorted_indices.iter().take(visible_count).enumerate() {
+    let visible_slice = &sorted_indices[*task_scroll_offset..*task_scroll_offset + visible_count];
+    for (vi, &idx) in visible_slice.iter().enumerate() {
         let task = &batch.tasks[idx];
         let is_focused = focused_task == Some(idx);
         render_single_task_box(frame, box_areas[vi], task, idx, is_focused, has_prefix, has_suffix, terminal_previews);
+    }
+
+    // Scroll indicators
+    let has_above = *task_scroll_offset > 0;
+    let has_below = *task_scroll_offset + visible_count < sorted_indices.len();
+    if has_above {
+        let indicator = Span::styled(
+            format!(" \u{25b2} {} more above ", *task_scroll_offset),
+            Style::default().fg(theme::R_TEXT_TERTIARY),
+        );
+        frame.render_widget(
+            Paragraph::new(Line::from(indicator)).alignment(Alignment::Center),
+            Rect { height: 1, ..area },
+        );
+    }
+    if has_below {
+        let below_count = sorted_indices.len() - *task_scroll_offset - visible_count;
+        let indicator = Span::styled(
+            format!(" \u{25bc} {} more below ", below_count),
+            Style::default().fg(theme::R_TEXT_TERTIARY),
+        );
+        let y = area.y + area.height.saturating_sub(1);
+        frame.render_widget(
+            Paragraph::new(Line::from(indicator)).alignment(Alignment::Center),
+            Rect { x: area.x, y, width: area.width, height: 1 },
+        );
     }
 }
 
@@ -1248,21 +1420,14 @@ fn render_single_task_box(
 
     let mut lines = vec![header_line];
 
-    // Line 2: truncated prompt
-    let max_prompt = content_area.width as usize;
-    let prompt_first_line = task.prompt.lines().next().unwrap_or("");
-    let prompt_display = if prompt_first_line.len() > max_prompt {
-        format!(
-            "{}\u{2026}",
-            &prompt_first_line[..max_prompt.saturating_sub(1)]
-        )
-    } else {
-        prompt_first_line.to_string()
-    };
-    lines.push(Line::from(Span::styled(
-        prompt_display,
-        Style::default().fg(theme::R_TEXT_TERTIARY),
-    )));
+    // Wrapped prompt lines
+    let prompt_lines = wrap_prompt_text(&task.prompt, content_area.width as usize);
+    for pl in prompt_lines {
+        lines.push(Line::from(Span::styled(
+            pl,
+            Style::default().fg(theme::R_TEXT_TERTIARY),
+        )));
+    }
 
     // Status bar: prefix/suffix applied indicators
     {
