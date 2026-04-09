@@ -1018,6 +1018,7 @@ pub fn run(hub_name: &str) -> io::Result<()> {
         focus_mode_state.drain_output_events();
         focus_mode_state.drain_diff_events();
         focus_mode_state.drain_compare_diff_events();
+        focus_mode_state.drain_pr_events();
         focus_mode_state.drain_terminal_events();
 
         // Re-enable mouse capture after passthrough timer expires

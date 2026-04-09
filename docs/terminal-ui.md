@@ -392,6 +392,8 @@ When the agent was opened from a batch task (`batch_origin` is set), a batch bad
 
 The left panel has a tab bar at the top with three tabs: `Changes`, `Compare`, `Terminal`. The `Changes` tab shows a unified inline diff viewer showing uncommitted changes (`git diff HEAD`). The `Compare` tab shows a branch comparison diff viewer where users can select any local branch and view the diff between it and the agent's current branch. The `Terminal` tab provides an interactive shell session running inside the agent's worktree directory, allowing users to run shell commands alongside the agent. When the agent has no `repo_path` (non-repository agent), the left panel renders a simplified state: the tab bar and diff viewer are replaced by a centered "Agent not running inside repository" message in tertiary text color on the base background. The diff refresh background task is not spawned for non-repository agents.
 
+When a GitHub PR is detected for the agent's branch, a `PR #N` indicator is appended to the Compare tab label in the tab bar (rendered in `R_INFO` color, bold when the tab is active). The indicator is part of the Compare tab's click region.
+
 **Diff viewer (Changes tab):**
 
 - Displays the output of `git diff HEAD` for the agent's working directory
@@ -409,6 +411,7 @@ The left panel has a tab bar at the top with three tabs: `Changes`, `Compare`, `
 **Branch Compare (Compare tab):**
 
 - Allows comparing the agent's current branch against any other local or remote branch in the same repository
+- **Automatic PR detection:** When entering focus mode, a one-shot background task runs `gh pr view --json number,baseRefName,url` to detect an open GitHub PR for the agent's branch. If a PR is found, the Compare tab auto-selects the PR's base branch and starts the diff, and the left panel auto-switches to the Compare tab (unless the user has already navigated away from the default Changes tab). The `PrInfo` struct (defined in `gitdiff.rs`) holds the PR number, base branch name, and URL. The detection task is only spawned when the agent has both a `repo_path` and a `branch_name`. The base branch name is resolved via `resolve_branch_for_compare()`, which checks for a local branch first, then `origin/<name>`, and falls back to the raw name
 - Has two modes controlled by `BranchPickerMode`: `Searching` and `Selected`
 - **Searching mode:** Shows a text input field with fuzzy search filtering and a scrollable branch list below it. The agent's own branch is excluded from the list. Uses `SkimMatcherV2` for fuzzy matching, with results sorted by match score descending. Keyboard controls: `↑` / `↓` navigate the list, `Enter` selects a branch and switches to Selected mode, `Esc` cancels and returns to Selected mode, typing filters the list, `Backspace` deletes characters, `←` / `→` move the cursor within the input
 - **Selected mode:** Shows a label bar displaying the selected branch name (or "No branch selected" if none), followed by a diff viewer showing the output of `git diff <selected-branch> <agent-branch>`. Pressing `Enter` re-opens the search picker. `↑` / `↓` scroll the diff. `Tab` cycles to the next left panel tab
@@ -458,7 +461,7 @@ The agent's `working_dir`, `repo_path`, and `branch_name` are passed to `open_ag
 
 **Implementation:**
 
-- `FocusModeState` manages a single `AgentPanel` with its own IPC background task, output channel, and `TerminalEmulator`. It also manages an optional `TerminalPanel` for the Terminal tab, with its own IPC background task, output channel, and `TerminalEmulator`. It also tracks `branch_name` (in addition to `working_dir` and `repo_path`) to support worktree cleanup dialogs when exiting focus mode. The `batch_origin: Option<BatchOrigin>` field stores metadata about the batch the agent was opened from (batch title, batch index, task index). When set, exit behavior navigates to the Batches tab and restores batch/task focus. The field is cleared on `open_agent()` and `shutdown()`.
+- `FocusModeState` manages a single `AgentPanel` with its own IPC background task, output channel, and `TerminalEmulator`. It also manages an optional `TerminalPanel` for the Terminal tab, with its own IPC background task, output channel, and `TerminalEmulator`. It also tracks `branch_name` (in addition to `working_dir` and `repo_path`) to support worktree cleanup dialogs when exiting focus mode. The `batch_origin: Option<BatchOrigin>` field stores metadata about the batch the agent was opened from (batch title, batch index, task index). When set, exit behavior navigates to the Batches tab and restores batch/task focus. The field is cleared on `open_agent()` and `shutdown()`. PR detection state is managed via `pr_info: Option<PrInfo>`, a one-shot `mpsc` channel (`pr_detection_tx`/`pr_detection_rx`), and an optional `JoinHandle` for the detection task. The `pr_info` field is cleared on `open_agent()` (when switching agents) and `close_panel()` (on exit).
 - `BatchOrigin` struct (defined in `overview/mod.rs`) holds `batch_title: String`, `batch_idx: usize`, and `task_idx: usize`.
 - The panel dimensions are calculated as 40% of the content area width (minus borders) by the content area height (minus header).
 - `FocusSide` enum tracks which panel has keyboard focus (`Left` or `Right`).
@@ -466,11 +469,12 @@ The agent's `working_dir`, `repo_path`, and `branch_name` are passed to `open_ag
 - Diff state is managed via `ParsedDiff` (lines, file start indices, file names), `diff_scroll` (current scroll position), and `diff_error` (error message if `git diff` failed).
 - A background diff refresh task (`spawn_diff_task`) runs every 2 seconds and sends `DiffEvent::Updated` or `DiffEvent::Error` via an `mpsc` channel. A `watch` channel signals the task to stop. The diff task is only spawned when `repo_path` is `Some` (i.e., the agent is running inside a git repository).
 - `drain_diff_events()` is called each frame in the main event loop alongside `drain_output_events()`.
+- `drain_pr_events()` is called each frame in the main event loop to process the one-shot PR detection result. When a PR is detected, it stores the `PrInfo`, resolves the base branch, auto-configures the compare picker, and optionally switches to the Compare tab.
 - `parse_unified_diff()` parses raw `git diff HEAD` output into structured `DiffLine` entries with kind (FileHeader, HunkHeader, Context, Add, Delete, FileMetadata, Separator), content, line numbers, and file index. Separator lines are automatically inserted between files during parsing.
 - On terminal resize, the focus mode panel is resized via `TerminalEmulator::resize()` (preserving scrollback history) and the hub is notified via `ResizeAgent`. On `FocusGained` events, dimensions are also re-sent unconditionally to account for PTY resizes by other clients while the window was unfocused.
 - Focus mode is orthogonal to tab cycling -- `Tab` / `Shift+Tab` cycles between `Repositories`, `Overview`, and `Batches` (3 tabs). Focus mode is only entered explicitly via the entry points above.
 - State is tracked by an `in_focus_mode: bool` flag rather than a `previous_tab` option. The `ActiveTab` enum no longer has a `FocusMode` variant.
-- On exit (via `close_panel()`), the diff task is stopped via the watch channel and aborted, diff state is cleared, the terminal session is closed (detach message sent, background task aborted), and the panel's connection is detached.
+- On exit (via `close_panel()`), the diff task is stopped via the watch channel and aborted, diff state is cleared, the PR detection task is aborted and `pr_info` is cleared, the terminal session is closed (detach message sent, background task aborted), and the panel's connection is detached.
 
 **Keyboard shortcuts (focus mode, right panel focused):**
 

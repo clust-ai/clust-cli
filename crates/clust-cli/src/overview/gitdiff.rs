@@ -304,6 +304,50 @@ fn run_branch_diff(
 }
 
 // ---------------------------------------------------------------------------
+// PR detection
+// ---------------------------------------------------------------------------
+
+/// Detected GitHub Pull Request information for the current branch.
+#[derive(Clone, Debug)]
+pub struct PrInfo {
+    pub number: u64,
+    pub base_branch: String,
+    pub url: String,
+}
+
+pub fn spawn_pr_detection_task(
+    working_dir: String,
+    tx: mpsc::Sender<Option<PrInfo>>,
+) -> JoinHandle<()> {
+    tokio::task::spawn(async move {
+        let dir = working_dir;
+        let result = tokio::task::spawn_blocking(move || detect_pr(&dir)).await;
+        let pr = result.ok().flatten();
+        let _ = tx.send(pr).await;
+    })
+}
+
+fn detect_pr(working_dir: &str) -> Option<PrInfo> {
+    let output = Command::new("gh")
+        .args(["pr", "view", "--json", "number,baseRefName,url"])
+        .current_dir(working_dir)
+        .output()
+        .ok()?;
+
+    if !output.status.success() {
+        return None;
+    }
+
+    let stdout = String::from_utf8(output.stdout).ok()?;
+    let v: serde_json::Value = serde_json::from_str(&stdout).ok()?;
+    Some(PrInfo {
+        number: v.get("number")?.as_u64()?,
+        base_branch: v.get("baseRefName")?.as_str()?.to_string(),
+        url: v.get("url")?.as_str()?.to_string(),
+    })
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 

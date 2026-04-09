@@ -1760,6 +1760,11 @@ pub struct FocusModeState {
     compare_diff_tx: mpsc::Sender<gitdiff::DiffEvent>,
     compare_diff_stop_tx: Option<watch::Sender<bool>>,
     compare_diff_task: Option<JoinHandle<()>>,
+    // PR detection state
+    pub pr_info: Option<gitdiff::PrInfo>,
+    pr_detection_rx: mpsc::Receiver<Option<gitdiff::PrInfo>>,
+    pr_detection_tx: mpsc::Sender<Option<gitdiff::PrInfo>>,
+    pr_detection_task: Option<JoinHandle<()>>,
     // Terminal tab state
     pub terminal_panel: Option<TerminalPanel>,
     terminal_output_rx: mpsc::Receiver<TerminalOutputEvent>,
@@ -1773,6 +1778,7 @@ impl FocusModeState {
         let (output_tx, output_rx) = mpsc::channel(512);
         let (diff_tx, diff_rx) = mpsc::channel(16);
         let (compare_diff_tx, compare_diff_rx) = mpsc::channel(16);
+        let (pr_detection_tx, pr_detection_rx) = mpsc::channel(1);
         let (terminal_output_tx, terminal_output_rx) = mpsc::channel(512);
         Self {
             panel: None,
@@ -1801,6 +1807,10 @@ impl FocusModeState {
             compare_diff_tx,
             compare_diff_stop_tx: None,
             compare_diff_task: None,
+            pr_info: None,
+            pr_detection_rx,
+            pr_detection_tx,
+            pr_detection_task: None,
             terminal_panel: None,
             terminal_output_rx,
             terminal_output_tx,
@@ -1839,6 +1849,7 @@ impl FocusModeState {
         self.compare_diff = None;
         self.compare_diff_scroll = 0;
         self.compare_diff_error = None;
+        self.pr_info = None;
 
         let id = agent_id.to_string();
         let binary = agent_binary.to_string();
@@ -1872,6 +1883,14 @@ impl FocusModeState {
                 gitdiff::spawn_diff_task(working_dir.to_string(), diff_tx, stop_rx);
             self.diff_stop_tx = Some(stop_tx);
             self.diff_task = Some(diff_handle);
+
+            // Spawn one-shot PR detection task
+            if branch_name.is_some() {
+                let pr_tx = self.pr_detection_tx.clone();
+                let pr_handle =
+                    gitdiff::spawn_pr_detection_task(working_dir.to_string(), pr_tx);
+                self.pr_detection_task = Some(pr_handle);
+            }
         }
 
         // Start terminal session
@@ -1993,6 +2012,11 @@ impl FocusModeState {
         self.repo_path = None;
         // Stop compare diff task
         self.stop_compare_diff();
+        // Stop PR detection task
+        if let Some(handle) = self.pr_detection_task.take() {
+            handle.abort();
+        }
+        self.pr_info = None;
         // Stop terminal
         self.close_terminal();
     }
@@ -2135,6 +2159,60 @@ impl FocusModeState {
         }
     }
 
+    /// Drain PR detection result and auto-open compare tab if a PR is found.
+    pub fn drain_pr_events(&mut self) {
+        let Ok(result) = self.pr_detection_rx.try_recv() else {
+            return;
+        };
+
+        let Some(pr) = result else {
+            return;
+        };
+
+        self.pr_info = Some(pr.clone());
+
+        // Resolve the base branch name for git diff
+        let resolved = self.resolve_branch_for_compare(&pr.base_branch);
+
+        // Auto-configure the compare picker
+        self.compare_picker.selected_branch = Some(resolved);
+        self.compare_picker.mode = BranchPickerMode::Selected;
+
+        // Only auto-switch to Compare if user hasn't navigated away from the default tab
+        if self.left_tab == LeftPanelTab::Changes {
+            self.left_tab = LeftPanelTab::Compare;
+        }
+
+        self.start_compare_diff();
+    }
+
+    /// Resolve a short branch name (e.g. "main") to the best available git ref.
+    fn resolve_branch_for_compare(&self, short_name: &str) -> String {
+        // Check if the short name exists as a local branch
+        let has_local = self
+            .compare_picker
+            .branches
+            .iter()
+            .any(|b| !b.is_remote && b.name == short_name);
+        if has_local {
+            return short_name.to_string();
+        }
+
+        // Check for origin/<name> in the branch list
+        let remote_name = format!("origin/{short_name}");
+        let has_remote = self
+            .compare_picker
+            .branches
+            .iter()
+            .any(|b| b.name == remote_name);
+        if has_remote {
+            return remote_name;
+        }
+
+        // Fallback: let git resolve the ref
+        short_name.to_string()
+    }
+
     /// Update the branch picker's branch list from the current repos data.
     pub fn update_compare_branches(&mut self, repos: &[RepoInfo]) {
         let branches = self
@@ -2218,7 +2296,7 @@ fn render_left_panel(frame: &mut Frame, area: Rect, state: &mut FocusModeState, 
 
     // Render tab bar
     let left_focused = state.focus_side == FocusSide::Left;
-    render_left_tab_bar(frame, tab_area, state.left_tab, left_focused, click_map);
+    render_left_tab_bar(frame, tab_area, state.left_tab, left_focused, click_map, state.pr_info.as_ref());
 
     // Render active tab content
     match state.left_tab {
@@ -2304,6 +2382,7 @@ fn render_left_tab_bar(
     active: LeftPanelTab,
     panel_focused: bool,
     click_map: &mut ClickMap,
+    pr_info: Option<&gitdiff::PrInfo>,
 ) {
     let mut spans = Vec::new();
     let mut cursor_x = area.x;
@@ -2338,14 +2417,40 @@ fn render_left_tab_bar(
         };
 
         let label = format!(" {} ", tab.label());
-        let label_width = label.chars().count() as u16;
-        click_map.focus_left_tabs.push((
-            Rect { x: cursor_x, y: area.y, width: label_width, height: 1 },
-            *tab,
-        ));
-        cursor_x += label_width;
 
-        spans.push(Span::styled(label, style));
+        // Add PR indicator after the Compare tab label
+        if let Some(pr) = pr_info.filter(|_| *tab == LeftPanelTab::Compare) {
+            let pr_label = format!("PR #{} ", pr.number);
+
+            let label_width = label.chars().count() as u16;
+            let pr_width = pr_label.chars().count() as u16;
+            let total_width = label_width + pr_width;
+
+            click_map.focus_left_tabs.push((
+                Rect { x: cursor_x, y: area.y, width: total_width, height: 1 },
+                *tab,
+            ));
+
+            spans.push(Span::styled(label, style));
+            let pr_style = if is_active {
+                Style::default()
+                    .fg(theme::R_INFO)
+                    .bg(bg)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(theme::R_INFO).bg(bg)
+            };
+            spans.push(Span::styled(pr_label, pr_style));
+            cursor_x += total_width;
+        } else {
+            let label_width = label.chars().count() as u16;
+            click_map.focus_left_tabs.push((
+                Rect { x: cursor_x, y: area.y, width: label_width, height: 1 },
+                *tab,
+            ));
+            cursor_x += label_width;
+            spans.push(Span::styled(label, style));
+        }
     }
 
     // Fill rest with background
