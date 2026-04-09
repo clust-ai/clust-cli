@@ -745,9 +745,11 @@ A 3-step modal for importing batch definitions from JSON files, opened globally 
 - `Esc` -- cancel the modal (from step 1) or go back to the previous step (from steps 2/3)
 - Type to fuzzy-filter the file list
 
-**JSON validation:** The selected file is parsed using `serde_json` into a `BatchJson` struct. Validation errors (malformed JSON, missing required fields) and files with zero tasks are rejected with an error message displayed below the file list.
+**JSON validation:** The selected file is parsed using `serde_json` as a list of `BatchJson` objects (`Vec<BatchJson>`). A single `BatchJson` object (not wrapped in an array) is also accepted for backward compatibility. Validation errors (malformed JSON, missing required fields) and files with zero tasks across all batches are rejected with an error message displayed below the file list.
 
 **JSON schema (`BatchJson` / `TaskJson`):**
+
+The import file is a JSON array of batch objects. Each batch object has:
 - `title` (string, optional) -- batch name, falls back to auto-naming
 - `prefix` (string, optional) -- prompt prefix prepended to every task
 - `suffix` (string, optional) -- prompt suffix appended to every task
@@ -758,38 +760,61 @@ A 3-step modal for importing batch definitions from JSON files, opened globally 
 - `depends_on` (array of strings, optional) -- titles of other batches this batch depends on; resolved to hub IDs during import. Batches auto-start when all dependency batches complete.
 - `tasks` (array, required) -- list of task objects with `branch` (string, required), `prompt` (string, required), `use_prefix` (bool, default true), `use_suffix` (bool, default true), and `plan_mode` (bool, default false)
 
-Example JSON:
+Example JSON (list format):
+```json
+[
+  {
+    "title": "Refactor auth",
+    "prefix": "Follow the project style guide.",
+    "launch_mode": "auto",
+    "max_concurrent": 3,
+    "tasks": [
+      {
+        "branch": "refactor/login",
+        "prompt": "Refactor the login handler to use the new auth service."
+      },
+      {
+        "branch": "refactor/signup",
+        "prompt": "Refactor the signup handler to use the new auth service.",
+        "use_prefix": false
+      }
+    ]
+  },
+  {
+    "title": "Integration tests",
+    "depends_on": ["Refactor auth"],
+    "tasks": [
+      {
+        "branch": "test/auth-integration",
+        "prompt": "Write integration tests for the new auth service.",
+        "plan_mode": true
+      }
+    ]
+  }
+]
+```
+
+A single batch object (not wrapped in an array) is also accepted for backward compatibility:
 ```json
 {
   "title": "Refactor auth",
-  "prefix": "Follow the project style guide.",
-  "launch_mode": "auto",
-  "max_concurrent": 3,
   "tasks": [
-    {
-      "branch": "refactor/login",
-      "prompt": "Refactor the login handler to use the new auth service."
-    },
-    {
-      "branch": "refactor/signup",
-      "prompt": "Refactor the signup handler to use the new auth service.",
-      "use_prefix": false
-    }
+    { "branch": "refactor/login", "prompt": "Refactor the login handler." }
   ]
 }
 ```
 
-**Copy to clipboard:** Pressing `c` while a batch card is focused copies the batch as JSON (matching the import schema) to the system clipboard. This makes it easy to share batch definitions or re-import them elsewhere. Uses `pbcopy` on macOS and `xclip`/`xsel` on Linux.
+**Copy to clipboard:** Pressing `c` while a batch card is focused copies the batch as JSON in list format (a single-element array matching the import schema) to the system clipboard. The export includes `depends_on` titles (resolved from hub IDs) and per-task `plan_mode`, `use_prefix`, `use_suffix` fields when they differ from their defaults. Uses `pbcopy` on macOS and `xclip`/`xsel` on Linux.
 
-**Completion:** On selecting a branch in step 3, the modal outputs an `ImportBatchOutput` containing the parsed `BatchJson`, repo path, repo name, and branch name. The batch is created with all tasks pre-populated, per-task `use_prefix`/`use_suffix` values from the JSON are passed through (defaulting to `true`), plan_mode and allow_bypass toggled as specified, and the active tab switches to the Batches tab. If the batch has `depends_on` entries, they are resolved from batch titles to hub batch IDs by matching against existing batches. The batch is registered with the hub daemon via a `RegisterBatch` IPC message (with tasks passed inline as `Vec<QueuedTask>`, including resolved dependencies), mirroring the create-batch flow. The hub responds with `BatchRegistered` containing the `hub_batch_id`, which is stored asynchronously to enable subsequent hub communication (status updates, task spawning). A success status message shows the imported task count, plus any unresolved dependency titles.
+**Completion:** On selecting a branch in step 3, the modal outputs an `ImportBatchOutput` containing the parsed list of `BatchJson` objects, repo path, repo name, and branch name. Each batch in the list is created with all tasks pre-populated, per-task `use_prefix`/`use_suffix`/`plan_mode` values from the JSON are passed through (defaulting to `true`/`true`/`false` respectively), plan_mode and allow_bypass toggled as specified, and the active tab switches to the Batches tab. If any batch has `depends_on` entries, they are resolved from batch titles to hub batch IDs by matching against existing batches (including other batches from the same import). Each batch is registered with the hub daemon via a `RegisterBatch` IPC message (with tasks passed inline as `Vec<QueuedTask>`, including resolved dependencies), mirroring the create-batch flow. The hub responds with `BatchRegistered` containing the `hub_batch_id`, which is stored asynchronously to enable subsequent hub communication (status updates, task spawning). A success status message shows the imported task count, plus any unresolved dependency titles.
 
 **Rendering:** The modal is rendered as a centered overlay (60 columns wide, 60% of terminal height) with a titled border showing the current step and description. The file browser step shows the base path above the input field, with a scrollable list of directories (with `/` suffix) and `.json` files below. Parse errors are displayed in `R_ERROR` color at the bottom. Steps 2 and 3 follow the same rendering pattern as the Create Batch Modal.
 
-**Implementation:** `import_batch_modal.rs` contains the `ImportBatchModal` struct, `ImportBatchResult` enum (`Pending`, `Cancelled`, `Completed(Box<ImportBatchOutput>)`), and the `BatchJson`/`TaskJson` serde structs. The `parse_launch_mode()` helper converts the optional launch mode string to a `LaunchMode` enum value.
+**Implementation:** `import_batch_modal.rs` contains the `ImportBatchModal` struct, `ImportBatchResult` enum (`Pending`, `Cancelled`, `Completed(Box<ImportBatchOutput>)`), and the `BatchJson`/`TaskJson` serde structs. `ImportBatchOutput` contains `batches: Vec<BatchJson>` for multi-batch import support. The `parse_launch_mode()` helper converts the optional launch mode string to a `LaunchMode` enum value.
 
 ### Batch Dependencies Modal
 
-A multi-select modal for configuring batch-to-batch dependencies, opened by pressing `Shift+D` when a batch card is focused on the Jobs tab. Lists all other batches as selectable items.
+A multi-select modal for configuring batch-to-batch dependencies, opened by pressing `Shift+D` when a batch card is focused on the Batches tab. Lists all other batches as selectable items.
 
 **Navigation:**
 - `Up` / `Down` -- navigate the list of available batches
