@@ -59,6 +59,9 @@ pub const R_BG_ACTIVE: Color = Color::Rgb(72, 75, 82);  // #484b52
 pub const R_DIFF_ADD_BG: Color = Color::Rgb(30, 50, 30);
 pub const R_DIFF_DEL_BG: Color = Color::Rgb(55, 25, 25);
 
+// Selection highlight — accent blue at ~14% opacity blended onto R_BG_BASE
+pub const R_SELECTION_BG: Color = Color::Rgb(40, 49, 58);
+
 // Repository colors — vibrant, high-chroma, perceptually distinct on dark bg
 pub const R_REPO_RED: Color = Color::Rgb(240, 96, 96);      // #f06060
 pub const R_REPO_ORANGE: Color = Color::Rgb(240, 160, 48);  // #f0a030
