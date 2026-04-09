@@ -1,4 +1,5 @@
 mod add_task_modal;
+mod batch_deps_modal;
 mod cli;
 mod context_menu;
 mod create_agent_modal;
