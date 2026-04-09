@@ -20,7 +20,7 @@ use crate::ui::ClickMap;
 const MIN_CARD_WIDTH: u16 = 40;
 
 /// Set to `false` to disable terminal output previews in task boxes.
-pub const SHOW_TERMINAL_PREVIEW: bool = true;
+pub const SHOW_TERMINAL_PREVIEW: bool = false;
 
 /// Number of terminal output lines shown in active task preview.
 pub const TASK_TERMINAL_PREVIEW_LINES: usize = 4;
