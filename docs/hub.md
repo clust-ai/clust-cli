@@ -354,8 +354,9 @@ The hub includes a batch engine (`batch.rs`) that manages batch persistence and 
 
 - **QueueBatch**: Creates a new queued batch with a scheduled start time. The batch and its tasks are persisted to the `queued_batches` and `queued_batch_tasks` tables. Returns `BatchQueued { batch_id, scheduled_at }`.
 - **CancelQueuedBatch**: Cancels a queued batch by ID with a `cleanup_mode` field (`BatchCleanupMode` enum). `NoCleanup` removes the batch record without stopping agents or cleaning up worktrees. `StopAgents` stops all active agents associated with the batch before removing it. `StopAgentsAndRemoveBranches` stops agents, removes their worktrees, and deletes their local branches before removing the batch. Returns `BatchCancelled { batch_id }`.
-- **ListQueuedBatches**: Returns a list of all non-completed queued batches as `QueuedBatchList { batches: Vec<QueuedBatchInfo> }`. Each `QueuedBatchInfo` includes full per-task detail (`tasks: Vec<QueuedBatchTaskInfo>`), `launch_mode`, `max_concurrent`, `prompt_prefix`, `prompt_suffix`, `plan_mode`, `allow_bypass`, and `agent_binary` so the CLI can fully reconstruct batch state.
-- **RegisterBatch**: Registers a new batch with the hub for persistence without scheduling it (status = `idle`). Used by the CLI when a batch is created in the Tasks tab. The batch and its tasks are persisted immediately. Returns `BatchRegistered { batch_id }`.
+- **ListQueuedBatches**: Returns a list of all non-completed queued batches as `QueuedBatchList { batches: Vec<QueuedBatchInfo> }`. Each `QueuedBatchInfo` includes full per-task detail (`tasks: Vec<QueuedBatchTaskInfo>`), `launch_mode`, `max_concurrent`, `prompt_prefix`, `prompt_suffix`, `plan_mode`, `allow_bypass`, `agent_binary`, and `depends_on` so the CLI can fully reconstruct batch state.
+- **RegisterBatch**: Registers a new batch with the hub for persistence without scheduling it (status = `idle`). Used by the CLI when a batch is created in the Tasks tab. The batch and its tasks are persisted immediately. Accepts an optional `depends_on` field (list of hub batch IDs). Returns `BatchRegistered { batch_id }`.
+- **UpdateBatchDependencies**: Updates the dependency list (`depends_on`) of a batch by ID. Persists the new list to the database. Returns `Ok`.
 - **AddBatchTask**: Adds a task to an existing registered batch. The hub appends the task to the `queued_batch_tasks` table with the next available `task_index`. Returns `Ok`.
 - **UpdateBatchTask**: Updates the status and/or `agent_id` of a specific task within a batch (identified by `batch_id` and `task_index`). Returns `Ok`.
 - **UpdateBatchConfig**: Updates batch configuration fields (`prompt_prefix`, `prompt_suffix`, `plan_mode`, `allow_bypass`). Returns `Ok`.
@@ -371,6 +372,7 @@ A background tokio task (`spawn_batch_timer`) runs on a 5-second interval. On ea
 2. For running batches, checks if any active task agents have exited (by comparing agent IDs against the hub's agent map). Exited agents' tasks are marked as `Done`.
 3. If all tasks in a batch are done, marks the batch as `Completed`.
 4. Collects idle tasks that can be started (respecting `max_concurrent`) and spawns agents for them using the shared `create_worktree_and_spawn_agent()` helper.
+5. Checks idle batches with non-empty `depends_on` lists. If all dependency batches have completed (or are no longer present in memory), the batch is auto-started by transitioning from `Idle` to `Running` and its tasks are collected for spawning.
 
 Agent spawning happens outside the hub state lock to avoid blocking other operations during slow worktree creation.
 
@@ -390,7 +392,7 @@ The `create_worktree_and_spawn_agent()` function extracts the worktree creation 
 
 ### Batch Lifecycle
 
-Batches can enter the system through two paths: direct registration (idle) or scheduled queueing.
+Batches can enter the system through three paths: direct registration (idle), scheduled queueing, or dependency-based auto-start.
 
 ```
 CLI sends RegisterBatch (no timer)       CLI sends QueueBatch (scheduled_at = future time)
@@ -410,9 +412,15 @@ Agent exits --> Task marked Done
                      |
                      v
 All tasks Done --> Batch transitions to Completed
+                     |
+                     v
+            Timer tick checks idle batches with depends_on
+            If all dependencies completed --> Auto-start batch (Idle -> Running)
 ```
 
-The CLI can also mutate batches at any point via `AddBatchTask`, `UpdateBatchTask`, `UpdateBatchConfig`, `RemoveDoneBatchTasks`, and `DeleteBatch`. All mutations are persisted to SQLite immediately.
+**Batch Dependencies:** Batches can declare dependencies on other batches via `depends_on` (a list of hub batch IDs). When a batch completes, the timer task checks if any idle batches have all their dependencies satisfied (all dependency batches are either completed or no longer present in memory). Satisfied batches are automatically transitioned from Idle to Running and their tasks begin spawning. Circular dependencies are prevented in the TUI via a DFS cycle check before allowing a dependency to be toggled.
+
+The CLI can also mutate batches at any point via `AddBatchTask`, `UpdateBatchTask`, `UpdateBatchConfig`, `UpdateBatchDependencies`, `RemoveDoneBatchTasks`, and `DeleteBatch`. All mutations are persisted to SQLite immediately.
 
 ### Hub Startup Recovery
 

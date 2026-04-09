@@ -1653,6 +1653,7 @@ async fn handle_connection(
                         scheduled_at: Some(dt.with_timezone(&chrono::Utc)),
                         status: crate::batch::HubBatchStatus::Scheduled,
                         launch_mode: "auto".to_string(),
+                        depends_on: Vec::new(),
                     };
 
                     // Persist to database
@@ -1678,6 +1679,7 @@ async fn handle_connection(
                                 scheduled_at: Some(scheduled_at.clone()),
                                 status: "scheduled".to_string(),
                                 launch_mode: "auto".to_string(),
+                                depends_on: "[]".to_string(),
                             };
                             let _ = crate::db::insert_queued_batch(db, &row, &task_data);
                         }
@@ -1834,6 +1836,7 @@ async fn handle_connection(
                         plan_mode: b.plan_mode,
                         allow_bypass: b.allow_bypass,
                         agent_binary: b.agent_binary.clone(),
+                        depends_on: b.depends_on.clone(),
                     })
                     .collect()
             };
@@ -1856,6 +1859,7 @@ async fn handle_connection(
             hub,
             launch_mode,
             tasks,
+            depends_on,
         } => {
             let batch_id = {
                 let hub_state = state.lock().await;
@@ -1897,6 +1901,7 @@ async fn handle_connection(
                 scheduled_at: None,
                 status: crate::batch::HubBatchStatus::Idle,
                 launch_mode: launch_mode.clone(),
+                depends_on: depends_on.clone(),
             };
 
             // Persist to database
@@ -1907,6 +1912,8 @@ async fn handle_connection(
             {
                 let hub_state = state.lock().await;
                 if let Some(ref db) = hub_state.db {
+                    let depends_on_json = serde_json::to_string(&depends_on)
+                        .unwrap_or_else(|_| "[]".to_string());
                     let row = crate::db::QueuedBatchRow {
                         id: batch_id.clone(),
                         title,
@@ -1922,6 +1929,7 @@ async fn handle_connection(
                         scheduled_at: None,
                         status: "idle".to_string(),
                         launch_mode,
+                        depends_on: depends_on_json,
                     };
                     let _ = crate::db::insert_queued_batch(db, &row, &task_data);
                 }
@@ -2056,6 +2064,31 @@ async fn handle_connection(
                 batch.status = crate::batch::HubBatchStatus::parse(&status);
                 if let Some(ref db) = hub_state.db {
                     let _ = crate::db::update_batch_status(db, &batch_id, &status);
+                }
+                ok = true;
+            }
+            if ok {
+                clust_ipc::send_message_write(&mut writer, &HubMessage::Ok).await?;
+            } else {
+                clust_ipc::send_message_write(
+                    &mut writer,
+                    &HubMessage::Error {
+                        message: format!("batch {batch_id} not found"),
+                    },
+                )
+                .await?;
+            }
+        }
+        CliMessage::UpdateBatchDependencies {
+            batch_id,
+            depends_on,
+        } => {
+            let mut hub_state = state.lock().await;
+            let mut ok = false;
+            if let Some(batch) = hub_state.queued_batches.iter_mut().find(|b| b.id == batch_id) {
+                batch.depends_on = depends_on.clone();
+                if let Some(ref db) = hub_state.db {
+                    let _ = crate::db::update_batch_depends_on(db, &batch_id, &depends_on);
                 }
                 ok = true;
             }

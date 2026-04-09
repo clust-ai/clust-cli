@@ -20,6 +20,7 @@ use clust_ipc::{AgentInfo, CliMessage, HubMessage, RepoInfo, DEFAULT_HUB};
 
 use crate::{
     add_task_modal::{AddTaskModal, AddTaskResult},
+    batch_deps_modal::{BatchDepsModal, BatchDepsResult},
     context_menu::{ContextMenu, ContextMenuItem, MenuResult},
     create_agent_modal::{CreateAgentModal, ModalResult},
     create_batch_modal::{CreateBatchModal, BatchModalResult},
@@ -979,6 +980,7 @@ pub fn run(hub_name: &str) -> io::Result<()> {
     let mut create_batch_modal: Option<CreateBatchModal> = None;
     let mut import_batch_modal: Option<ImportBatchModal> = None;
     let mut add_task_modal: Option<AddTaskModal> = None;
+    let mut batch_deps_modal: Option<BatchDepsModal> = None;
     let mut edit_field_modal: Option<EditFieldModal> = None;
     let mut edit_field_target: Option<(usize, bool)> = None; // (batch_idx, is_suffix)
     let mut timer_modal: Option<TimerModal> = None;
@@ -1371,7 +1373,7 @@ pub fn run(hub_name: &str) -> io::Result<()> {
             .collect();
 
         let mut click_map = ClickMap::default();
-        let show_modal = create_modal.is_some() || create_batch_modal.is_some() || import_batch_modal.is_some() || add_task_modal.is_some() || edit_field_modal.is_some() || timer_modal.is_some() || detached_modal.is_some() || repo_modal.is_some();
+        let show_modal = create_modal.is_some() || create_batch_modal.is_some() || import_batch_modal.is_some() || add_task_modal.is_some() || batch_deps_modal.is_some() || edit_field_modal.is_some() || timer_modal.is_some() || detached_modal.is_some() || repo_modal.is_some();
         let show_search = search_modal.is_some();
         let purge_ref = &purge_progress;
         let clone_ref = &clone_progress;
@@ -1516,6 +1518,9 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                     modal.render(frame, content_area);
                 }
                 if let Some(ref modal) = add_task_modal {
+                    modal.render(frame, content_area);
+                }
+                if let Some(ref modal) = batch_deps_modal {
                     modal.render(frame, content_area);
                 }
                 if let Some(ref modal) = edit_field_modal {
@@ -2690,6 +2695,7 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                     hub: hub_name.to_string(),
                                     launch_mode: launch_mode_str.to_string(),
                                     tasks: vec![],
+                                    depends_on: vec![],
                                 };
                                 let batch_idx = tasks_state.add_batch(output);
                                 // Register with hub asynchronously
@@ -2727,39 +2733,79 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                     tasks::LaunchMode::Manual => "manual",
                                     tasks::LaunchMode::Auto => "auto",
                                 };
-                                // Build IPC tasks list for hub registration
-                                let ipc_tasks: Vec<clust_ipc::QueuedTask> = output.batch_json.tasks.iter().map(|t| {
-                                    clust_ipc::QueuedTask {
+                                // Resolve depends_on titles to hub batch IDs
+                                let mut resolved_deps: Vec<String> = Vec::new();
+                                let mut unresolved: Vec<String> = Vec::new();
+                                for dep_title in &output.batch_json.depends_on {
+                                    if let Some(hub_id) = tasks_state.batches.iter()
+                                        .find(|b| b.title == *dep_title)
+                                        .and_then(|b| b.hub_batch_id.clone())
+                                    {
+                                        resolved_deps.push(hub_id);
+                                    } else {
+                                        unresolved.push(dep_title.clone());
+                                    }
+                                }
+                                let batch_output = crate::create_batch_modal::BatchModalOutput {
+                                    repo_path: output.repo_path.clone(),
+                                    repo_name: output.repo_name.clone(),
+                                    branch_name: output.branch_name.clone(),
+                                    title: output.batch_json.title.clone(),
+                                    max_concurrent: output.batch_json.max_concurrent,
+                                    launch_mode,
+                                };
+                                let batch_idx = tasks_state.add_batch(batch_output);
+                                // Apply prefix/suffix
+                                if let Some(ref prefix) = output.batch_json.prefix {
+                                    tasks_state.set_prompt_prefix(batch_idx, prefix.clone());
+                                }
+                                if let Some(ref suffix) = output.batch_json.suffix {
+                                    tasks_state.set_prompt_suffix(batch_idx, suffix.clone());
+                                }
+                                // Apply plan_mode and allow_bypass
+                                if output.batch_json.plan_mode {
+                                    tasks_state.toggle_plan_mode(batch_idx);
+                                }
+                                if output.batch_json.allow_bypass {
+                                    tasks_state.toggle_allow_bypass(batch_idx);
+                                }
+                                // Set resolved dependencies
+                                if let Some(batch) = tasks_state.batches.get_mut(batch_idx) {
+                                    batch.depends_on = resolved_deps.clone();
+                                }
+                                // Add all tasks
+                                let ipc_tasks: Vec<clust_ipc::QueuedTask> = output.batch_json.tasks
+                                    .iter()
+                                    .map(|t| clust_ipc::QueuedTask {
                                         branch_name: t.branch.clone(),
                                         prompt: t.prompt.clone(),
                                         use_prefix: true,
                                         use_suffix: true,
-                                    }
-                                }).collect();
+                                    })
+                                    .collect();
+                                for task in &output.batch_json.tasks {
+                                    tasks_state.add_task(batch_idx, task.branch.clone(), task.prompt.clone(), task.use_prefix, task.use_suffix);
+                                }
+                                // Register with hub
                                 let reg_msg = CliMessage::RegisterBatch {
-                                    repo_path: output.repo_path.clone(),
-                                    target_branch: output.branch_name.clone(),
-                                    title: output.batch_json.title.clone().unwrap_or_else(|| format!("Batch {}", tasks_state.batches.len() + 1)),
+                                    repo_path: output.repo_path,
+                                    target_branch: output.branch_name,
+                                    title: output.batch_json.title.unwrap_or_else(|| {
+                                        tasks_state.batches.get(batch_idx)
+                                            .map(|b| b.title.clone())
+                                            .unwrap_or_else(|| "Batch".to_string())
+                                    }),
                                     max_concurrent: output.batch_json.max_concurrent,
-                                    prompt_prefix: output.batch_json.prefix.clone(),
-                                    prompt_suffix: output.batch_json.suffix.clone(),
+                                    prompt_prefix: output.batch_json.prefix,
+                                    prompt_suffix: output.batch_json.suffix,
                                     plan_mode: output.batch_json.plan_mode,
                                     allow_bypass: output.batch_json.allow_bypass,
                                     agent_binary: None,
                                     hub: hub_name.to_string(),
                                     launch_mode: launch_mode_str.to_string(),
                                     tasks: ipc_tasks,
+                                    depends_on: resolved_deps,
                                 };
-                                let batch_output = crate::create_batch_modal::BatchModalOutput {
-                                    repo_path: output.repo_path,
-                                    repo_name: output.repo_name,
-                                    branch_name: output.branch_name,
-                                    title: output.batch_json.title.clone(),
-                                    max_concurrent: output.batch_json.max_concurrent,
-                                    launch_mode,
-                                };
-                                let batch_idx = tasks_state.add_batch(batch_output);
-                                // Register with hub asynchronously
                                 let tx = agent_start_tx.clone();
                                 tokio::spawn(async move {
                                     if let Ok(mut stream) = ipc::try_connect().await {
@@ -2775,28 +2821,14 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                         }
                                     }
                                 });
-                                // Apply prefix/suffix
-                                if let Some(ref prefix) = output.batch_json.prefix {
-                                    tasks_state.set_prompt_prefix(batch_idx, prefix.clone());
-                                }
-                                if let Some(ref suffix) = output.batch_json.suffix {
-                                    tasks_state.set_prompt_suffix(batch_idx, suffix.clone());
-                                }
-                                // Apply plan_mode and allow_bypass
-                                if output.batch_json.plan_mode {
-                                    tasks_state.toggle_plan_mode(batch_idx);
-                                }
-                                if output.batch_json.allow_bypass {
-                                    tasks_state.toggle_allow_bypass(batch_idx);
-                                }
-                                // Add all tasks
-                                for task in &output.batch_json.tasks {
-                                    tasks_state.add_task(batch_idx, task.branch.clone(), task.prompt.clone(), task.use_prefix, task.use_suffix);
-                                }
                                 active_tab = ActiveTab::Tasks;
                                 let task_count = output.batch_json.tasks.len();
+                                let mut msg_text = format!("Imported batch with {task_count} task{}", if task_count == 1 { "" } else { "s" });
+                                if !unresolved.is_empty() {
+                                    msg_text.push_str(&format!(" (unresolved deps: {})", unresolved.join(", ")));
+                                }
                                 status_message = Some(StatusMessage {
-                                    text: format!("Imported batch with {task_count} task{}", if task_count == 1 { "" } else { "s" }),
+                                    text: msg_text,
                                     level: StatusLevel::Success,
                                     created: Instant::now(),
                                 });
@@ -2830,6 +2862,33 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                 tasks_state.add_task(output.batch_idx, output.branch_name, output.prompt, output.use_prefix, output.use_suffix);
                             }
                             AddTaskResult::Pending => {}
+                        }
+                    // Batch-deps modal takes priority over all other input
+                    } else if let Some(ref mut modal) = batch_deps_modal {
+                        match modal.handle_key(key.code) {
+                            BatchDepsResult::Cancelled => {
+                                batch_deps_modal = None;
+                            }
+                            BatchDepsResult::Completed(deps) => {
+                                let bidx = modal.batch_idx();
+                                batch_deps_modal = None;
+                                if let Some(batch) = tasks_state.batches.get_mut(bidx) {
+                                    batch.depends_on = deps.clone();
+                                    if let Some(ref hub_id) = batch.hub_batch_id {
+                                        let msg = CliMessage::UpdateBatchDependencies {
+                                            batch_id: hub_id.clone(),
+                                            depends_on: deps,
+                                        };
+                                        tokio::spawn(async move {
+                                            if let Ok(mut stream) = ipc::try_connect().await {
+                                                let _ = clust_ipc::send_message(&mut stream, &msg).await;
+                                                let _ = clust_ipc::recv_message::<HubMessage>(&mut stream).await;
+                                            }
+                                        });
+                                    }
+                                }
+                            }
+                            BatchDepsResult::Pending => {}
                         }
                     // Edit-field modal takes priority over all other input
                     } else if let Some(ref mut modal) = edit_field_modal {
@@ -3857,6 +3916,31 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                                         });
                                                     }
                                                 }
+                                            }
+                                        }
+                                    }
+                                    KeyCode::Char('D') => {
+                                        if let TasksFocus::BatchCard(idx) = tasks_state.focus {
+                                            if let Some(batch) = tasks_state.batches.get(idx) {
+                                                // Collect other batches for the modal
+                                                let other_batches: Vec<(String, String, Vec<String>)> = tasks_state
+                                                    .batches
+                                                    .iter()
+                                                    .enumerate()
+                                                    .filter(|(i, b)| *i != idx && b.hub_batch_id.is_some())
+                                                    .map(|(_, b)| (
+                                                        b.hub_batch_id.clone().unwrap(),
+                                                        b.title.clone(),
+                                                        b.depends_on.clone(),
+                                                    ))
+                                                    .collect();
+                                                batch_deps_modal = Some(BatchDepsModal::new(
+                                                    idx,
+                                                    batch.title.clone(),
+                                                    batch.hub_batch_id.clone(),
+                                                    &batch.depends_on,
+                                                    other_batches,
+                                                ));
                                             }
                                         }
                                     }

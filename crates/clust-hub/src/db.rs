@@ -62,6 +62,9 @@ fn run_migrations(conn: &Connection) -> Result<(), String> {
     if current_version < 7 {
         migrate_v7(conn)?;
     }
+    if current_version < 8 {
+        migrate_v8(conn)?;
+    }
 
     Ok(())
 }
@@ -182,6 +185,15 @@ fn migrate_v7(conn: &Connection) -> Result<(), String> {
     .map_err(|e| format!("migration v7 failed: {e}"))
 }
 
+/// Migration v8: add depends_on column for batch-to-batch dependencies.
+fn migrate_v8(conn: &Connection) -> Result<(), String> {
+    conn.execute_batch(
+        "ALTER TABLE queued_batches ADD COLUMN depends_on TEXT NOT NULL DEFAULT '[]';
+         INSERT INTO schema_version (version) VALUES (8);",
+    )
+    .map_err(|e| format!("migration v8 failed: {e}"))
+}
+
 // ---------------------------------------------------------------------------
 // Queued batch CRUD
 // ---------------------------------------------------------------------------
@@ -202,6 +214,7 @@ pub struct QueuedBatchRow {
     pub scheduled_at: Option<String>,
     pub status: String,
     pub launch_mode: String,
+    pub depends_on: String,
 }
 
 /// A row from the queued_batch_tasks table.
@@ -224,8 +237,8 @@ pub fn insert_queued_batch(
     conn.execute(
         "INSERT INTO queued_batches (id, title, repo_path, target_branch, max_concurrent,
          prompt_prefix, prompt_suffix, plan_mode, allow_bypass, agent_binary, hub,
-         scheduled_at, status, created_at, launch_mode)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
+         scheduled_at, status, created_at, launch_mode, depends_on)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
         rusqlite::params![
             batch.id,
             batch.title,
@@ -242,6 +255,7 @@ pub fn insert_queued_batch(
             batch.status,
             chrono::Utc::now().to_rfc3339(),
             batch.launch_mode,
+            batch.depends_on,
         ],
     )
     .map_err(|e| format!("failed to insert queued batch: {e}"))?;
@@ -265,7 +279,7 @@ pub fn load_queued_batches(
         .prepare(
             "SELECT id, title, repo_path, target_branch, max_concurrent,
                     prompt_prefix, prompt_suffix, plan_mode, allow_bypass,
-                    agent_binary, hub, scheduled_at, status, launch_mode
+                    agent_binary, hub, scheduled_at, status, launch_mode, depends_on
              FROM queued_batches
              WHERE status IN ('idle', 'scheduled', 'running')
              ORDER BY rowid",
@@ -291,6 +305,7 @@ pub fn load_queued_batches(
                 scheduled_at: row.get(11)?,
                 status: row.get(12)?,
                 launch_mode: row.get::<_, Option<String>>(13)?.unwrap_or_else(|| "auto".to_string()),
+                depends_on: row.get::<_, Option<String>>(14)?.unwrap_or_else(|| "[]".to_string()),
             })
         })
         .map_err(|e| format!("failed to query queued batches: {e}"))?
@@ -403,6 +418,22 @@ pub fn update_batch_config(
         rusqlite::params![prompt_prefix, prompt_suffix, plan_mode as i32, allow_bypass as i32, id],
     )
     .map_err(|e| format!("failed to update batch config: {e}"))?;
+    Ok(())
+}
+
+/// Update the depends_on list of a batch.
+pub fn update_batch_depends_on(
+    conn: &Connection,
+    id: &str,
+    depends_on: &[String],
+) -> Result<(), String> {
+    let json = serde_json::to_string(depends_on)
+        .map_err(|e| format!("failed to serialize depends_on: {e}"))?;
+    conn.execute(
+        "UPDATE queued_batches SET depends_on = ?1 WHERE id = ?2",
+        rusqlite::params![json, id],
+    )
+    .map_err(|e| format!("failed to update batch depends_on: {e}"))?;
     Ok(())
 }
 

@@ -100,6 +100,8 @@ pub struct BatchInfo {
     pub allow_bypass: bool,
     /// Hub-assigned persistent batch ID (set after registration).
     pub hub_batch_id: Option<String>,
+    /// Hub batch IDs of batches this batch depends on.
+    pub depends_on: Vec<String>,
 }
 
 impl BatchInfo {
@@ -298,6 +300,7 @@ impl TasksState {
             plan_mode: false,
             allow_bypass: false,
             hub_batch_id: None,
+            depends_on: Vec::new(),
         });
         self.next_id += 1;
         idx
@@ -560,6 +563,7 @@ impl TasksState {
                 plan_mode: info.plan_mode,
                 allow_bypass: info.allow_bypass,
                 hub_batch_id: Some(info.batch_id),
+                depends_on: info.depends_on,
             });
             self.next_id += 1;
         }
@@ -637,6 +641,7 @@ impl TasksState {
             batch.prompt_suffix = hub_info.prompt_suffix.clone();
             batch.plan_mode = hub_info.plan_mode;
             batch.allow_bypass = hub_info.allow_bypass;
+            batch.depends_on = hub_info.depends_on.clone();
         }
 
         // Remove batches that are no longer in the hub (completed/deleted)
@@ -803,7 +808,16 @@ pub fn render_tasks(
 
         let ft = if is_focused { state.focused_task } else { None };
         let scroll = if is_focused { &mut state.task_scroll_offset } else { &mut 0 };
-        render_batch_card(frame, card_areas[i], batch, is_focused, repo_color, ft, terminal_previews, scroll);
+        // Resolve dependency hub IDs to titles
+        let dep_titles: Vec<&str> = batch
+            .depends_on
+            .iter()
+            .filter_map(|dep_id| {
+                state.batches.iter().find(|b| b.hub_batch_id.as_deref() == Some(dep_id))
+                    .map(|b| b.title.as_str())
+            })
+            .collect();
+        render_batch_card(frame, card_areas[i], batch, is_focused, repo_color, ft, terminal_previews, scroll, &dep_titles);
 
         click_map.tasks_batch_cards.push((card_areas[i], batch_idx));
     }
@@ -830,7 +844,7 @@ fn render_options_bar(frame: &mut Frame, area: Rect, state: &TasksState) {
                 .bg(theme::R_BG_RAISED),
         ),
         Span::styled(
-            format!("  {mod_key}+T create  {mod_key}+I import  Space toggle  T timer  {mod_key}+S start  M mode  B bypass  d clear done"),
+            format!("  {mod_key}+T create  {mod_key}+I import  Space toggle  T timer  {mod_key}+S start  M mode  B bypass  D deps  d clear done"),
             Style::default()
                 .fg(theme::R_TEXT_TERTIARY)
                 .bg(theme::R_BG_RAISED),
@@ -874,6 +888,7 @@ fn render_batch_card(
     focused_task: Option<usize>,
     terminal_previews: &TerminalPreviewMap,
     task_scroll_offset: &mut usize,
+    dep_titles: &[&str],
 ) {
     let border_color = match (focused, repo_color) {
         (true, Some(c)) => c,
@@ -1049,6 +1064,17 @@ fn render_batch_card(
             pad_span,
             Span::styled("Status    ", label_style),
             status_span,
+        ]),
+        Line::from(vec![
+            Span::styled("Depends   ", label_style),
+            if dep_titles.is_empty() {
+                Span::styled("(none)", Style::default().fg(theme::R_TEXT_DISABLED))
+            } else {
+                Span::styled(
+                    dep_titles.join(", "),
+                    Style::default().fg(theme::R_INFO),
+                )
+            },
         ]),
     ];
 

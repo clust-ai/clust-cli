@@ -85,6 +85,7 @@ pub struct HubBatchEntry {
     pub scheduled_at: Option<chrono::DateTime<chrono::Utc>>,
     pub status: HubBatchStatus,
     pub launch_mode: String,
+    pub depends_on: Vec<String>,
 }
 
 impl HubBatchEntry {
@@ -203,6 +204,52 @@ async fn check_and_advance_batches(state: &SharedHubState) {
                 }
 
                 // Collect tasks to spawn
+                for (task_idx, task) in batch.next_tasks_to_start() {
+                    tasks_to_spawn.push(TaskSpawnRequest {
+                        batch_id: batch.id.clone(),
+                        task_index: task_idx,
+                        repo_path: batch.repo_path.clone(),
+                        target_branch: batch.target_branch.clone(),
+                        branch_name: task.branch_name.clone(),
+                        prompt: batch.build_prompt(task),
+                        agent_binary: batch.agent_binary.clone(),
+                        plan_mode: batch.plan_mode,
+                        allow_bypass: batch.allow_bypass,
+                        hub: batch.hub.clone(),
+                    });
+                }
+            }
+        }
+
+        // Auto-start idle batches whose dependencies are all satisfied.
+        // Collect completed/absent IDs first (immutable pass), then apply transitions.
+        let completed_ids: std::collections::HashSet<String> = hub
+            .queued_batches
+            .iter()
+            .filter(|b| b.status == HubBatchStatus::Completed)
+            .map(|b| b.id.clone())
+            .collect();
+
+        let batches_to_start: Vec<String> = hub
+            .queued_batches
+            .iter()
+            .filter(|b| b.status == HubBatchStatus::Idle && !b.depends_on.is_empty())
+            .filter(|b| {
+                b.depends_on.iter().all(|dep_id| {
+                    // Satisfied if completed or no longer in memory (deleted/evicted)
+                    completed_ids.contains(dep_id)
+                        || !hub.queued_batches.iter().any(|other| other.id == *dep_id)
+                })
+            })
+            .map(|b| b.id.clone())
+            .collect();
+
+        for batch_id in &batches_to_start {
+            if let Some(batch) = hub.queued_batches.iter_mut().find(|b| &b.id == batch_id) {
+                batch.status = HubBatchStatus::Running;
+                db_updates.push(("running", batch.id.clone(), None));
+
+                // Collect tasks to spawn for newly started batches
                 for (task_idx, task) in batch.next_tasks_to_start() {
                     tasks_to_spawn.push(TaskSpawnRequest {
                         batch_id: batch.id.clone(),
@@ -508,6 +555,9 @@ pub fn load_batches_from_db(hub: &HubState) -> Vec<HubBatchEntry> {
                 })
                 .collect();
 
+            let depends_on: Vec<String> =
+                serde_json::from_str(&batch_row.depends_on).unwrap_or_default();
+
             HubBatchEntry {
                 id: batch_row.id,
                 title: batch_row.title,
@@ -524,6 +574,7 @@ pub fn load_batches_from_db(hub: &HubState) -> Vec<HubBatchEntry> {
                 scheduled_at,
                 status,
                 launch_mode: batch_row.launch_mode,
+                depends_on,
             }
         })
         .collect()

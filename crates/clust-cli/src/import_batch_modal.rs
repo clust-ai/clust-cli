@@ -37,18 +37,17 @@ pub struct BatchJson {
     pub allow_bypass: bool,
     /// The tasks to create in this batch.
     pub tasks: Vec<TaskJson>,
+    /// Optional list of batch titles this batch depends on.
+    #[serde(default)]
+    pub depends_on: Vec<String>,
 }
 
 #[derive(Deserialize)]
-#[allow(dead_code)]
 pub struct TaskJson {
     /// Branch name for the worktree.
     pub branch: String,
     /// The prompt for the agent.
     pub prompt: String,
-    /// Optional list of branch names this task depends on (for documentation/ordering).
-    #[serde(default)]
-    pub depends_on: Vec<String>,
     /// Whether the batch prompt prefix is applied to this task. Defaults to `true`.
     #[serde(default = "default_true")]
     pub use_prefix: bool,
