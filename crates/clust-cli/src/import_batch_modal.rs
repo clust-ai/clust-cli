@@ -54,6 +54,9 @@ pub struct TaskJson {
     /// Whether the batch prompt suffix is applied to this task. Defaults to `true`.
     #[serde(default = "default_true")]
     pub use_suffix: bool,
+    /// Whether this task starts in plan mode. Defaults to batch-level plan_mode if omitted.
+    #[serde(default)]
+    pub plan_mode: bool,
 }
 
 fn default_true() -> bool {
@@ -71,7 +74,7 @@ pub enum ImportBatchResult {
 }
 
 pub struct ImportBatchOutput {
-    pub batch_json: BatchJson,
+    pub batches: Vec<BatchJson>,
     /// The repo path selected by the user.
     pub repo_path: String,
     /// The repo name selected by the user.
@@ -101,8 +104,8 @@ pub struct ImportBatchModal {
     base_path: String,
     file_entries: Vec<FileEntry>,
 
-    // Parsed batch
-    parsed_batch: Option<BatchJson>,
+    // Parsed batches (list format)
+    parsed_batches: Option<Vec<BatchJson>>,
     parse_error: Option<String>,
 
     // Repo/branch selection (reused from create_batch_modal pattern)
@@ -139,7 +142,7 @@ impl ImportBatchModal {
             selected_idx: 0,
             base_path,
             file_entries: Vec::new(),
-            parsed_batch: None,
+            parsed_batches: None,
             parse_error: None,
             repos,
             branches: Vec::new(),
@@ -212,21 +215,28 @@ impl ImportBatchModal {
 
     fn try_parse_file(&mut self, path: &str) {
         match std::fs::read_to_string(path) {
-            Ok(contents) => match serde_json::from_str::<BatchJson>(&contents) {
-                Ok(batch) => {
-                    if batch.tasks.is_empty() {
-                        self.parse_error = Some("JSON has no tasks".to_string());
-                    } else {
-                        self.parsed_batch = Some(batch);
-                        self.parse_error = None;
-                        self.step = Step::Repo;
-                        self.reset_input();
+            Ok(contents) => {
+                // Try list format first, then single-object format (backward compat)
+                let batches = serde_json::from_str::<Vec<BatchJson>>(&contents)
+                    .or_else(|_| {
+                        serde_json::from_str::<BatchJson>(&contents).map(|b| vec![b])
+                    });
+                match batches {
+                    Ok(list) => {
+                        if list.is_empty() || list.iter().all(|b| b.tasks.is_empty()) {
+                            self.parse_error = Some("JSON has no tasks".to_string());
+                        } else {
+                            self.parsed_batches = Some(list);
+                            self.parse_error = None;
+                            self.step = Step::Repo;
+                            self.reset_input();
+                        }
+                    }
+                    Err(e) => {
+                        self.parse_error = Some(format!("Invalid JSON: {e}"));
                     }
                 }
-                Err(e) => {
-                    self.parse_error = Some(format!("Invalid JSON: {e}"));
-                }
-            },
+            }
             Err(e) => {
                 self.parse_error = Some(format!("Cannot read file: {e}"));
             }
@@ -387,7 +397,7 @@ impl ImportBatchModal {
             Step::File => ImportBatchResult::Cancelled,
             Step::Repo => {
                 self.step = Step::File;
-                self.parsed_batch = None;
+                self.parsed_batches = None;
                 self.reset_input();
                 ImportBatchResult::Pending
             }
@@ -438,9 +448,9 @@ impl ImportBatchModal {
                 if let Some(&(idx, _)) = filtered.get(self.selected_idx) {
                     let branch_name = self.branches[idx].name.clone();
                     let repo = self.selected_repo.as_ref().unwrap();
-                    if let Some(batch_json) = self.parsed_batch.take() {
+                    if let Some(batches) = self.parsed_batches.take() {
                         return ImportBatchResult::Completed(Box::new(ImportBatchOutput {
-                            batch_json,
+                            batches,
                             repo_path: repo.path.clone(),
                             repo_name: repo.name.clone(),
                             branch_name,

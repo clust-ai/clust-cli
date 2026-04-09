@@ -126,7 +126,8 @@ impl BatchInfo {
     }
 
     /// Serialize this batch to a JSON string matching the import schema.
-    pub fn to_batch_json(&self) -> String {
+    /// `depends_on_titles` should contain resolved batch titles (not hub IDs).
+    pub fn to_batch_json(&self, depends_on_titles: &[String]) -> String {
         let tasks: Vec<serde_json::Value> = self
             .tasks
             .iter()
@@ -137,6 +138,12 @@ impl BatchInfo {
                 });
                 if t.plan_mode {
                     task_obj["plan_mode"] = serde_json::json!(true);
+                }
+                if !t.use_prefix {
+                    task_obj["use_prefix"] = serde_json::json!(false);
+                }
+                if !t.use_suffix {
+                    task_obj["use_suffix"] = serde_json::json!(false);
                 }
                 task_obj
             })
@@ -163,6 +170,9 @@ impl BatchInfo {
         }
         if self.allow_bypass {
             obj.insert("allow_bypass".into(), serde_json::json!(true));
+        }
+        if !depends_on_titles.is_empty() {
+            obj.insert("depends_on".into(), serde_json::json!(depends_on_titles));
         }
         obj.insert("tasks".into(), serde_json::json!(tasks));
 
