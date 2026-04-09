@@ -122,7 +122,7 @@ A multi-agent terminal overview that displays all active agents side-by-side wit
 ││                    │││                │││         ││
 │└──── Shift+↓ focus──┘│└────────────────┘│└─────────┘│
 ├──────────────────────┴──────────────────┴───────────┤
-│ ● connected  Shift+↓ enter terminal  ...    v0.0.16 │
+│ ● connected  Shift+↓ enter terminal  ...    v0.0.17 │
 └─────────────────────────────────────────────────────┘
 ```
 
@@ -267,7 +267,7 @@ On startup, `clust ui` automatically connects to the hub daemon, starting it if 
 ### Bottom Status Bar
 
 ```
-● connected  q to quit  Q to quit and stop hub  ↑↓←→ navigate  Shift+←→ panels  v toggle agents          v0.0.16
+● connected  q to quit  Q to quit and stop hub  ↑↓←→ navigate  Shift+←→ panels  v toggle agents          v0.0.17
 ```
 
 | Section | Description |
@@ -277,7 +277,7 @@ On startup, `clust ui` automatically connects to the hub daemon, starting it if 
 | BYPASS indicator | When bypass-permissions is enabled globally, shows `BYPASS` in a distinct color. Hidden when disabled. |
 | Focused agent | When an agent has keyboard focus (in Overview terminal focus or focus mode), shows the repo name in the repo's assigned color followed by `/branch` in secondary text color |
 | Status message / Shortcuts | Either a temporary status message or context-aware keybinding hints (see below) |
-| Version | Right-aligned, e.g. `v0.0.16` |
+| Version | Right-aligned, e.g. `v0.0.17` |
 
 **Status messages:** Temporary status messages override the keybinding hints area. Messages are displayed for 5 seconds before auto-dismissing, after which the keybinding hints reappear. Two severity levels exist: `Error` (displayed in `R_ERROR` color) and `Success` (displayed in `R_SUCCESS` color). Status messages are used to surface feedback from async operations such as agent creation, branch pulls, and remote branch checkout -- both success confirmations (e.g., "Agent started on feature-branch", "Pulled main: Already up to date.", "Checked out feature-branch") and error details (e.g., "Agent create failed: hub connect error: ...", "Pull failed: ...", "Checkout failed: ..."). The `StatusMessage` struct tracks the message text, level, and creation `Instant` for auto-dismissal timing. Status messages are delivered from background tokio tasks to the main event loop via a dedicated `mpsc` channel (`status_tx` / `status_rx`), separate from the `AgentStartResult` channel used for agent creation results.
 
@@ -330,10 +330,10 @@ On startup, `clust ui` automatically connects to the hub daemon, starting it if 
 
 Context menus appear as centered modal overlays. They support arrow key navigation, Enter to confirm, Esc to dismiss, and number keys 1-9/0 for direct item selection. Context menus may include an optional description field -- body text rendered between the title and the numbered items (used for confirmation dialogs). Mouse clicks on menu items are supported; clicking outside the modal dismisses it.
 
-- **Repo context menu:** Appears on Enter when a repo is selected. Contains: "Change Color" (opens color picker), "Open in File System", "Open in Terminal", "Stop All Agents", "Unregister", "Clean Stale Refs" (prunes stale remote tracking refs), and "Purge" (opens confirmation dialog).
+- **Repo context menu:** Appears on Enter when a repo is selected. Contains: "Change Color" (opens color picker), "Open in File System", "Open in Terminal", "Stop All Agents", "Unregister", "Clean Stale Refs" (prunes stale remote tracking refs), "Detach" (detaches HEAD from the currently checked-out branch via `DetachHead` IPC), and "Purge" (opens confirmation dialog).
 - **Purge confirmation dialog:** A `ConfirmAction` menu with a description explaining the destructive operation ("This will stop all agents, delete all worktrees, and delete all local branches."). Options are "Confirm" and "Cancel". On confirm, launches an asynchronous purge operation and displays the purge progress modal.
 - **Purge progress modal:** A centered overlay that shows real-time progress during the purge operation. Each phase (stopping agents, removing worktrees, deleting branches, cleaning stale refs) is displayed as a line item with an animated braille spinner while in progress, replaced by a checkmark when complete. All keyboard and mouse input is blocked while the purge is running. On completion, the modal shows "Press Esc to close" and only then accepts Esc to dismiss. If an error occurs, it is displayed in the modal. The purge runs asynchronously via a background task that streams `PurgeProgress` IPC messages from the hub, keeping the TUI responsive throughout.
-- **Local branch context menu:** Appears on Enter when a local branch is selected. Contains: "Open Agent" (shown first when the branch has active agents), "Start Agent (worktree)" (always shown; creates a worktree and starts an agent), "Start Agent (in place)" (shown only for the HEAD branch; starts an agent directly in the repo root without creating a worktree, using the existing `StartAgent` IPC message), "Base Worktree Off" (always shown; opens the create-agent modal pre-populated with the selected repo and branch -- user only enters a new branch name and prompt), "Pull" (always shown; pulls or fetches the branch -- see Pull Branch below), "Stop Agents" (shown when the branch has active agents), "Remove Worktree" (shown when the branch is a worktree), and "Delete Branch" (force-deletes the local branch via `DeleteLocalBranch` IPC). When "Stop Agents" is selected and the stopped agents were in worktrees, a worktree cleanup dialog is shown after stopping.
+- **Local branch context menu:** Appears on Enter when a local branch is selected. Contains: "Open Agent" (shown first when the branch has active agents), "Start Agent (worktree)" (always shown; creates a worktree and starts an agent), "Start Agent (in place)" (shown only for the HEAD branch; starts an agent directly in the repo root without creating a worktree, using the existing `StartAgent` IPC message), "Detach" (shown only for the HEAD branch; detaches HEAD from the branch via `DetachHead` IPC), "Checkout" (shown only for non-HEAD branches that are not worktrees; checks out the branch via `CheckoutLocalBranch` IPC), "Base Worktree Off" (always shown; opens the create-agent modal pre-populated with the selected repo and branch -- user only enters a new branch name and prompt), "Pull" (always shown; pulls or fetches the branch -- see Pull Branch below), "Stop Agents" (shown when the branch has active agents), "Remove Worktree" (shown when the branch is a worktree), and "Delete Branch" (force-deletes the local branch via `DeleteLocalBranch` IPC). When "Stop Agents" is selected and the stopped agents were in worktrees, a worktree cleanup dialog is shown after stopping.
 - **Detach HEAD confirmation dialog:** When "Start Agent (worktree)" is selected on the HEAD branch, a `ConfirmAction` confirmation dialog is shown before proceeding: "This will detach HEAD in your repo. The branch will be moved to a worktree for the agent." with "Confirm" and "Cancel" options. On confirm, the hub auto-detaches HEAD in the main worktree so the branch can be moved to a linked worktree, then creates the worktree and starts the agent via `CreateWorktreeAgent`. This dialog is shown on both keyboard and mouse paths.
 - **Remote branch context menu:** Appears on Enter when a remote branch is selected. Contains: "Checkout & Track Locally" (shown first; checks out the remote branch as a local tracking branch via `CheckoutRemoteBranch` IPC using `git checkout --track`), "Start Agent (checkout)" (creates a worktree from the remote branch and starts an agent), "Create Worktree" (checks out the remote branch as a worktree), and "Delete Remote Branch" (deletes the remote branch via `DeleteRemoteBranch` IPC).
 - **Color picker:** Shows the 10 available repo colors (red, orange, yellow, lime, green, teal, blue, purple, pink, coral) with colored `●` indicators. Selecting a color sends a `SetRepoColor` IPC message to the hub.
@@ -384,7 +384,7 @@ When the agent was opened from a batch task (`batch_origin` is set), a batch bad
 │      3      3│  let x = 1;   ││                    ││
 │                               │└────────────────────┘│
 ├─────────────────────────────────────────────────────┤
-│ ● connected  Shift+←/→ switch panel  ...     v0.0.16│
+│ ● connected  Shift+←/→ switch panel  ...     v0.0.17│
 └─────────────────────────────────────────────────────┘
 ```
 

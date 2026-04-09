@@ -134,6 +134,8 @@ CLI -> Hub:
   CloneRepo { url: String, parent_dir: String, name: Option<String> }
   SetBypassPermissions { enabled: bool }
   GetBypassPermissions
+  DetachHead { repo_path: String }
+  CheckoutLocalBranch { repo_path: String, branch_name: String }
   StartTerminal { working_dir: String, cols: u16, rows: u16 }
   AttachTerminal { id: String }
   DetachTerminal { id: String }
@@ -180,6 +182,8 @@ Hub -> CLI:
   LocalBranchDeleted { branch_name: String, stopped_agents: usize }
   RemoteBranchDeleted { branch_name: String }
   RemoteBranchCheckedOut { branch_name: String }
+  HeadDetached
+  LocalBranchCheckedOut { branch_name: String }
   RepoPurged { path: String, stopped_agents: usize, removed_worktrees: usize, deleted_branches: usize }
   PurgeProgress { step: String }
   StaleRefsCleaned { path: String }
@@ -203,7 +207,7 @@ Hub -> CLI:
 
 ### Protocol Versioning
 
-The IPC protocol includes a version check to detect stale hubs. `clust-ipc` exports a `PROTOCOL_VERSION` constant (currently `6`) that must be bumped whenever the `CliMessage` or `HubMessage` enum shapes change (since `rmp-serde` uses numeric enum indices).
+The IPC protocol includes a version check to detect stale hubs. `clust-ipc` exports a `PROTOCOL_VERSION` constant (currently `7`) that must be bumped whenever the `CliMessage` or `HubMessage` enum shapes change (since `rmp-serde` uses numeric enum indices).
 
 On connection, the CLI sends a `Ping { protocol_version }` message. The hub replies with `Pong { protocol_version }` carrying its own version. If versions mismatch, the CLI stops the stale hub and spawns a fresh one before proceeding.
 

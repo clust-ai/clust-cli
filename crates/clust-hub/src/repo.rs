@@ -473,7 +473,7 @@ fn is_branch_head(repo_root: &Path, branch: &str) -> bool {
 }
 
 /// Detach HEAD in the main worktree so a branch can be moved to a linked worktree.
-fn detach_head(repo_root: &Path) -> Result<(), String> {
+pub fn detach_head(repo_root: &Path) -> Result<(), String> {
     let output = std::process::Command::new("git")
         .current_dir(repo_root)
         .args(["checkout", "--detach"])
@@ -782,6 +782,21 @@ pub fn checkout_remote_branch(
     }
 
     Ok(local_branch.to_string())
+}
+
+/// Checkout a local branch in the main worktree.
+pub fn checkout_local_branch(repo_root: &Path, branch: &str) -> Result<(), String> {
+    let output = std::process::Command::new("git")
+        .current_dir(repo_root)
+        .args(["checkout", branch])
+        .output()
+        .map_err(|e| format!("failed to run git checkout: {e}"))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(format!("git checkout failed: {}", stderr.trim()));
+    }
+    Ok(())
 }
 
 /// Result of a repository purge operation.
