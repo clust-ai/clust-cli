@@ -427,7 +427,7 @@ The left panel has a tab bar at the top with three tabs: `Changes`, `Compare`, `
 - The shell is spawned by the hub as a PTY process (using `$SHELL` or `/bin/zsh` as fallback) with the agent's `working_dir` as the working directory
 - Terminal output is rendered using a `TerminalEmulator` (same `vt100`-backed emulator used for agent panels), supporting full ANSI escape sequences, colors, cursor movement, and alternate screen buffer
 - The terminal connection runs as a background tokio task (`terminal_connection_task`) with its own IPC streaming connection to the hub, independent of the agent panel connection
-- All keyboard input is forwarded directly to the terminal shell when the Terminal tab is focused, including `Tab` (which is why `Shift+Tab` / `BackTab` is used as "previous tab" to navigate away from the Terminal tab)
+- `Tab` is intercepted for left-panel tab cycling (consistent with Changes and Compare tabs) rather than being forwarded to the shell. `Shift+Tab` (`BackTab`) cycles to the previous tab. All other keyboard input is forwarded directly to the terminal shell when the Terminal tab is focused
 - `Esc` is forwarded to the shell process (not intercepted by the UI)
 - Paste events (bracketed paste) are forwarded to the terminal shell
 - Scrollback is supported via `Shift+PageUp` / `Shift+PageDown` with the same scrollback mechanism as agent panels
@@ -439,6 +439,7 @@ The left panel has a tab bar at the top with three tabs: `Changes`, `Compare`, `
 - When the terminal session exits, the tab displays "Terminal session ended" in tertiary text
 - When the terminal is starting (before the first output), the tab displays "Starting terminal..."
 - On focus mode exit (`close_panel()`), the terminal session is cleaned up: a `DetachTerminal` message is sent and the background task is aborted
+- A hardware cursor (caret) is displayed via `frame.set_cursor_position()` when the terminal is the active input target (left panel focused, not scrolled back, and the application has not hidden the cursor via DECTCEM). The cursor position is read from the `TerminalEmulator`'s `cursor_position()` method and clamped to the terminal area bounds
 
 **Panel focus:**
 
@@ -518,10 +519,10 @@ The agent's `working_dir`, `repo_path`, and `branch_name` are passed to `open_ag
 | `Shift+↑` | Exit focus mode, return to originating tab |
 | `Shift+→` | Switch focus to right panel |
 | `Shift+Tab` (`BackTab`) | Cycle to previous left panel tab |
+| `Tab` | Cycle to next left panel tab |
 | `Shift+PageUp` | Scroll terminal scrollback up by one page |
 | `Shift+PageDown` | Scroll terminal scrollback down by one page |
 | `Esc` | Forwarded to the terminal shell |
-| `Tab` | Forwarded to the terminal shell |
 | All other keys | Forwarded to the terminal shell's PTY |
 
 ### Help Overlay (`?`)
@@ -532,7 +533,7 @@ The `?` key toggles a keyboard shortcut overlay rendered as a centered modal (44
 - **Repositories section (shown when Repositories tab is active):** `↑/↓` navigate, `Shift+↑/↓` jump repos, `←/→` navigate tree, `Shift+←/→` switch panel, `Enter` open menu/focus agent, `Space` collapse/expand, `v` toggle grouping.
 - **Overview section (shown when Overview tab is active):** `Shift+←/→` scroll panels, `Shift+↓` enter terminal, plus an "In terminal:" sub-context label followed by `Shift+↑` back to options bar, `Shift+↓` enter focus mode, `Shift+←/→` switch agent, `PgUp/PgDn` scroll terminal.
 - **Batches section (shown when Batches tab is active):** `Shift+←/→` switch batch (with auto-scroll), `←/→` scroll viewport, `↑/↓` navigate tasks within a batch, `Shift+↓` open active task in focus mode, `Space` toggle batch status (or cancel queued), `t` set timer (queue batch), `Alt+P` toggle task prefix, `Alt+S` toggle task suffix / start (manual), `Enter` add task to batch, `p` edit prompt prefix, `s` edit prompt suffix, `D` edit batch dependencies, `d` clear done tasks, `Del/Backspace` open batch cleanup modal.
-- **Focus Mode section (shown when in focus mode):** `Shift+↑` exit, `Shift+←/→` switch panel, `Shift+PgUp/PgDn` scroll terminal, plus a "Left panel:" sub-context label followed by `Tab` cycle tabs, `Shift+Tab` prev tab (used in Terminal tab since Tab is forwarded to the shell), `↑/↓` scroll diff.
+- **Focus Mode section (shown when in focus mode):** `Shift+↑` exit, `Shift+←/→` switch panel, `Shift+PgUp/PgDn` scroll terminal, plus a "Left panel:" sub-context label followed by `Tab` cycle tabs, `Shift+Tab` prev tab, `↑/↓` scroll diff.
 
 Key names are displayed in accent color (left-aligned, 16 chars wide); descriptions use primary text color. Section headers use secondary text color with bold modifier. Sub-context labels use tertiary text color and are indented.
 

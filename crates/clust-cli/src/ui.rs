@@ -3434,8 +3434,13 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                         }
                                     }
                                     overview::LeftPanelTab::Terminal => {
-                                        // All keys forwarded to terminal
-                                        if key.code == KeyCode::Esc {
+                                        // Tab cycles left-panel tabs (same as
+                                        // Changes/Compare); all other keys
+                                        // forwarded to the terminal PTY.
+                                        if key.code == KeyCode::Tab {
+                                            focus_mode_state.left_tab =
+                                                focus_mode_state.left_tab.next();
+                                        } else if key.code == KeyCode::Esc {
                                             focus_mode_state
                                                 .send_terminal_input(vec![0x1b]);
                                         } else if let Some(bytes) =

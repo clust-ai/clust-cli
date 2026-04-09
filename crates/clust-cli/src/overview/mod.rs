@@ -4,7 +4,7 @@ pub mod input;
 use std::collections::{HashMap, HashSet};
 
 use ratatui::{
-    layout::{Constraint, Layout, Rect},
+    layout::{Constraint, Layout, Position, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
     widgets::{Block, Borders, Paragraph, Wrap},
@@ -2241,6 +2241,7 @@ fn render_left_panel(frame: &mut Frame, area: Rect, state: &mut FocusModeState, 
 }
 
 fn render_terminal_tab(frame: &mut Frame, area: Rect, state: &mut FocusModeState) {
+    let is_focused = state.focus_side == FocusSide::Left;
     match &mut state.terminal_panel {
         Some(panel) if !panel.exited => {
             let lines = if panel.scroll_offset > 0 {
@@ -2251,6 +2252,16 @@ fn render_terminal_tab(frame: &mut Frame, area: Rect, state: &mut FocusModeState
             let paragraph = Paragraph::new(lines)
                 .style(Style::default().bg(theme::R_BG_BASE));
             frame.render_widget(paragraph, area);
+
+            // Show hardware cursor when terminal is the active input target
+            if is_focused && panel.scroll_offset == 0 && !panel.vterm.hide_cursor() {
+                let (cursor_row, cursor_col) = panel.vterm.cursor_position();
+                let x = area.x + cursor_col;
+                let y = area.y + cursor_row;
+                if x < area.x + area.width && y < area.y + area.height {
+                    frame.set_cursor_position(Position { x, y });
+                }
+            }
         }
         Some(_) => {
             frame.render_widget(
