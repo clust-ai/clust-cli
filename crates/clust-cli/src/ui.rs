@@ -200,7 +200,7 @@ impl ActiveTab {
         match self {
             Self::Repositories => "Repositories",
             Self::Overview => "Overview",
-            Self::Tasks => "Jobs",
+            Self::Tasks => "Batches",
         }
     }
 }
@@ -5605,7 +5605,7 @@ fn render_focus_back_bar(
             .bg(theme::R_BG_RAISED)
             .add_modifier(Modifier::BOLD),
     ));
-    let back_target = if state.batch_origin.is_some() { "Tasks" } else { origin_tab.label() };
+    let back_target = if state.batch_origin.is_some() { ActiveTab::Tasks.label() } else { origin_tab.label() };
     let back_label = format!("  Back to {}", back_target);
     spans.push(Span::styled(
         &back_label,
@@ -6891,7 +6891,7 @@ fn render_help_overlay(frame: &mut Frame, area: Rect, active_tab: ActiveTab, in_
     // -- Tasks --
     if active_tab == ActiveTab::Tasks {
         lines.push(Line::from(""));
-        lines.push(header_line("Jobs"));
+        lines.push(header_line("Batches"));
         lines.push(binding_line("\u{2190} / \u{2192}", "Navigate batches"));
         lines.push(binding_line("Shift+\u{2190}/\u{2192}", "Scroll batches"));
         lines.push(binding_line("\u{2191} / \u{2193}", "Navigate tasks in batch"));
@@ -8610,7 +8610,7 @@ mod tests {
     fn active_tab_labels() {
         assert_eq!(ActiveTab::Repositories.label(), "Repositories");
         assert_eq!(ActiveTab::Overview.label(), "Overview");
-        assert_eq!(ActiveTab::Tasks.label(), "Jobs");
+        assert_eq!(ActiveTab::Tasks.label(), "Batches");
     }
 
     #[test]
