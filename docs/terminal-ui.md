@@ -661,7 +661,7 @@ A multi-step modal for creating prompt batch definitions, opened globally with `
 - `Enter` -- confirm and complete the modal
 - `Esc` -- go back to the launch mode step
 
-**Completion:** On completing the final step, the modal outputs a `BatchModalOutput` containing the selected repo path, repo name, branch name, optional title, optional max concurrent value, and launch mode. The batch is added to `TasksState` and the active tab switches to the Batches tab.
+**Completion:** On completing the final step, the modal outputs a `BatchModalOutput` containing the selected repo path, repo name, branch name, optional title, optional max concurrent value, and launch mode. The batch is added to `TasksState`, registered with the hub daemon via a `RegisterBatch` IPC message, and the active tab switches to the Batches tab. The hub responds asynchronously with `BatchRegistered` containing the `hub_batch_id`.
 
 **Rendering:** The modal is rendered as a centered overlay (60 columns wide, 60% of terminal height) with a titled border, input field with visible cursor, and a scrollable list with fuzzy-matched results. The selected item is indicated with a `>` prefix and bold text. In the launch mode step, two options ("Auto" and "Manual") are displayed with descriptions, using a `>` prefix for the selected option. In the concurrency step, the input shows the current value (or infinity symbol for unlimited) with arrow hint text below.
 
@@ -771,7 +771,7 @@ Example JSON:
 
 **Copy to clipboard:** Pressing `c` while a batch card is focused copies the batch as JSON (matching the import schema) to the system clipboard. This makes it easy to share batch definitions or re-import them elsewhere. Uses `pbcopy` on macOS and `xclip`/`xsel` on Linux.
 
-**Completion:** On selecting a branch in step 3, the modal outputs an `ImportBatchOutput` containing the parsed `BatchJson`, repo path, repo name, and branch name. The batch is created with all tasks pre-populated, prefix/suffix applied, plan_mode and allow_bypass toggled as specified, and the active tab switches to the Batches tab. A success status message shows the imported task count.
+**Completion:** On selecting a branch in step 3, the modal outputs an `ImportBatchOutput` containing the parsed `BatchJson`, repo path, repo name, and branch name. The batch is created with all tasks pre-populated, prefix/suffix applied, plan_mode and allow_bypass toggled as specified, and the active tab switches to the Batches tab. A success status message shows the imported task count. The batch is registered with the hub daemon via a `RegisterBatch` IPC message (with tasks passed inline as `Vec<QueuedTask>`), mirroring the create-batch flow. The hub responds with `BatchRegistered` containing the `hub_batch_id`, which is stored asynchronously to enable subsequent hub communication (status updates, task spawning).
 
 **Rendering:** The modal is rendered as a centered overlay (60 columns wide, 60% of terminal height) with a titled border showing the current step and description. The file browser step shows the base path above the input field, with a scrollable list of directories (with `/` suffix) and `.json` files below. Parse errors are displayed in `R_ERROR` color at the bottom. Steps 2 and 3 follow the same rendering pattern as the Create Batch Modal.
 
