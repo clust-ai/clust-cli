@@ -81,10 +81,6 @@ impl DetachedAgentModal {
         modal
     }
 
-    pub fn set_plan_mode(&mut self, val: bool) {
-        self.plan_mode = val;
-    }
-
     // -----------------------------------------------------------------------
     // Directory browsing
     // -----------------------------------------------------------------------

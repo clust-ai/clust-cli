@@ -239,24 +239,29 @@ pub fn spawn_agent(
     if let Some(ref p) = params.prompt {
         cmd.arg(p);
     }
-    if state.bypass_permissions {
-        // Global bypass_permissions supersedes all per-agent flags
-        if let Some(args) = clust_ipc::agents::bypass_permissions_args_for(&binary) {
-            for arg in args {
-                cmd.arg(arg);
-            }
-        }
-    } else if params.plan_mode {
+    if params.plan_mode {
         if let Some(args) = clust_ipc::agents::plan_mode_args_for(&binary) {
             for arg in args {
                 cmd.arg(arg);
             }
         }
-        if params.allow_bypass {
+        if state.bypass_permissions {
+            if let Some(args) = clust_ipc::agents::bypass_permissions_args_for(&binary) {
+                for arg in args {
+                    cmd.arg(arg);
+                }
+            }
+        } else if params.allow_bypass {
             if let Some(args) = clust_ipc::agents::allow_bypass_args_for(&binary) {
                 for arg in args {
                     cmd.arg(arg);
                 }
+            }
+        }
+    } else if state.bypass_permissions {
+        if let Some(args) = clust_ipc::agents::bypass_permissions_args_for(&binary) {
+            for arg in args {
+                cmd.arg(arg);
             }
         }
     } else if params.accept_edits {
