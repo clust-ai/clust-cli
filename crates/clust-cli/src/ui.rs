@@ -2125,14 +2125,11 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                                 }
                                                 BranchAction::BaseWorktreeOff => {
                                                     if let Some(repo_info) = repos.iter().find(|r| r.path == repo_path).cloned() {
-                                                        let mut modal = CreateAgentModal::new_with_branch(
+                                                        let modal = CreateAgentModal::new_with_branch(
                                                             repos.clone(),
                                                             repo_info,
                                                             branch_name.clone(),
                                                         );
-                                                        if bypass_permissions {
-                                                            modal.set_plan_mode(true);
-                                                        }
                                                         create_modal = Some(modal);
                                                     }
                                                 }
@@ -3204,10 +3201,7 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                     {
                         // Global shortcut: Alt+E opens create-agent modal
                         if !repos.is_empty() {
-                            let mut modal = CreateAgentModal::new(repos.clone());
-                            if bypass_permissions {
-                                modal.set_plan_mode(true);
-                            }
+                            let modal = CreateAgentModal::new(repos.clone());
                             create_modal = Some(modal);
                             show_help = false;
                         }
@@ -3215,10 +3209,7 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                         && key.modifiers.contains(KeyModifiers::ALT)
                     {
                         // Global shortcut: Alt+D opens detached agent modal
-                        let mut modal = DetachedAgentModal::new();
-                        if bypass_permissions {
-                            modal.set_plan_mode(true);
-                        }
+                        let modal = DetachedAgentModal::new();
                         detached_modal = Some(modal);
                         show_help = false;
                     } else if key.code == KeyCode::Char('f')
@@ -4979,14 +4970,11 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                                 }
                                                 BranchAction::BaseWorktreeOff => {
                                                     if let Some(repo_info) = repos.iter().find(|r| r.path == repo_path).cloned() {
-                                                        let mut modal = CreateAgentModal::new_with_branch(
+                                                        let modal = CreateAgentModal::new_with_branch(
                                                             repos.clone(),
                                                             repo_info,
                                                             branch_name.clone(),
                                                         );
-                                                        if bypass_permissions {
-                                                            modal.set_plan_mode(true);
-                                                        }
                                                         create_modal = Some(modal);
                                                     }
                                                 }
