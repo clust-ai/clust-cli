@@ -233,7 +233,7 @@ Each batch card has:
 - `TaskEntry` stores: branch_name, prompt, status (`TaskStatus`: Idle, Active, or Done), an optional `agent_id` (set when the task's agent is started, linking it to its `AgentPanel` in `OverviewState`), `use_prefix` (bool, default true), and `use_suffix` (bool, default true) for a single task within a batch.
 - `BatchAgentInfo` stores: batch_title, batch_id, task_index, and task_count for an agent that belongs to a batch. Built by `TasksState::batch_agent_map()` which returns a `HashMap<String, BatchAgentInfo>` mapping agent IDs to their batch membership info. Used by the overview tab for sorting, filter bar labels, and panel border titles.
 - `TerminalPreviewMap` (type alias for `HashMap<String, Vec<Line>>`) maps agent IDs to their last N terminal output lines, built by `build_task_terminal_previews()` in `ui.rs` each render frame.
-- `SHOW_TERMINAL_PREVIEW` constant (default `true`) gates whether terminal output previews are shown in active task boxes.
+- `SHOW_TERMINAL_PREVIEW` constant (default `false`) gates whether terminal output previews are shown in active task boxes.
 - `TASK_TERMINAL_PREVIEW_LINES` constant (default `4`) controls how many terminal output lines are shown in the preview.
 - `BatchStatus` enum: `Idle` (default, gray/disabled text), `Active` (green bold text), and `Queued { scheduled_at: String, batch_id: String }` (info color with live countdown). Queued batches display a formatted countdown (e.g., "Queued 16:00 (1h 30m)") that updates each render frame via `timer_modal::format_countdown()`.
 - `TaskStatus` enum: `Idle` (gray/disabled text), `Active` (green bold text), and `Done` (amber/warning text).
