@@ -59,6 +59,16 @@ impl TerminalEmulator {
         self.cols
     }
 
+    /// Returns the current cursor position as `(row, col)`.
+    pub fn cursor_position(&self) -> (u16, u16) {
+        self.parser.screen().cursor_position()
+    }
+
+    /// Returns `true` if the application has hidden the cursor.
+    pub fn hide_cursor(&self) -> bool {
+        self.parser.screen().hide_cursor()
+    }
+
     /// Number of scrollback lines available above the visible screen.
     ///
     /// Uses the `set_scrollback(MAX)` probe since vt100 exposes the current
