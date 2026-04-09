@@ -1743,6 +1743,8 @@ pub struct FocusModeState {
     pub left_tab: LeftPanelTab,
     pub diff: Option<gitdiff::ParsedDiff>,
     pub diff_scroll: usize,
+    pub diff_cursor: usize,
+    pub diff_sel_anchor: Option<usize>,
     pub diff_error: Option<String>,
     diff_rx: mpsc::Receiver<gitdiff::DiffEvent>,
     diff_tx: mpsc::Sender<gitdiff::DiffEvent>,
@@ -1755,6 +1757,8 @@ pub struct FocusModeState {
     pub compare_picker: BranchPicker,
     pub compare_diff: Option<gitdiff::ParsedDiff>,
     pub compare_diff_scroll: usize,
+    pub compare_cursor: usize,
+    pub compare_sel_anchor: Option<usize>,
     pub compare_diff_error: Option<String>,
     compare_diff_rx: mpsc::Receiver<gitdiff::DiffEvent>,
     compare_diff_tx: mpsc::Sender<gitdiff::DiffEvent>,
@@ -1791,6 +1795,8 @@ impl FocusModeState {
             left_tab: LeftPanelTab::Changes,
             diff: None,
             diff_scroll: 0,
+            diff_cursor: 0,
+            diff_sel_anchor: None,
             diff_error: None,
             diff_rx,
             diff_tx,
@@ -1802,6 +1808,8 @@ impl FocusModeState {
             compare_picker: BranchPicker::new(),
             compare_diff: None,
             compare_diff_scroll: 0,
+            compare_cursor: 0,
+            compare_sel_anchor: None,
             compare_diff_error: None,
             compare_diff_rx,
             compare_diff_tx,
@@ -1841,6 +1849,8 @@ impl FocusModeState {
         self.left_tab = LeftPanelTab::Changes;
         self.diff = None;
         self.diff_scroll = 0;
+        self.diff_cursor = 0;
+        self.diff_sel_anchor = None;
         self.diff_error = None;
         self.working_dir = Some(working_dir.to_string());
         self.repo_path = repo_path.map(|s| s.to_string());
@@ -1848,6 +1858,8 @@ impl FocusModeState {
         self.compare_picker = BranchPicker::new();
         self.compare_diff = None;
         self.compare_diff_scroll = 0;
+        self.compare_cursor = 0;
+        self.compare_sel_anchor = None;
         self.compare_diff_error = None;
         self.pr_info = None;
 
@@ -1921,9 +1933,11 @@ impl FocusModeState {
         while let Ok(event) = self.diff_rx.try_recv() {
             match event {
                 gitdiff::DiffEvent::Updated(parsed) => {
-                    // Clamp scroll to new diff length
+                    // Clamp scroll and cursor to new diff length
                     let max = parsed.lines.len().saturating_sub(1);
                     self.diff_scroll = self.diff_scroll.min(max);
+                    self.diff_cursor = self.diff_cursor.min(max);
+                    self.diff_sel_anchor = None;
                     self.diff = Some(parsed);
                     self.diff_error = None;
                 }
@@ -2007,6 +2021,8 @@ impl FocusModeState {
         }
         self.diff = None;
         self.diff_scroll = 0;
+        self.diff_cursor = 0;
+        self.diff_sel_anchor = None;
         self.diff_error = None;
         self.working_dir = None;
         self.repo_path = None;
@@ -2149,6 +2165,8 @@ impl FocusModeState {
                 gitdiff::DiffEvent::Updated(parsed) => {
                     let max = parsed.lines.len().saturating_sub(1);
                     self.compare_diff_scroll = self.compare_diff_scroll.min(max);
+                    self.compare_cursor = self.compare_cursor.min(max);
+                    self.compare_sel_anchor = None;
                     self.compare_diff = Some(parsed);
                     self.compare_diff_error = None;
                 }
@@ -2243,6 +2261,162 @@ impl FocusModeState {
             }
         }
     }
+
+    // -- Diff cursor / selection (Changes tab) --
+
+    /// Move diff cursor up, auto-scrolling the viewport if needed.
+    pub fn diff_cursor_up(&mut self, viewport_height: usize) {
+        self.diff_cursor = self.diff_cursor.saturating_sub(1);
+        self.diff_ensure_cursor_visible(viewport_height);
+    }
+
+    /// Move diff cursor down, auto-scrolling the viewport if needed.
+    pub fn diff_cursor_down(&mut self, viewport_height: usize) {
+        if let Some(diff) = &self.diff {
+            let max = diff.lines.len().saturating_sub(1);
+            self.diff_cursor = (self.diff_cursor + 1).min(max);
+        }
+        self.diff_ensure_cursor_visible(viewport_height);
+    }
+
+    fn diff_ensure_cursor_visible(&mut self, viewport_height: usize) {
+        if viewport_height == 0 {
+            return;
+        }
+        if self.diff_cursor < self.diff_scroll {
+            self.diff_scroll = self.diff_cursor;
+        } else if self.diff_cursor >= self.diff_scroll + viewport_height {
+            self.diff_scroll = self.diff_cursor.saturating_sub(viewport_height - 1);
+        }
+    }
+
+    /// Toggle selection anchor at the current cursor position.
+    pub fn diff_toggle_anchor(&mut self) {
+        if self.diff_sel_anchor.is_some() {
+            self.diff_sel_anchor = None;
+        } else {
+            self.diff_sel_anchor = Some(self.diff_cursor);
+        }
+    }
+
+    pub fn diff_cancel_selection(&mut self) {
+        self.diff_sel_anchor = None;
+    }
+
+    /// Build text from the current diff selection and send it to the agent terminal.
+    pub fn diff_send_selection(&self) {
+        let diff = match &self.diff {
+            Some(d) if !d.lines.is_empty() => d,
+            _ => return,
+        };
+        let text = build_selection_text(diff, self.diff_cursor, self.diff_sel_anchor);
+        if !text.is_empty() {
+            self.send_input(text.into_bytes());
+        }
+    }
+
+    #[allow(dead_code)]
+    pub fn diff_has_selection(&self) -> bool {
+        self.diff_sel_anchor.is_some()
+    }
+
+    // -- Compare cursor / selection (Compare tab) --
+
+    /// Move compare cursor up, auto-scrolling the viewport if needed.
+    pub fn compare_cursor_up(&mut self, viewport_height: usize) {
+        self.compare_cursor = self.compare_cursor.saturating_sub(1);
+        self.compare_ensure_cursor_visible(viewport_height);
+    }
+
+    /// Move compare cursor down, auto-scrolling the viewport if needed.
+    pub fn compare_cursor_down(&mut self, viewport_height: usize) {
+        if let Some(diff) = &self.compare_diff {
+            let max = diff.lines.len().saturating_sub(1);
+            self.compare_cursor = (self.compare_cursor + 1).min(max);
+        }
+        self.compare_ensure_cursor_visible(viewport_height);
+    }
+
+    fn compare_ensure_cursor_visible(&mut self, viewport_height: usize) {
+        if viewport_height == 0 {
+            return;
+        }
+        if self.compare_cursor < self.compare_diff_scroll {
+            self.compare_diff_scroll = self.compare_cursor;
+        } else if self.compare_cursor >= self.compare_diff_scroll + viewport_height {
+            self.compare_diff_scroll = self.compare_cursor.saturating_sub(viewport_height - 1);
+        }
+    }
+
+    pub fn compare_toggle_anchor(&mut self) {
+        if self.compare_sel_anchor.is_some() {
+            self.compare_sel_anchor = None;
+        } else {
+            self.compare_sel_anchor = Some(self.compare_cursor);
+        }
+    }
+
+    pub fn compare_cancel_selection(&mut self) {
+        self.compare_sel_anchor = None;
+    }
+
+    pub fn compare_send_selection(&self) {
+        let diff = match &self.compare_diff {
+            Some(d) if !d.lines.is_empty() => d,
+            _ => return,
+        };
+        let text = build_selection_text(diff, self.compare_cursor, self.compare_sel_anchor);
+        if !text.is_empty() {
+            self.send_input(text.into_bytes());
+        }
+    }
+
+    pub fn compare_has_selection(&self) -> bool {
+        self.compare_sel_anchor.is_some()
+    }
+}
+
+/// Build text payload from a diff selection range (or single cursor line).
+fn build_selection_text(
+    diff: &gitdiff::ParsedDiff,
+    cursor: usize,
+    anchor: Option<usize>,
+) -> String {
+    let max_idx = diff.lines.len().saturating_sub(1);
+    let (lo, hi) = match anchor {
+        Some(a) => (a.min(cursor).min(max_idx), a.max(cursor).min(max_idx)),
+        None => (cursor.min(max_idx), cursor.min(max_idx)),
+    };
+
+    let mut out = String::new();
+    let mut last_file_idx: Option<usize> = None;
+
+    for line in &diff.lines[lo..=hi] {
+        match line.kind {
+            gitdiff::DiffLineKind::Add
+            | gitdiff::DiffLineKind::Delete
+            | gitdiff::DiffLineKind::Context => {
+                if last_file_idx != Some(line.file_idx) {
+                    if let Some(name) = diff.file_names.get(line.file_idx) {
+                        out.push_str("# file: ");
+                        out.push_str(name);
+                        out.push('\n');
+                    }
+                    last_file_idx = Some(line.file_idx);
+                }
+                let prefix = match line.kind {
+                    gitdiff::DiffLineKind::Add => '+',
+                    gitdiff::DiffLineKind::Delete => '-',
+                    _ => ' ',
+                };
+                out.push(prefix);
+                out.push_str(&line.content);
+                out.push('\n');
+            }
+            _ => {} // skip structural lines
+        }
+    }
+    out
 }
 
 /// Render the focus mode view: 60% left panel with tabs, 40% agent panel right.
@@ -2308,6 +2482,8 @@ fn render_left_panel(frame: &mut Frame, area: Rect, state: &mut FocusModeState, 
             state.diff_error.as_deref(),
             "No uncommitted changes",
             repo_color,
+            if left_focused { Some(state.diff_cursor) } else { None },
+            state.diff_sel_anchor,
         ),
         LeftPanelTab::Compare => render_compare_tab(frame, content_area, state, repo_color),
         LeftPanelTab::Terminal => {
@@ -2466,6 +2642,7 @@ fn render_left_tab_bar(
     frame.render_widget(Paragraph::new(Line::from(spans)), area);
 }
 
+#[allow(clippy::too_many_arguments)]
 fn render_diff_viewer(
     frame: &mut Frame,
     area: Rect,
@@ -2474,6 +2651,8 @@ fn render_diff_viewer(
     error: Option<&str>,
     empty_message: &str,
     repo_color: Option<Color>,
+    cursor: Option<usize>,
+    sel_anchor: Option<usize>,
 ) {
     let bg_style = Style::default().bg(theme::R_BG_BASE);
 
@@ -2520,22 +2699,55 @@ fn render_diff_viewer(
         }
     };
 
-    let visible_height = area.height as usize;
+    // Split area for hint bar when cursor is active
+    let (body_area, hint_area) = if cursor.is_some() && area.height >= 2 {
+        let [body, hint] = Layout::vertical([
+            Constraint::Min(0),
+            Constraint::Length(1),
+        ])
+        .areas(area);
+        (body, Some(hint))
+    } else {
+        (area, None)
+    };
+
+    let visible_height = body_area.height as usize;
     let start = scroll;
     let end = (start + visible_height).min(diff.lines.len());
 
     // Gutter width: "  old | new │" = 4+4+1 = 9 chars
     let gutter_width: u16 = 9;
-    let content_width = area.width.saturating_sub(gutter_width);
+    let content_width = body_area.width.saturating_sub(gutter_width);
+
+    // Compute selection range for highlight checks
+    let sel_range = match (cursor, sel_anchor) {
+        (Some(c), Some(a)) => Some((a.min(c), a.max(c))),
+        _ => None,
+    };
 
     let mut lines = Vec::with_capacity(visible_height);
 
-    for diff_line in &diff.lines[start..end] {
+    for (vis_idx, diff_line) in diff.lines[start..end].iter().enumerate() {
+        let abs_idx = start + vis_idx;
+
+        // Determine if this line is the cursor or part of a selection
+        let is_cursor = cursor == Some(abs_idx);
+        let is_selected = sel_range
+            .map(|(lo, hi)| abs_idx >= lo && abs_idx <= hi)
+            .unwrap_or(false);
+
         // Separator: blank line between files
         if diff_line.kind == gitdiff::DiffLineKind::Separator {
+            let sep_bg = if is_cursor {
+                theme::R_BG_ACTIVE
+            } else if is_selected {
+                theme::R_SELECTION_BG
+            } else {
+                theme::R_BG_BASE
+            };
             lines.push(Line::from(Span::styled(
-                " ".repeat(area.width as usize),
-                bg_style,
+                " ".repeat(body_area.width as usize),
+                Style::default().bg(sep_bg),
             )));
             continue;
         }
@@ -2551,12 +2763,21 @@ fn render_diff_viewer(
             gitdiff::DiffLineKind::Separator => unreachable!(),
         };
 
-        let gutter_style = Style::default().fg(theme::R_TEXT_TERTIARY).bg(line_bg);
-        let sep_style = Style::default().fg(theme::R_TEXT_DISABLED).bg(line_bg);
-        let content_style = if diff_line.kind == gitdiff::DiffLineKind::FileHeader {
-            Style::default().fg(content_fg).bg(line_bg).add_modifier(Modifier::BOLD)
+        // Override background for cursor/selection
+        let row_bg = if is_cursor {
+            theme::R_BG_ACTIVE
+        } else if is_selected {
+            theme::R_SELECTION_BG
         } else {
-            Style::default().fg(content_fg).bg(line_bg)
+            line_bg
+        };
+
+        let gutter_style = Style::default().fg(theme::R_TEXT_TERTIARY).bg(row_bg);
+        let sep_style = Style::default().fg(theme::R_TEXT_DISABLED).bg(row_bg);
+        let content_style = if diff_line.kind == gitdiff::DiffLineKind::FileHeader {
+            Style::default().fg(content_fg).bg(row_bg).add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(content_fg).bg(row_bg)
         };
 
         // Build gutter: " old  new│"
@@ -2598,7 +2819,7 @@ fn render_diff_viewer(
                 match file_syntax {
                     Some(syn) => {
                         let spans = syntax::highlight_line(
-                            &display_content, syn, line_bg, content_fg,
+                            &display_content, syn, row_bg, content_fg,
                         );
                         if spans.is_empty() {
                             vec![Span::styled(display_content, content_style)]
@@ -2628,12 +2849,30 @@ fn render_diff_viewer(
     // Fill remaining visible area with empty lines
     for _ in end.saturating_sub(start)..visible_height {
         lines.push(Line::from(Span::styled(
-            " ".repeat(area.width as usize),
+            " ".repeat(body_area.width as usize),
             bg_style,
         )));
     }
 
-    frame.render_widget(Paragraph::new(lines), area);
+    frame.render_widget(Paragraph::new(lines), body_area);
+
+    // Render hint bar when cursor is active
+    if let Some(hint_area) = hint_area {
+        let hint_text = if sel_anchor.is_some() {
+            " \u{2191}\u{2193} extend  Enter send  Esc cancel"
+        } else {
+            " v select  Enter send  Esc cancel"
+        };
+        frame.render_widget(
+            Paragraph::new(Line::from(Span::styled(
+                hint_text,
+                Style::default()
+                    .fg(theme::R_TEXT_TERTIARY)
+                    .bg(theme::R_BG_SURFACE),
+            ))),
+            hint_area,
+        );
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -2675,6 +2914,7 @@ fn render_compare_tab(
             render_compare_label(frame, label_area, &state.compare_picker);
 
             if state.compare_picker.selected_branch.is_some() {
+                let left_focused = state.focus_side == FocusSide::Left;
                 render_diff_viewer(
                     frame,
                     diff_area,
@@ -2683,6 +2923,8 @@ fn render_compare_tab(
                     state.compare_diff_error.as_deref(),
                     "No differences",
                     repo_color,
+                    if left_focused { Some(state.compare_cursor) } else { None },
+                    state.compare_sel_anchor,
                 );
             } else {
                 frame.render_widget(

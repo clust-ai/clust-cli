@@ -3644,14 +3644,27 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                             } else {
                                 match focus_mode_state.left_tab {
                                     overview::LeftPanelTab::Changes => {
+                                        // tab bar (1) + hint bar (1) = 2 rows overhead
+                                        let vh = last_content_area.height.saturating_sub(2) as usize;
                                         match key.code {
                                             KeyCode::Up => {
-                                                focus_mode_state.diff_scroll_up()
+                                                focus_mode_state.diff_cursor_up(vh)
                                             }
                                             KeyCode::Down => {
-                                                focus_mode_state.diff_scroll_down()
+                                                focus_mode_state.diff_cursor_down(vh)
+                                            }
+                                            KeyCode::Char('v') => {
+                                                focus_mode_state.diff_toggle_anchor()
+                                            }
+                                            KeyCode::Enter => {
+                                                focus_mode_state.diff_send_selection();
+                                                focus_mode_state.diff_cancel_selection();
+                                            }
+                                            KeyCode::Esc => {
+                                                focus_mode_state.diff_cancel_selection()
                                             }
                                             KeyCode::Tab => {
+                                                focus_mode_state.diff_cancel_selection();
                                                 focus_mode_state.left_tab =
                                                     focus_mode_state.left_tab.next();
                                             }
@@ -3669,21 +3682,36 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                                 }
                                             }
                                             overview::BranchPickerMode::Selected => {
+                                                let vh = last_content_area.height.saturating_sub(3) as usize;
                                                 match key.code {
                                                     KeyCode::Up => {
                                                         focus_mode_state
-                                                            .compare_scroll_up()
+                                                            .compare_cursor_up(vh)
                                                     }
                                                     KeyCode::Down => {
                                                         focus_mode_state
-                                                            .compare_scroll_down()
+                                                            .compare_cursor_down(vh)
+                                                    }
+                                                    KeyCode::Char('v') => {
+                                                        focus_mode_state
+                                                            .compare_toggle_anchor()
                                                     }
                                                     KeyCode::Enter => {
+                                                        if focus_mode_state.compare_has_selection() {
+                                                            focus_mode_state.compare_send_selection();
+                                                            focus_mode_state.compare_cancel_selection();
+                                                        } else {
+                                                            focus_mode_state
+                                                                .compare_picker
+                                                                .enter_search();
+                                                        }
+                                                    }
+                                                    KeyCode::Esc => {
                                                         focus_mode_state
-                                                            .compare_picker
-                                                            .enter_search();
+                                                            .compare_cancel_selection()
                                                     }
                                                     KeyCode::Tab => {
+                                                        focus_mode_state.compare_cancel_selection();
                                                         focus_mode_state.left_tab =
                                                             focus_mode_state
                                                                 .left_tab
@@ -3736,6 +3764,9 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                     KeyCode::Left if focus_mode_state.repo_path.is_some() => {
                                         focus_mode_state.focus_side =
                                             overview::FocusSide::Left;
+                                        // Place cursor at top of visible viewport
+                                        focus_mode_state.diff_cursor = focus_mode_state.diff_scroll;
+                                        focus_mode_state.compare_cursor = focus_mode_state.compare_diff_scroll;
                                     }
                                     KeyCode::PageUp => {
                                         if let Some(panel) =
