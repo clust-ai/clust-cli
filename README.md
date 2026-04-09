@@ -154,10 +154,11 @@ clust repo -s
 
 ## Terminal UI
 
-The TUI dashboard (`clust ui`) has two tabs:
+The TUI dashboard (`clust ui`) has three tabs:
 
 - **Repositories** — Browse tracked repos and branches in a tree view, see which agents are running where, and jump into focus mode. Repos are color-coded for quick identification.
 - **Overview** — Side-by-side terminal panels showing all running agents with full ANSI rendering, scrollback, and Cmd+click URL opening.
+- **Batches** — Batch creation and task management with horizontal batch cards, scheduling, and JSON import.
 
 Mouse support includes click navigation, scroll, and Cmd+click to open URLs.
 
