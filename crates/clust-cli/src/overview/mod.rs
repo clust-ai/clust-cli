@@ -1478,18 +1478,16 @@ fn render_agent_panel(
         header_area,
     );
 
-    // Terminal content (skip for batch agents — header is sufficient)
-    if batch_info.is_none() {
-        let lines = if panel.panel_scroll_offset > 0 {
-            panel
-                .vterm
-                .to_ratatui_lines_scrolled(panel.panel_scroll_offset)
-        } else {
-            panel.vterm.to_ratatui_lines()
-        };
-        let paragraph = Paragraph::new(lines).style(Style::default().bg(theme::R_BG_BASE));
-        frame.render_widget(paragraph, content_area);
-    }
+    // Terminal content
+    let lines = if panel.panel_scroll_offset > 0 {
+        panel
+            .vterm
+            .to_ratatui_lines_scrolled(panel.panel_scroll_offset)
+    } else {
+        panel.vterm.to_ratatui_lines()
+    };
+    let paragraph = Paragraph::new(lines).style(Style::default().bg(theme::R_BG_BASE));
+    frame.render_widget(paragraph, content_area);
     Some(content_area)
 }
 
