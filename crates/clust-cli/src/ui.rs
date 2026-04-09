@@ -2723,6 +2723,24 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                 let launch_mode = crate::import_batch_modal::parse_launch_mode(
                                     output.batch_json.launch_mode.as_deref(),
                                 );
+                                let launch_mode_str = match launch_mode {
+                                    tasks::LaunchMode::Manual => "manual",
+                                    tasks::LaunchMode::Auto => "auto",
+                                };
+                                let reg_msg = CliMessage::RegisterBatch {
+                                    repo_path: output.repo_path.clone(),
+                                    target_branch: output.branch_name.clone(),
+                                    title: output.batch_json.title.clone().unwrap_or_else(|| format!("Batch {}", tasks_state.batches.len() + 1)),
+                                    max_concurrent: output.batch_json.max_concurrent,
+                                    prompt_prefix: output.batch_json.prefix.clone(),
+                                    prompt_suffix: output.batch_json.suffix.clone(),
+                                    plan_mode: output.batch_json.plan_mode,
+                                    allow_bypass: output.batch_json.allow_bypass,
+                                    agent_binary: None,
+                                    hub: hub_name.to_string(),
+                                    launch_mode: launch_mode_str.to_string(),
+                                    tasks: vec![],
+                                };
                                 let batch_output = crate::create_batch_modal::BatchModalOutput {
                                     repo_path: output.repo_path,
                                     repo_name: output.repo_name,
@@ -2731,8 +2749,23 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                     max_concurrent: output.batch_json.max_concurrent,
                                     launch_mode,
                                 };
-                                tasks_state.add_batch(batch_output);
-                                let batch_idx = tasks_state.batches.len() - 1;
+                                let batch_idx = tasks_state.add_batch(batch_output);
+                                // Register with hub asynchronously
+                                let tx = agent_start_tx.clone();
+                                tokio::spawn(async move {
+                                    if let Ok(mut stream) = ipc::try_connect().await {
+                                        if let Ok(()) = clust_ipc::send_message(&mut stream, &reg_msg).await {
+                                            if let Ok(HubMessage::BatchRegistered { batch_id }) =
+                                                clust_ipc::recv_message::<HubMessage>(&mut stream).await
+                                            {
+                                                let _ = tx.send(AgentStartResult::BatchRegistered {
+                                                    local_batch_idx: batch_idx,
+                                                    hub_batch_id: batch_id,
+                                                }).await;
+                                            }
+                                        }
+                                    }
+                                });
                                 // Apply prefix/suffix
                                 if let Some(ref prefix) = output.batch_json.prefix {
                                     tasks_state.set_prompt_prefix(batch_idx, prefix.clone());
