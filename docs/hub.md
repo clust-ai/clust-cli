@@ -269,6 +269,20 @@ When the hub receives a `CheckoutRemoteBranch` message:
 3. Check out the remote branch as a local tracking branch using `git checkout --track <remote/branch>`.
 4. Return `RemoteBranchCheckedOut { branch_name }` with the local branch name.
 
+### Detach Head
+
+When the hub receives a `DetachHead` message:
+
+1. Run `git checkout --detach` in the repository root.
+2. Return `HeadDetached` on success, or `Error` on failure.
+
+### Checkout Local Branch
+
+When the hub receives a `CheckoutLocalBranch` message:
+
+1. Run `git checkout <branch>` in the repository root.
+2. Return `LocalBranchCheckedOut { branch_name }` on success, or `Error` on failure.
+
 ### Pull Branch
 
 When the hub receives a `PullBranch` message:

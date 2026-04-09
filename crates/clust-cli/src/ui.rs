@@ -291,6 +291,8 @@ enum BranchAction {
     DeleteRemoteBranch,
     CheckoutRemote,
     BaseWorktreeOff,
+    DetachHead,
+    CheckoutLocal,
 }
 
 /// Action to execute after user confirms in a confirmation dialog.
@@ -1734,6 +1736,77 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                                     Instant::now() - Duration::from_secs(10);
                                             }
                                             6 => {
+                                                // "Detach"
+                                                let tx = status_tx.clone();
+                                                let rp = repo_path.clone();
+                                                tokio::spawn(async move {
+                                                    let mut stream =
+                                                        match ipc::try_connect().await {
+                                                            Ok(s) => s,
+                                                            Err(e) => {
+                                                                let _ = tx.send(StatusMessage {
+                                                                    text: format!("Detach failed: hub connect error: {e}"),
+                                                                    level: StatusLevel::Error,
+                                                                    created: Instant::now(),
+                                                                }).await;
+                                                                return;
+                                                            }
+                                                        };
+                                                    let msg = CliMessage::DetachHead {
+                                                        repo_path: rp,
+                                                    };
+                                                    if let Err(e) = clust_ipc::send_message(
+                                                        &mut stream,
+                                                        &msg,
+                                                    )
+                                                    .await
+                                                    {
+                                                        let _ = tx.send(StatusMessage {
+                                                            text: format!("Detach failed: send error: {e}"),
+                                                            level: StatusLevel::Error,
+                                                            created: Instant::now(),
+                                                        }).await;
+                                                        return;
+                                                    }
+                                                    match clust_ipc::recv_message::<HubMessage>(
+                                                        &mut stream,
+                                                    )
+                                                    .await
+                                                    {
+                                                        Ok(HubMessage::HeadDetached) => {
+                                                            let _ = tx.send(StatusMessage {
+                                                                text: "HEAD detached".to_string(),
+                                                                level: StatusLevel::Success,
+                                                                created: Instant::now(),
+                                                            }).await;
+                                                        }
+                                                        Ok(HubMessage::Error { message }) => {
+                                                            let _ = tx.send(StatusMessage {
+                                                                text: format!("Detach failed: {message}"),
+                                                                level: StatusLevel::Error,
+                                                                created: Instant::now(),
+                                                            }).await;
+                                                        }
+                                                        Ok(_) => {
+                                                            let _ = tx.send(StatusMessage {
+                                                                text: "Detach failed: unexpected hub response".to_string(),
+                                                                level: StatusLevel::Error,
+                                                                created: Instant::now(),
+                                                            }).await;
+                                                        }
+                                                        Err(e) => {
+                                                            let _ = tx.send(StatusMessage {
+                                                                text: format!("Detach failed: recv error: {e}"),
+                                                                level: StatusLevel::Error,
+                                                                created: Instant::now(),
+                                                            }).await;
+                                                        }
+                                                    }
+                                                });
+                                                last_repo_fetch =
+                                                    Instant::now() - Duration::from_secs(10);
+                                            }
+                                            7 => {
                                                 // "Purge" → open confirmation dialog
                                                 active_menu = Some(ActiveMenu::ConfirmAction {
                                                     action: ConfirmedAction::PurgeRepo {
@@ -2132,6 +2205,148 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                                         );
                                                         create_modal = Some(modal);
                                                     }
+                                                }
+                                                BranchAction::DetachHead => {
+                                                    let tx = status_tx.clone();
+                                                    let rp = repo_path.clone();
+                                                    tokio::spawn(async move {
+                                                        let mut stream =
+                                                            match ipc::try_connect().await {
+                                                                Ok(s) => s,
+                                                                Err(e) => {
+                                                                    let _ = tx.send(StatusMessage {
+                                                                        text: format!("Detach failed: hub connect error: {e}"),
+                                                                        level: StatusLevel::Error,
+                                                                        created: Instant::now(),
+                                                                    }).await;
+                                                                    return;
+                                                                }
+                                                            };
+                                                        let msg = CliMessage::DetachHead {
+                                                            repo_path: rp,
+                                                        };
+                                                        if let Err(e) = clust_ipc::send_message(
+                                                            &mut stream,
+                                                            &msg,
+                                                        )
+                                                        .await
+                                                        {
+                                                            let _ = tx.send(StatusMessage {
+                                                                text: format!("Detach failed: send error: {e}"),
+                                                                level: StatusLevel::Error,
+                                                                created: Instant::now(),
+                                                            }).await;
+                                                            return;
+                                                        }
+                                                        match clust_ipc::recv_message::<HubMessage>(
+                                                            &mut stream,
+                                                        )
+                                                        .await
+                                                        {
+                                                            Ok(HubMessage::HeadDetached) => {
+                                                                let _ = tx.send(StatusMessage {
+                                                                    text: "HEAD detached".to_string(),
+                                                                    level: StatusLevel::Success,
+                                                                    created: Instant::now(),
+                                                                }).await;
+                                                            }
+                                                            Ok(HubMessage::Error { message }) => {
+                                                                let _ = tx.send(StatusMessage {
+                                                                    text: format!("Detach failed: {message}"),
+                                                                    level: StatusLevel::Error,
+                                                                    created: Instant::now(),
+                                                                }).await;
+                                                            }
+                                                            Ok(_) => {
+                                                                let _ = tx.send(StatusMessage {
+                                                                    text: "Detach failed: unexpected hub response".to_string(),
+                                                                    level: StatusLevel::Error,
+                                                                    created: Instant::now(),
+                                                                }).await;
+                                                            }
+                                                            Err(e) => {
+                                                                let _ = tx.send(StatusMessage {
+                                                                    text: format!("Detach failed: recv error: {e}"),
+                                                                    level: StatusLevel::Error,
+                                                                    created: Instant::now(),
+                                                                }).await;
+                                                            }
+                                                        }
+                                                    });
+                                                    last_repo_fetch =
+                                                        Instant::now() - Duration::from_secs(10);
+                                                }
+                                                BranchAction::CheckoutLocal => {
+                                                    let tx = status_tx.clone();
+                                                    let rp = repo_path.clone();
+                                                    let bn = branch_name.clone();
+                                                    tokio::spawn(async move {
+                                                        let mut stream =
+                                                            match ipc::try_connect().await {
+                                                                Ok(s) => s,
+                                                                Err(e) => {
+                                                                    let _ = tx.send(StatusMessage {
+                                                                        text: format!("Checkout failed: hub connect error: {e}"),
+                                                                        level: StatusLevel::Error,
+                                                                        created: Instant::now(),
+                                                                    }).await;
+                                                                    return;
+                                                                }
+                                                            };
+                                                        let msg = CliMessage::CheckoutLocalBranch {
+                                                            repo_path: rp,
+                                                            branch_name: bn.clone(),
+                                                        };
+                                                        if let Err(e) = clust_ipc::send_message(
+                                                            &mut stream,
+                                                            &msg,
+                                                        )
+                                                        .await
+                                                        {
+                                                            let _ = tx.send(StatusMessage {
+                                                                text: format!("Checkout failed: send error: {e}"),
+                                                                level: StatusLevel::Error,
+                                                                created: Instant::now(),
+                                                            }).await;
+                                                            return;
+                                                        }
+                                                        match clust_ipc::recv_message::<HubMessage>(
+                                                            &mut stream,
+                                                        )
+                                                        .await
+                                                        {
+                                                            Ok(HubMessage::LocalBranchCheckedOut { branch_name }) => {
+                                                                let _ = tx.send(StatusMessage {
+                                                                    text: format!("Checked out {branch_name}"),
+                                                                    level: StatusLevel::Success,
+                                                                    created: Instant::now(),
+                                                                }).await;
+                                                            }
+                                                            Ok(HubMessage::Error { message }) => {
+                                                                let _ = tx.send(StatusMessage {
+                                                                    text: format!("Checkout failed: {message}"),
+                                                                    level: StatusLevel::Error,
+                                                                    created: Instant::now(),
+                                                                }).await;
+                                                            }
+                                                            Ok(_) => {
+                                                                let _ = tx.send(StatusMessage {
+                                                                    text: "Checkout failed: unexpected hub response".to_string(),
+                                                                    level: StatusLevel::Error,
+                                                                    created: Instant::now(),
+                                                                }).await;
+                                                            }
+                                                            Err(e) => {
+                                                                let _ = tx.send(StatusMessage {
+                                                                    text: format!("Checkout failed: recv error: {e}"),
+                                                                    level: StatusLevel::Error,
+                                                                    created: Instant::now(),
+                                                                }).await;
+                                                            }
+                                                        }
+                                                    });
+                                                    last_repo_fetch =
+                                                        Instant::now() - Duration::from_secs(10);
                                                 }
                                                 BranchAction::RemoteStartAgent => {
                                                     if let Some(local) =
@@ -4156,6 +4371,7 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                                                         "Stop All Agents".to_string(),
                                                                         "Unregister".to_string(),
                                                                         "Clean Stale Refs".to_string(),
+                                                                        "Detach".to_string(),
                                                                         "Purge".to_string(),
                                                                     ],
                                                                 ),
@@ -4193,6 +4409,12 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                                                 if branch.is_head {
                                                                     labels.push("Start Agent (in place)".to_string());
                                                                     actions.push(BranchAction::StartAgentInPlace);
+                                                                    labels.push("Detach".to_string());
+                                                                    actions.push(BranchAction::DetachHead);
+                                                                }
+                                                                if !branch.is_head && !branch.is_worktree {
+                                                                    labels.push("Checkout".to_string());
+                                                                    actions.push(BranchAction::CheckoutLocal);
                                                                 }
                                                                 labels.push("Base Worktree Off".to_string());
                                                                 actions.push(BranchAction::BaseWorktreeOff);
@@ -4601,6 +4823,77 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                                     Instant::now() - Duration::from_secs(10);
                                             }
                                             6 => {
+                                                // "Detach"
+                                                let tx = status_tx.clone();
+                                                let rp = repo_path.clone();
+                                                tokio::spawn(async move {
+                                                    let mut stream =
+                                                        match ipc::try_connect().await {
+                                                            Ok(s) => s,
+                                                            Err(e) => {
+                                                                let _ = tx.send(StatusMessage {
+                                                                    text: format!("Detach failed: hub connect error: {e}"),
+                                                                    level: StatusLevel::Error,
+                                                                    created: Instant::now(),
+                                                                }).await;
+                                                                return;
+                                                            }
+                                                        };
+                                                    let msg = CliMessage::DetachHead {
+                                                        repo_path: rp,
+                                                    };
+                                                    if let Err(e) = clust_ipc::send_message(
+                                                        &mut stream,
+                                                        &msg,
+                                                    )
+                                                    .await
+                                                    {
+                                                        let _ = tx.send(StatusMessage {
+                                                            text: format!("Detach failed: send error: {e}"),
+                                                            level: StatusLevel::Error,
+                                                            created: Instant::now(),
+                                                        }).await;
+                                                        return;
+                                                    }
+                                                    match clust_ipc::recv_message::<HubMessage>(
+                                                        &mut stream,
+                                                    )
+                                                    .await
+                                                    {
+                                                        Ok(HubMessage::HeadDetached) => {
+                                                            let _ = tx.send(StatusMessage {
+                                                                text: "HEAD detached".to_string(),
+                                                                level: StatusLevel::Success,
+                                                                created: Instant::now(),
+                                                            }).await;
+                                                        }
+                                                        Ok(HubMessage::Error { message }) => {
+                                                            let _ = tx.send(StatusMessage {
+                                                                text: format!("Detach failed: {message}"),
+                                                                level: StatusLevel::Error,
+                                                                created: Instant::now(),
+                                                            }).await;
+                                                        }
+                                                        Ok(_) => {
+                                                            let _ = tx.send(StatusMessage {
+                                                                text: "Detach failed: unexpected hub response".to_string(),
+                                                                level: StatusLevel::Error,
+                                                                created: Instant::now(),
+                                                            }).await;
+                                                        }
+                                                        Err(e) => {
+                                                            let _ = tx.send(StatusMessage {
+                                                                text: format!("Detach failed: recv error: {e}"),
+                                                                level: StatusLevel::Error,
+                                                                created: Instant::now(),
+                                                            }).await;
+                                                        }
+                                                    }
+                                                });
+                                                last_repo_fetch =
+                                                    Instant::now() - Duration::from_secs(10);
+                                            }
+                                            7 => {
                                                 active_menu = Some(ActiveMenu::ConfirmAction {
                                                     action: ConfirmedAction::PurgeRepo {
                                                         repo_path,
@@ -4997,6 +5290,148 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                                         );
                                                         create_modal = Some(modal);
                                                     }
+                                                }
+                                                BranchAction::DetachHead => {
+                                                    let tx = status_tx.clone();
+                                                    let rp = repo_path.clone();
+                                                    tokio::spawn(async move {
+                                                        let mut stream =
+                                                            match ipc::try_connect().await {
+                                                                Ok(s) => s,
+                                                                Err(e) => {
+                                                                    let _ = tx.send(StatusMessage {
+                                                                        text: format!("Detach failed: hub connect error: {e}"),
+                                                                        level: StatusLevel::Error,
+                                                                        created: Instant::now(),
+                                                                    }).await;
+                                                                    return;
+                                                                }
+                                                            };
+                                                        let msg = CliMessage::DetachHead {
+                                                            repo_path: rp,
+                                                        };
+                                                        if let Err(e) = clust_ipc::send_message(
+                                                            &mut stream,
+                                                            &msg,
+                                                        )
+                                                        .await
+                                                        {
+                                                            let _ = tx.send(StatusMessage {
+                                                                text: format!("Detach failed: send error: {e}"),
+                                                                level: StatusLevel::Error,
+                                                                created: Instant::now(),
+                                                            }).await;
+                                                            return;
+                                                        }
+                                                        match clust_ipc::recv_message::<HubMessage>(
+                                                            &mut stream,
+                                                        )
+                                                        .await
+                                                        {
+                                                            Ok(HubMessage::HeadDetached) => {
+                                                                let _ = tx.send(StatusMessage {
+                                                                    text: "HEAD detached".to_string(),
+                                                                    level: StatusLevel::Success,
+                                                                    created: Instant::now(),
+                                                                }).await;
+                                                            }
+                                                            Ok(HubMessage::Error { message }) => {
+                                                                let _ = tx.send(StatusMessage {
+                                                                    text: format!("Detach failed: {message}"),
+                                                                    level: StatusLevel::Error,
+                                                                    created: Instant::now(),
+                                                                }).await;
+                                                            }
+                                                            Ok(_) => {
+                                                                let _ = tx.send(StatusMessage {
+                                                                    text: "Detach failed: unexpected hub response".to_string(),
+                                                                    level: StatusLevel::Error,
+                                                                    created: Instant::now(),
+                                                                }).await;
+                                                            }
+                                                            Err(e) => {
+                                                                let _ = tx.send(StatusMessage {
+                                                                    text: format!("Detach failed: recv error: {e}"),
+                                                                    level: StatusLevel::Error,
+                                                                    created: Instant::now(),
+                                                                }).await;
+                                                            }
+                                                        }
+                                                    });
+                                                    last_repo_fetch =
+                                                        Instant::now() - Duration::from_secs(10);
+                                                }
+                                                BranchAction::CheckoutLocal => {
+                                                    let tx = status_tx.clone();
+                                                    let rp = repo_path.clone();
+                                                    let bn = branch_name.clone();
+                                                    tokio::spawn(async move {
+                                                        let mut stream =
+                                                            match ipc::try_connect().await {
+                                                                Ok(s) => s,
+                                                                Err(e) => {
+                                                                    let _ = tx.send(StatusMessage {
+                                                                        text: format!("Checkout failed: hub connect error: {e}"),
+                                                                        level: StatusLevel::Error,
+                                                                        created: Instant::now(),
+                                                                    }).await;
+                                                                    return;
+                                                                }
+                                                            };
+                                                        let msg = CliMessage::CheckoutLocalBranch {
+                                                            repo_path: rp,
+                                                            branch_name: bn.clone(),
+                                                        };
+                                                        if let Err(e) = clust_ipc::send_message(
+                                                            &mut stream,
+                                                            &msg,
+                                                        )
+                                                        .await
+                                                        {
+                                                            let _ = tx.send(StatusMessage {
+                                                                text: format!("Checkout failed: send error: {e}"),
+                                                                level: StatusLevel::Error,
+                                                                created: Instant::now(),
+                                                            }).await;
+                                                            return;
+                                                        }
+                                                        match clust_ipc::recv_message::<HubMessage>(
+                                                            &mut stream,
+                                                        )
+                                                        .await
+                                                        {
+                                                            Ok(HubMessage::LocalBranchCheckedOut { branch_name }) => {
+                                                                let _ = tx.send(StatusMessage {
+                                                                    text: format!("Checked out {branch_name}"),
+                                                                    level: StatusLevel::Success,
+                                                                    created: Instant::now(),
+                                                                }).await;
+                                                            }
+                                                            Ok(HubMessage::Error { message }) => {
+                                                                let _ = tx.send(StatusMessage {
+                                                                    text: format!("Checkout failed: {message}"),
+                                                                    level: StatusLevel::Error,
+                                                                    created: Instant::now(),
+                                                                }).await;
+                                                            }
+                                                            Ok(_) => {
+                                                                let _ = tx.send(StatusMessage {
+                                                                    text: "Checkout failed: unexpected hub response".to_string(),
+                                                                    level: StatusLevel::Error,
+                                                                    created: Instant::now(),
+                                                                }).await;
+                                                            }
+                                                            Err(e) => {
+                                                                let _ = tx.send(StatusMessage {
+                                                                    text: format!("Checkout failed: recv error: {e}"),
+                                                                    level: StatusLevel::Error,
+                                                                    created: Instant::now(),
+                                                                }).await;
+                                                            }
+                                                        }
+                                                    });
+                                                    last_repo_fetch =
+                                                        Instant::now() - Duration::from_secs(10);
                                                 }
                                                 BranchAction::RemoteStartAgent => {
                                                     if let Some(local) =
