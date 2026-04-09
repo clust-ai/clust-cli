@@ -2575,6 +2575,14 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                                 tasks_state.remove_batch(batch_idx);
                                                 last_agent_fetch = Instant::now() - Duration::from_secs(10);
                                                 last_repo_fetch = Instant::now() - Duration::from_secs(10);
+                                                // Mark batch agent panels as already cleaned up so the
+                                                // worktree-removal modal won't fire when they exit.
+                                                for panel in overview_state.panels.iter_mut() {
+                                                    if agent_ids.contains(&panel.id) {
+                                                        panel.worktree_cleanup_shown = true;
+                                                    }
+                                                }
+                                                pending_worktree_cleanups.retain(|c| !branch_names.contains(&c.branch_name));
                                                 status_message = Some(StatusMessage {
                                                     text: "Batch removed, agents stopped, branches cleaned up".to_string(),
                                                     level: StatusLevel::Info,
@@ -5406,6 +5414,14 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                                 tasks_state.remove_batch(batch_idx);
                                                 last_agent_fetch = Instant::now() - Duration::from_secs(10);
                                                 last_repo_fetch = Instant::now() - Duration::from_secs(10);
+                                                // Mark batch agent panels as already cleaned up so the
+                                                // worktree-removal modal won't fire when they exit.
+                                                for panel in overview_state.panels.iter_mut() {
+                                                    if agent_ids.contains(&panel.id) {
+                                                        panel.worktree_cleanup_shown = true;
+                                                    }
+                                                }
+                                                pending_worktree_cleanups.retain(|c| !branch_names.contains(&c.branch_name));
                                                 status_message = Some(StatusMessage { text: "Batch removed, agents stopped, branches cleaned up".to_string(), level: StatusLevel::Info, created: Instant::now() });
                                             }
                                             _ => {}
