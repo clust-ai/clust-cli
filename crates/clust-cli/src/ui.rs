@@ -2727,6 +2727,15 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                     tasks::LaunchMode::Manual => "manual",
                                     tasks::LaunchMode::Auto => "auto",
                                 };
+                                // Build IPC tasks list for hub registration
+                                let ipc_tasks: Vec<clust_ipc::QueuedTask> = output.batch_json.tasks.iter().map(|t| {
+                                    clust_ipc::QueuedTask {
+                                        branch_name: t.branch.clone(),
+                                        prompt: t.prompt.clone(),
+                                        use_prefix: true,
+                                        use_suffix: true,
+                                    }
+                                }).collect();
                                 let reg_msg = CliMessage::RegisterBatch {
                                     repo_path: output.repo_path.clone(),
                                     target_branch: output.branch_name.clone(),
@@ -2739,7 +2748,7 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                     agent_binary: None,
                                     hub: hub_name.to_string(),
                                     launch_mode: launch_mode_str.to_string(),
-                                    tasks: vec![],
+                                    tasks: ipc_tasks,
                                 };
                                 let batch_output = crate::create_batch_modal::BatchModalOutput {
                                     repo_path: output.repo_path,
