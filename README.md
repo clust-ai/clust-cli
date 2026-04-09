@@ -178,25 +178,34 @@ Batches can be imported from JSON files using `Alt+I` in the TUI. The file brows
   "max_concurrent": 2,
   "plan_mode": false,
   "allow_bypass": false,
+  "depends_on": [],
   "tasks": [
     {
       "branch": "feat/login-form",
-      "prompt": "Implement the login form component",
-      "depends_on": []
+      "prompt": "Implement the login form component"
     },
     {
       "branch": "feat/login-api",
-      "prompt": "Add the login API endpoint",
-      "depends_on": [],
-      "use_prefix": true,
-      "use_suffix": false
+      "prompt": "Add the login API endpoint"
     },
     {
       "branch": "feat/login-tests",
-      "prompt": "Write integration tests for the login flow",
-      "depends_on": ["feat/login-form", "feat/login-api"],
-      "use_prefix": false,
-      "use_suffix": true
+      "prompt": "Write integration tests for the login flow"
+    }
+  ]
+}
+```
+
+Batches can depend on other batches. When a dependency batch completes all its tasks, dependent batches auto-start. Use `depends_on` with the titles of existing batches:
+
+```json
+{
+  "title": "Integration Tests",
+  "depends_on": ["My Batch"],
+  "tasks": [
+    {
+      "branch": "feat/integration-tests",
+      "prompt": "Write integration tests for the auth module"
     }
   ]
 }
@@ -213,6 +222,7 @@ Batches can be imported from JSON files using `Alt+I` in the TUI. The file brows
 | `max_concurrent` | number | No | Max concurrent agents (auto mode). Null = unlimited. |
 | `plan_mode` | boolean | No | Start agents in plan mode. Default `false`. |
 | `allow_bypass` | boolean | No | Allow agents to bypass permission prompts. Default `false`. |
+| `depends_on` | array | No | Titles of batches this batch depends on. Batch auto-starts when all dependencies complete. |
 | `tasks` | array | Yes | List of task objects (at least one required). |
 
 **Task fields:**
@@ -221,11 +231,8 @@ Batches can be imported from JSON files using `Alt+I` in the TUI. The file brows
 |-------|------|----------|-------------|
 | `branch` | string | Yes | Branch name for the worktree. |
 | `prompt` | string | Yes | The prompt for the agent. |
-| `depends_on` | array | No | Branch names this task depends on (for ordering/documentation). |
-| `use_prefix` | boolean | No | Apply batch prompt prefix to this task. Default `true`. |
-| `use_suffix` | boolean | No | Apply batch prompt suffix to this task. Default `true`. |
 
-After selecting a JSON file, you'll be prompted to choose a repository and branch. The batch is created with all tasks pre-populated.
+After selecting a JSON file, you'll be prompted to choose a repository and branch. The batch is created with all tasks pre-populated. Dependencies can also be configured after creation using `Shift+D` in the TUI.
 
 ## Architecture
 

@@ -186,6 +186,13 @@ pub enum CliMessage {
         hub: String,
         launch_mode: String,
         tasks: Vec<QueuedTask>,
+        #[serde(default)]
+        depends_on: Vec<String>,
+    },
+    /// Update the dependency list of a batch.
+    UpdateBatchDependencies {
+        batch_id: String,
+        depends_on: Vec<String>,
     },
     /// Add a task to a registered batch.
     AddBatchTask {
@@ -317,6 +324,8 @@ pub struct QueuedBatchInfo {
     pub plan_mode: bool,
     pub allow_bypass: bool,
     pub agent_binary: Option<String>,
+    #[serde(default)]
+    pub depends_on: Vec<String>,
 }
 
 /// Messages sent from Hub to CLI.
