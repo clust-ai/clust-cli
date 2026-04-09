@@ -2143,7 +2143,11 @@ impl FocusModeState {
             .repo_path
             .as_ref()
             .and_then(|rp| repos.iter().find(|r| r.path == *rp))
-            .map(|r| r.local_branches.clone())
+            .map(|r| {
+                let mut all = r.local_branches.clone();
+                all.extend(r.remote_branches.clone());
+                all
+            })
             .unwrap_or_default();
         self.compare_picker
             .update_branches(branches, self.branch_name.as_deref());
@@ -2719,6 +2723,12 @@ fn render_picker_branch_list(frame: &mut Frame, area: Rect, picker: &BranchPicke
             };
 
             // Badges (same as CreateAgentModal)
+            if branch.is_remote {
+                spans.push(Span::styled(
+                    " [remote]",
+                    Style::default().fg(theme::R_TEXT_TERTIARY),
+                ));
+            }
             if branch.is_head {
                 spans.push(Span::styled(
                     " HEAD",
