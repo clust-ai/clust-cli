@@ -217,6 +217,7 @@ Each batch card has:
 | `b` | Toggle allow bypass on the focused batch card |
 | `p` | Open the Edit Field modal to edit the prompt prefix of the focused batch |
 | `s` | Open the Edit Field modal to edit the prompt suffix of the focused batch |
+| `c` | Copy the focused batch as JSON (import schema format) to the system clipboard |
 | `d` | Remove all tasks with Done status from the focused batch card |
 
 **State management:**
@@ -747,6 +748,28 @@ A 3-step modal for importing batch definitions from JSON files, opened globally 
 - `plan_mode` (bool, default false) -- start agents in plan mode
 - `allow_bypass` (bool, default false) -- allow agents to bypass permission prompts
 - `tasks` (array, required) -- list of task objects with `branch` (string, required), `prompt` (string, required), `depends_on` (array of strings, optional), `use_prefix` (bool, default true), and `use_suffix` (bool, default true)
+
+Example JSON:
+```json
+{
+  "title": "Refactor auth",
+  "prefix": "Follow the project style guide.",
+  "launch_mode": "auto",
+  "max_concurrent": 3,
+  "tasks": [
+    {
+      "branch": "refactor/login",
+      "prompt": "Refactor the login handler to use the new auth service."
+    },
+    {
+      "branch": "refactor/signup",
+      "prompt": "Refactor the signup handler to use the new auth service."
+    }
+  ]
+}
+```
+
+**Copy to clipboard:** Pressing `c` while a batch card is focused copies the batch as JSON (matching the import schema) to the system clipboard. This makes it easy to share batch definitions or re-import them elsewhere. Uses `pbcopy` on macOS and `xclip`/`xsel` on Linux.
 
 **Completion:** On selecting a branch in step 3, the modal outputs an `ImportBatchOutput` containing the parsed `BatchJson`, repo path, repo name, and branch name. The batch is created with all tasks pre-populated, prefix/suffix applied, plan_mode and allow_bypass toggled as specified, and the active tab switches to the Batches tab. A success status message shows the imported task count.
 
