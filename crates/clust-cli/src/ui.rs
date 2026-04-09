@@ -3815,6 +3815,29 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                             sync_batch_config_to_hub(&tasks_state, idx);
                                         }
                                     }
+                                    KeyCode::Char('c') => {
+                                        if let TasksFocus::BatchCard(idx) = tasks_state.focus {
+                                            if let Some(batch) = tasks_state.batches.get(idx) {
+                                                let json = batch.to_batch_json();
+                                                match tasks::copy_to_clipboard(&json) {
+                                                    Ok(()) => {
+                                                        status_message = Some(StatusMessage {
+                                                            text: "Batch JSON copied to clipboard".to_string(),
+                                                            level: StatusLevel::Success,
+                                                            created: Instant::now(),
+                                                        });
+                                                    }
+                                                    Err(e) => {
+                                                        status_message = Some(StatusMessage {
+                                                            text: e,
+                                                            level: StatusLevel::Error,
+                                                            created: Instant::now(),
+                                                        });
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
                                     KeyCode::Char(' ') => {
                                         if let TasksFocus::BatchCard(idx) = tasks_state.focus {
                                             // If queued, cancel the queue via hub IPC
@@ -6762,7 +6785,7 @@ fn render_status_bar(
                 }
             }
         } else if active_tab == ActiveTab::Tasks {
-            format!("{mod_key}+T new batch  {mod_key}+I import  \u{2190}/\u{2192} navigate  Space toggle  Enter add task  p prefix  s suffix  Del remove  q quit  ? keys")
+            format!("{mod_key}+T new batch  {mod_key}+I import  \u{2190}/\u{2192} navigate  Space toggle  Enter add task  c copy JSON  p prefix  s suffix  Del remove  q quit  ? keys")
         } else {
             format!("{mod_key}+N new repo  {mod_key}+R new agent  q quit  Q stop+quit  ? keys")
         };
@@ -6900,6 +6923,7 @@ fn render_help_overlay(frame: &mut Frame, area: Rect, active_tab: ActiveTab, in_
         lines.push(binding_line("Enter", "Add task to batch"));
         lines.push(binding_line("p", "Edit prompt prefix"));
         lines.push(binding_line("s", "Edit prompt suffix"));
+        lines.push(binding_line("c", "Copy batch JSON to clipboard"));
         lines.push(binding_line("Alt+P", "Toggle task prefix"));
         lines.push(binding_line("Alt+S", "Toggle task suffix / start"));
         lines.push(binding_line("Del / Backspace", "Remove batch"));

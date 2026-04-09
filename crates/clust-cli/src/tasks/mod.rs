@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::io::Write;
 
 use ratatui::{
     layout::{Alignment, Constraint, Layout, Rect},
@@ -118,6 +119,98 @@ impl BatchInfo {
             }
         }
         parts.join("\n\n")
+    }
+
+    /// Serialize this batch to a JSON string matching the import schema.
+    pub fn to_batch_json(&self) -> String {
+        let tasks: Vec<serde_json::Value> = self
+            .tasks
+            .iter()
+            .map(|t| {
+                serde_json::json!({
+                    "branch": t.branch_name,
+                    "prompt": t.prompt,
+                })
+            })
+            .collect();
+
+        let mut obj = serde_json::Map::new();
+        obj.insert("title".into(), serde_json::json!(self.title));
+        if let Some(ref prefix) = self.prompt_prefix {
+            obj.insert("prefix".into(), serde_json::json!(prefix));
+        }
+        if let Some(ref suffix) = self.prompt_suffix {
+            obj.insert("suffix".into(), serde_json::json!(suffix));
+        }
+        let mode = match self.launch_mode {
+            LaunchMode::Auto => "auto",
+            LaunchMode::Manual => "manual",
+        };
+        obj.insert("launch_mode".into(), serde_json::json!(mode));
+        if let Some(mc) = self.max_concurrent {
+            obj.insert("max_concurrent".into(), serde_json::json!(mc));
+        }
+        if self.plan_mode {
+            obj.insert("plan_mode".into(), serde_json::json!(true));
+        }
+        if self.allow_bypass {
+            obj.insert("allow_bypass".into(), serde_json::json!(true));
+        }
+        obj.insert("tasks".into(), serde_json::json!(tasks));
+
+        serde_json::to_string_pretty(&obj).unwrap_or_default()
+    }
+}
+
+/// Copy text to the system clipboard. Returns Ok on success.
+pub fn copy_to_clipboard(text: &str) -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    {
+        let mut child = std::process::Command::new("pbcopy")
+            .stdin(std::process::Stdio::piped())
+            .spawn()
+            .map_err(|e| format!("Failed to run pbcopy: {e}"))?;
+        if let Some(ref mut stdin) = child.stdin {
+            stdin
+                .write_all(text.as_bytes())
+                .map_err(|e| format!("Failed to write to pbcopy: {e}"))?;
+        }
+        child
+            .wait()
+            .map_err(|e| format!("pbcopy failed: {e}"))?;
+        Ok(())
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        // Try xclip first, then xsel
+        let tool = if which::which("xclip").is_ok() {
+            "xclip"
+        } else if which::which("xsel").is_ok() {
+            "xsel"
+        } else {
+            return Err("No clipboard tool found (install xclip or xsel)".to_string());
+        };
+
+        let args: &[&str] = if tool == "xclip" {
+            &["-selection", "clipboard"]
+        } else {
+            &["--clipboard", "--input"]
+        };
+
+        let mut child = std::process::Command::new(tool)
+            .args(args)
+            .stdin(std::process::Stdio::piped())
+            .spawn()
+            .map_err(|e| format!("Failed to run {tool}: {e}"))?;
+        if let Some(ref mut stdin) = child.stdin {
+            stdin
+                .write_all(text.as_bytes())
+                .map_err(|e| format!("Failed to write to {tool}: {e}"))?;
+        }
+        child
+            .wait()
+            .map_err(|e| format!("{tool} failed: {e}"))?;
+        Ok(())
     }
 }
 
