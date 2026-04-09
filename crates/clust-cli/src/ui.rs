@@ -1798,6 +1798,7 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                                     let hub = hub_name.to_string();
                                                     let rp = repo_path.clone();
                                                     let bn = branch_name.clone();
+                                                    let bp = bypass_permissions;
                                                     let (cols, rows) =
                                                         crossterm::terminal::size()
                                                             .unwrap_or((80, 24));
@@ -1824,8 +1825,8 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                                                     .saturating_sub(2)
                                                                     .max(1),
                                                                 accept_edits: false,
-                                                                plan_mode: false,
-                                                                allow_bypass: false,
+                                                                plan_mode: bp,
+                                                                allow_bypass: bp,
                                                                 hub,
                                                             };
                                                         if let Err(e) = clust_ipc::send_message(
@@ -1884,6 +1885,7 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                                     let tx = agent_start_tx.clone();
                                                     let hub = hub_name.to_string();
                                                     let rp = repo_path.clone();
+                                                    let bp = bypass_permissions;
                                                     let (cols, rows) =
                                                         crossterm::terminal::size()
                                                             .unwrap_or((80, 24));
@@ -1907,8 +1909,8 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                                                 .saturating_sub(2)
                                                                 .max(1),
                                                             accept_edits: false,
-                                                            plan_mode: false,
-                                                            allow_bypass: false,
+                                                            plan_mode: bp,
+                                                            allow_bypass: bp,
                                                             hub,
                                                         };
                                                         if let Err(e) = clust_ipc::send_message(
@@ -2123,11 +2125,15 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                                 }
                                                 BranchAction::BaseWorktreeOff => {
                                                     if let Some(repo_info) = repos.iter().find(|r| r.path == repo_path).cloned() {
-                                                        create_modal = Some(CreateAgentModal::new_with_branch(
+                                                        let mut modal = CreateAgentModal::new_with_branch(
                                                             repos.clone(),
                                                             repo_info,
                                                             branch_name.clone(),
-                                                        ));
+                                                        );
+                                                        if bypass_permissions {
+                                                            modal.set_plan_mode(true);
+                                                        }
+                                                        create_modal = Some(modal);
                                                     }
                                                 }
                                                 BranchAction::RemoteStartAgent => {
@@ -2139,6 +2145,7 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                                         let rp = repo_path.clone();
                                                         let remote_ref = branch_name.clone();
                                                         let local_name = local.to_string();
+                                                        let bp = bypass_permissions;
                                                         let (cols, rows) =
                                                             crossterm::terminal::size()
                                                                 .unwrap_or((80, 24));
@@ -2171,8 +2178,8 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                                                         .saturating_sub(2)
                                                                         .max(1),
                                                                     accept_edits: false,
-                                                                    plan_mode: false,
-                                                                    allow_bypass: false,
+                                                                    plan_mode: bp,
+                                                                    allow_bypass: bp,
                                                                     hub,
                                                                 };
                                                             if let Err(e) = clust_ipc::send_message(
@@ -2334,6 +2341,7 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                                 ConfirmedAction::StartAgentDetach { repo_path, branch_name } => {
                                                     let tx = agent_start_tx.clone();
                                                     let hub = hub_name.to_string();
+                                                    let bp = bypass_permissions;
                                                     let (cols, rows) =
                                                         crossterm::terminal::size()
                                                             .unwrap_or((80, 24));
@@ -2360,8 +2368,8 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                                                     .saturating_sub(2)
                                                                     .max(1),
                                                                 accept_edits: false,
-                                                                plan_mode: false,
-                                                                allow_bypass: false,
+                                                                plan_mode: bp,
+                                                                allow_bypass: bp,
                                                                 hub,
                                                             };
                                                         if let Err(e) = clust_ipc::send_message(
@@ -2597,6 +2605,8 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                 create_modal = None;
                                 let tx = agent_start_tx.clone();
                                 let hub = hub_name.to_string();
+                                let bp = bypass_permissions;
+                                let plan = output.plan_mode;
                                 let (cols, rows) =
                                     crossterm::terminal::size().unwrap_or((80, 24));
                                 tokio::spawn(async move {
@@ -2618,8 +2628,8 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                         cols,
                                         rows: rows.saturating_sub(2).max(1),
                                         accept_edits: false,
-                                        plan_mode: false,
-                                        allow_bypass: false,
+                                        plan_mode: plan,
+                                        allow_bypass: bp,
                                         hub,
                                     };
                                     if let Err(e) =
@@ -2782,10 +2792,11 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                         prompt: t.prompt.clone(),
                                         use_prefix: true,
                                         use_suffix: true,
+                                        plan_mode: output.batch_json.plan_mode,
                                     })
                                     .collect();
                                 for task in &output.batch_json.tasks {
-                                    tasks_state.add_task(batch_idx, task.branch.clone(), task.prompt.clone(), task.use_prefix, task.use_suffix);
+                                    tasks_state.add_task(batch_idx, task.branch.clone(), task.prompt.clone(), task.use_prefix, task.use_suffix, output.batch_json.plan_mode);
                                 }
                                 // Register with hub
                                 let reg_msg = CliMessage::RegisterBatch {
@@ -2860,7 +2871,7 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                         });
                                     }
                                 }
-                                tasks_state.add_task(output.batch_idx, output.branch_name, output.prompt, output.use_prefix, output.use_suffix);
+                                tasks_state.add_task(output.batch_idx, output.branch_name, output.prompt, output.use_prefix, output.use_suffix, output.plan_mode);
                             }
                             AddTaskResult::Pending => {}
                         }
@@ -2930,6 +2941,7 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                                 prompt: t.prompt.clone(),
                                                 use_prefix: t.use_prefix,
                                                 use_suffix: t.use_suffix,
+                                                plan_mode: t.plan_mode,
                                             })
                                             .collect();
                                         let msg = CliMessage::QueueBatch {
@@ -3035,6 +3047,8 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                 detached_modal = None;
                                 let tx = agent_start_tx.clone();
                                 let hub = hub_name.to_string();
+                                let bp = bypass_permissions;
+                                let plan = output.plan_mode;
                                 let (cols, rows) =
                                     crossterm::terminal::size().unwrap_or((80, 24));
                                 let wd = output.working_dir.clone();
@@ -3055,8 +3069,8 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                         cols,
                                         rows: rows.saturating_sub(2).max(1),
                                         accept_edits: false,
-                                        plan_mode: false,
-                                        allow_bypass: false,
+                                        plan_mode: plan,
+                                        allow_bypass: bp,
                                         hub,
                                     };
                                     if let Err(e) =
@@ -3182,14 +3196,22 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                     {
                         // Global shortcut: Alt+E opens create-agent modal
                         if !repos.is_empty() {
-                            create_modal = Some(CreateAgentModal::new(repos.clone()));
+                            let mut modal = CreateAgentModal::new(repos.clone());
+                            if bypass_permissions {
+                                modal.set_plan_mode(true);
+                            }
+                            create_modal = Some(modal);
                             show_help = false;
                         }
                     } else if key.code == KeyCode::Char('d')
                         && key.modifiers.contains(KeyModifiers::ALT)
                     {
                         // Global shortcut: Alt+D opens detached agent modal
-                        detached_modal = Some(DetachedAgentModal::new());
+                        let mut modal = DetachedAgentModal::new();
+                        if bypass_permissions {
+                            modal.set_plan_mode(true);
+                        }
+                        detached_modal = Some(modal);
                         show_help = false;
                     } else if key.code == KeyCode::Char('f')
                         && key.modifiers.contains(KeyModifiers::ALT)
@@ -3262,7 +3284,20 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                         && key.modifiers.contains(KeyModifiers::ALT)
                         && active_tab == ActiveTab::Tasks
                     {
-                        // Alt+P: toggle per-task prefix
+                        // Alt+P: toggle plan_mode (per-task if task focused, batch-level otherwise)
+                        if let TasksFocus::BatchCard(batch_idx) = tasks_state.focus {
+                            if let Some(task_idx) = tasks_state.focused_task {
+                                tasks_state.toggle_task_plan_mode(batch_idx, task_idx);
+                            } else {
+                                tasks_state.toggle_plan_mode(batch_idx);
+                                sync_batch_config_to_hub(&tasks_state, batch_idx);
+                            }
+                        }
+                    } else if key.code == KeyCode::Char('a')
+                        && key.modifiers.contains(KeyModifiers::ALT)
+                        && active_tab == ActiveTab::Tasks
+                    {
+                        // Alt+A: toggle per-task prefix (remapped from Alt+P)
                         if let TasksFocus::BatchCard(batch_idx) = tasks_state.focus {
                             if let Some(task_idx) = tasks_state.focused_task {
                                 tasks_state.toggle_task_use_prefix(batch_idx, task_idx);
@@ -3857,6 +3892,7 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                                     batch.title.clone(),
                                                     batch.prompt_prefix.is_some(),
                                                     batch.prompt_suffix.is_some(),
+                                                    batch.plan_mode,
                                                 ));
                                                 show_help = false;
                                             }
@@ -4608,6 +4644,7 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                                     let hub = hub_name.to_string();
                                                     let rp = repo_path.clone();
                                                     let bn = branch_name.clone();
+                                                    let bp = bypass_permissions;
                                                     let (cols, rows) =
                                                         crossterm::terminal::size()
                                                             .unwrap_or((80, 24));
@@ -4634,8 +4671,8 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                                                     .saturating_sub(2)
                                                                     .max(1),
                                                                 accept_edits: false,
-                                                                plan_mode: false,
-                                                                allow_bypass: false,
+                                                                plan_mode: bp,
+                                                                allow_bypass: bp,
                                                                 hub,
                                                             };
                                                         if let Err(e) = clust_ipc::send_message(
@@ -4694,6 +4731,7 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                                     let tx = agent_start_tx.clone();
                                                     let hub = hub_name.to_string();
                                                     let rp = repo_path.clone();
+                                                    let bp = bypass_permissions;
                                                     let (cols, rows) =
                                                         crossterm::terminal::size()
                                                             .unwrap_or((80, 24));
@@ -4717,8 +4755,8 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                                                 .saturating_sub(2)
                                                                 .max(1),
                                                             accept_edits: false,
-                                                            plan_mode: false,
-                                                            allow_bypass: false,
+                                                            plan_mode: bp,
+                                                            allow_bypass: bp,
                                                             hub,
                                                         };
                                                         if let Err(e) = clust_ipc::send_message(
@@ -4933,11 +4971,15 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                                 }
                                                 BranchAction::BaseWorktreeOff => {
                                                     if let Some(repo_info) = repos.iter().find(|r| r.path == repo_path).cloned() {
-                                                        create_modal = Some(CreateAgentModal::new_with_branch(
+                                                        let mut modal = CreateAgentModal::new_with_branch(
                                                             repos.clone(),
                                                             repo_info,
                                                             branch_name.clone(),
-                                                        ));
+                                                        );
+                                                        if bypass_permissions {
+                                                            modal.set_plan_mode(true);
+                                                        }
+                                                        create_modal = Some(modal);
                                                     }
                                                 }
                                                 BranchAction::RemoteStartAgent => {
@@ -4949,6 +4991,7 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                                         let rp = repo_path.clone();
                                                         let remote_ref = branch_name.clone();
                                                         let local_name = local.to_string();
+                                                        let bp = bypass_permissions;
                                                         let (cols, rows) =
                                                             crossterm::terminal::size()
                                                                 .unwrap_or((80, 24));
@@ -4981,8 +5024,8 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                                                         .saturating_sub(2)
                                                                         .max(1),
                                                                     accept_edits: false,
-                                                                    plan_mode: false,
-                                                                    allow_bypass: false,
+                                                                    plan_mode: bp,
+                                                                    allow_bypass: bp,
                                                                     hub,
                                                                 };
                                                             if let Err(e) = clust_ipc::send_message(
@@ -5144,6 +5187,7 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                                 ConfirmedAction::StartAgentDetach { repo_path, branch_name } => {
                                                     let tx = agent_start_tx.clone();
                                                     let hub = hub_name.to_string();
+                                                    let bp = bypass_permissions;
                                                     let (cols, rows) =
                                                         crossterm::terminal::size()
                                                             .unwrap_or((80, 24));
@@ -5170,8 +5214,8 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                                                     .saturating_sub(2)
                                                                     .max(1),
                                                                 accept_edits: false,
-                                                                plan_mode: false,
-                                                                allow_bypass: false,
+                                                                plan_mode: bp,
+                                                                allow_bypass: bp,
                                                                 hub,
                                                             };
                                                         if let Err(e) = clust_ipc::send_message(
@@ -6995,6 +7039,7 @@ fn render_help_overlay(frame: &mut Frame, area: Rect, active_tab: ActiveTab, in_
     lines.push(binding_line("Alt+N", "Add repository"));
     lines.push(binding_line("Alt+V", "Open in editor"));
     lines.push(binding_line("Alt+B", "Toggle bypass permissions"));
+    lines.push(binding_line("Alt+P", "Toggle plan mode (in modals)"));
     lines.push(binding_line("Alt+T", "Create batch"));
     lines.push(binding_line("Alt+I", "Import batch from JSON"));
 
@@ -7036,7 +7081,8 @@ fn render_help_overlay(frame: &mut Frame, area: Rect, active_tab: ActiveTab, in_
         lines.push(binding_line("p", "Edit prompt prefix"));
         lines.push(binding_line("s", "Edit prompt suffix"));
         lines.push(binding_line("c", "Copy batch JSON to clipboard"));
-        lines.push(binding_line("Alt+P", "Toggle task prefix"));
+        lines.push(binding_line("Alt+P", "Toggle plan mode"));
+        lines.push(binding_line("Alt+A", "Toggle task prefix"));
         lines.push(binding_line("Alt+S", "Toggle task suffix / start"));
         lines.push(binding_line("Del / Backspace", "Remove batch"));
     }
@@ -7953,24 +7999,23 @@ fn spawn_batch_tasks(
         Some(b) => b,
         None => return,
     };
-    let built_prompts: Vec<_> = start_info
+    let task_configs: Vec<_> = start_info
         .tasks_to_start
         .iter()
         .map(|(idx, _, raw_prompt)| {
-            let (use_prefix, use_suffix) = batch
+            let (use_prefix, use_suffix, task_plan_mode) = batch
                 .tasks
                 .get(*idx)
-                .map(|t| (t.use_prefix, t.use_suffix))
-                .unwrap_or((true, true));
-            batch.build_prompt(raw_prompt, use_prefix, use_suffix)
+                .map(|t| (t.use_prefix, t.use_suffix, t.plan_mode))
+                .unwrap_or((true, true, batch.plan_mode));
+            (batch.build_prompt(raw_prompt, use_prefix, use_suffix), task_plan_mode)
         })
         .collect();
-    let batch_plan_mode = batch.plan_mode;
     let batch_allow_bypass = batch.allow_bypass;
     let hub = hub_name.to_string();
     let (cols, rows) = crossterm::terminal::size().unwrap_or((80, 24));
-    for ((task_index, new_branch, _), full_prompt) in
-        start_info.tasks_to_start.iter().zip(built_prompts)
+    for ((task_index, new_branch, _), (full_prompt, task_plan_mode)) in
+        start_info.tasks_to_start.iter().zip(task_configs)
     {
         let tx = agent_start_tx.clone();
         let hub = hub.clone();
@@ -8002,7 +8047,7 @@ fn spawn_batch_tasks(
                 cols,
                 rows: rows.saturating_sub(2).max(1),
                 accept_edits: false,
-                plan_mode: batch_plan_mode,
+                plan_mode: task_plan_mode,
                 allow_bypass: batch_allow_bypass,
                 hub,
             };

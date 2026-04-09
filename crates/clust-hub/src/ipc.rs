@@ -1634,6 +1634,7 @@ async fn handle_connection(
                             agent_id: None,
                             use_prefix: t.use_prefix,
                             use_suffix: t.use_suffix,
+                            plan_mode: t.plan_mode,
                         })
                         .collect();
 
@@ -1657,9 +1658,9 @@ async fn handle_connection(
                     };
 
                     // Persist to database
-                    let task_data: Vec<(String, String, bool, bool)> = tasks
+                    let task_data: Vec<(String, String, bool, bool, bool)> = tasks
                         .iter()
-                        .map(|t| (t.branch_name.clone(), t.prompt.clone(), t.use_prefix, t.use_suffix))
+                        .map(|t| (t.branch_name.clone(), t.prompt.clone(), t.use_prefix, t.use_suffix, t.plan_mode))
                         .collect();
                     {
                         let hub_state = state.lock().await;
@@ -1827,6 +1828,7 @@ async fn handle_connection(
                                 agent_id: t.agent_id.clone(),
                                 use_prefix: t.use_prefix,
                                 use_suffix: t.use_suffix,
+                                plan_mode: t.plan_mode,
                             })
                             .collect(),
                         launch_mode: b.launch_mode.clone(),
@@ -1882,6 +1884,7 @@ async fn handle_connection(
                     agent_id: None,
                     use_prefix: t.use_prefix,
                     use_suffix: t.use_suffix,
+                    plan_mode: t.plan_mode,
                 })
                 .collect();
 
@@ -1905,9 +1908,9 @@ async fn handle_connection(
             };
 
             // Persist to database
-            let task_data: Vec<(String, String, bool, bool)> = tasks
+            let task_data: Vec<(String, String, bool, bool, bool)> = tasks
                 .iter()
-                .map(|t| (t.branch_name.clone(), t.prompt.clone(), t.use_prefix, t.use_suffix))
+                .map(|t| (t.branch_name.clone(), t.prompt.clone(), t.use_prefix, t.use_suffix, t.plan_mode))
                 .collect();
             {
                 let hub_state = state.lock().await;
@@ -1955,6 +1958,7 @@ async fn handle_connection(
             let mut hub_state = state.lock().await;
             let mut ok = false;
             if let Some(batch) = hub_state.queued_batches.iter_mut().find(|b| b.id == batch_id) {
+                let task_plan_mode = batch.plan_mode;
                 batch.tasks.push(crate::batch::HubTaskEntry {
                     branch_name: branch_name.clone(),
                     prompt: prompt.clone(),
@@ -1962,6 +1966,7 @@ async fn handle_connection(
                     agent_id: None,
                     use_prefix: true,
                     use_suffix: true,
+                    plan_mode: task_plan_mode,
                 });
                 if let Some(ref db) = hub_state.db {
                     let _ = crate::db::add_batch_task(db, &batch_id, &branch_name, &prompt);

@@ -102,11 +102,14 @@ CREATE TABLE queued_batch_tasks (
     status      TEXT NOT NULL DEFAULT 'idle',  -- idle, active, done
     agent_id    TEXT,                           -- set when the task's agent is started
     use_prefix  INTEGER NOT NULL DEFAULT 1,    -- per-task prefix toggle (1 = apply, 0 = skip); added in migration v6
-    use_suffix  INTEGER NOT NULL DEFAULT 1     -- per-task suffix toggle (1 = apply, 0 = skip); added in migration v6
+    use_suffix  INTEGER NOT NULL DEFAULT 1,    -- per-task suffix toggle (1 = apply, 0 = skip); added in migration v6
+    plan_mode   INTEGER NOT NULL DEFAULT 0     -- per-task plan mode override (1 = plan, 0 = inherit batch default); added in migration v9
 );
 ```
 
 Migration v6 adds `use_prefix` and `use_suffix` columns for per-task control over whether the batch's prompt prefix and suffix are applied when building the full prompt. Both default to 1 (true) for backward compatibility.
+
+Migration v9 adds the `plan_mode` column for per-task plan mode control. When set to 1, the task's agent is started in plan mode regardless of the batch-level plan_mode setting. Defaults to 0 (inherit batch default) for backward compatibility.
 
 #### `agent_history` *(deferred — future migration)*
 

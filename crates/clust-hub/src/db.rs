@@ -65,6 +65,9 @@ fn run_migrations(conn: &Connection) -> Result<(), String> {
     if current_version < 8 {
         migrate_v8(conn)?;
     }
+    if current_version < 9 {
+        migrate_v9(conn)?;
+    }
 
     Ok(())
 }
@@ -194,6 +197,15 @@ fn migrate_v8(conn: &Connection) -> Result<(), String> {
     .map_err(|e| format!("migration v8 failed: {e}"))
 }
 
+/// Migration v9: add per-task plan_mode flag to queued_batch_tasks.
+fn migrate_v9(conn: &Connection) -> Result<(), String> {
+    conn.execute_batch(
+        "ALTER TABLE queued_batch_tasks ADD COLUMN plan_mode INTEGER NOT NULL DEFAULT 0;
+         INSERT INTO schema_version (version) VALUES (9);",
+    )
+    .map_err(|e| format!("migration v9 failed: {e}"))
+}
+
 // ---------------------------------------------------------------------------
 // Queued batch CRUD
 // ---------------------------------------------------------------------------
@@ -226,13 +238,14 @@ pub struct QueuedBatchTaskRow {
     pub agent_id: Option<String>,
     pub use_prefix: bool,
     pub use_suffix: bool,
+    pub plan_mode: bool,
 }
 
 /// Insert a new queued batch and its tasks.
 pub fn insert_queued_batch(
     conn: &Connection,
     batch: &QueuedBatchRow,
-    tasks: &[(String, String, bool, bool)],
+    tasks: &[(String, String, bool, bool, bool)],
 ) -> Result<(), String> {
     conn.execute(
         "INSERT INTO queued_batches (id, title, repo_path, target_branch, max_concurrent,
@@ -260,11 +273,11 @@ pub fn insert_queued_batch(
     )
     .map_err(|e| format!("failed to insert queued batch: {e}"))?;
 
-    for (i, (branch_name, prompt, use_prefix, use_suffix)) in tasks.iter().enumerate() {
+    for (i, (branch_name, prompt, use_prefix, use_suffix, plan_mode)) in tasks.iter().enumerate() {
         conn.execute(
-            "INSERT INTO queued_batch_tasks (batch_id, task_index, branch_name, prompt, status, use_prefix, use_suffix)
-             VALUES (?1, ?2, ?3, ?4, 'idle', ?5, ?6)",
-            rusqlite::params![batch.id, i as i64, branch_name, prompt, *use_prefix as i32, *use_suffix as i32],
+            "INSERT INTO queued_batch_tasks (batch_id, task_index, branch_name, prompt, status, use_prefix, use_suffix, plan_mode)
+             VALUES (?1, ?2, ?3, ?4, 'idle', ?5, ?6, ?7)",
+            rusqlite::params![batch.id, i as i64, branch_name, prompt, *use_prefix as i32, *use_suffix as i32, *plan_mode as i32],
         )
         .map_err(|e| format!("failed to insert queued batch task: {e}"))?;
     }
@@ -327,7 +340,7 @@ fn load_batch_tasks(
 ) -> Result<Vec<QueuedBatchTaskRow>, String> {
     let mut stmt = conn
         .prepare(
-            "SELECT task_index, branch_name, prompt, status, agent_id, use_prefix, use_suffix
+            "SELECT task_index, branch_name, prompt, status, agent_id, use_prefix, use_suffix, plan_mode
              FROM queued_batch_tasks
              WHERE batch_id = ?1
              ORDER BY task_index",
@@ -344,6 +357,7 @@ fn load_batch_tasks(
                 agent_id: row.get(4)?,
                 use_prefix: row.get::<_, i32>(5)? != 0,
                 use_suffix: row.get::<_, i32>(6)? != 0,
+                plan_mode: row.get::<_, i32>(7)? != 0,
             })
         })
         .map_err(|e| format!("failed to query tasks: {e}"))?
