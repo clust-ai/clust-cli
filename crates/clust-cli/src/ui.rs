@@ -2782,7 +2782,7 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                 }
                                 // Add all tasks
                                 for task in &output.batch_json.tasks {
-                                    tasks_state.add_task(batch_idx, task.branch.clone(), task.prompt.clone(), true, true);
+                                    tasks_state.add_task(batch_idx, task.branch.clone(), task.prompt.clone(), task.use_prefix, task.use_suffix);
                                 }
                                 active_tab = ActiveTab::Tasks;
                                 let task_count = output.batch_json.tasks.len();

@@ -814,8 +814,32 @@ fn render_batch_card(
         None => "\u{221E}".to_string(),
     };
 
-    let label_style = Style::default().fg(theme::R_TEXT_TERTIARY);
-    let value_style = Style::default().fg(theme::R_TEXT_SECONDARY);
+    // The batch top part is "selected" when the card is focused but no task is highlighted
+    let batch_top_selected = focused && focused_task.is_none();
+
+    let label_style = Style::default().fg(if batch_top_selected {
+        theme::R_TEXT_SECONDARY
+    } else {
+        theme::R_TEXT_TERTIARY
+    });
+    let value_style = Style::default().fg(if batch_top_selected {
+        theme::R_TEXT_PRIMARY
+    } else {
+        theme::R_TEXT_SECONDARY
+    });
+
+    // Selection indicator prefix: "> " on first line, "  " on subsequent lines
+    let indicator_span = if batch_top_selected {
+        Span::styled(
+            "> ",
+            Style::default()
+                .fg(theme::R_ACCENT_BRIGHT)
+                .add_modifier(Modifier::BOLD),
+        )
+    } else {
+        Span::styled("  ", Style::default())
+    };
+    let pad_span = Span::styled("  ", Style::default());
 
     let status_span = if batch.launch_mode == LaunchMode::Manual {
         Span::styled("Manual", Style::default().fg(theme::R_INFO))
@@ -844,29 +868,35 @@ fn render_batch_card(
 
     let metadata_lines = vec![
         Line::from(vec![
+            indicator_span.clone(),
             Span::styled("Repo      ", label_style),
             Span::styled(&batch.repo_name, Style::default().fg(repo_color_val)),
         ]),
         Line::from(vec![
+            pad_span.clone(),
             Span::styled("Branch    ", label_style),
             Span::styled(&batch.branch_name, value_style),
         ]),
         if batch.launch_mode == LaunchMode::Auto {
             Line::from(vec![
+                pad_span.clone(),
                 Span::styled("Workers   ", label_style),
                 Span::styled(concurrency_text, value_style),
             ])
         } else {
             Line::from(vec![
+                pad_span.clone(),
                 Span::styled("Mode      ", label_style),
                 Span::styled("Manual", Style::default().fg(theme::R_INFO)),
             ])
         },
         Line::from(vec![
+            pad_span.clone(),
             Span::styled("Tasks     ", label_style),
             Span::styled(batch.tasks.len().to_string(), value_style),
         ]),
         Line::from(vec![
+            pad_span.clone(),
             Span::styled("Prefix    ", label_style),
             Span::styled(
                 batch.prompt_prefix.as_deref().unwrap_or("(none)"),
@@ -876,6 +906,7 @@ fn render_batch_card(
             ),
         ]),
         Line::from(vec![
+            pad_span.clone(),
             Span::styled("Suffix    ", label_style),
             Span::styled(
                 batch.prompt_suffix.as_deref().unwrap_or("(none)"),
@@ -885,6 +916,7 @@ fn render_batch_card(
             ),
         ]),
         Line::from(vec![
+            pad_span.clone(),
             Span::styled("Mode      ", label_style),
             if batch.plan_mode {
                 Span::styled(
@@ -898,6 +930,7 @@ fn render_batch_card(
             },
         ]),
         Line::from(vec![
+            pad_span.clone(),
             Span::styled("Bypass    ", label_style),
             if batch.allow_bypass {
                 Span::styled(
@@ -911,6 +944,7 @@ fn render_batch_card(
             },
         ]),
         Line::from(vec![
+            pad_span,
             Span::styled("Status    ", label_style),
             status_span,
         ]),

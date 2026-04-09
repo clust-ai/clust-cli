@@ -190,7 +190,9 @@ Batches can be imported from JSON files using `Alt+I` in the TUI. The file brows
     {
       "branch": "feat/login-tests",
       "prompt": "Write integration tests for the login flow",
-      "depends_on": ["feat/login-form", "feat/login-api"]
+      "depends_on": ["feat/login-form", "feat/login-api"],
+      "use_prefix": false,
+      "use_suffix": true
     }
   ]
 }
@@ -216,6 +218,8 @@ Batches can be imported from JSON files using `Alt+I` in the TUI. The file brows
 | `branch` | string | Yes | Branch name for the worktree. |
 | `prompt` | string | Yes | The prompt for the agent. |
 | `depends_on` | array | No | Branch names this task depends on (for ordering/documentation). |
+| `use_prefix` | boolean | No | Apply batch prompt prefix to this task. Default `true`. |
+| `use_suffix` | boolean | No | Apply batch prompt suffix to this task. Default `true`. |
 
 After selecting a JSON file, you'll be prompted to choose a repository and branch. The batch is created with all tasks pre-populated.
 
