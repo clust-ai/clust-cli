@@ -31,6 +31,7 @@ pub struct AddTaskOutput {
     pub prompt: String,
     pub use_prefix: bool,
     pub use_suffix: bool,
+    pub plan_mode: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -49,10 +50,11 @@ pub struct AddTaskModal {
     use_suffix: bool,
     has_prefix: bool,
     has_suffix: bool,
+    plan_mode: bool,
 }
 
 impl AddTaskModal {
-    pub fn new(batch_idx: usize, batch_title: String, has_prefix: bool, has_suffix: bool) -> Self {
+    pub fn new(batch_idx: usize, batch_title: String, has_prefix: bool, has_suffix: bool, batch_plan_mode: bool) -> Self {
         Self {
             step: AddTaskStep::EnterBranch,
             input: String::new(),
@@ -64,6 +66,7 @@ impl AddTaskModal {
             use_suffix: true,
             has_prefix,
             has_suffix,
+            plan_mode: batch_plan_mode,
         }
     }
 
@@ -116,7 +119,8 @@ impl AddTaskModal {
             KeyCode::Char(c) => {
                 if key.modifiers.contains(KeyModifiers::ALT) {
                     match c {
-                        'p' => self.use_prefix = !self.use_prefix,
+                        'p' => self.plan_mode = !self.plan_mode,
+                        'a' => self.use_prefix = !self.use_prefix,
                         's' => self.use_suffix = !self.use_suffix,
                         _ => {}
                     }
@@ -157,6 +161,7 @@ impl AddTaskModal {
                     prompt: trimmed,
                     use_prefix: self.use_prefix,
                     use_suffix: self.use_suffix,
+                    plan_mode: self.plan_mode,
                 })
             }
         }
@@ -275,9 +280,25 @@ impl AddTaskModal {
         let mod_key = if cfg!(target_os = "macos") { "Opt" } else { "Alt" };
         let mut spans: Vec<Span> = Vec::new();
 
+        if self.plan_mode {
+            spans.push(Span::styled(
+                "PLAN",
+                Style::default()
+                    .fg(theme::R_WARNING)
+                    .add_modifier(Modifier::BOLD),
+            ));
+        } else {
+            spans.push(Span::styled(
+                "Normal",
+                Style::default().fg(theme::R_TEXT_DISABLED),
+            ));
+        }
+
+        spans.push(Span::styled("  ", Style::default()));
+
         if self.use_prefix {
             spans.push(Span::styled(
-                "\u{2713} Prefix applied",
+                "\u{2713} Pfx",
                 if self.has_prefix {
                     Style::default().fg(theme::R_SUCCESS)
                 } else {
@@ -286,7 +307,7 @@ impl AddTaskModal {
             ));
         } else {
             spans.push(Span::styled(
-                "\u{2717} Prefix skipped",
+                "\u{2717} Pfx",
                 Style::default().fg(theme::R_TEXT_DISABLED),
             ));
         }
@@ -295,7 +316,7 @@ impl AddTaskModal {
 
         if self.use_suffix {
             spans.push(Span::styled(
-                "\u{2713} Suffix applied",
+                "\u{2713} Sfx",
                 if self.has_suffix {
                     Style::default().fg(theme::R_SUCCESS)
                 } else {
@@ -304,13 +325,13 @@ impl AddTaskModal {
             ));
         } else {
             spans.push(Span::styled(
-                "\u{2717} Suffix skipped",
+                "\u{2717} Sfx",
                 Style::default().fg(theme::R_TEXT_DISABLED),
             ));
         }
 
         spans.push(Span::styled(
-            format!("  {mod_key}+P/S toggle"),
+            format!("  {mod_key}+P plan  {mod_key}+A/S pfx/sfx"),
             Style::default().fg(theme::R_TEXT_DISABLED),
         ));
 

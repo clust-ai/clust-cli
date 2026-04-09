@@ -72,6 +72,8 @@ pub struct TaskEntry {
     pub use_prefix: bool,
     /// Whether the batch prompt suffix should be applied to this task.
     pub use_suffix: bool,
+    /// Whether this task should run in plan mode (overrides batch default).
+    pub plan_mode: bool,
 }
 
 /// Batch membership info for an agent displayed in the overview.
@@ -129,10 +131,14 @@ impl BatchInfo {
             .tasks
             .iter()
             .map(|t| {
-                serde_json::json!({
+                let mut task_obj = serde_json::json!({
                     "branch": t.branch_name,
                     "prompt": t.prompt,
-                })
+                });
+                if t.plan_mode {
+                    task_obj["plan_mode"] = serde_json::json!(true);
+                }
+                task_obj
             })
             .collect();
 
@@ -306,7 +312,7 @@ impl TasksState {
         idx
     }
 
-    pub fn add_task(&mut self, batch_idx: usize, branch_name: String, prompt: String, use_prefix: bool, use_suffix: bool) {
+    pub fn add_task(&mut self, batch_idx: usize, branch_name: String, prompt: String, use_prefix: bool, use_suffix: bool, plan_mode: bool) {
         if let Some(batch) = self.batches.get_mut(batch_idx) {
             batch.tasks.push(TaskEntry {
                 branch_name,
@@ -315,6 +321,7 @@ impl TasksState {
                 agent_id: None,
                 use_prefix,
                 use_suffix,
+                plan_mode,
             });
         }
     }
@@ -373,6 +380,14 @@ impl TasksState {
         if let Some(batch) = self.batches.get_mut(batch_idx) {
             if let Some(task) = batch.tasks.get_mut(task_idx) {
                 task.use_suffix = !task.use_suffix;
+            }
+        }
+    }
+
+    pub fn toggle_task_plan_mode(&mut self, batch_idx: usize, task_idx: usize) {
+        if let Some(batch) = self.batches.get_mut(batch_idx) {
+            if let Some(task) = batch.tasks.get_mut(task_idx) {
+                task.plan_mode = !task.plan_mode;
             }
         }
     }
@@ -530,6 +545,7 @@ impl TasksState {
                     agent_id: t.agent_id.clone(),
                     use_prefix: t.use_prefix,
                     use_suffix: t.use_suffix,
+                    plan_mode: t.plan_mode,
                 })
                 .collect();
 
@@ -632,6 +648,7 @@ impl TasksState {
                         agent_id: hub_task.agent_id.clone(),
                         use_prefix: hub_task.use_prefix,
                         use_suffix: hub_task.use_suffix,
+                        plan_mode: hub_task.plan_mode,
                     });
                 }
             }
@@ -1455,14 +1472,30 @@ fn render_single_task_box(
         )));
     }
 
-    // Status bar: prefix/suffix applied indicators
+    // Status bar: plan mode + prefix/suffix applied indicators
     {
         let mod_key = if cfg!(target_os = "macos") { "Opt" } else { "Alt" };
         let mut status_spans: Vec<Span> = Vec::new();
 
+        if task.plan_mode {
+            status_spans.push(Span::styled(
+                "PLAN",
+                Style::default()
+                    .fg(theme::R_WARNING)
+                    .add_modifier(Modifier::BOLD),
+            ));
+        } else {
+            status_spans.push(Span::styled(
+                "Normal",
+                Style::default().fg(theme::R_TEXT_DISABLED),
+            ));
+        }
+
+        status_spans.push(Span::styled("  ", Style::default()));
+
         if task.use_prefix {
             status_spans.push(Span::styled(
-                "\u{2713} Prefix applied",
+                "\u{2713} Pfx",
                 if has_prefix {
                     Style::default().fg(theme::R_SUCCESS)
                 } else {
@@ -1471,7 +1504,7 @@ fn render_single_task_box(
             ));
         } else {
             status_spans.push(Span::styled(
-                "\u{2717} Prefix skipped",
+                "\u{2717} Pfx",
                 Style::default().fg(theme::R_TEXT_DISABLED),
             ));
         }
@@ -1480,7 +1513,7 @@ fn render_single_task_box(
 
         if task.use_suffix {
             status_spans.push(Span::styled(
-                "\u{2713} Suffix applied",
+                "\u{2713} Sfx",
                 if has_suffix {
                     Style::default().fg(theme::R_SUCCESS)
                 } else {
@@ -1489,14 +1522,14 @@ fn render_single_task_box(
             ));
         } else {
             status_spans.push(Span::styled(
-                "\u{2717} Suffix skipped",
+                "\u{2717} Sfx",
                 Style::default().fg(theme::R_TEXT_DISABLED),
             ));
         }
 
         if is_focused {
             status_spans.push(Span::styled(
-                format!("  {mod_key}+P/S toggle"),
+                format!("  {mod_key}+P plan  {mod_key}+A/S pfx/sfx"),
                 Style::default().fg(theme::R_TEXT_DISABLED),
             ));
         }

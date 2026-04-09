@@ -67,6 +67,7 @@ pub struct HubTaskEntry {
     pub agent_id: Option<String>,
     pub use_prefix: bool,
     pub use_suffix: bool,
+    pub plan_mode: bool,
 }
 
 pub struct HubBatchEntry {
@@ -213,7 +214,7 @@ async fn check_and_advance_batches(state: &SharedHubState) {
                         branch_name: task.branch_name.clone(),
                         prompt: batch.build_prompt(task),
                         agent_binary: batch.agent_binary.clone(),
-                        plan_mode: batch.plan_mode,
+                        plan_mode: task.plan_mode,
                         allow_bypass: batch.allow_bypass,
                         hub: batch.hub.clone(),
                     });
@@ -259,7 +260,7 @@ async fn check_and_advance_batches(state: &SharedHubState) {
                         branch_name: task.branch_name.clone(),
                         prompt: batch.build_prompt(task),
                         agent_binary: batch.agent_binary.clone(),
-                        plan_mode: batch.plan_mode,
+                        plan_mode: task.plan_mode,
                         allow_bypass: batch.allow_bypass,
                         hub: batch.hub.clone(),
                     });
@@ -552,6 +553,7 @@ pub fn load_batches_from_db(hub: &HubState) -> Vec<HubBatchEntry> {
                     agent_id: t.agent_id,
                     use_prefix: t.use_prefix,
                     use_suffix: t.use_suffix,
+                    plan_mode: t.plan_mode,
                 })
                 .collect();
 

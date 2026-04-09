@@ -291,6 +291,8 @@ pub struct QueuedTask {
     pub use_prefix: bool,
     #[serde(default = "default_true")]
     pub use_suffix: bool,
+    #[serde(default)]
+    pub plan_mode: bool,
 }
 
 /// Per-task detail within a batch, returned in QueuedBatchList.
@@ -304,6 +306,8 @@ pub struct QueuedBatchTaskInfo {
     pub use_prefix: bool,
     #[serde(default = "default_true")]
     pub use_suffix: bool,
+    #[serde(default)]
+    pub plan_mode: bool,
 }
 
 /// Full info about a batch, returned in QueuedBatchList.

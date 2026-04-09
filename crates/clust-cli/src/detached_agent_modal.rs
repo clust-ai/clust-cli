@@ -30,6 +30,7 @@ pub enum DetachedModalResult {
 pub struct DetachedModalOutput {
     pub working_dir: String,
     pub prompt: Option<String>,
+    pub plan_mode: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -49,6 +50,8 @@ pub struct DetachedAgentModal {
 
     /// Confirmed working directory (set when transitioning to EnterPrompt).
     working_dir: String,
+
+    plan_mode: bool,
 
     matcher: SkimMatcherV2,
 }
@@ -71,10 +74,15 @@ impl DetachedAgentModal {
             base_path: base_path.clone(),
             dir_entries: Vec::new(),
             working_dir: base_path,
+            plan_mode: false,
             matcher: SkimMatcherV2::default(),
         };
         modal.refresh_entries();
         modal
+    }
+
+    pub fn set_plan_mode(&mut self, val: bool) {
+        self.plan_mode = val;
     }
 
     // -----------------------------------------------------------------------
@@ -214,9 +222,13 @@ impl DetachedAgentModal {
                 DetachedModalResult::Pending
             }
             KeyCode::Char(c) => {
-                if key.modifiers.contains(KeyModifiers::ALT)
-                    || key.modifiers.contains(KeyModifiers::CONTROL)
-                {
+                if key.modifiers.contains(KeyModifiers::ALT) {
+                    if c == 'p' {
+                        self.plan_mode = !self.plan_mode;
+                    }
+                    return DetachedModalResult::Pending;
+                }
+                if key.modifiers.contains(KeyModifiers::CONTROL) {
                     return DetachedModalResult::Pending;
                 }
                 self.input.insert(self.cursor_pos, c);
@@ -261,6 +273,7 @@ impl DetachedAgentModal {
                 DetachedModalResult::Completed(DetachedModalOutput {
                     working_dir: self.working_dir.clone(),
                     prompt,
+                    plan_mode: self.plan_mode,
                 })
             }
         }
@@ -338,7 +351,7 @@ impl DetachedAgentModal {
         frame.render_widget(block, modal_area);
 
         let is_prompt_step = self.step == DetachedModalStep::EnterPrompt;
-        let [hint_area, path_area, input_area, _gap, list_area] = Layout::vertical([
+        let [hint_area, path_area, input_area, _gap, list_area, _spacer, status_area] = Layout::vertical([
             Constraint::Length(1),
             if is_prompt_step {
                 Constraint::Length(0)
@@ -360,6 +373,8 @@ impl DetachedAgentModal {
             } else {
                 Constraint::Min(0)
             },
+            Constraint::Length(0),
+            Constraint::Length(1),
         ])
         .areas(inner);
 
@@ -390,6 +405,35 @@ impl DetachedAgentModal {
         if !is_prompt_step {
             self.render_dir_list(frame, list_area);
         }
+
+        // Status bar: plan mode indicator
+        self.render_status_bar(frame, status_area);
+    }
+
+    fn render_status_bar(&self, frame: &mut Frame, area: Rect) {
+        let mod_key = if cfg!(target_os = "macos") { "Opt" } else { "Alt" };
+        let mut spans: Vec<Span> = Vec::new();
+
+        if self.plan_mode {
+            spans.push(Span::styled(
+                "PLAN",
+                Style::default()
+                    .fg(theme::R_WARNING)
+                    .add_modifier(Modifier::BOLD),
+            ));
+        } else {
+            spans.push(Span::styled(
+                "Normal",
+                Style::default().fg(theme::R_TEXT_DISABLED),
+            ));
+        }
+
+        spans.push(Span::styled(
+            format!("  {mod_key}+P toggle plan mode"),
+            Style::default().fg(theme::R_TEXT_DISABLED),
+        ));
+
+        frame.render_widget(Paragraph::new(Line::from(spans)), area);
     }
 
     fn render_input(&self, frame: &mut Frame, area: Rect) {
