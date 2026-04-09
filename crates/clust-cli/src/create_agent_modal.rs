@@ -36,6 +36,7 @@ pub struct ModalOutput {
     pub target_branch: Option<String>,
     pub new_branch: Option<String>,
     pub prompt: Option<String>,
+    pub plan_mode: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -62,6 +63,8 @@ pub struct CreateAgentModal {
     // Whether the modal was opened with repo+branch pre-selected (e.g. "Base Worktree Off")
     pre_selected: bool,
 
+    plan_mode: bool,
+
     matcher: SkimMatcherV2,
 }
 
@@ -79,6 +82,7 @@ impl CreateAgentModal {
             new_branch_name: None,
             new_branch_required: false,
             pre_selected: false,
+            plan_mode: false,
             matcher: SkimMatcherV2::default(),
         }
     }
@@ -96,8 +100,13 @@ impl CreateAgentModal {
             new_branch_name: None,
             new_branch_required: true,
             pre_selected: true,
+            plan_mode: false,
             matcher: SkimMatcherV2::default(),
         }
+    }
+
+    pub fn set_plan_mode(&mut self, val: bool) {
+        self.plan_mode = val;
     }
 
     // -----------------------------------------------------------------------
@@ -177,9 +186,13 @@ impl CreateAgentModal {
                 ModalResult::Pending
             }
             KeyCode::Char(c) => {
-                if key.modifiers.contains(KeyModifiers::ALT)
-                    || key.modifiers.contains(KeyModifiers::CONTROL)
-                {
+                if key.modifiers.contains(KeyModifiers::ALT) {
+                    if c == 'p' {
+                        self.plan_mode = !self.plan_mode;
+                    }
+                    return ModalResult::Pending;
+                }
+                if key.modifiers.contains(KeyModifiers::CONTROL) {
                     return ModalResult::Pending;
                 }
                 self.input.insert(self.cursor_pos, c);
@@ -245,6 +258,7 @@ impl CreateAgentModal {
                     target_branch: self.target_branch.clone(),
                     new_branch: self.new_branch_name.clone(),
                     prompt,
+                    plan_mode: self.plan_mode,
                 })
             }
         }
@@ -366,11 +380,13 @@ impl CreateAgentModal {
         frame.render_widget(block, modal_area);
 
         let is_prompt_step = self.step == ModalStep::EnterPrompt;
-        let [hint_area, input_area, _gap, list_area] = Layout::vertical([
+        let [hint_area, input_area, _gap, list_area, _spacer, status_area] = Layout::vertical([
             Constraint::Length(1),
             if is_prompt_step { Constraint::Min(3) } else { Constraint::Length(1) },
             if is_prompt_step { Constraint::Length(0) } else { Constraint::Length(1) },
             if is_prompt_step { Constraint::Length(0) } else { Constraint::Min(0) },
+            Constraint::Length(0),
+            Constraint::Length(1),
         ])
         .areas(inner);
 
@@ -393,6 +409,35 @@ impl CreateAgentModal {
             ModalStep::NewBranch => self.render_new_branch_hint(frame, list_area),
             ModalStep::EnterPrompt => {}
         }
+
+        // Status bar: plan mode indicator
+        self.render_status_bar(frame, status_area);
+    }
+
+    fn render_status_bar(&self, frame: &mut Frame, area: Rect) {
+        let mod_key = if cfg!(target_os = "macos") { "Opt" } else { "Alt" };
+        let mut spans: Vec<Span> = Vec::new();
+
+        if self.plan_mode {
+            spans.push(Span::styled(
+                "PLAN",
+                Style::default()
+                    .fg(theme::R_WARNING)
+                    .add_modifier(Modifier::BOLD),
+            ));
+        } else {
+            spans.push(Span::styled(
+                "Normal",
+                Style::default().fg(theme::R_TEXT_DISABLED),
+            ));
+        }
+
+        spans.push(Span::styled(
+            format!("  {mod_key}+P toggle plan mode"),
+            Style::default().fg(theme::R_TEXT_DISABLED),
+        ));
+
+        frame.render_widget(Paragraph::new(Line::from(spans)), area);
     }
 
     fn render_input(&self, frame: &mut Frame, area: Rect) {
