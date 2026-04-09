@@ -49,10 +49,10 @@ pub struct TaskJson {
     /// Optional list of branch names this task depends on (for documentation/ordering).
     #[serde(default)]
     pub depends_on: Vec<String>,
-    /// Whether the batch prompt prefix should be applied to this task. Default `true`.
+    /// Whether the batch prompt prefix is applied to this task. Defaults to `true`.
     #[serde(default = "default_true")]
     pub use_prefix: bool,
-    /// Whether the batch prompt suffix should be applied to this task. Default `true`.
+    /// Whether the batch prompt suffix is applied to this task. Defaults to `true`.
     #[serde(default = "default_true")]
     pub use_suffix: bool,
 }
