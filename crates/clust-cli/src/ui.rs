@@ -1329,6 +1329,7 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                 is_head: false,
                                 active_agent_count: 1,
                                 is_worktree: false,
+                                is_remote: false,
                             }
                         })
                         .collect(),
@@ -8085,6 +8086,7 @@ mod tests {
             is_head,
             active_agent_count: agent_count,
             is_worktree,
+            is_remote: false,
         }
     }
 

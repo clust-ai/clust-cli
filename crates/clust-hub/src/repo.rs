@@ -186,6 +186,7 @@ fn list_branches<A: AgentMatcher>(
                 is_head,
                 active_agent_count,
                 is_worktree,
+                is_remote: branch_type == git2::BranchType::Remote,
             })
         })
         .collect()
