@@ -407,13 +407,13 @@ The left panel has a tab bar at the top with three tabs: `Changes`, `Compare`, `
 
 **Branch Compare (Compare tab):**
 
-- Allows comparing the agent's current branch against any other local branch in the same repository
+- Allows comparing the agent's current branch against any other local or remote branch in the same repository
 - Has two modes controlled by `BranchPickerMode`: `Searching` and `Selected`
 - **Searching mode:** Shows a text input field with fuzzy search filtering and a scrollable branch list below it. The agent's own branch is excluded from the list. Uses `SkimMatcherV2` for fuzzy matching, with results sorted by match score descending. Keyboard controls: `↑` / `↓` navigate the list, `Enter` selects a branch and switches to Selected mode, `Esc` cancels and returns to Selected mode, typing filters the list, `Backspace` deletes characters, `←` / `→` move the cursor within the input
 - **Selected mode:** Shows a label bar displaying the selected branch name (or "No branch selected" if none), followed by a diff viewer showing the output of `git diff <selected-branch> <agent-branch>`. Pressing `Enter` re-opens the search picker. `↑` / `↓` scroll the diff. `Tab` cycles to the next left panel tab
 - The diff is refreshed every 2 seconds via a background tokio task (`spawn_branch_diff_task`) that runs `git diff <base> <head>` in a `spawn_blocking` call, mirroring the Changes tab refresh mechanism
 - `BranchPicker` struct manages the picker state: input text, cursor position, selected index, selected branch name, branch list, and a `SkimMatcherV2` fuzzy matcher
-- Branch list is updated via `update_compare_branches()` which is called during the repo refresh path, pulling local branches from the matching `RepoInfo`
+- Branch list is updated via `update_compare_branches()` which is called during the repo refresh path, pulling both local and remote branches from the matching `RepoInfo`. Remote branches are displayed with a `[remote]` badge in tertiary text color
 - When a branch is selected, `start_compare_diff()` stops any existing compare diff task and spawns a new one
 - `drain_compare_diff_events()` is called each frame in the main event loop to process background diff results
 - Scroll state, diff data, and error state are managed independently from the Changes tab (`compare_diff`, `compare_diff_scroll`, `compare_diff_error`)

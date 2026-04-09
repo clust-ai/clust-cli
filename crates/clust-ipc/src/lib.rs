@@ -264,6 +264,8 @@ pub struct BranchInfo {
     pub is_head: bool,
     pub active_agent_count: usize,
     pub is_worktree: bool,
+    #[serde(default)]
+    pub is_remote: bool,
 }
 
 /// Info about a single worktree in a repository.
@@ -1035,12 +1037,14 @@ mod tests {
                         is_head: true,
                         active_agent_count: 1,
                         is_worktree: false,
+                        is_remote: false,
                     },
                     BranchInfo {
                         name: "feature/foo".into(),
                         is_head: false,
                         active_agent_count: 0,
                         is_worktree: true,
+                        is_remote: false,
                     },
                 ],
                 remote_branches: vec![BranchInfo {
@@ -1048,6 +1052,7 @@ mod tests {
                     is_head: false,
                     active_agent_count: 0,
                     is_worktree: false,
+                    is_remote: true,
                 }],
             }],
         })
