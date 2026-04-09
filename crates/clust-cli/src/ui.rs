@@ -3685,10 +3685,24 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                 let shift = key.modifiers.contains(KeyModifiers::SHIFT);
                                 match key.code {
                                     KeyCode::Left if shift => {
-                                        tasks_state.scroll_left();
+                                        tasks_state.focus_prev_card();
+                                        // Auto-scroll to keep focused batch visible
+                                        if let TasksFocus::BatchCard(idx) = tasks_state.focus {
+                                            if idx < tasks_state.scroll_offset {
+                                                tasks_state.scroll_offset = idx;
+                                            }
+                                        }
                                     }
                                     KeyCode::Right if shift => {
-                                        tasks_state.scroll_right(last_content_area.width);
+                                        tasks_state.focused_task = None;
+                                        tasks_state.focus_next_card();
+                                        // Auto-scroll to keep focused batch visible
+                                        if let TasksFocus::BatchCard(idx) = tasks_state.focus {
+                                            let visible = tasks_state.visible_batch_count(last_content_area.width);
+                                            if visible > 0 && idx >= tasks_state.scroll_offset + visible {
+                                                tasks_state.scroll_offset = idx + 1 - visible;
+                                            }
+                                        }
                                     }
                                     KeyCode::Down if shift => {
                                         // Open focused active task in focus mode
@@ -3726,11 +3740,10 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                         }
                                     }
                                     KeyCode::Left => {
-                                        tasks_state.focus_prev_card();
+                                        tasks_state.scroll_left();
                                     }
                                     KeyCode::Right => {
-                                        tasks_state.focused_task = None;
-                                        tasks_state.focus_next_card();
+                                        tasks_state.scroll_right(last_content_area.width);
                                     }
                                     KeyCode::Down => {
                                         match tasks_state.focus {
@@ -6924,8 +6937,8 @@ fn render_help_overlay(frame: &mut Frame, area: Rect, active_tab: ActiveTab, in_
     if active_tab == ActiveTab::Tasks {
         lines.push(Line::from(""));
         lines.push(header_line("Batches"));
-        lines.push(binding_line("\u{2190} / \u{2192}", "Navigate batches"));
-        lines.push(binding_line("Shift+\u{2190}/\u{2192}", "Scroll batches"));
+        lines.push(binding_line("Shift+\u{2190}/\u{2192}", "Switch batch"));
+        lines.push(binding_line("\u{2190} / \u{2192}", "Scroll viewport"));
         lines.push(binding_line("\u{2191} / \u{2193}", "Navigate tasks in batch"));
         lines.push(binding_line("Space", "Toggle batch status (auto)"));
         lines.push(binding_line("Alt+S", "Start selected task (manual)"));

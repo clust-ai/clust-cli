@@ -140,10 +140,11 @@ clust repo -s
 | Shortcut | Action |
 |----------|--------|
 | `Tab` / `Shift+Tab` | Switch tabs |
-| `↑` `↓` `←` `→` | Navigate repo tree / panels |
+| `↑` `↓` | Navigate items |
+| `←` `→` | Navigate tree / scroll viewport |
 | `Enter` | Open context menu or focus mode |
 | `Space` | Toggle collapse/expand |
-| `Shift+←` / `Shift+→` | Switch panel focus |
+| `Shift+←` / `Shift+→` | Switch panel or batch |
 | `Shift+↓` | Enter terminal / focus mode |
 | `Alt+E` | Create new agent on a worktree |
 | `v` | Toggle agent grouping (by-repo / by-hub) |
@@ -186,7 +187,9 @@ Batches can be imported from JSON files using `Alt+I` in the TUI. The file brows
     {
       "branch": "feat/login-api",
       "prompt": "Add the login API endpoint",
-      "depends_on": []
+      "depends_on": [],
+      "use_prefix": true,
+      "use_suffix": false
     },
     {
       "branch": "feat/login-tests",

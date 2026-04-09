@@ -179,7 +179,7 @@ A batch management tab that displays created batch definitions as horizontal car
 **Layout:**
 
 - **Options bar (1 row):** A single-line bar at the top showing the batch count (e.g., "3 batches") and hints `Opt+T create`, `Opt+I import`, `Space toggle`, `T timer`, `Opt+S start`, `M mode`, `B bypass`, and `d clear done`. The bar uses `R_BG_RAISED` background.
-- **Batch cards (horizontal):** Dynamically sized columns distributed evenly across the available width. The minimum card width is 40 columns. Cards use ratio-based constraints so they fill the screen evenly. A single card never exceeds half the screen width (minimum 2 slots). When more batches exist than fit on screen, horizontal scrolling is enabled via `Shift+Left`/`Shift+Right`.
+- **Batch cards (horizontal):** Dynamically sized columns distributed evenly across the available width. The minimum card width is 40 columns. Cards use ratio-based constraints so they fill the screen evenly. A single card never exceeds half the screen width (minimum 2 slots). When more batches exist than fit on screen, horizontal scrolling is enabled via `Left`/`Right`, and `Shift+Left`/`Shift+Right` switches between batch cards with auto-scrolling.
 
 Each batch card has:
 - **Box-drawing borders** using the repo's assigned color (bright when focused, dimmed when unfocused via `dim_color()`). Cards without a repo fall back to accent blue when focused and tertiary text color when unfocused.
@@ -202,8 +202,8 @@ Each batch card has:
 
 | Shortcut | Action |
 |----------|--------|
-| `Left` / `Right` | Navigate between batch cards |
-| `Shift+Left` / `Shift+Right` | Scroll the batch viewport left/right |
+| `Shift+Left` / `Shift+Right` | Switch between batch cards (auto-scrolls to keep focused batch visible) |
+| `Left` / `Right` | Scroll the batch viewport left/right |
 | `Down` | Focus the first visible batch card, or navigate to the next task within a focused batch card |
 | `Up` | Navigate to the previous task within a focused batch card, or return to batch list focus when no task is focused |
 | `Delete` / `Backspace` | Open the batch cleanup modal for the focused batch card |
@@ -530,7 +530,7 @@ The `?` key toggles a keyboard shortcut overlay rendered as a centered modal (44
 - **Global section (always shown):** `q / Esc×2`, `Q`, `Ctrl+C`, `Tab`, `Shift+Tab`, `?`, `F2`, `Alt+M`, `Alt+E`, `Alt+D`, `Alt+F`, `Alt+N`, `Alt+V`, `Alt+B`, `Alt+T`, `Alt+I`, `Cmd+1`, `Cmd+2`.
 - **Repositories section (shown when Repositories tab is active):** `↑/↓` navigate, `Shift+↑/↓` jump repos, `←/→` navigate tree, `Shift+←/→` switch panel, `Enter` open menu/focus agent, `Space` collapse/expand, `v` toggle grouping.
 - **Overview section (shown when Overview tab is active):** `Shift+←/→` scroll panels, `Shift+↓` enter terminal, plus an "In terminal:" sub-context label followed by `Shift+↑` back to options bar, `Shift+↓` enter focus mode, `Shift+←/→` switch agent, `PgUp/PgDn` scroll terminal.
-- **Batches section (shown when Batches tab is active):** `←/→` navigate batches, `↑/↓` navigate tasks within a batch, `Shift+↓` open active task in focus mode, `Shift+←/→` scroll batches, `Space` toggle batch status (or cancel queued), `t` set timer (queue batch), `Alt+P` toggle task prefix, `Alt+S` toggle task suffix / start (manual), `Enter` add task to batch, `p` edit prompt prefix, `s` edit prompt suffix, `d` clear done tasks, `Del/Backspace` open batch cleanup modal.
+- **Batches section (shown when Batches tab is active):** `Shift+←/→` switch batch (with auto-scroll), `←/→` scroll viewport, `↑/↓` navigate tasks within a batch, `Shift+↓` open active task in focus mode, `Space` toggle batch status (or cancel queued), `t` set timer (queue batch), `Alt+P` toggle task prefix, `Alt+S` toggle task suffix / start (manual), `Enter` add task to batch, `p` edit prompt prefix, `s` edit prompt suffix, `d` clear done tasks, `Del/Backspace` open batch cleanup modal.
 - **Focus Mode section (shown when in focus mode):** `Shift+↑` exit, `Shift+←/→` switch panel, `Shift+PgUp/PgDn` scroll terminal, plus a "Left panel:" sub-context label followed by `Tab` cycle tabs, `Shift+Tab` prev tab (used in Terminal tab since Tab is forwarded to the shell), `↑/↓` scroll diff.
 
 Key names are displayed in accent color (left-aligned, 16 chars wide); descriptions use primary text color. Section headers use secondary text color with bold modifier. Sub-context labels use tertiary text color and are indented.
@@ -764,7 +764,8 @@ Example JSON:
     },
     {
       "branch": "refactor/signup",
-      "prompt": "Refactor the signup handler to use the new auth service."
+      "prompt": "Refactor the signup handler to use the new auth service.",
+      "use_prefix": false
     }
   ]
 }
