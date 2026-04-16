@@ -194,6 +194,10 @@ When the hub receives a `StopTerminal` message:
 2. Wait 3 seconds
 3. If still running, send SIGKILL
 
+### Agent-Linked Terminals
+
+A `StartTerminal` message may include an optional `agent_id` that records which agent owns the shell (focus mode sets this so that its auto-spawned terminal is tied to the opened agent). When an agent is removed from hub state — whether via explicit `StopAgent`, worktree removal, or natural exit — the agent's PTY reader enumerates `terminals` for matching `agent_id`s and spawns fire-and-forget `stop_terminal` tasks for each. This ensures child processes like dev servers started in the focus-mode terminal are killed alongside the agent.
+
 ### Terminal Output Multiplexing
 
 Terminal sessions use the same output multiplexing infrastructure as agents: broadcast channel (capacity 1024), replay buffer (512 KB ring buffer), per-client size tracking, and active-client-based PTY resizing. The `TerminalEntry` struct mirrors `AgentEntry` for these fields.

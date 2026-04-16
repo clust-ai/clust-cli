@@ -122,7 +122,7 @@ A multi-agent terminal overview that displays all active agents side-by-side wit
 ││                    │││                │││         ││
 │└──── Shift+↓ focus──┘│└────────────────┘│└─────────┘│
 ├──────────────────────┴──────────────────┴───────────┤
-│ ● connected  Shift+↓ enter terminal  ...    v0.0.17 │
+│ ● connected  Shift+↓ enter terminal  ...    v0.0.18 │
 └─────────────────────────────────────────────────────┘
 ```
 
@@ -267,7 +267,7 @@ On startup, `clust ui` automatically connects to the hub daemon, starting it if 
 ### Bottom Status Bar
 
 ```
-● connected  q to quit  Q to quit and stop hub  ↑↓←→ navigate  Shift+←→ panels  v toggle agents          v0.0.17
+● connected  q to quit  Q to quit and stop hub  ↑↓←→ navigate  Shift+←→ panels  v toggle agents          v0.0.18
 ```
 
 | Section | Description |
@@ -277,7 +277,7 @@ On startup, `clust ui` automatically connects to the hub daemon, starting it if 
 | BYPASS indicator | When bypass-permissions is enabled globally, shows `BYPASS` in a distinct color. Hidden when disabled. |
 | Focused agent | When an agent has keyboard focus (in Overview terminal focus or focus mode), shows the repo name in the repo's assigned color followed by `/branch` in secondary text color |
 | Status message / Shortcuts | Either a temporary status message or context-aware keybinding hints (see below) |
-| Version | Right-aligned, e.g. `v0.0.17` |
+| Version | Right-aligned, e.g. `v0.0.18` |
 
 **Status messages:** Temporary status messages override the keybinding hints area. Messages are displayed for 5 seconds before auto-dismissing, after which the keybinding hints reappear. Two severity levels exist: `Error` (displayed in `R_ERROR` color) and `Success` (displayed in `R_SUCCESS` color). Status messages are used to surface feedback from async operations such as agent creation, branch pulls, and remote branch checkout -- both success confirmations (e.g., "Agent started on feature-branch", "Pulled main: Already up to date.", "Checked out feature-branch") and error details (e.g., "Agent create failed: hub connect error: ...", "Pull failed: ...", "Checkout failed: ..."). The `StatusMessage` struct tracks the message text, level, and creation `Instant` for auto-dismissal timing. Status messages are delivered from background tokio tasks to the main event loop via a dedicated `mpsc` channel (`status_tx` / `status_rx`), separate from the `AgentStartResult` channel used for agent creation results.
 
@@ -384,7 +384,7 @@ When the agent was opened from a batch task (`batch_origin` is set), a batch bad
 │      3      3│  let x = 1;   ││                    ││
 │                               │└────────────────────┘│
 ├─────────────────────────────────────────────────────┤
-│ ● connected  Shift+←/→ switch panel  ...     v0.0.17│
+│ ● connected  Shift+←/→ switch panel  ...     v0.0.18│
 └─────────────────────────────────────────────────────┘
 ```
 
@@ -444,6 +444,7 @@ When a GitHub PR is detected for the agent's branch, a `PR #N` indicator is appe
 - When the terminal session exits, the tab displays "Terminal session ended" in tertiary text
 - When the terminal is starting (before the first output), the tab displays "Starting terminal..."
 - On focus mode exit (`close_panel()`), the terminal session is cleaned up: a `DetachTerminal` message is sent and the background task is aborted
+- The focus-mode terminal is linked to the agent by passing `Some(agent_id)` in the `StartTerminal` message; the hub records this on the `TerminalEntry` so that when the agent exits (explicit stop, worktree removal, or natural exit) any terminals owned by that agent are killed, preventing orphaned child processes such as dev servers
 - A hardware cursor (caret) is displayed via `frame.set_cursor_position()` when the terminal is the active input target (left panel focused, not scrolled back, and the application has not hidden the cursor via DECTCEM). The cursor position is read from the `TerminalEmulator`'s `cursor_position()` method and clamped to the terminal area bounds
 
 **Panel focus:**

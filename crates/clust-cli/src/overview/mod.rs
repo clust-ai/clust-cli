@@ -738,6 +738,7 @@ async fn terminal_connection_task(
     working_dir: String,
     cols: u16,
     rows: u16,
+    agent_id: Option<String>,
     event_tx: mpsc::Sender<TerminalOutputEvent>,
     mut command_rx: mpsc::Receiver<PanelCommand>,
 ) {
@@ -762,6 +763,7 @@ async fn terminal_connection_task(
             working_dir,
             cols,
             rows,
+            agent_id,
         },
     )
     .await
@@ -1914,8 +1916,14 @@ impl FocusModeState {
             }
         }
 
-        // Start terminal session
-        self.open_terminal(working_dir, self.terminal_cols, self.terminal_rows);
+        // Start terminal session, linked to this agent so the shell is killed
+        // alongside the agent (prevents orphaned dev servers, etc.).
+        self.open_terminal(
+            working_dir,
+            self.terminal_cols,
+            self.terminal_rows,
+            Some(agent_id.to_string()),
+        );
     }
 
     /// Drain all pending output events from the background task.
@@ -2061,7 +2069,13 @@ impl FocusModeState {
 
     // Terminal session management
 
-    fn open_terminal(&mut self, working_dir: &str, cols: u16, rows: u16) {
+    fn open_terminal(
+        &mut self,
+        working_dir: &str,
+        cols: u16,
+        rows: u16,
+        agent_id: Option<String>,
+    ) {
         self.close_terminal();
         self.terminal_cols = cols;
         self.terminal_rows = rows;
@@ -2071,7 +2085,7 @@ impl FocusModeState {
         let wd = working_dir.to_string();
 
         let handle = tokio::task::spawn(async move {
-            terminal_connection_task(wd, cols, rows, event_tx, command_rx).await;
+            terminal_connection_task(wd, cols, rows, agent_id, event_tx, command_rx).await;
         });
 
         self.terminal_panel = Some(TerminalPanel {

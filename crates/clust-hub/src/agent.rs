@@ -375,12 +375,27 @@ fn spawn_pty_reader(
 
         let _ = output_tx.send(AgentEvent::Exited(exit_code));
 
-        // Remove agent from shared state and notify batch engine
+        // Remove agent from shared state, notify batch engine, and cascade-kill
+        // any terminals this agent spawned so long-lived processes (dev
+        // servers, etc.) don't linger after the agent dies.
         let handle = tokio::runtime::Handle::current();
         handle.block_on(async {
-            let mut hub = state.lock().await;
-            hub.agents.remove(&agent_id);
-            crate::batch::on_agent_exited(&mut hub, &agent_id);
+            let terminal_ids: Vec<String> = {
+                let mut hub = state.lock().await;
+                hub.agents.remove(&agent_id);
+                crate::batch::on_agent_exited(&mut hub, &agent_id);
+                hub.terminals
+                    .values()
+                    .filter(|t| t.agent_id.as_deref() == Some(agent_id.as_str()))
+                    .map(|t| t.id.clone())
+                    .collect()
+            };
+            for tid in terminal_ids {
+                let state = state.clone();
+                tokio::spawn(async move {
+                    let _ = stop_terminal(&state, &tid).await;
+                });
+            }
         });
     });
 }
@@ -437,6 +452,10 @@ pub struct TerminalEntry {
     pub current_pty_size: (u16, u16),
     pub active_client_id: Option<u64>,
     pub(crate) next_client_id: AtomicU64,
+    /// Agent that spawned this terminal, if any. When the agent exits the
+    /// terminal is killed alongside it so child processes (dev servers, etc.)
+    /// do not linger.
+    pub agent_id: Option<String>,
 }
 
 impl TerminalEntry {
@@ -482,6 +501,7 @@ pub fn spawn_terminal(
     working_dir: String,
     cols: u16,
     rows: u16,
+    agent_id: Option<String>,
     shared_state: SharedHubState,
 ) -> Result<String, String> {
     let id = generate_terminal_id(&state.terminals);
@@ -546,6 +566,7 @@ pub fn spawn_terminal(
         current_pty_size: (cols, rows),
         active_client_id: None,
         next_client_id: AtomicU64::new(0),
+        agent_id,
     };
 
     state.terminals.insert(id.clone(), entry);
