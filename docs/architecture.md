@@ -136,7 +136,7 @@ CLI -> Hub:
   GetBypassPermissions
   DetachHead { repo_path: String }
   CheckoutLocalBranch { repo_path: String, branch_name: String }
-  StartTerminal { working_dir: String, cols: u16, rows: u16 }
+  StartTerminal { working_dir: String, cols: u16, rows: u16, agent_id: Option<String> }
   AttachTerminal { id: String }
   DetachTerminal { id: String }
   TerminalInput { id: String, data: Vec<u8> }
