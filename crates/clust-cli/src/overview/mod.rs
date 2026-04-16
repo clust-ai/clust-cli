@@ -85,6 +85,10 @@ pub struct AgentPanel {
     pub branch_name: Option<String>,
     pub repo_path: Option<String>,
     pub is_worktree: bool,
+    /// RFC 3339 timestamp of when the hub spawned this agent. Used as the
+    /// tertiary sort key in the overview so newly-spawned agents are appended
+    /// at the end of their (repo, batch) group.
+    pub started_at: String,
     pub vterm: TerminalEmulator,
     pub command_tx: mpsc::Sender<PanelCommand>,
     pub exited: bool,
@@ -429,7 +433,8 @@ impl OverviewState {
         }
     }
 
-    /// Compute panel indices sorted by repo group order, then branch, then ID.
+    /// Compute panel indices sorted by repo group order, then batch group,
+    /// then creation time (newly-spawned agents appear at the end of their group).
     /// Batch agents are grouped together by batch, ordered by task index.
     /// Panels whose repo is collapsed are excluded from the result.
     pub fn compute_sorted_indices(
@@ -483,7 +488,7 @@ impl OverviewState {
             order_a
                 .cmp(&order_b)
                 .then_with(|| group_a.cmp(&group_b))
-                .then_with(|| pa.branch_name.cmp(&pb.branch_name))
+                .then_with(|| pa.started_at.cmp(&pb.started_at))
                 .then_with(|| pa.id.cmp(&pb.id))
         });
 
@@ -529,6 +534,7 @@ impl OverviewState {
             branch_name: agent.branch_name.clone(),
             repo_path: agent.repo_path.clone(),
             is_worktree: agent.is_worktree,
+            started_at: agent.started_at.clone(),
             vterm: TerminalEmulator::new(cols as usize, rows as usize),
             command_tx,
             exited: false,
@@ -1879,6 +1885,9 @@ impl FocusModeState {
             branch_name: branch_name.map(|s| s.to_string()),
             repo_path: repo_path.map(|s| s.to_string()),
             is_worktree,
+            // Focus mode has a single panel and never sorts it, so the
+            // creation timestamp is irrelevant here.
+            started_at: String::new(),
             vterm: TerminalEmulator::new(cols as usize, rows as usize),
             command_tx,
             exited: false,
