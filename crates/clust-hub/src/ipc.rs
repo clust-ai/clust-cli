@@ -1561,10 +1561,17 @@ async fn handle_connection(
         }
 
         // Terminal session management
-        CliMessage::StartTerminal { working_dir, cols, rows } => {
+        CliMessage::StartTerminal { working_dir, cols, rows, agent_id } => {
             let result = {
                 let mut hub_state = state.lock().await;
-                agent::spawn_terminal(&mut hub_state, working_dir, cols, rows, state.clone())
+                agent::spawn_terminal(
+                    &mut hub_state,
+                    working_dir,
+                    cols,
+                    rows,
+                    agent_id,
+                    state.clone(),
+                )
             };
             match result {
                 Ok(id) => {

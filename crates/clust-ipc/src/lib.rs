@@ -156,6 +156,7 @@ pub enum CliMessage {
         working_dir: String,
         cols: u16,
         rows: u16,
+        agent_id: Option<String>,
     },
     AttachTerminal { id: String },
     DetachTerminal { id: String },
