@@ -2665,6 +2665,52 @@ fn render_left_tab_bar(
     frame.render_widget(Paragraph::new(Line::from(spans)), area);
 }
 
+/// Split a list of styled spans into rows of at most `max_width` characters.
+/// Preserves styles across wrap boundaries by splitting individual spans as needed.
+fn wrap_spans(spans: Vec<Span<'static>>, max_width: usize) -> Vec<Vec<Span<'static>>> {
+    if max_width == 0 {
+        return vec![spans];
+    }
+
+    let mut rows: Vec<Vec<Span<'static>>> = Vec::new();
+    let mut current_row: Vec<Span<'static>> = Vec::new();
+    let mut current_width: usize = 0;
+
+    for span in spans {
+        let style = span.style;
+        let full: &str = &span.content;
+        let mut remaining = full;
+
+        while !remaining.is_empty() {
+            let budget = max_width - current_width;
+            let take_chars = remaining.chars().count().min(budget);
+            let byte_end = remaining
+                .char_indices()
+                .nth(take_chars)
+                .map(|(i, _)| i)
+                .unwrap_or(remaining.len());
+
+            let (chunk, rest) = remaining.split_at(byte_end);
+            if !chunk.is_empty() {
+                current_row.push(Span::styled(chunk.to_string(), style));
+                current_width += take_chars;
+            }
+            remaining = rest;
+
+            if current_width >= max_width && !remaining.is_empty() {
+                rows.push(std::mem::take(&mut current_row));
+                current_width = 0;
+            }
+        }
+    }
+
+    rows.push(current_row);
+    if rows.is_empty() {
+        rows.push(Vec::new());
+    }
+    rows
+}
+
 #[allow(clippy::too_many_arguments)]
 fn render_diff_viewer(
     frame: &mut Frame,
@@ -2735,8 +2781,6 @@ fn render_diff_viewer(
     };
 
     let visible_height = body_area.height as usize;
-    let start = scroll;
-    let end = (start + visible_height).min(diff.lines.len());
 
     // Gutter width: "  old | new │" = 4+4+1 = 9 chars
     let gutter_width: u16 = 9;
@@ -2749,9 +2793,12 @@ fn render_diff_viewer(
     };
 
     let mut lines = Vec::with_capacity(visible_height);
+    let mut diff_idx = scroll;
 
-    for (vis_idx, diff_line) in diff.lines[start..end].iter().enumerate() {
-        let abs_idx = start + vis_idx;
+    while lines.len() < visible_height && diff_idx < diff.lines.len() {
+        let diff_line = &diff.lines[diff_idx];
+        let abs_idx = diff_idx;
+        diff_idx += 1;
 
         // Determine if this line is the cursor or part of a selection
         let is_cursor = cursor == Some(abs_idx);
@@ -2829,8 +2876,6 @@ fn render_diff_viewer(
         } else {
             diff_line.content.clone()
         };
-        let content_chars = display_content.chars().count();
-        let pad = (content_width as usize).saturating_sub(content_chars);
 
         // Syntax-highlight code lines (Add/Delete/Context); others keep plain styling
         let content_spans = match diff_line.kind {
@@ -2856,21 +2901,42 @@ fn render_diff_viewer(
             _ => vec![Span::styled(display_content, content_style)],
         };
 
-        let mut spans = vec![
-            Span::styled(gutter_text, gutter_style),
-            Span::styled(separator, sep_style),
-        ];
-        spans.extend(content_spans);
+        // Wrap content spans into visual rows that fit within content_width
+        let wrapped_rows = wrap_spans(content_spans, content_width as usize);
 
-        if pad > 0 {
-            spans.push(Span::styled(" ".repeat(pad), content_style));
+        for (row_i, row_spans) in wrapped_rows.into_iter().enumerate() {
+            if lines.len() >= visible_height {
+                break;
+            }
+
+            // First row: real gutter with line numbers; continuation rows: blank gutter
+            let (gutter_for_row, sep_for_row) = if row_i == 0 {
+                (gutter_text.clone(), separator)
+            } else {
+                ("        ".to_string(), " ")
+            };
+
+            let mut spans = vec![
+                Span::styled(gutter_for_row, gutter_style),
+                Span::styled(sep_for_row, sep_style),
+            ];
+
+            let row_content_chars: usize = row_spans.iter()
+                .map(|s| s.content.chars().count())
+                .sum();
+            spans.extend(row_spans);
+
+            let pad = (content_width as usize).saturating_sub(row_content_chars);
+            if pad > 0 {
+                spans.push(Span::styled(" ".repeat(pad), content_style));
+            }
+
+            lines.push(Line::from(spans));
         }
-
-        lines.push(Line::from(spans));
     }
 
     // Fill remaining visible area with empty lines
-    for _ in end.saturating_sub(start)..visible_height {
+    for _ in lines.len()..visible_height {
         lines.push(Line::from(Span::styled(
             " ".repeat(body_area.width as usize),
             bg_style,
