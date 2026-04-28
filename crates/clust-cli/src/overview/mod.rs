@@ -75,7 +75,37 @@ pub struct TerminalPanel {
     pub command_tx: mpsc::Sender<PanelCommand>,
     pub exited: bool,
     pub scroll_offset: usize,
+    /// Per-panel event channel. Owned by the panel so output keeps flowing into
+    /// the local `vterm` even while the panel is stashed in the overview's
+    /// `agent_terminals` cache (i.e., focus mode closed).
+    event_rx: mpsc::Receiver<TerminalOutputEvent>,
     task_handle: JoinHandle<()>,
+}
+
+impl TerminalPanel {
+    /// Drain pending output events into the panel's vterm. Should be called
+    /// every main-loop tick whether or not focus mode is currently displaying
+    /// this panel.
+    pub fn drain_events(&mut self) {
+        while let Ok(event) = self.event_rx.try_recv() {
+            match event {
+                TerminalOutputEvent::Output { id, data } => {
+                    if self.id.is_empty() || self.id == id {
+                        if self.id.is_empty() {
+                            self.id = id;
+                        }
+                        self.vterm.process(&data);
+                    }
+                }
+                TerminalOutputEvent::Exited { id }
+                | TerminalOutputEvent::ConnectionLost { id } => {
+                    if self.id.is_empty() || self.id == id {
+                        self.exited = true;
+                    }
+                }
+            }
+        }
+    }
 }
 
 /// A single agent panel in the overview.
@@ -120,6 +150,10 @@ pub struct OverviewState {
     /// Sorted+filtered panel indices, recomputed each frame.
     /// Used by both rendering and keyboard navigation.
     pub sorted_indices: Vec<usize>,
+    /// Cached focus-mode terminal panels, keyed by agent_id. Stashed here while
+    /// focus mode is closed so the shell session and its scrollback survive
+    /// across re-entries for the same agent.
+    pub agent_terminals: HashMap<String, TerminalPanel>,
 }
 
 impl OverviewState {
@@ -139,6 +173,26 @@ impl OverviewState {
             collapsed_repos: HashSet::new(),
             filter_cursor: 0,
             sorted_indices: Vec::new(),
+            agent_terminals: HashMap::new(),
+        }
+    }
+
+    /// Take the cached focus-mode terminal panel for an agent, if one exists.
+    pub fn take_agent_terminal(&mut self, agent_id: &str) -> Option<TerminalPanel> {
+        self.agent_terminals.remove(agent_id)
+    }
+
+    /// Stash a focus-mode terminal panel for an agent so it can be reused next
+    /// time focus mode is opened for that agent.
+    pub fn store_agent_terminal(&mut self, agent_id: String, panel: TerminalPanel) {
+        self.agent_terminals.insert(agent_id, panel);
+    }
+
+    /// Drain pending output events for every cached focus-mode terminal so
+    /// scrollback keeps accumulating while focus mode is closed.
+    pub fn drain_cached_terminal_events(&mut self) {
+        for panel in self.agent_terminals.values_mut() {
+            panel.drain_events();
         }
     }
 
@@ -157,6 +211,17 @@ impl OverviewState {
                 i += 1;
             }
         }
+
+        // Prune cached focus-mode terminal panels whose agent is gone. A
+        // cache entry can outlive its agent's overview panel if the user
+        // closed focus mode just before the agent disappeared.
+        self.agent_terminals.retain(|id, panel| {
+            let alive = agents.iter().any(|a| a.id == *id);
+            if !alive {
+                panel.task_handle.abort();
+            }
+            alive
+        });
 
         // Add panels for new agents
         for agent in agents {
@@ -1779,8 +1844,6 @@ pub struct FocusModeState {
     pr_detection_task: Option<JoinHandle<()>>,
     // Terminal tab state
     pub terminal_panel: Option<TerminalPanel>,
-    terminal_output_rx: mpsc::Receiver<TerminalOutputEvent>,
-    terminal_output_tx: mpsc::Sender<TerminalOutputEvent>,
     terminal_cols: u16,
     terminal_rows: u16,
 }
@@ -1791,7 +1854,6 @@ impl FocusModeState {
         let (diff_tx, diff_rx) = mpsc::channel(16);
         let (compare_diff_tx, compare_diff_rx) = mpsc::channel(16);
         let (pr_detection_tx, pr_detection_rx) = mpsc::channel(1);
-        let (terminal_output_tx, terminal_output_rx) = mpsc::channel(512);
         Self {
             panel: None,
             output_rx,
@@ -1828,14 +1890,17 @@ impl FocusModeState {
             pr_detection_tx,
             pr_detection_task: None,
             terminal_panel: None,
-            terminal_output_rx,
-            terminal_output_tx,
             terminal_cols: 80,
             terminal_rows: 24,
         }
     }
 
     /// Open an agent in focus mode, replacing any existing panel.
+    ///
+    /// `existing_terminal`, if provided, is a cached `TerminalPanel` from a
+    /// previous focus-mode session for the same agent. When present, the
+    /// shell session and its scrollback are reused instead of spawning a new
+    /// terminal.
     #[allow(clippy::too_many_arguments)]
     pub fn open_agent(
         &mut self,
@@ -1847,6 +1912,7 @@ impl FocusModeState {
         repo_path: Option<&str>,
         branch_name: Option<&str>,
         is_worktree: bool,
+        existing_terminal: Option<TerminalPanel>,
     ) {
         self.close_panel();
 
@@ -1916,14 +1982,42 @@ impl FocusModeState {
             }
         }
 
-        // Start terminal session, linked to this agent so the shell is killed
-        // alongside the agent (prevents orphaned dev servers, etc.).
-        self.open_terminal(
-            working_dir,
-            self.terminal_cols,
-            self.terminal_rows,
-            Some(agent_id.to_string()),
-        );
+        // Start (or restore) terminal session. The terminal is linked to this
+        // agent so the shell is killed alongside the agent (prevents orphaned
+        // dev servers, etc.). If a cached panel was handed in, reuse its
+        // existing shell session and scrollback rather than spawning anew.
+        if let Some(panel) = existing_terminal {
+            self.install_existing_terminal(panel);
+        } else {
+            self.open_terminal(
+                working_dir,
+                self.terminal_cols,
+                self.terminal_rows,
+                Some(agent_id.to_string()),
+            );
+        }
+    }
+
+    /// Install a previously-cached terminal panel and refit it to the current
+    /// focus-mode dimensions. The background `terminal_connection_task` is
+    /// already running, so no IPC is needed beyond an optional resize.
+    fn install_existing_terminal(&mut self, mut panel: TerminalPanel) {
+        // Defensive: drop any half-initialized current panel.
+        self.close_terminal();
+
+        let cols = self.terminal_cols;
+        let rows = self.terminal_rows;
+        let needs_resize =
+            panel.vterm.cols() != cols as usize || panel.vterm.rows() != rows as usize;
+        if needs_resize
+            && panel
+                .command_tx
+                .try_send(PanelCommand::Resize { cols, rows })
+                .is_ok()
+        {
+            panel.vterm.resize(cols as usize, rows as usize);
+        }
+        self.terminal_panel = Some(panel);
     }
 
     /// Drain all pending output events from the background task.
@@ -2015,9 +2109,24 @@ impl FocusModeState {
         }
     }
 
-    /// Shut down the current panel and clean up.
+    /// Shut down the current panel and clean up. Tears down the terminal too.
     pub fn shutdown(&mut self) {
         self.close_panel();
+    }
+
+    /// Step out of focus mode while keeping the terminal panel alive. Returns
+    /// `(agent_id, terminal_panel)` so the caller can stash the terminal for
+    /// reuse next time focus mode opens for the same agent. The agent panel
+    /// (a focus-mode-only second connection) and all auxiliary tasks are torn
+    /// down as usual.
+    pub fn detach(&mut self) -> Option<(String, TerminalPanel)> {
+        let agent_id = self.panel.as_ref().map(|p| p.id.clone());
+        self.close_panel_keep_terminal();
+        let terminal = self.terminal_panel.take();
+        match (agent_id, terminal) {
+            (Some(id), Some(panel)) => Some((id, panel)),
+            _ => None,
+        }
     }
 
     pub fn is_active(&self) -> bool {
@@ -2025,6 +2134,14 @@ impl FocusModeState {
     }
 
     fn close_panel(&mut self) {
+        self.close_panel_keep_terminal();
+        // Stop terminal
+        self.close_terminal();
+    }
+
+    /// Same as `close_panel` except the terminal panel is left untouched. Used
+    /// by `detach` so the caller can take the terminal panel for caching.
+    fn close_panel_keep_terminal(&mut self) {
         if let Some(panel) = self.panel.take() {
             let _ = panel.command_tx.try_send(PanelCommand::Detach);
             panel.task_handle.abort();
@@ -2050,8 +2167,6 @@ impl FocusModeState {
             handle.abort();
         }
         self.pr_info = None;
-        // Stop terminal
-        self.close_terminal();
     }
 
     /// Stop the branch compare diff background task.
@@ -2080,7 +2195,7 @@ impl FocusModeState {
         self.terminal_cols = cols;
         self.terminal_rows = rows;
 
-        let event_tx = self.terminal_output_tx.clone();
+        let (event_tx, event_rx) = mpsc::channel::<TerminalOutputEvent>(512);
         let (command_tx, command_rx) = mpsc::channel::<PanelCommand>(64);
         let wd = working_dir.to_string();
 
@@ -2094,6 +2209,7 @@ impl FocusModeState {
             command_tx,
             exited: false,
             scroll_offset: 0,
+            event_rx,
             task_handle: handle,
         });
     }
@@ -2105,29 +2221,12 @@ impl FocusModeState {
         }
     }
 
-    /// Drain terminal output events into the vterm.
+    /// Drain terminal output events into the vterm of the active terminal
+    /// panel. Cached panels in `OverviewState::agent_terminals` drain their
+    /// own events via `OverviewState::drain_cached_terminal_events`.
     pub fn drain_terminal_events(&mut self) {
-        while let Ok(event) = self.terminal_output_rx.try_recv() {
-            match event {
-                TerminalOutputEvent::Output { id, data } => {
-                    if let Some(panel) = self.terminal_panel.as_mut() {
-                        if panel.id.is_empty() || panel.id == id {
-                            if panel.id.is_empty() {
-                                panel.id = id;
-                            }
-                            panel.vterm.process(&data);
-                        }
-                    }
-                }
-                TerminalOutputEvent::Exited { id }
-                | TerminalOutputEvent::ConnectionLost { id } => {
-                    if let Some(panel) = self.terminal_panel.as_mut() {
-                        if panel.id.is_empty() || panel.id == id {
-                            panel.exited = true;
-                        }
-                    }
-                }
-            }
+        if let Some(panel) = self.terminal_panel.as_mut() {
+            panel.drain_events();
         }
     }
 
