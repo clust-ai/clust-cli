@@ -1017,6 +1017,7 @@ pub fn run(hub_name: &str) -> io::Result<()> {
     loop {
         // Drain output events (non-blocking, runs regardless of tab)
         overview_state.drain_output_events();
+        overview_state.drain_cached_terminal_events();
         focus_mode_state.drain_output_events();
         focus_mode_state.drain_diff_events();
         focus_mode_state.drain_compare_diff_events();
@@ -1085,6 +1086,7 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                             .saturating_sub(2)
                             .max(1);
                         let fm_rows = last_content_area.height.saturating_sub(3).max(1);
+                        let existing_terminal = overview_state.take_agent_terminal(&agent_id);
                         focus_mode_state.open_agent(
                             &agent_id,
                             &agent_binary,
@@ -1094,6 +1096,7 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                             repo_path.as_deref(),
                             branch_name.as_deref(),
                             is_worktree,
+                            existing_terminal,
                         );
                         in_focus_mode = true;
                     }
@@ -1593,7 +1596,9 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                             KeyCode::Char('1') => {
                                 active_menu = None;
                                 if in_focus_mode {
-                                    focus_mode_state.shutdown();
+                                    if let Some((aid, panel)) = focus_mode_state.detach() {
+                                        overview_state.store_agent_terminal(aid, panel);
+                                    }
                                     in_focus_mode = false;
                                 }
                                 active_tab = ActiveTab::Repositories;
@@ -1601,7 +1606,9 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                             KeyCode::Char('2') => {
                                 active_menu = None;
                                 if in_focus_mode {
-                                    focus_mode_state.shutdown();
+                                    if let Some((aid, panel)) = focus_mode_state.detach() {
+                                        overview_state.store_agent_terminal(aid, panel);
+                                    }
                                     in_focus_mode = false;
                                 }
                                 active_tab = ActiveTab::Overview;
@@ -1615,7 +1622,9 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                             KeyCode::Char('3') => {
                                 active_menu = None;
                                 if in_focus_mode {
-                                    focus_mode_state.shutdown();
+                                    if let Some((aid, panel)) = focus_mode_state.detach() {
+                                        overview_state.store_agent_terminal(aid, panel);
+                                    }
                                     in_focus_mode = false;
                                 }
                                 active_tab = ActiveTab::Tasks;
@@ -1659,6 +1668,8 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                                 .max(1);
                                             let fm_rows =
                                                 last_content_area.height.saturating_sub(3).max(1);
+                                            let existing_terminal =
+                                                overview_state.take_agent_terminal(&agent_id);
                                             focus_mode_state.open_agent(
                                                 &agent_id,
                                                 &agent_binary,
@@ -1668,6 +1679,7 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                                 agent.repo_path.as_deref(),
                                                 agent.branch_name.as_deref(),
                                                 agent.is_worktree,
+                                                existing_terminal,
                                             );
                                             in_focus_mode = true;
                                         }
@@ -2144,6 +2156,8 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                                             .height
                                                             .saturating_sub(3)
                                                             .max(1);
+                                                        let existing_terminal = overview_state
+                                                            .take_agent_terminal(&agent.id);
                                                         focus_mode_state.open_agent(
                                                             &agent.id,
                                                             &agent.agent_binary,
@@ -2153,6 +2167,7 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                                             agent.repo_path.as_deref(),
                                                             agent.branch_name.as_deref(),
                                                             agent.is_worktree,
+                                                            existing_terminal,
                                                         );
                                                         in_focus_mode = true;
                                                     } else if branch_agents.len() > 1 {
@@ -3254,6 +3269,8 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                     .max(1);
                                 let fm_rows =
                                     last_content_area.height.saturating_sub(3).max(1);
+                                let existing_terminal =
+                                    overview_state.take_agent_terminal(&agent.id);
                                 focus_mode_state.open_agent(
                                     &agent.id,
                                     &agent.agent_binary,
@@ -3263,6 +3280,7 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                     agent.repo_path.as_deref(),
                                     agent.branch_name.as_deref(),
                                     agent.is_worktree,
+                                    existing_terminal,
                                 );
                                 in_focus_mode = true;
                                 active_tab = ActiveTab::Overview;
@@ -3586,7 +3604,9 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                         {
                                             overview_state.force_resize_all();
                                         }
-                                        focus_mode_state.shutdown();
+                                        if let Some((aid, panel)) = focus_mode_state.detach() {
+                                            overview_state.store_agent_terminal(aid, panel);
+                                        }
                                         in_focus_mode = false;
                                     }
                                     KeyCode::Right => {
@@ -3758,7 +3778,9 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                         {
                                             overview_state.force_resize_all();
                                         }
-                                        focus_mode_state.shutdown();
+                                        if let Some((aid, panel)) = focus_mode_state.detach() {
+                                            overview_state.store_agent_terminal(aid, panel);
+                                        }
                                         in_focus_mode = false;
                                     }
                                     KeyCode::Left if focus_mode_state.repo_path.is_some() => {
@@ -3852,6 +3874,8 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                                 .height
                                                 .saturating_sub(3)
                                                 .max(1);
+                                            let existing_terminal =
+                                                overview_state.take_agent_terminal(&agent_id);
                                             focus_mode_state.open_agent(
                                                 &agent_id,
                                                 &agent_binary,
@@ -3861,6 +3885,7 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                                 repo_path.as_deref(),
                                                 branch_name.as_deref(),
                                                 is_wt,
+                                                existing_terminal,
                                             );
                                             in_focus_mode = true;
                                         }
@@ -4076,6 +4101,8 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                                     .height
                                                     .saturating_sub(3)
                                                     .max(1);
+                                                let existing_terminal =
+                                                    overview_state.take_agent_terminal(&aid);
                                                 focus_mode_state.open_agent(
                                                     &aid,
                                                     &agent.agent_binary,
@@ -4085,6 +4112,7 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                                     agent.repo_path.as_deref(),
                                                     agent.branch_name.as_deref(),
                                                     agent.is_worktree,
+                                                    existing_terminal,
                                                 );
                                                 focus_mode_state.batch_origin =
                                                     Some(overview::BatchOrigin {
@@ -4520,6 +4548,8 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                                     .height
                                                     .saturating_sub(3)
                                                     .max(1);
+                                                let existing_terminal =
+                                                    overview_state.take_agent_terminal(&agent_id);
                                                 focus_mode_state.open_agent(
                                                     &agent_id,
                                                     &agent_binary,
@@ -4529,6 +4559,7 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                                     agent_repo_path.as_deref(),
                                                     agent_branch.as_deref(),
                                                     agent_is_wt,
+                                                    existing_terminal,
                                                 );
                                                 in_focus_mode = true;
                                             }
@@ -4783,6 +4814,8 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                                 .max(1);
                                             let fm_rows =
                                                 last_content_area.height.saturating_sub(3).max(1);
+                                            let existing_terminal =
+                                                overview_state.take_agent_terminal(&agent_id);
                                             focus_mode_state.open_agent(
                                                 &agent_id,
                                                 &agent_binary,
@@ -4792,6 +4825,7 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                                 agent.repo_path.as_deref(),
                                                 agent.branch_name.as_deref(),
                                                 agent.is_worktree,
+                                                existing_terminal,
                                             );
                                             in_focus_mode = true;
                                         }
@@ -5260,6 +5294,8 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                                             .height
                                                             .saturating_sub(3)
                                                             .max(1);
+                                                        let existing_terminal = overview_state
+                                                            .take_agent_terminal(&agent.id);
                                                         focus_mode_state.open_agent(
                                                             &agent.id,
                                                             &agent.agent_binary,
@@ -5269,6 +5305,7 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                                             agent.repo_path.as_deref(),
                                                             agent.branch_name.as_deref(),
                                                             agent.is_worktree,
+                                                            existing_terminal,
                                                         );
                                                         in_focus_mode = true;
                                                     } else if branch_agents.len() > 1 {
@@ -5920,7 +5957,9 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                             {
                                 overview_state.force_resize_all();
                             }
-                            focus_mode_state.shutdown();
+                            if let Some((aid, panel)) = focus_mode_state.detach() {
+                                overview_state.store_agent_terminal(aid, panel);
+                            }
                             in_focus_mode = false;
                         } else if focus_mode_state.repo_path.is_some() {
                             if let Some((_, tab)) = click_map.focus_left_tabs.iter().find(|(r, _)| r.contains(pos)) {
