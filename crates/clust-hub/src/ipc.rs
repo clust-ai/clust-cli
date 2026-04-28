@@ -1448,6 +1448,7 @@ async fn handle_connection(
                         let reader = std::io::BufReader::new(stderr);
                         for line in reader.lines() {
                             match line {
+                                #[allow(clippy::collapsible_match)]
                                 Ok(l) if !l.is_empty() => {
                                     if tx.send(Ok(l)).is_err() {
                                         break;
