@@ -170,7 +170,7 @@ pub enum AgentEvent {
 }
 
 /// Generate a unique 6-character hex agent ID.
-pub fn generate_agent_id(existing: &HashMap<String, AgentEntry>) -> String {
+pub fn generate_agent_id<V>(existing: &HashMap<String, V>) -> String {
     use rand::Rng;
     let mut rng = rand::thread_rng();
     loop {
@@ -699,7 +699,7 @@ mod tests {
 
     #[test]
     fn agent_id_is_6_char_hex() {
-        let existing = HashMap::new();
+        let existing: HashMap<String, ()> = HashMap::new();
         let id = generate_agent_id(&existing);
         assert_eq!(id.len(), 6);
         assert!(id.chars().all(|c| c.is_ascii_hexdigit()));
@@ -707,33 +707,11 @@ mod tests {
 
     #[test]
     fn agent_id_avoids_collisions() {
-        let mut existing = HashMap::new();
-        // Fill with many IDs to test collision avoidance
+        // Use a value-less map so the test doesn't allocate 100 PTYs (CI
+        // environments without a configured PTY device fail otherwise).
+        let mut existing: HashMap<String, ()> = HashMap::new();
         for i in 0..100 {
-            let id = format!("{:06x}", i);
-            existing.insert(
-                id.clone(),
-                AgentEntry {
-                    id: id.clone(),
-                    agent_binary: "test".into(),
-                    started_at: "2026-01-01T00:00:00Z".into(),
-                    working_dir: "/tmp".into(),
-                    hub: clust_ipc::DEFAULT_HUB.into(),
-                    pid: None,
-                    pty_master: create_dummy_pty_master(),
-                    pty_writer: Box::new(std::io::sink()),
-                    output_tx: broadcast::channel(1).0,
-                    replay_buffer: Arc::new(std::sync::Mutex::new(ReplayBuffer::new())),
-                    attached_count: Arc::new(AtomicUsize::new(0)),
-                    client_sizes: HashMap::new(),
-                    current_pty_size: (80, 24),
-                    active_client_id: None,
-                    next_client_id: AtomicU64::new(0),
-                    repo_path: None,
-                    branch_name: None,
-                    is_worktree: false,
-                },
-            );
+            existing.insert(format!("{:06x}", i), ());
         }
         let id = generate_agent_id(&existing);
         assert!(!existing.contains_key(&id));
