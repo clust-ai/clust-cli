@@ -607,24 +607,18 @@ impl TasksState {
 
             // Update batch status
             match hub_info.status.as_str() {
-                "running" => {
-                    if !matches!(batch.status, BatchStatus::Active) {
-                        batch.status = BatchStatus::Active;
-                    }
+                "running" if !matches!(batch.status, BatchStatus::Active) => {
+                    batch.status = BatchStatus::Active;
                 }
-                "scheduled" => {
-                    // Keep the Queued state with its scheduled_at
-                    if !matches!(batch.status, BatchStatus::Queued { .. }) {
-                        batch.status = BatchStatus::Queued {
-                            scheduled_at: hub_info.scheduled_at.clone().unwrap_or_default(),
-                            batch_id: hub_info.batch_id.clone(),
-                        };
-                    }
+                // Keep the Queued state with its scheduled_at
+                "scheduled" if !matches!(batch.status, BatchStatus::Queued { .. }) => {
+                    batch.status = BatchStatus::Queued {
+                        scheduled_at: hub_info.scheduled_at.clone().unwrap_or_default(),
+                        batch_id: hub_info.batch_id.clone(),
+                    };
                 }
-                "idle" => {
-                    if !matches!(batch.status, BatchStatus::Idle) {
-                        batch.status = BatchStatus::Idle;
-                    }
+                "idle" if !matches!(batch.status, BatchStatus::Idle) => {
+                    batch.status = BatchStatus::Idle;
                 }
                 _ => {}
             }

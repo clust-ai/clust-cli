@@ -1961,24 +1961,20 @@ fn read_custom_agent() -> DefaultPickerResult {
         }
 
         match key.code {
-            KeyCode::Enter => {
-                if !buf.is_empty() {
-                    // Erase the input line
-                    write!(stdout, "\r\x1b[2K").unwrap();
-                    stdout.flush().unwrap();
-                    return DefaultPickerResult::Selected(buf);
-                }
+            KeyCode::Enter if !buf.is_empty() => {
+                // Erase the input line
+                write!(stdout, "\r\x1b[2K").unwrap();
+                stdout.flush().unwrap();
+                return DefaultPickerResult::Selected(buf);
             }
             KeyCode::Esc => {
                 write!(stdout, "\r\x1b[2K").unwrap();
                 stdout.flush().unwrap();
                 return DefaultPickerResult::Cancel;
             }
-            KeyCode::Backspace => {
-                if buf.pop().is_some() {
-                    write!(stdout, "\x08 \x08").unwrap();
-                    stdout.flush().unwrap();
-                }
+            KeyCode::Backspace if buf.pop().is_some() => {
+                write!(stdout, "\x08 \x08").unwrap();
+                stdout.flush().unwrap();
             }
             KeyCode::Char(c) => {
                 buf.push(c);

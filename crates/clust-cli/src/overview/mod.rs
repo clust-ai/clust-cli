@@ -716,6 +716,7 @@ async fn agent_connection_task(
         tokio::select! {
             msg = clust_ipc::recv_message_read::<HubMessage>(&mut reader) => {
                 match msg {
+                    #[allow(clippy::collapsible_match)]
                     Ok(HubMessage::AgentOutput { data, .. }) => {
                         if event_tx
                             .send(AgentOutputEvent::Output {
@@ -902,6 +903,7 @@ async fn terminal_connection_task(
         tokio::select! {
             msg = clust_ipc::recv_message_read::<HubMessage>(&mut reader) => {
                 match msg {
+                    #[allow(clippy::collapsible_match)]
                     Ok(HubMessage::TerminalOutput { data, .. }) => {
                         if event_tx
                             .send(TerminalOutputEvent::Output {
@@ -1688,7 +1690,7 @@ impl BranchPicker {
                     .map(|score| (i, score))
             })
             .collect();
-        results.sort_by(|a, b| b.1.cmp(&a.1));
+        results.sort_by_key(|b| std::cmp::Reverse(b.1));
         results
     }
 

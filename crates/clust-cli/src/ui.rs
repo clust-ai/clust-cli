@@ -3956,10 +3956,8 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                         // Normal key handling (options bar, other tabs)
                         match key.code {
                             KeyCode::Char('q') => break,
-                            KeyCode::Esc => {
-                                if is_double_esc(&mut last_esc_press) {
-                                    break;
-                                }
+                            KeyCode::Esc if is_double_esc(&mut last_esc_press) => {
+                                break;
                             }
                             KeyCode::Char('c')
                                 if key.modifiers.contains(KeyModifiers::CONTROL) =>
@@ -4027,10 +4025,10 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                             .scroll_right(last_content_area.width);
                                     }
                                     // Filter group navigation
-                                    KeyCode::Left if !shift => {
-                                        if overview_state.filter_cursor > 0 {
-                                            overview_state.filter_cursor -= 1;
-                                        }
+                                    KeyCode::Left
+                                        if !shift && overview_state.filter_cursor > 0 =>
+                                    {
+                                        overview_state.filter_cursor -= 1;
                                     }
                                     KeyCode::Right if !shift => {
                                         let has_other = agents.iter().any(|a| a.repo_path.is_none());
@@ -4581,22 +4579,18 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                     KeyCode::Up
                                         if key
                                             .modifiers
-                                            .contains(KeyModifiers::SHIFT) =>
+                                            .contains(KeyModifiers::SHIFT)
+                                            && focus == FocusPanel::Left =>
                                     {
-                                        if focus == FocusPanel::Left {
-                                            selection
-                                                .jump_prev_repo(&display_repos);
-                                        }
+                                        selection.jump_prev_repo(&display_repos);
                                     }
                                     KeyCode::Down
                                         if key
                                             .modifiers
-                                            .contains(KeyModifiers::SHIFT) =>
+                                            .contains(KeyModifiers::SHIFT)
+                                            && focus == FocusPanel::Left =>
                                     {
-                                        if focus == FocusPanel::Left {
-                                            selection
-                                                .jump_next_repo(&display_repos);
-                                        }
+                                        selection.jump_next_repo(&display_repos);
                                     }
                                     KeyCode::Up => match focus {
                                         FocusPanel::Left => {

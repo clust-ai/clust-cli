@@ -370,7 +370,7 @@ impl CreateBatchModal {
                     .map(|score| (i, score))
             })
             .collect();
-        results.sort_by(|a, b| b.1.cmp(&a.1));
+        results.sort_by_key(|b| std::cmp::Reverse(b.1));
         results
     }
 
@@ -393,7 +393,7 @@ impl CreateBatchModal {
                     .map(|score| (i, score))
             })
             .collect();
-        results.sort_by(|a, b| b.1.cmp(&a.1));
+        results.sort_by_key(|b| std::cmp::Reverse(b.1));
         results
     }
 
@@ -520,15 +520,11 @@ impl CreateBatchModal {
             Span::styled(after_cursor, Style::default().fg(theme::R_TEXT_PRIMARY)),
         ]);
         let width = area.width as usize;
-        let scroll = if width > 0 {
-            let char_pos = self.input[..self.cursor_pos].chars().count();
-            let cursor_line = (2 + char_pos) / width;
-            let visible = area.height as usize;
-            if cursor_line >= visible {
-                (cursor_line - visible + 1) as u16
-            } else {
-                0
-            }
+        let char_pos = self.input[..self.cursor_pos].chars().count();
+        let cursor_line = (2 + char_pos).checked_div(width).unwrap_or(0);
+        let visible = area.height as usize;
+        let scroll: u16 = if cursor_line >= visible {
+            (cursor_line - visible + 1) as u16
         } else {
             0
         };
