@@ -435,3 +435,32 @@ These shortcuts are active in the `clust ui` dashboard. They are displayed in th
 | `↑` / `↓` | Scroll diff up/down |
 | `Shift+→` | Switch focus to right panel |
 | `Tab` | Cycle to next left panel tab |
+
+**Focus mode — Terminal tab (Navigate sub-mode, default):**
+
+The Terminal tab supports multiple shells per agent shown as a label strip (`[1] [2*] [3]    [+]`). Default sub-mode is Navigate so keys are TUI commands, not shell input.
+
+| Shortcut | Action |
+|----------|--------|
+| `Ctrl+\` | Toggle Type ↔ Navigate sub-mode |
+| `Enter` | Enter Type sub-mode (shortcut into typing) |
+| `]` | Switch to next terminal |
+| `[` | Switch to previous terminal |
+| `n` | Open a new terminal (and enter Type mode on it) |
+| `x` | Close the current terminal (kills its PTY) |
+| `Tab` | Cycle to next left panel tab |
+| `Shift+PgUp` / `Shift+PgDn` | Scroll the active terminal's scrollback |
+| Mouse: click `[N]` | Switch to terminal N |
+| Mouse: click `[+]` | Spawn new terminal, enter Type mode |
+| Mouse: click terminal area | Enter Type mode |
+| Mouse: scroll over terminal | Scroll active terminal scrollback |
+| Mouse: scroll over label strip | Cycle terminals |
+
+**Focus mode — Terminal tab (Type sub-mode):**
+
+| Shortcut | Action |
+|----------|--------|
+| `Ctrl+\` | Stop typing, return to Navigate sub-mode |
+| All other keys | Forwarded to the active terminal's shell PTY |
+
+All Terminal-tab shells are killed automatically when the owning agent exits, its worktree is removed, or its branch is deleted — no orphan processes left behind.

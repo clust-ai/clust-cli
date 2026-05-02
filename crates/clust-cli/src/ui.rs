@@ -259,6 +259,10 @@ pub(crate) struct ClickMap {
     pub(crate) focus_right_area: Rect,
     pub(crate) focus_left_tabs: Vec<(Rect, overview::LeftPanelTab)>,
     focus_back_button: Rect,
+    // Multi-terminal label strip (inside the Terminal tab)
+    pub(crate) focus_terminal_labels: Vec<(Rect, usize)>, // (rect, terminal_idx)
+    pub(crate) focus_terminal_new_button: Rect,           // [+] hit zone
+    pub(crate) focus_terminal_content_area: Rect,         // active terminal vterm area
 
     // Terminal content areas (inner area excluding borders/header) for URL click
     pub(crate) overview_content_areas: Vec<(Rect, usize)>, // (content_area, panel_idx)
@@ -1086,7 +1090,7 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                             .saturating_sub(2)
                             .max(1);
                         let fm_rows = last_content_area.height.saturating_sub(3).max(1);
-                        let existing_terminal = overview_state.take_agent_terminal(&agent_id);
+                        let existing_terminals = overview_state.take_agent_terminals(&agent_id);
                         focus_mode_state.open_agent(
                             &agent_id,
                             &agent_binary,
@@ -1096,7 +1100,7 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                             repo_path.as_deref(),
                             branch_name.as_deref(),
                             is_worktree,
-                            existing_terminal,
+                            existing_terminals,
                         );
                         in_focus_mode = true;
                     }
@@ -1477,6 +1481,21 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                 None
             };
 
+            let focus_hint = if cur_focus_mode {
+                if focus_mode_state.left_tab == overview::LeftPanelTab::Terminal
+                    && focus_mode_state.focus_side == overview::FocusSide::Left
+                {
+                    if focus_mode_state.terminal_input_focused {
+                        FocusModeHint::TerminalType
+                    } else {
+                        FocusModeHint::TerminalNavigate
+                    }
+                } else {
+                    FocusModeHint::Other
+                }
+            } else {
+                FocusModeHint::Other
+            };
             render_status_bar(
                 frame,
                 status_area,
@@ -1491,6 +1510,7 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                 mouse_captured_now,
                 mouse_passthrough_now,
                 bypass_permissions,
+                focus_hint,
             );
 
             if let Some(ref menu_state) = menu_ref {
@@ -1596,8 +1616,8 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                             KeyCode::Char('1') => {
                                 active_menu = None;
                                 if in_focus_mode {
-                                    if let Some((aid, panel)) = focus_mode_state.detach() {
-                                        overview_state.store_agent_terminal(aid, panel);
+                                    if let Some((aid, cache)) = focus_mode_state.detach() {
+                                        overview_state.store_agent_terminals(aid, cache);
                                     }
                                     in_focus_mode = false;
                                 }
@@ -1606,8 +1626,8 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                             KeyCode::Char('2') => {
                                 active_menu = None;
                                 if in_focus_mode {
-                                    if let Some((aid, panel)) = focus_mode_state.detach() {
-                                        overview_state.store_agent_terminal(aid, panel);
+                                    if let Some((aid, cache)) = focus_mode_state.detach() {
+                                        overview_state.store_agent_terminals(aid, cache);
                                     }
                                     in_focus_mode = false;
                                 }
@@ -1622,8 +1642,8 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                             KeyCode::Char('3') => {
                                 active_menu = None;
                                 if in_focus_mode {
-                                    if let Some((aid, panel)) = focus_mode_state.detach() {
-                                        overview_state.store_agent_terminal(aid, panel);
+                                    if let Some((aid, cache)) = focus_mode_state.detach() {
+                                        overview_state.store_agent_terminals(aid, cache);
                                     }
                                     in_focus_mode = false;
                                 }
@@ -1668,8 +1688,8 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                                 .max(1);
                                             let fm_rows =
                                                 last_content_area.height.saturating_sub(3).max(1);
-                                            let existing_terminal =
-                                                overview_state.take_agent_terminal(&agent_id);
+                                            let existing_terminals =
+                                                overview_state.take_agent_terminals(&agent_id);
                                             focus_mode_state.open_agent(
                                                 &agent_id,
                                                 &agent_binary,
@@ -1679,7 +1699,7 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                                 agent.repo_path.as_deref(),
                                                 agent.branch_name.as_deref(),
                                                 agent.is_worktree,
-                                                existing_terminal,
+                                                existing_terminals,
                                             );
                                             in_focus_mode = true;
                                         }
@@ -2156,8 +2176,8 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                                             .height
                                                             .saturating_sub(3)
                                                             .max(1);
-                                                        let existing_terminal = overview_state
-                                                            .take_agent_terminal(&agent.id);
+                                                        let existing_terminals = overview_state
+                                                            .take_agent_terminals(&agent.id);
                                                         focus_mode_state.open_agent(
                                                             &agent.id,
                                                             &agent.agent_binary,
@@ -2167,7 +2187,7 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                                             agent.repo_path.as_deref(),
                                                             agent.branch_name.as_deref(),
                                                             agent.is_worktree,
-                                                            existing_terminal,
+                                                            existing_terminals,
                                                         );
                                                         in_focus_mode = true;
                                                     } else if branch_agents.len() > 1 {
@@ -3269,8 +3289,8 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                     .max(1);
                                 let fm_rows =
                                     last_content_area.height.saturating_sub(3).max(1);
-                                let existing_terminal =
-                                    overview_state.take_agent_terminal(&agent.id);
+                                let existing_terminals =
+                                    overview_state.take_agent_terminals(&agent.id);
                                 focus_mode_state.open_agent(
                                     &agent.id,
                                     &agent.agent_binary,
@@ -3280,7 +3300,7 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                     agent.repo_path.as_deref(),
                                     agent.branch_name.as_deref(),
                                     agent.is_worktree,
-                                    existing_terminal,
+                                    existing_terminals,
                                 );
                                 in_focus_mode = true;
                                 active_tab = ActiveTab::Overview;
@@ -3604,8 +3624,8 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                         {
                                             overview_state.force_resize_all();
                                         }
-                                        if let Some((aid, panel)) = focus_mode_state.detach() {
-                                            overview_state.store_agent_terminal(aid, panel);
+                                        if let Some((aid, cache)) = focus_mode_state.detach() {
+                                            overview_state.store_agent_terminals(aid, cache);
                                         }
                                         in_focus_mode = false;
                                     }
@@ -3622,7 +3642,7 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                             == overview::LeftPanelTab::Terminal =>
                                     {
                                         if let Some(panel) =
-                                            &mut focus_mode_state.terminal_panel
+                                            focus_mode_state.current_terminal_mut()
                                         {
                                             let page = panel.vterm.rows();
                                             let max =
@@ -3637,7 +3657,7 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                             == overview::LeftPanelTab::Terminal =>
                                     {
                                         if let Some(panel) =
-                                            &mut focus_mode_state.terminal_panel
+                                            focus_mode_state.current_terminal_mut()
                                         {
                                             let page = panel.vterm.rows();
                                             panel.scroll_offset = panel
@@ -3646,10 +3666,12 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                         }
                                     }
                                     _ if focus_mode_state.left_tab
-                                        == overview::LeftPanelTab::Terminal =>
+                                        == overview::LeftPanelTab::Terminal
+                                        && focus_mode_state
+                                            .terminal_input_focused =>
                                     {
-                                        // Forward shifted keys to terminal
-                                        // (e.g. Shift+A for uppercase)
+                                        // Forward shifted keys to the active
+                                        // terminal only when in Type mode.
                                         if let Some(bytes) =
                                             overview::input::key_event_to_bytes(
                                                 &key,
@@ -3743,22 +3765,69 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                         }
                                     }
                                     overview::LeftPanelTab::Terminal => {
-                                        // Tab cycles left-panel tabs (same as
-                                        // Changes/Compare); all other keys
-                                        // forwarded to the terminal PTY.
-                                        if key.code == KeyCode::Tab {
-                                            focus_mode_state.left_tab =
-                                                focus_mode_state.left_tab.next();
-                                        } else if key.code == KeyCode::Esc {
+                                        // Two sub-modes: Navigate (default,
+                                        // keys = TUI commands) and Type (keys
+                                        // forwarded to the active PTY).
+                                        // Ctrl+\ toggles in both directions.
+                                        let is_ctrl_backslash = key
+                                            .modifiers
+                                            .contains(KeyModifiers::CONTROL)
+                                            && matches!(
+                                                key.code,
+                                                KeyCode::Char('\\')
+                                            );
+                                        if is_ctrl_backslash {
                                             focus_mode_state
-                                                .send_terminal_input(vec![0x1b]);
-                                        } else if let Some(bytes) =
-                                            overview::input::key_event_to_bytes(
-                                                &key,
-                                            )
+                                                .terminal_input_focused = !focus_mode_state
+                                                .terminal_input_focused;
+                                        } else if focus_mode_state
+                                            .terminal_input_focused
                                         {
-                                            focus_mode_state
-                                                .send_terminal_input(bytes);
+                                            // Type mode: forward everything to
+                                            // the PTY (existing behaviour).
+                                            if key.code == KeyCode::Esc {
+                                                focus_mode_state
+                                                    .send_terminal_input(vec![0x1b]);
+                                            } else if let Some(bytes) =
+                                                overview::input::key_event_to_bytes(
+                                                    &key,
+                                                )
+                                            {
+                                                focus_mode_state
+                                                    .send_terminal_input(bytes);
+                                            }
+                                        } else {
+                                            // Navigate mode: TUI commands.
+                                            match key.code {
+                                                KeyCode::Tab => {
+                                                    focus_mode_state.left_tab =
+                                                        focus_mode_state
+                                                            .left_tab
+                                                            .next();
+                                                }
+                                                KeyCode::Enter => {
+                                                    focus_mode_state
+                                                        .terminal_input_focused = true;
+                                                }
+                                                KeyCode::Char(']') => {
+                                                    focus_mode_state.next_terminal();
+                                                }
+                                                KeyCode::Char('[') => {
+                                                    focus_mode_state.prev_terminal();
+                                                }
+                                                KeyCode::Char('n') => {
+                                                    focus_mode_state.add_terminal();
+                                                    // Land in Type mode on the
+                                                    // freshly-spawned shell.
+                                                    focus_mode_state
+                                                        .terminal_input_focused = true;
+                                                }
+                                                KeyCode::Char('x') => {
+                                                    focus_mode_state
+                                                        .close_current_terminal();
+                                                }
+                                                _ => {}
+                                            }
                                         }
                                     }
                                 }
@@ -3778,8 +3847,8 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                         {
                                             overview_state.force_resize_all();
                                         }
-                                        if let Some((aid, panel)) = focus_mode_state.detach() {
-                                            overview_state.store_agent_terminal(aid, panel);
+                                        if let Some((aid, cache)) = focus_mode_state.detach() {
+                                            overview_state.store_agent_terminals(aid, cache);
                                         }
                                         in_focus_mode = false;
                                     }
@@ -3874,8 +3943,8 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                                 .height
                                                 .saturating_sub(3)
                                                 .max(1);
-                                            let existing_terminal =
-                                                overview_state.take_agent_terminal(&agent_id);
+                                            let existing_terminals =
+                                                overview_state.take_agent_terminals(&agent_id);
                                             focus_mode_state.open_agent(
                                                 &agent_id,
                                                 &agent_binary,
@@ -3885,7 +3954,7 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                                 repo_path.as_deref(),
                                                 branch_name.as_deref(),
                                                 is_wt,
-                                                existing_terminal,
+                                                existing_terminals,
                                             );
                                             in_focus_mode = true;
                                         }
@@ -4099,8 +4168,8 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                                     .height
                                                     .saturating_sub(3)
                                                     .max(1);
-                                                let existing_terminal =
-                                                    overview_state.take_agent_terminal(&aid);
+                                                let existing_terminals =
+                                                    overview_state.take_agent_terminals(&aid);
                                                 focus_mode_state.open_agent(
                                                     &aid,
                                                     &agent.agent_binary,
@@ -4110,7 +4179,7 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                                     agent.repo_path.as_deref(),
                                                     agent.branch_name.as_deref(),
                                                     agent.is_worktree,
-                                                    existing_terminal,
+                                                    existing_terminals,
                                                 );
                                                 focus_mode_state.batch_origin =
                                                     Some(overview::BatchOrigin {
@@ -4546,8 +4615,8 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                                     .height
                                                     .saturating_sub(3)
                                                     .max(1);
-                                                let existing_terminal =
-                                                    overview_state.take_agent_terminal(&agent_id);
+                                                let existing_terminals =
+                                                    overview_state.take_agent_terminals(&agent_id);
                                                 focus_mode_state.open_agent(
                                                     &agent_id,
                                                     &agent_binary,
@@ -4557,7 +4626,7 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                                     agent_repo_path.as_deref(),
                                                     agent_branch.as_deref(),
                                                     agent_is_wt,
-                                                    existing_terminal,
+                                                    existing_terminals,
                                                 );
                                                 in_focus_mode = true;
                                             }
@@ -4808,8 +4877,8 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                                 .max(1);
                                             let fm_rows =
                                                 last_content_area.height.saturating_sub(3).max(1);
-                                            let existing_terminal =
-                                                overview_state.take_agent_terminal(&agent_id);
+                                            let existing_terminals =
+                                                overview_state.take_agent_terminals(&agent_id);
                                             focus_mode_state.open_agent(
                                                 &agent_id,
                                                 &agent_binary,
@@ -4819,7 +4888,7 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                                 agent.repo_path.as_deref(),
                                                 agent.branch_name.as_deref(),
                                                 agent.is_worktree,
-                                                existing_terminal,
+                                                existing_terminals,
                                             );
                                             in_focus_mode = true;
                                         }
@@ -5288,8 +5357,8 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                                             .height
                                                             .saturating_sub(3)
                                                             .max(1);
-                                                        let existing_terminal = overview_state
-                                                            .take_agent_terminal(&agent.id);
+                                                        let existing_terminals = overview_state
+                                                            .take_agent_terminals(&agent.id);
                                                         focus_mode_state.open_agent(
                                                             &agent.id,
                                                             &agent.agent_binary,
@@ -5299,7 +5368,7 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                                             agent.repo_path.as_deref(),
                                                             agent.branch_name.as_deref(),
                                                             agent.is_worktree,
-                                                            existing_terminal,
+                                                            existing_terminals,
                                                         );
                                                         in_focus_mode = true;
                                                     } else if branch_agents.len() > 1 {
@@ -5951,21 +6020,57 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                             {
                                 overview_state.force_resize_all();
                             }
-                            if let Some((aid, panel)) = focus_mode_state.detach() {
-                                overview_state.store_agent_terminal(aid, panel);
+                            if let Some((aid, cache)) = focus_mode_state.detach() {
+                                overview_state.store_agent_terminals(aid, cache);
                             }
                             in_focus_mode = false;
                         } else if focus_mode_state.repo_path.is_some() {
-                            if let Some((_, tab)) = click_map.focus_left_tabs.iter().find(|(r, _)| r.contains(pos)) {
+                            // Per-terminal label strip + content area: clicks
+                            // here are checked before the generic left-area
+                            // handler so they don't get swallowed by it. Only
+                            // active when the Terminal tab is the visible one.
+                            let in_terminal_tab = focus_mode_state.left_tab
+                                == overview::LeftPanelTab::Terminal;
+                            let label_hit = if in_terminal_tab {
+                                click_map
+                                    .focus_terminal_labels
+                                    .iter()
+                                    .find(|(r, _)| r.contains(pos))
+                                    .map(|(_, idx)| *idx)
+                            } else {
+                                None
+                            };
+                            if in_terminal_tab
+                                && click_map.focus_terminal_new_button.contains(pos)
+                            {
+                                focus_mode_state.add_terminal();
+                                focus_mode_state.focus_side = overview::FocusSide::Left;
+                                focus_mode_state.terminal_input_focused = true;
+                            } else if let Some(idx) = label_hit {
+                                focus_mode_state.select_terminal(idx);
+                                focus_mode_state.focus_side = overview::FocusSide::Left;
+                            } else if in_terminal_tab
+                                && click_map.focus_terminal_content_area.contains(pos)
+                            {
+                                // Click into the active terminal area = enter Type mode.
+                                focus_mode_state.focus_side = overview::FocusSide::Left;
+                                focus_mode_state.terminal_input_focused = true;
+                            } else if let Some((_, tab)) = click_map.focus_left_tabs.iter().find(|(r, _)| r.contains(pos)) {
                                 focus_mode_state.left_tab = *tab;
                                 focus_mode_state.focus_side = overview::FocusSide::Left;
+                                // Switching to a non-Terminal tab leaves Type mode.
+                                if *tab != overview::LeftPanelTab::Terminal {
+                                    focus_mode_state.terminal_input_focused = false;
+                                }
                             } else if click_map.focus_left_area.contains(pos) {
                                 focus_mode_state.focus_side = overview::FocusSide::Left;
                             } else if click_map.focus_right_area.contains(pos) {
                                 focus_mode_state.focus_side = overview::FocusSide::Right;
+                                focus_mode_state.terminal_input_focused = false;
                             }
                         } else if click_map.focus_right_area.contains(pos) {
                             focus_mode_state.focus_side = overview::FocusSide::Right;
+                            focus_mode_state.terminal_input_focused = false;
                         }
                     } else if let Some((_, tab)) = click_map.tabs.iter().find(|(r, _)| r.contains(pos)) {
                         // Tab bar clicks
@@ -6077,7 +6182,17 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                             }
                         }
                     } else if in_focus_mode && focus_mode_state.is_active() {
-                        if click_map.focus_right_area.contains(pos) {
+                        let on_terminal_label_strip = focus_mode_state.left_tab
+                            == overview::LeftPanelTab::Terminal
+                            && (click_map
+                                .focus_terminal_labels
+                                .iter()
+                                .any(|(r, _)| r.contains(pos))
+                                || click_map.focus_terminal_new_button.contains(pos));
+                        if on_terminal_label_strip {
+                            // Scroll wheel over the label strip cycles terminals.
+                            focus_mode_state.prev_terminal();
+                        } else if click_map.focus_right_area.contains(pos) {
                             if let Some(panel) = &mut focus_mode_state.panel {
                                 let max = panel.vterm.scrollback_len();
                                 panel.panel_scroll_offset =
@@ -6086,7 +6201,9 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                         } else if click_map.focus_left_area.contains(pos) {
                             match focus_mode_state.left_tab {
                                 overview::LeftPanelTab::Terminal => {
-                                    if let Some(panel) = &mut focus_mode_state.terminal_panel {
+                                    if let Some(panel) =
+                                        focus_mode_state.current_terminal_mut()
+                                    {
                                         let max = panel.vterm.scrollback_len();
                                         panel.scroll_offset = (panel.scroll_offset + 3).min(max);
                                     }
@@ -6123,7 +6240,17 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                             }
                         }
                     } else if in_focus_mode && focus_mode_state.is_active() {
-                        if click_map.focus_right_area.contains(pos) {
+                        let on_terminal_label_strip = focus_mode_state.left_tab
+                            == overview::LeftPanelTab::Terminal
+                            && (click_map
+                                .focus_terminal_labels
+                                .iter()
+                                .any(|(r, _)| r.contains(pos))
+                                || click_map.focus_terminal_new_button.contains(pos));
+                        if on_terminal_label_strip {
+                            // Scroll wheel over the label strip cycles terminals.
+                            focus_mode_state.next_terminal();
+                        } else if click_map.focus_right_area.contains(pos) {
                             if let Some(panel) = &mut focus_mode_state.panel {
                                 panel.panel_scroll_offset =
                                     panel.panel_scroll_offset.saturating_sub(3);
@@ -6131,7 +6258,9 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                         } else if click_map.focus_left_area.contains(pos) {
                             match focus_mode_state.left_tab {
                                 overview::LeftPanelTab::Terminal => {
-                                    if let Some(panel) = &mut focus_mode_state.terminal_panel {
+                                    if let Some(panel) =
+                                        focus_mode_state.current_terminal_mut()
+                                    {
                                         panel.scroll_offset = panel.scroll_offset.saturating_sub(3);
                                     }
                                 }
@@ -7350,6 +7479,17 @@ fn state_to_agent_info(
 }
 
 
+/// Sub-state shown in the focus-mode status hint.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) enum FocusModeHint {
+    /// User is somewhere other than the Terminal tab.
+    Other,
+    /// User is on the Terminal tab in Navigate sub-mode.
+    TerminalNavigate,
+    /// User is on the Terminal tab in Type sub-mode.
+    TerminalType,
+}
+
 #[allow(clippy::too_many_arguments)]
 fn render_status_bar(
     frame: &mut Frame,
@@ -7365,6 +7505,7 @@ fn render_status_bar(
     mouse_captured: bool,
     mouse_passthrough: bool,
     bypass_permissions: bool,
+    focus_hint: FocusModeHint,
 ) {
     let bg = Style::default().bg(theme::R_BG_RAISED);
 
@@ -7454,7 +7595,17 @@ fn render_status_bar(
     } else {
         let mod_key = if cfg!(target_os = "macos") { "Opt" } else { "Alt" };
         let hint_text = if in_focus_mode {
-            format!("Shift+\u{2190}/\u{2192} switch panel  Shift+\u{2191} exit  {mod_key}+R new agent")
+            match focus_hint {
+                FocusModeHint::TerminalType => {
+                    "Ctrl+\\ stop typing  Shift+\u{2191} exit".to_string()
+                }
+                FocusModeHint::TerminalNavigate => {
+                    "Ctrl+\\ or Enter type  ] / [ next/prev  n new  x close  Shift+\u{2191} exit".to_string()
+                }
+                FocusModeHint::Other => {
+                    format!("Shift+\u{2190}/\u{2192} switch panel  Shift+\u{2191} exit  {mod_key}+R new agent")
+                }
+            }
         } else if active_tab == ActiveTab::Overview {
             match overview_focus {
                 OverviewFocus::Terminal(_) => {
@@ -7621,6 +7772,15 @@ fn render_help_overlay(frame: &mut Frame, area: Rect, active_tab: ActiveTab, in_
         lines.push(sub_label_line("Left panel:"));
         lines.push(binding_line("Tab", "Cycle tabs"));
         lines.push(binding_line("\u{2191} / \u{2193}", "Scroll diff"));
+        lines.push(sub_label_line("Terminal tab (Navigate):"));
+        lines.push(binding_line("Ctrl+\\", "Toggle Type \u{2194} Navigate"));
+        lines.push(binding_line("Enter", "Enter Type mode"));
+        lines.push(binding_line("[ / ]", "Previous / next terminal"));
+        lines.push(binding_line("n", "New terminal"));
+        lines.push(binding_line("x", "Close current terminal"));
+        lines.push(sub_label_line("Terminal tab (Type):"));
+        lines.push(binding_line("Ctrl+\\", "Stop typing (back to Navigate)"));
+        lines.push(binding_line("(any other)", "Forwarded to the active shell"));
     }
 
     let modal_width: u16 = 44;
