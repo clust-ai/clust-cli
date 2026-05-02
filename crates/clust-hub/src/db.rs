@@ -68,6 +68,9 @@ fn run_migrations(conn: &Connection) -> Result<(), String> {
     if current_version < 9 {
         migrate_v9(conn)?;
     }
+    if current_version < 10 {
+        migrate_v10(conn)?;
+    }
 
     Ok(())
 }
@@ -206,6 +209,17 @@ fn migrate_v9(conn: &Connection) -> Result<(), String> {
     .map_err(|e| format!("migration v9 failed: {e}"))
 }
 
+/// Migration v10: add is_manager flag to queued_batch_tasks. Manager tasks are
+/// auto-injected by the orchestrator import flow and do not consume a
+/// `max_concurrent` slot.
+fn migrate_v10(conn: &Connection) -> Result<(), String> {
+    conn.execute_batch(
+        "ALTER TABLE queued_batch_tasks ADD COLUMN is_manager INTEGER NOT NULL DEFAULT 0;
+         INSERT INTO schema_version (version) VALUES (10);",
+    )
+    .map_err(|e| format!("migration v10 failed: {e}"))
+}
+
 // ---------------------------------------------------------------------------
 // Queued batch CRUD
 // ---------------------------------------------------------------------------
@@ -239,13 +253,17 @@ pub struct QueuedBatchTaskRow {
     pub use_prefix: bool,
     pub use_suffix: bool,
     pub plan_mode: bool,
+    pub is_manager: bool,
 }
+
+/// One task to insert: (branch_name, prompt, use_prefix, use_suffix, plan_mode, is_manager).
+pub type InsertTaskRow = (String, String, bool, bool, bool, bool);
 
 /// Insert a new queued batch and its tasks.
 pub fn insert_queued_batch(
     conn: &Connection,
     batch: &QueuedBatchRow,
-    tasks: &[(String, String, bool, bool, bool)],
+    tasks: &[InsertTaskRow],
 ) -> Result<(), String> {
     conn.execute(
         "INSERT INTO queued_batches (id, title, repo_path, target_branch, max_concurrent,
@@ -273,11 +291,13 @@ pub fn insert_queued_batch(
     )
     .map_err(|e| format!("failed to insert queued batch: {e}"))?;
 
-    for (i, (branch_name, prompt, use_prefix, use_suffix, plan_mode)) in tasks.iter().enumerate() {
+    for (i, (branch_name, prompt, use_prefix, use_suffix, plan_mode, is_manager)) in
+        tasks.iter().enumerate()
+    {
         conn.execute(
-            "INSERT INTO queued_batch_tasks (batch_id, task_index, branch_name, prompt, status, use_prefix, use_suffix, plan_mode)
-             VALUES (?1, ?2, ?3, ?4, 'idle', ?5, ?6, ?7)",
-            rusqlite::params![batch.id, i as i64, branch_name, prompt, *use_prefix as i32, *use_suffix as i32, *plan_mode as i32],
+            "INSERT INTO queued_batch_tasks (batch_id, task_index, branch_name, prompt, status, use_prefix, use_suffix, plan_mode, is_manager)
+             VALUES (?1, ?2, ?3, ?4, 'idle', ?5, ?6, ?7, ?8)",
+            rusqlite::params![batch.id, i as i64, branch_name, prompt, *use_prefix as i32, *use_suffix as i32, *plan_mode as i32, *is_manager as i32],
         )
         .map_err(|e| format!("failed to insert queued batch task: {e}"))?;
     }
@@ -306,9 +326,7 @@ pub fn load_queued_batches(
                 title: row.get(1)?,
                 repo_path: row.get(2)?,
                 target_branch: row.get(3)?,
-                max_concurrent: row
-                    .get::<_, Option<i64>>(4)?
-                    .map(|v| v as usize),
+                max_concurrent: row.get::<_, Option<i64>>(4)?.map(|v| v as usize),
                 prompt_prefix: row.get(5)?,
                 prompt_suffix: row.get(6)?,
                 plan_mode: row.get::<_, i32>(7)? != 0,
@@ -317,8 +335,12 @@ pub fn load_queued_batches(
                 hub: row.get(10)?,
                 scheduled_at: row.get(11)?,
                 status: row.get(12)?,
-                launch_mode: row.get::<_, Option<String>>(13)?.unwrap_or_else(|| "auto".to_string()),
-                depends_on: row.get::<_, Option<String>>(14)?.unwrap_or_else(|| "[]".to_string()),
+                launch_mode: row
+                    .get::<_, Option<String>>(13)?
+                    .unwrap_or_else(|| "auto".to_string()),
+                depends_on: row
+                    .get::<_, Option<String>>(14)?
+                    .unwrap_or_else(|| "[]".to_string()),
             })
         })
         .map_err(|e| format!("failed to query queued batches: {e}"))?
@@ -334,13 +356,10 @@ pub fn load_queued_batches(
 }
 
 /// Load tasks for a specific batch.
-fn load_batch_tasks(
-    conn: &Connection,
-    batch_id: &str,
-) -> Result<Vec<QueuedBatchTaskRow>, String> {
+fn load_batch_tasks(conn: &Connection, batch_id: &str) -> Result<Vec<QueuedBatchTaskRow>, String> {
     let mut stmt = conn
         .prepare(
-            "SELECT task_index, branch_name, prompt, status, agent_id, use_prefix, use_suffix, plan_mode
+            "SELECT task_index, branch_name, prompt, status, agent_id, use_prefix, use_suffix, plan_mode, is_manager
              FROM queued_batch_tasks
              WHERE batch_id = ?1
              ORDER BY task_index",
@@ -358,6 +377,7 @@ fn load_batch_tasks(
                 use_prefix: row.get::<_, i32>(5)? != 0,
                 use_suffix: row.get::<_, i32>(6)? != 0,
                 plan_mode: row.get::<_, i32>(7)? != 0,
+                is_manager: row.get::<_, i32>(8)? != 0,
             })
         })
         .map_err(|e| format!("failed to query tasks: {e}"))?
@@ -429,7 +449,13 @@ pub fn update_batch_config(
     conn.execute(
         "UPDATE queued_batches SET prompt_prefix = ?1, prompt_suffix = ?2,
          plan_mode = ?3, allow_bypass = ?4 WHERE id = ?5",
-        rusqlite::params![prompt_prefix, prompt_suffix, plan_mode as i32, allow_bypass as i32, id],
+        rusqlite::params![
+            prompt_prefix,
+            prompt_suffix,
+            plan_mode as i32,
+            allow_bypass as i32,
+            id
+        ],
     )
     .map_err(|e| format!("failed to update batch config: {e}"))?;
     Ok(())
@@ -460,9 +486,7 @@ pub fn remove_done_batch_tasks(conn: &Connection, batch_id: &str) -> Result<(), 
     .map_err(|e| format!("failed to remove done tasks: {e}"))?;
     // Re-index remaining tasks
     let mut stmt = conn
-        .prepare(
-            "SELECT id FROM queued_batch_tasks WHERE batch_id = ?1 ORDER BY task_index",
-        )
+        .prepare("SELECT id FROM queued_batch_tasks WHERE batch_id = ?1 ORDER BY task_index")
         .map_err(|e| format!("failed to prepare re-index query: {e}"))?;
     let ids: Vec<i64> = stmt
         .query_map([batch_id], |row| row.get(0))
@@ -482,11 +506,8 @@ pub fn remove_done_batch_tasks(conn: &Connection, batch_id: &str) -> Result<(), 
 /// Delete a queued batch and its tasks (cascade).
 pub fn delete_queued_batch(conn: &Connection, id: &str) -> Result<(), String> {
     // Delete tasks first (SQLite foreign key cascade may not be enabled)
-    conn.execute(
-        "DELETE FROM queued_batch_tasks WHERE batch_id = ?1",
-        [id],
-    )
-    .map_err(|e| format!("failed to delete batch tasks: {e}"))?;
+    conn.execute("DELETE FROM queued_batch_tasks WHERE batch_id = ?1", [id])
+        .map_err(|e| format!("failed to delete batch tasks: {e}"))?;
     conn.execute("DELETE FROM queued_batches WHERE id = ?1", [id])
         .map_err(|e| format!("failed to delete batch: {e}"))?;
     Ok(())
@@ -494,8 +515,7 @@ pub fn delete_queued_batch(conn: &Connection, id: &str) -> Result<(), String> {
 
 /// Available colors for repository identification.
 pub const REPO_COLORS: &[&str] = &[
-    "red", "orange", "yellow", "lime", "green",
-    "teal", "blue", "purple", "pink", "coral",
+    "red", "orange", "yellow", "lime", "green", "teal", "blue", "purple", "pink", "coral",
 ];
 
 /// Register a repository path with a color. Silently ignores duplicates.
@@ -515,7 +535,9 @@ pub fn list_repos(conn: &Connection) -> Result<Vec<RepoRow>, String> {
         .prepare("SELECT path, name, color, editor FROM repos ORDER BY name")
         .map_err(|e| format!("failed to prepare repo query: {e}"))?;
     let rows = stmt
-        .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)))
+        .query_map([], |row| {
+            Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+        })
         .map_err(|e| format!("failed to query repos: {e}"))?;
     rows.collect::<Result<Vec<_>, _>>()
         .map_err(|e| format!("failed to collect repos: {e}"))

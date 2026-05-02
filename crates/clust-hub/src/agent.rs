@@ -63,6 +63,11 @@ pub struct HubState {
     pub bypass_permissions: bool,
     pub db: Option<rusqlite::Connection>,
     pub queued_batches: Vec<crate::batch::HubBatchEntry>,
+    /// Live orchestrator agents, keyed by orchestrator id.
+    pub orchestrators: HashMap<String, crate::orchestrator::OrchestratorEntry>,
+    /// Per-(repo, target_branch) lock so two manager agents do not race to
+    /// check out the same branch.
+    pub manager_locks: crate::orchestrator::ManagerLockMap,
 }
 
 impl HubState {
@@ -411,9 +416,7 @@ pub async fn stop_agent(state: &SharedHubState, id: &str) -> Result<(), String> 
             .agents
             .get(id)
             .ok_or_else(|| format!("agent {id} not found"))?;
-        entry
-            .pid
-            .ok_or_else(|| format!("agent {id} has no PID"))?
+        entry.pid.ok_or_else(|| format!("agent {id} has no PID"))?
     };
 
     // SIGTERM
@@ -506,8 +509,7 @@ pub fn spawn_terminal(
 ) -> Result<String, String> {
     let id = generate_terminal_id(&state.terminals);
 
-    let shell = std::env::var("SHELL")
-        .unwrap_or_else(|_| "/bin/zsh".to_string());
+    let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".to_string());
 
     let pty_system = portable_pty::native_pty_system();
     let pair = pty_system

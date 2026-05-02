@@ -4,8 +4,16 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use crossterm::{
-    event::{self, Event, KeyCode, KeyEventKind, KeyModifiers, KeyboardEnhancementFlags, MouseButton, MouseEvent, MouseEventKind, EnableMouseCapture, DisableMouseCapture, EnableBracketedPaste, DisableBracketedPaste, EnableFocusChange, DisableFocusChange, PushKeyboardEnhancementFlags, PopKeyboardEnhancementFlags},
-    terminal::{disable_raw_mode, enable_raw_mode, supports_keyboard_enhancement, EnterAlternateScreen, LeaveAlternateScreen},
+    event::{
+        self, DisableBracketedPaste, DisableFocusChange, DisableMouseCapture, EnableBracketedPaste,
+        EnableFocusChange, EnableMouseCapture, Event, KeyCode, KeyEventKind, KeyModifiers,
+        KeyboardEnhancementFlags, MouseButton, MouseEvent, MouseEventKind,
+        PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
+    },
+    terminal::{
+        disable_raw_mode, enable_raw_mode, supports_keyboard_enhancement, EnterAlternateScreen,
+        LeaveAlternateScreen,
+    },
     ExecutableCommand,
 };
 use ratatui::{
@@ -23,19 +31,19 @@ use crate::{
     batch_deps_modal::{BatchDepsModal, BatchDepsResult},
     context_menu::{ContextMenu, ContextMenuItem, MenuResult},
     create_agent_modal::{CreateAgentModal, ModalResult},
-    create_batch_modal::{CreateBatchModal, BatchModalResult},
+    create_batch_modal::{BatchModalResult, CreateBatchModal},
     detached_agent_modal::{DetachedAgentModal, DetachedModalResult},
     edit_field_modal::{EditFieldModal, EditFieldResult},
-    import_batch_modal::{ImportBatchModal, ImportBatchResult},
-    timer_modal::{TimerModal, TimerResult},
     format::{format_attached, format_started},
+    import_batch_modal::{ImportBatchModal, ImportBatchResult},
     ipc,
     overview::{self, OverviewFocus, OverviewState},
     repo_modal::{RepoModal, RepoModalResult},
     search_modal::{SearchModal, SearchResult},
     tasks::{self, TasksFocus, TasksState},
-    terminal_emulator,
-    theme, version,
+    terminal_emulator, theme,
+    timer_modal::{TimerModal, TimerResult},
+    version,
 };
 
 /// Maximum interval between two Esc presses to count as a "double-tap".
@@ -139,8 +147,9 @@ struct CloneProgress {
 /// Sentinel path used for the "Add Repository" synthetic tree entry.
 const ADD_REPO_SENTINEL: &str = "__add_repo__";
 
-const SPINNER_CHARS: &[char] = &['\u{2839}', '\u{2838}', '\u{283c}', '\u{2834}',
-                                  '\u{2826}', '\u{2827}', '\u{2807}', '\u{280f}'];
+const SPINNER_CHARS: &[char] = &[
+    '\u{2839}', '\u{2838}', '\u{283c}', '\u{2834}', '\u{2826}', '\u{2827}', '\u{2807}', '\u{280f}',
+];
 
 const LOGO_LINES: &[&str] = &[
     "██████╗ ██╗     ██╗   ██╗███████╗████████╗",
@@ -301,8 +310,13 @@ enum BranchAction {
 
 /// Action to execute after user confirms in a confirmation dialog.
 enum ConfirmedAction {
-    PurgeRepo { repo_path: String },
-    StartAgentDetach { repo_path: String, branch_name: String },
+    PurgeRepo {
+        repo_path: String,
+    },
+    StartAgentDetach {
+        repo_path: String,
+        branch_name: String,
+    },
 }
 
 /// Tracks which context menu is currently open.
@@ -547,9 +561,7 @@ impl Default for TreeSelection {
 impl TreeSelection {
     /// Returns true if the selected repo is the synthetic "No Repository" entry.
     fn is_unlinked_repo(&self, repos: &[RepoInfo]) -> bool {
-        repos
-            .get(self.repo_idx)
-            .is_some_and(|r| r.path.is_empty())
+        repos.get(self.repo_idx).is_some_and(|r| r.path.is_empty())
     }
 
     /// Returns valid category indices (0=local, 1=remote) for the selected repo.
@@ -636,7 +648,9 @@ impl TreeSelection {
     /// Move to the last visible descendant of a repo (for move_up into previous repo).
     fn go_to_last_visible_of_repo(&mut self, repos: &[RepoInfo]) {
         if self.is_unlinked_repo(repos) {
-            let bc = repos.get(self.repo_idx).map_or(0, |r| r.local_branches.len());
+            let bc = repos
+                .get(self.repo_idx)
+                .map_or(0, |r| r.local_branches.len());
             if bc > 0 && !self.is_repo_collapsed(self.repo_idx) {
                 self.level = TreeLevel::Branch;
                 self.category_idx = 0;
@@ -730,7 +744,9 @@ impl TreeSelection {
                     }
                 } else if self.is_unlinked_repo(repos) {
                     // "No Repository" — go to first branch or next repo
-                    let bc = repos.get(self.repo_idx).map_or(0, |r| r.local_branches.len());
+                    let bc = repos
+                        .get(self.repo_idx)
+                        .map_or(0, |r| r.local_branches.len());
                     if bc > 0 {
                         self.level = TreeLevel::Branch;
                         self.category_idx = 0;
@@ -1005,6 +1021,8 @@ pub fn run(hub_name: &str) -> io::Result<()> {
     let mut pending_overview_select: Option<String> = None;
     // Detached (directory) agent modal state
     let mut detached_modal: Option<DetachedAgentModal> = None;
+    // Orchestrator agent modal state
+    let mut orchestrator_modal: Option<crate::orchestrator_modal::OrchestratorModal> = None;
     // Purge progress modal state
     let mut purge_progress: Option<PurgeProgress> = None;
     // Repository create/clone modal state
@@ -1013,10 +1031,8 @@ pub fn run(hub_name: &str) -> io::Result<()> {
     let mut clone_progress: Option<CloneProgress> = None;
     // Cached list of installed editors (detected once at startup)
     let editors_cache = crate::editor::detect_installed_editors();
-    let (agent_start_tx, mut agent_start_rx) =
-        tokio::sync::mpsc::channel::<AgentStartResult>(16);
-    let (status_tx, mut status_rx) =
-        tokio::sync::mpsc::channel::<StatusMessage>(4);
+    let (agent_start_tx, mut agent_start_rx) = tokio::sync::mpsc::channel::<AgentStartResult>(16);
+    let (status_tx, mut status_rx) = tokio::sync::mpsc::channel::<StatusMessage>(4);
 
     loop {
         // Drain output events (non-blocking, runs regardless of tab)
@@ -1143,7 +1159,8 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                             tokio::spawn(async move {
                                 if let Ok(mut stream) = ipc::try_connect().await {
                                     let _ = clust_ipc::send_message(&mut stream, &msg).await;
-                                    let _ = clust_ipc::recv_message::<HubMessage>(&mut stream).await;
+                                    let _ =
+                                        clust_ipc::recv_message::<HubMessage>(&mut stream).await;
                                 }
                             });
                         }
@@ -1285,12 +1302,7 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                     })
                 });
                 if let Some(start_info) = tasks_state.mark_agent_done(&agent_id) {
-                    spawn_batch_tasks(
-                        &tasks_state,
-                        &start_info,
-                        hub_name,
-                        agent_start_tx.clone(),
-                    );
+                    spawn_batch_tasks(&tasks_state, &start_info, hub_name, agent_start_tx.clone());
                 }
                 // Sync done status to hub
                 if let Some((hub_batch_id, task_index)) = task_info {
@@ -1384,7 +1396,16 @@ pub fn run(hub_name: &str) -> io::Result<()> {
             .collect();
 
         let mut click_map = ClickMap::default();
-        let show_modal = create_modal.is_some() || create_batch_modal.is_some() || import_batch_modal.is_some() || add_task_modal.is_some() || batch_deps_modal.is_some() || edit_field_modal.is_some() || timer_modal.is_some() || detached_modal.is_some() || repo_modal.is_some();
+        let show_modal = create_modal.is_some()
+            || create_batch_modal.is_some()
+            || import_batch_modal.is_some()
+            || add_task_modal.is_some()
+            || batch_deps_modal.is_some()
+            || edit_field_modal.is_some()
+            || timer_modal.is_some()
+            || detached_modal.is_some()
+            || repo_modal.is_some()
+            || orchestrator_modal.is_some();
         let show_search = search_modal.is_some();
         let purge_ref = &purge_progress;
         let clone_ref = &clone_progress;
@@ -1411,20 +1432,25 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                     &mut click_map,
                     &repo_colors,
                 );
-                overview::render_focus_mode(frame, content_area, &mut focus_mode_state, &mut click_map, &repo_colors);
+                overview::render_focus_mode(
+                    frame,
+                    content_area,
+                    &mut focus_mode_state,
+                    &mut click_map,
+                    &repo_colors,
+                );
             } else {
                 render_tab_bar(frame, header_area, cur_tab, &mut click_map);
 
                 match cur_tab {
                     ActiveTab::Repositories => {
                         // Content: left (40%) + divider (1 col) + right (60%)
-                        let [left_area, divider_area, right_area] =
-                            Layout::horizontal([
-                                Constraint::Percentage(40),
-                                Constraint::Length(1),
-                                Constraint::Percentage(60),
-                            ])
-                            .areas(content_area);
+                        let [left_area, divider_area, right_area] = Layout::horizontal([
+                            Constraint::Percentage(40),
+                            Constraint::Length(1),
+                            Constraint::Percentage(60),
+                        ])
+                        .areas(content_area);
 
                         click_map.left_panel_area = left_area;
                         click_map.right_panel_area = right_area;
@@ -1451,35 +1477,52 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                     }
                     ActiveTab::Overview => {
                         let batch_map = tasks_state.batch_agent_map();
-                        overview::render_overview(frame, content_area, &mut overview_state, &mut click_map, &repo_colors, &repos, &batch_map);
+                        overview::render_overview(
+                            frame,
+                            content_area,
+                            &mut overview_state,
+                            &mut click_map,
+                            &repo_colors,
+                            &repos,
+                            &batch_map,
+                        );
                     }
                     ActiveTab::Tasks => {
-                        let terminal_previews = build_task_terminal_previews(&tasks_state, &overview_state);
-                        tasks::render_tasks(frame, content_area, &mut tasks_state, &mut click_map, &repo_colors, &terminal_previews);
+                        let terminal_previews =
+                            build_task_terminal_previews(&tasks_state, &overview_state);
+                        tasks::render_tasks(
+                            frame,
+                            content_area,
+                            &mut tasks_state,
+                            &mut click_map,
+                            &repo_colors,
+                            &terminal_previews,
+                        );
                     }
                 }
             }
 
             // Resolve focused agent info for status bar
-            let focused_agent_info: Option<(String, ratatui::style::Color, String)> = if cur_focus_mode {
-                state_to_agent_info(&focus_mode_state, &repo_colors)
-            } else if let OverviewFocus::Terminal(idx) = overview_focus {
-                overview_state.panels.get(idx).and_then(|panel| {
-                    let rp = panel.repo_path.as_ref()?;
-                    let repo_display = std::path::Path::new(rp)
-                        .file_name()
-                        .map(|n| n.to_string_lossy().into_owned())
-                        .unwrap_or_else(|| rp.clone());
-                    let repo_clr = repo_colors
-                        .get(rp.as_str())
-                        .map(|c| theme::repo_color(c))
-                        .unwrap_or(theme::R_ACCENT);
-                    let branch = panel.branch_name.clone().unwrap_or_default();
-                    Some((repo_display, repo_clr, branch))
-                })
-            } else {
-                None
-            };
+            let focused_agent_info: Option<(String, ratatui::style::Color, String)> =
+                if cur_focus_mode {
+                    state_to_agent_info(&focus_mode_state, &repo_colors)
+                } else if let OverviewFocus::Terminal(idx) = overview_focus {
+                    overview_state.panels.get(idx).and_then(|panel| {
+                        let rp = panel.repo_path.as_ref()?;
+                        let repo_display = std::path::Path::new(rp)
+                            .file_name()
+                            .map(|n| n.to_string_lossy().into_owned())
+                            .unwrap_or_else(|| rp.clone());
+                        let repo_clr = repo_colors
+                            .get(rp.as_str())
+                            .map(|c| theme::repo_color(c))
+                            .unwrap_or(theme::R_ACCENT);
+                        let branch = panel.branch_name.clone().unwrap_or_default();
+                        Some((repo_display, repo_clr, branch))
+                    })
+                } else {
+                    None
+                };
 
             let focus_hint = if cur_focus_mode {
                 if focus_mode_state.left_tab == overview::LeftPanelTab::Terminal
@@ -1562,6 +1605,9 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                 if let Some(ref modal) = repo_modal {
                     modal.render(frame, content_area);
                 }
+                if let Some(ref modal) = orchestrator_modal {
+                    modal.render(frame, content_area);
+                }
             }
 
             if show_search {
@@ -1633,8 +1679,7 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                 }
                                 active_tab = ActiveTab::Overview;
                                 if !overview_state.initialized {
-                                    overview_state
-                                        .sync_agents(&agents, last_content_area);
+                                    overview_state.sync_agents(&agents, last_content_area);
                                 } else {
                                     overview_state.force_resize_all();
                                 }
@@ -1663,22 +1708,43 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                     // Context menu overlay: intercept all keys when active
                     } else if let Some(ref mut menu_state) = active_menu {
                         let result = match menu_state {
-                            ActiveMenu::AgentPicker { ref mut menu, .. } => menu.handle_key(key.code),
-                            ActiveMenu::RepoActions { ref mut menu, .. } => menu.handle_key(key.code),
-                            ActiveMenu::ColorPicker { ref mut menu, .. } => menu.handle_key(key.code),
-                            ActiveMenu::BranchActions { ref mut menu, .. } => menu.handle_key(key.code),
-                            ActiveMenu::ConfirmAction { ref mut menu, .. } => menu.handle_key(key.code),
-                            ActiveMenu::WorktreeCleanup { ref mut menu, .. } => menu.handle_key(key.code),
-                            ActiveMenu::EditorPicker { ref mut menu, .. } => menu.handle_key(key.code),
-                            ActiveMenu::EditorRemember { ref mut menu, .. } => menu.handle_key(key.code),
-                            ActiveMenu::BatchCleanup { ref mut menu, .. } => menu.handle_key(key.code),
+                            ActiveMenu::AgentPicker { ref mut menu, .. } => {
+                                menu.handle_key(key.code)
+                            }
+                            ActiveMenu::RepoActions { ref mut menu, .. } => {
+                                menu.handle_key(key.code)
+                            }
+                            ActiveMenu::ColorPicker { ref mut menu, .. } => {
+                                menu.handle_key(key.code)
+                            }
+                            ActiveMenu::BranchActions { ref mut menu, .. } => {
+                                menu.handle_key(key.code)
+                            }
+                            ActiveMenu::ConfirmAction { ref mut menu, .. } => {
+                                menu.handle_key(key.code)
+                            }
+                            ActiveMenu::WorktreeCleanup { ref mut menu, .. } => {
+                                menu.handle_key(key.code)
+                            }
+                            ActiveMenu::EditorPicker { ref mut menu, .. } => {
+                                menu.handle_key(key.code)
+                            }
+                            ActiveMenu::EditorRemember { ref mut menu, .. } => {
+                                menu.handle_key(key.code)
+                            }
+                            ActiveMenu::BatchCleanup { ref mut menu, .. } => {
+                                menu.handle_key(key.code)
+                            }
                         };
                         match result {
                             MenuResult::Selected(idx) => {
                                 // Take ownership of the menu state to process the action
                                 let taken = active_menu.take().unwrap();
                                 match taken {
-                                    ActiveMenu::AgentPicker { agents: picker_agents, .. } => {
+                                    ActiveMenu::AgentPicker {
+                                        agents: picker_agents,
+                                        ..
+                                    } => {
                                         if let Some(agent) = picker_agents.get(idx) {
                                             let agent_id = agent.id.clone();
                                             let agent_binary = agent.agent_binary.clone();
@@ -1738,7 +1804,9 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                                 // Collect worktree agents for this repo before stopping
                                                 let repo_agents: Vec<_> = agents
                                                     .iter()
-                                                    .filter(|a| a.repo_path.as_deref() == Some(&*repo_path))
+                                                    .filter(|a| {
+                                                        a.repo_path.as_deref() == Some(&*repo_path)
+                                                    })
                                                     .cloned()
                                                     .collect();
                                                 stop_repo_agents_ipc(&repo_path);
@@ -1746,12 +1814,16 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                                     Instant::now() - Duration::from_secs(10);
                                                 last_agent_fetch =
                                                     Instant::now() - Duration::from_secs(10);
-                                                let cleanups = crate::worktree::collect_worktree_cleanups(
-                                                    &repo_agents, &agents,
-                                                );
+                                                let cleanups =
+                                                    crate::worktree::collect_worktree_cleanups(
+                                                        &repo_agents,
+                                                        &agents,
+                                                    );
                                                 if !cleanups.is_empty() {
                                                     pending_worktree_cleanups = cleanups;
-                                                    active_menu = pop_worktree_cleanup_menu(&mut pending_worktree_cleanups);
+                                                    active_menu = pop_worktree_cleanup_menu(
+                                                        &mut pending_worktree_cleanups,
+                                                    );
                                                 }
                                             }
                                             4 => {
@@ -1773,26 +1845,23 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                                 let tx = status_tx.clone();
                                                 let rp = repo_path.clone();
                                                 tokio::spawn(async move {
-                                                    let mut stream =
-                                                        match ipc::try_connect().await {
-                                                            Ok(s) => s,
-                                                            Err(e) => {
-                                                                let _ = tx.send(StatusMessage {
+                                                    let mut stream = match ipc::try_connect().await
+                                                    {
+                                                        Ok(s) => s,
+                                                        Err(e) => {
+                                                            let _ = tx.send(StatusMessage {
                                                                     text: format!("Detach failed: hub connect error: {e}"),
                                                                     level: StatusLevel::Error,
                                                                     created: Instant::now(),
                                                                 }).await;
-                                                                return;
-                                                            }
-                                                        };
-                                                    let msg = CliMessage::DetachHead {
-                                                        repo_path: rp,
+                                                            return;
+                                                        }
                                                     };
-                                                    if let Err(e) = clust_ipc::send_message(
-                                                        &mut stream,
-                                                        &msg,
-                                                    )
-                                                    .await
+                                                    let msg =
+                                                        CliMessage::DetachHead { repo_path: rp };
+                                                    if let Err(e) =
+                                                        clust_ipc::send_message(&mut stream, &msg)
+                                                            .await
                                                     {
                                                         let _ = tx.send(StatusMessage {
                                                             text: format!("Detach failed: send error: {e}"),
@@ -1807,18 +1876,25 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                                     .await
                                                     {
                                                         Ok(HubMessage::HeadDetached) => {
-                                                            let _ = tx.send(StatusMessage {
-                                                                text: "HEAD detached".to_string(),
-                                                                level: StatusLevel::Success,
-                                                                created: Instant::now(),
-                                                            }).await;
+                                                            let _ = tx
+                                                                .send(StatusMessage {
+                                                                    text: "HEAD detached"
+                                                                        .to_string(),
+                                                                    level: StatusLevel::Success,
+                                                                    created: Instant::now(),
+                                                                })
+                                                                .await;
                                                         }
                                                         Ok(HubMessage::Error { message }) => {
-                                                            let _ = tx.send(StatusMessage {
-                                                                text: format!("Detach failed: {message}"),
-                                                                level: StatusLevel::Error,
-                                                                created: Instant::now(),
-                                                            }).await;
+                                                            let _ = tx
+                                                                .send(StatusMessage {
+                                                                    text: format!(
+                                                                        "Detach failed: {message}"
+                                                                    ),
+                                                                    level: StatusLevel::Error,
+                                                                    created: Instant::now(),
+                                                                })
+                                                                .await;
                                                         }
                                                         Ok(_) => {
                                                             let _ = tx.send(StatusMessage {
@@ -1861,8 +1937,7 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                         }
                                     }
                                     ActiveMenu::ColorPicker { repo_path, .. } => {
-                                        if let Some(&color_name) =
-                                            theme::REPO_COLOR_NAMES.get(idx)
+                                        if let Some(&color_name) = theme::REPO_COLOR_NAMES.get(idx)
                                         {
                                             set_repo_color_ipc(&repo_path, color_name);
                                             // Force repo refresh
@@ -1905,36 +1980,33 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                                     let rp = repo_path.clone();
                                                     let bn = branch_name.clone();
                                                     let bp = bypass_permissions;
-                                                    let (cols, rows) =
-                                                        crossterm::terminal::size()
-                                                            .unwrap_or((80, 24));
+                                                    let (cols, rows) = crossterm::terminal::size()
+                                                        .unwrap_or((80, 24));
                                                     tokio::spawn(async move {
-                                                        let mut stream =
-                                                            match ipc::try_connect().await {
-                                                                Ok(s) => s,
-                                                                Err(e) => {
-                                                                    let _ = tx.send(AgentStartResult::Failed(
+                                                        let mut stream = match ipc::try_connect()
+                                                            .await
+                                                        {
+                                                            Ok(s) => s,
+                                                            Err(e) => {
+                                                                let _ = tx.send(AgentStartResult::Failed(
                                                                         format!("Agent create failed: hub connect error: {e}")
                                                                     )).await;
-                                                                    return;
-                                                                }
-                                                            };
-                                                        let msg =
-                                                            CliMessage::CreateWorktreeAgent {
-                                                                repo_path: rp,
-                                                                target_branch: Some(bn),
-                                                                new_branch: None,
-                                                                prompt: None,
-                                                                agent_binary: None,
-                                                                cols,
-                                                                rows: rows
-                                                                    .saturating_sub(2)
-                                                                    .max(1),
-                                                                accept_edits: false,
-                                                                plan_mode: bp,
-                                                                allow_bypass: bp,
-                                                                hub,
-                                                            };
+                                                                return;
+                                                            }
+                                                        };
+                                                        let msg = CliMessage::CreateWorktreeAgent {
+                                                            repo_path: rp,
+                                                            target_branch: Some(bn),
+                                                            new_branch: None,
+                                                            prompt: None,
+                                                            agent_binary: None,
+                                                            cols,
+                                                            rows: rows.saturating_sub(2).max(1),
+                                                            accept_edits: false,
+                                                            plan_mode: bp,
+                                                            allow_bypass: bp,
+                                                            hub,
+                                                        };
                                                         if let Err(e) = clust_ipc::send_message(
                                                             &mut stream,
                                                             &msg,
@@ -1951,22 +2023,26 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                                         )
                                                         .await
                                                         {
-                                                            Ok(HubMessage::WorktreeAgentStarted {
-                                                                id,
-                                                                agent_binary,
-                                                                working_dir,
-                                                                repo_path,
-                                                                branch_name,
-                                                            }) => {
+                                                            Ok(
+                                                                HubMessage::WorktreeAgentStarted {
+                                                                    id,
+                                                                    agent_binary,
+                                                                    working_dir,
+                                                                    repo_path,
+                                                                    branch_name,
+                                                                },
+                                                            ) => {
                                                                 let _ = tx
-                                                                    .send(AgentStartResult::Started {
-                                                                        agent_id: id,
-                                                                        agent_binary,
-                                                                        working_dir,
-                                                                        repo_path,
-                                                                        branch_name,
-                                                                        is_worktree: true,
-                                                                    })
+                                                                    .send(
+                                                                        AgentStartResult::Started {
+                                                                            agent_id: id,
+                                                                            agent_binary,
+                                                                            working_dir,
+                                                                            repo_path,
+                                                                            branch_name,
+                                                                            is_worktree: true,
+                                                                        },
+                                                                    )
                                                                     .await;
                                                             }
                                                             Ok(HubMessage::Error { message }) => {
@@ -1992,28 +2068,26 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                                     let hub = hub_name.to_string();
                                                     let rp = repo_path.clone();
                                                     let bp = bypass_permissions;
-                                                    let (cols, rows) =
-                                                        crossterm::terminal::size()
-                                                            .unwrap_or((80, 24));
+                                                    let (cols, rows) = crossterm::terminal::size()
+                                                        .unwrap_or((80, 24));
                                                     tokio::spawn(async move {
-                                                        let mut stream =
-                                                            match ipc::try_connect().await {
-                                                                Ok(s) => s,
-                                                                Err(e) => {
-                                                                    let _ = tx.send(AgentStartResult::Failed(
+                                                        let mut stream = match ipc::try_connect()
+                                                            .await
+                                                        {
+                                                            Ok(s) => s,
+                                                            Err(e) => {
+                                                                let _ = tx.send(AgentStartResult::Failed(
                                                                         format!("Agent create failed: hub connect error: {e}")
                                                                     )).await;
-                                                                    return;
-                                                                }
-                                                            };
+                                                                return;
+                                                            }
+                                                        };
                                                         let msg = CliMessage::StartAgent {
                                                             prompt: None,
                                                             agent_binary: None,
                                                             working_dir: rp,
                                                             cols,
-                                                            rows: rows
-                                                                .saturating_sub(2)
-                                                                .max(1),
+                                                            rows: rows.saturating_sub(2).max(1),
                                                             accept_edits: false,
                                                             plan_mode: bp,
                                                             allow_bypass: bp,
@@ -2046,14 +2120,16 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                                                     .clone()
                                                                     .unwrap_or_default();
                                                                 let _ = tx
-                                                                    .send(AgentStartResult::Started {
-                                                                        agent_id: id,
-                                                                        agent_binary,
-                                                                        working_dir,
-                                                                        repo_path,
-                                                                        branch_name,
-                                                                        is_worktree,
-                                                                    })
+                                                                    .send(
+                                                                        AgentStartResult::Started {
+                                                                            agent_id: id,
+                                                                            agent_binary,
+                                                                            working_dir,
+                                                                            repo_path,
+                                                                            branch_name,
+                                                                            is_worktree,
+                                                                        },
+                                                                    )
                                                                     .await;
                                                             }
                                                             Ok(HubMessage::Error { message }) => {
@@ -2079,18 +2155,19 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                                     let rp = repo_path.clone();
                                                     let bn = branch_name.clone();
                                                     tokio::spawn(async move {
-                                                        let mut stream =
-                                                            match ipc::try_connect().await {
-                                                                Ok(s) => s,
-                                                                Err(e) => {
-                                                                    let _ = tx.send(StatusMessage {
+                                                        let mut stream = match ipc::try_connect()
+                                                            .await
+                                                        {
+                                                            Ok(s) => s,
+                                                            Err(e) => {
+                                                                let _ = tx.send(StatusMessage {
                                                                         text: format!("Pull failed: hub connect error: {e}"),
                                                                         level: StatusLevel::Error,
                                                                         created: Instant::now(),
                                                                     }).await;
-                                                                    return;
-                                                                }
-                                                            };
+                                                                return;
+                                                            }
+                                                        };
                                                         let msg = CliMessage::PullBranch {
                                                             repo_path: rp,
                                                             branch_name: bn.clone(),
@@ -2113,12 +2190,19 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                                         )
                                                         .await
                                                         {
-                                                            Ok(HubMessage::BranchPulled { branch_name, .. }) => {
-                                                                let _ = tx.send(StatusMessage {
-                                                                    text: format!("Pulled {branch_name}"),
-                                                                    level: StatusLevel::Success,
-                                                                    created: Instant::now(),
-                                                                }).await;
+                                                            Ok(HubMessage::BranchPulled {
+                                                                branch_name,
+                                                                ..
+                                                            }) => {
+                                                                let _ = tx
+                                                                    .send(StatusMessage {
+                                                                        text: format!(
+                                                                            "Pulled {branch_name}"
+                                                                        ),
+                                                                        level: StatusLevel::Success,
+                                                                        created: Instant::now(),
+                                                                    })
+                                                                    .await;
                                                             }
                                                             Ok(HubMessage::Error { message }) => {
                                                                 let _ = tx.send(StatusMessage {
@@ -2157,12 +2241,16 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                                     last_agent_fetch =
                                                         Instant::now() - Duration::from_secs(10);
                                                     // Queue worktree cleanup if applicable
-                                                    let cleanups = crate::worktree::collect_worktree_cleanups(
-                                                        &branch_agents, &agents,
-                                                    );
+                                                    let cleanups =
+                                                        crate::worktree::collect_worktree_cleanups(
+                                                            &branch_agents,
+                                                            &agents,
+                                                        );
                                                     if !cleanups.is_empty() {
                                                         pending_worktree_cleanups = cleanups;
-                                                        active_menu = pop_worktree_cleanup_menu(&mut pending_worktree_cleanups);
+                                                        active_menu = pop_worktree_cleanup_menu(
+                                                            &mut pending_worktree_cleanups,
+                                                        );
                                                     }
                                                 }
                                                 BranchAction::OpenAgent => {
@@ -2233,12 +2321,17 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                                         Instant::now() - Duration::from_secs(10);
                                                 }
                                                 BranchAction::BaseWorktreeOff => {
-                                                    if let Some(repo_info) = repos.iter().find(|r| r.path == repo_path).cloned() {
-                                                        let modal = CreateAgentModal::new_with_branch(
-                                                            repos.clone(),
-                                                            repo_info,
-                                                            branch_name.clone(),
-                                                        );
+                                                    if let Some(repo_info) = repos
+                                                        .iter()
+                                                        .find(|r| r.path == repo_path)
+                                                        .cloned()
+                                                    {
+                                                        let modal =
+                                                            CreateAgentModal::new_with_branch(
+                                                                repos.clone(),
+                                                                repo_info,
+                                                                branch_name.clone(),
+                                                            );
                                                         create_modal = Some(modal);
                                                     }
                                                 }
@@ -2246,18 +2339,19 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                                     let tx = status_tx.clone();
                                                     let rp = repo_path.clone();
                                                     tokio::spawn(async move {
-                                                        let mut stream =
-                                                            match ipc::try_connect().await {
-                                                                Ok(s) => s,
-                                                                Err(e) => {
-                                                                    let _ = tx.send(StatusMessage {
+                                                        let mut stream = match ipc::try_connect()
+                                                            .await
+                                                        {
+                                                            Ok(s) => s,
+                                                            Err(e) => {
+                                                                let _ = tx.send(StatusMessage {
                                                                         text: format!("Detach failed: hub connect error: {e}"),
                                                                         level: StatusLevel::Error,
                                                                         created: Instant::now(),
                                                                     }).await;
-                                                                    return;
-                                                                }
-                                                            };
+                                                                return;
+                                                            }
+                                                        };
                                                         let msg = CliMessage::DetachHead {
                                                             repo_path: rp,
                                                         };
@@ -2280,11 +2374,14 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                                         .await
                                                         {
                                                             Ok(HubMessage::HeadDetached) => {
-                                                                let _ = tx.send(StatusMessage {
-                                                                    text: "HEAD detached".to_string(),
-                                                                    level: StatusLevel::Success,
-                                                                    created: Instant::now(),
-                                                                }).await;
+                                                                let _ = tx
+                                                                    .send(StatusMessage {
+                                                                        text: "HEAD detached"
+                                                                            .to_string(),
+                                                                        level: StatusLevel::Success,
+                                                                        created: Instant::now(),
+                                                                    })
+                                                                    .await;
                                                             }
                                                             Ok(HubMessage::Error { message }) => {
                                                                 let _ = tx.send(StatusMessage {
@@ -2317,18 +2414,19 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                                     let rp = repo_path.clone();
                                                     let bn = branch_name.clone();
                                                     tokio::spawn(async move {
-                                                        let mut stream =
-                                                            match ipc::try_connect().await {
-                                                                Ok(s) => s,
-                                                                Err(e) => {
-                                                                    let _ = tx.send(StatusMessage {
+                                                        let mut stream = match ipc::try_connect()
+                                                            .await
+                                                        {
+                                                            Ok(s) => s,
+                                                            Err(e) => {
+                                                                let _ = tx.send(StatusMessage {
                                                                         text: format!("Checkout failed: hub connect error: {e}"),
                                                                         level: StatusLevel::Error,
                                                                         created: Instant::now(),
                                                                     }).await;
-                                                                    return;
-                                                                }
-                                                            };
+                                                                return;
+                                                            }
+                                                        };
                                                         let msg = CliMessage::CheckoutLocalBranch {
                                                             repo_path: rp,
                                                             branch_name: bn.clone(),
@@ -2351,7 +2449,11 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                                         )
                                                         .await
                                                         {
-                                                            Ok(HubMessage::LocalBranchCheckedOut { branch_name }) => {
+                                                            Ok(
+                                                                HubMessage::LocalBranchCheckedOut {
+                                                                    branch_name,
+                                                                },
+                                                            ) => {
                                                                 let _ = tx.send(StatusMessage {
                                                                     text: format!("Checked out {branch_name}"),
                                                                     level: StatusLevel::Success,
@@ -2398,27 +2500,23 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                                             crossterm::terminal::size()
                                                                 .unwrap_or((80, 24));
                                                         tokio::spawn(async move {
-                                                            let mut stream =
-                                                                match ipc::try_connect().await
-                                                                {
-                                                                    Ok(s) => s,
-                                                                    Err(e) => {
-                                                                        let _ = tx.send(AgentStartResult::Failed(
+                                                            let mut stream = match ipc::try_connect(
+                                                            )
+                                                            .await
+                                                            {
+                                                                Ok(s) => s,
+                                                                Err(e) => {
+                                                                    let _ = tx.send(AgentStartResult::Failed(
                                                                             format!("Agent create failed: hub connect error: {e}")
                                                                         )).await;
-                                                                        return;
-                                                                    }
-                                                                };
+                                                                    return;
+                                                                }
+                                                            };
                                                             let msg =
-                                                                CliMessage::CreateWorktreeAgent
-                                                                {
+                                                                CliMessage::CreateWorktreeAgent {
                                                                     repo_path: rp,
-                                                                    target_branch: Some(
-                                                                        remote_ref,
-                                                                    ),
-                                                                    new_branch: Some(
-                                                                        local_name,
-                                                                    ),
+                                                                    target_branch: Some(remote_ref),
+                                                                    new_branch: Some(local_name),
                                                                     prompt: None,
                                                                     agent_binary: None,
                                                                     cols,
@@ -2509,23 +2607,25 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                                     let rp = repo_path.clone();
                                                     let bn = branch_name.clone();
                                                     tokio::spawn(async move {
-                                                        let mut stream =
-                                                            match ipc::try_connect().await {
-                                                                Ok(s) => s,
-                                                                Err(e) => {
-                                                                    let _ = tx.send(StatusMessage {
+                                                        let mut stream = match ipc::try_connect()
+                                                            .await
+                                                        {
+                                                            Ok(s) => s,
+                                                            Err(e) => {
+                                                                let _ = tx.send(StatusMessage {
                                                                         text: format!("Checkout failed: hub connect error: {e}"),
                                                                         level: StatusLevel::Error,
                                                                         created: Instant::now(),
                                                                     }).await;
-                                                                    return;
-                                                                }
-                                                            };
-                                                        let msg = CliMessage::CheckoutRemoteBranch {
-                                                            working_dir: Some(rp),
-                                                            repo_name: None,
-                                                            remote_branch: bn.clone(),
+                                                                return;
+                                                            }
                                                         };
+                                                        let msg =
+                                                            CliMessage::CheckoutRemoteBranch {
+                                                                working_dir: Some(rp),
+                                                                repo_name: None,
+                                                                remote_branch: bn.clone(),
+                                                            };
                                                         if let Err(e) = clust_ipc::send_message(
                                                             &mut stream,
                                                             &msg,
@@ -2584,42 +2684,43 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                         if idx == 0 {
                                             match action {
                                                 ConfirmedAction::PurgeRepo { repo_path } => {
-                                                    purge_progress = Some(start_purge_async(&repo_path));
+                                                    purge_progress =
+                                                        Some(start_purge_async(&repo_path));
                                                 }
-                                                ConfirmedAction::StartAgentDetach { repo_path, branch_name } => {
+                                                ConfirmedAction::StartAgentDetach {
+                                                    repo_path,
+                                                    branch_name,
+                                                } => {
                                                     let tx = agent_start_tx.clone();
                                                     let hub = hub_name.to_string();
                                                     let bp = bypass_permissions;
-                                                    let (cols, rows) =
-                                                        crossterm::terminal::size()
-                                                            .unwrap_or((80, 24));
+                                                    let (cols, rows) = crossterm::terminal::size()
+                                                        .unwrap_or((80, 24));
                                                     tokio::spawn(async move {
-                                                        let mut stream =
-                                                            match ipc::try_connect().await {
-                                                                Ok(s) => s,
-                                                                Err(e) => {
-                                                                    let _ = tx.send(AgentStartResult::Failed(
+                                                        let mut stream = match ipc::try_connect()
+                                                            .await
+                                                        {
+                                                            Ok(s) => s,
+                                                            Err(e) => {
+                                                                let _ = tx.send(AgentStartResult::Failed(
                                                                         format!("Agent create failed: hub connect error: {e}")
                                                                     )).await;
-                                                                    return;
-                                                                }
-                                                            };
-                                                        let msg =
-                                                            CliMessage::CreateWorktreeAgent {
-                                                                repo_path,
-                                                                target_branch: Some(branch_name),
-                                                                new_branch: None,
-                                                                prompt: None,
-                                                                agent_binary: None,
-                                                                cols,
-                                                                rows: rows
-                                                                    .saturating_sub(2)
-                                                                    .max(1),
-                                                                accept_edits: false,
-                                                                plan_mode: bp,
-                                                                allow_bypass: bp,
-                                                                hub,
-                                                            };
+                                                                return;
+                                                            }
+                                                        };
+                                                        let msg = CliMessage::CreateWorktreeAgent {
+                                                            repo_path,
+                                                            target_branch: Some(branch_name),
+                                                            new_branch: None,
+                                                            prompt: None,
+                                                            agent_binary: None,
+                                                            cols,
+                                                            rows: rows.saturating_sub(2).max(1),
+                                                            accept_edits: false,
+                                                            plan_mode: bp,
+                                                            allow_bypass: bp,
+                                                            hub,
+                                                        };
                                                         if let Err(e) = clust_ipc::send_message(
                                                             &mut stream,
                                                             &msg,
@@ -2636,22 +2737,26 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                                         )
                                                         .await
                                                         {
-                                                            Ok(HubMessage::WorktreeAgentStarted {
-                                                                id,
-                                                                agent_binary,
-                                                                working_dir,
-                                                                repo_path,
-                                                                branch_name,
-                                                            }) => {
+                                                            Ok(
+                                                                HubMessage::WorktreeAgentStarted {
+                                                                    id,
+                                                                    agent_binary,
+                                                                    working_dir,
+                                                                    repo_path,
+                                                                    branch_name,
+                                                                },
+                                                            ) => {
                                                                 let _ = tx
-                                                                    .send(AgentStartResult::Started {
-                                                                        agent_id: id,
-                                                                        agent_binary,
-                                                                        working_dir,
-                                                                        repo_path,
-                                                                        branch_name,
-                                                                        is_worktree: true,
-                                                                    })
+                                                                    .send(
+                                                                        AgentStartResult::Started {
+                                                                            agent_id: id,
+                                                                            agent_binary,
+                                                                            working_dir,
+                                                                            repo_path,
+                                                                            branch_name,
+                                                                            is_worktree: true,
+                                                                        },
+                                                                    )
                                                                     .await;
                                                             }
                                                             Ok(HubMessage::Error { message }) => {
@@ -2675,28 +2780,53 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                             }
                                         }
                                     }
-                                    ActiveMenu::WorktreeCleanup { repo_path, branch_name, .. } => {
+                                    ActiveMenu::WorktreeCleanup {
+                                        repo_path,
+                                        branch_name,
+                                        ..
+                                    } => {
                                         match idx {
                                             1 => {
                                                 // Discard worktree
-                                                remove_worktree_ipc(&repo_path, &branch_name, false, true);
-                                                last_repo_fetch = Instant::now() - Duration::from_secs(10);
-                                                last_agent_fetch = Instant::now() - Duration::from_secs(10);
+                                                remove_worktree_ipc(
+                                                    &repo_path,
+                                                    &branch_name,
+                                                    false,
+                                                    true,
+                                                );
+                                                last_repo_fetch =
+                                                    Instant::now() - Duration::from_secs(10);
+                                                last_agent_fetch =
+                                                    Instant::now() - Duration::from_secs(10);
                                             }
                                             2 => {
                                                 // Discard worktree + branch
-                                                remove_worktree_ipc(&repo_path, &branch_name, true, true);
-                                                last_repo_fetch = Instant::now() - Duration::from_secs(10);
-                                                last_agent_fetch = Instant::now() - Duration::from_secs(10);
+                                                remove_worktree_ipc(
+                                                    &repo_path,
+                                                    &branch_name,
+                                                    true,
+                                                    true,
+                                                );
+                                                last_repo_fetch =
+                                                    Instant::now() - Duration::from_secs(10);
+                                                last_agent_fetch =
+                                                    Instant::now() - Duration::from_secs(10);
                                             }
                                             _ => {} // Keep
                                         }
                                         // Show next pending cleanup if any
-                                        if let Some(m) = pop_worktree_cleanup_menu(&mut pending_worktree_cleanups) {
+                                        if let Some(m) = pop_worktree_cleanup_menu(
+                                            &mut pending_worktree_cleanups,
+                                        ) {
                                             active_menu = Some(m);
                                         }
                                     }
-                                    ActiveMenu::EditorPicker { target_path, repo_path, editors, .. } => {
+                                    ActiveMenu::EditorPicker {
+                                        target_path,
+                                        repo_path,
+                                        editors,
+                                        ..
+                                    } => {
                                         if let Some(editor) = editors.get(idx).cloned() {
                                             crate::editor::open_in_editor(&editor, &target_path);
                                             if repo_path.is_some() {
@@ -2715,13 +2845,17 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                             }
                                         }
                                     }
-                                    ActiveMenu::EditorRemember { repo_path, editor, .. } => {
+                                    ActiveMenu::EditorRemember {
+                                        repo_path, editor, ..
+                                    } => {
                                         match idx {
                                             1 => {
                                                 // For this repository
                                                 if let Some(rp) = repo_path {
                                                     set_repo_editor_ipc(&rp, &editor.binary);
-                                                    if let Some(repo) = repos.iter_mut().find(|r| r.path == rp) {
+                                                    if let Some(repo) =
+                                                        repos.iter_mut().find(|r| r.path == rp)
+                                                    {
                                                         repo.editor = Some(editor.binary);
                                                     }
                                                 }
@@ -2733,7 +2867,14 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                             _ => {} // Just this time
                                         }
                                     }
-                                    ActiveMenu::BatchCleanup { batch_idx, hub_batch_id, repo_path, branch_names, agent_ids, .. } => {
+                                    ActiveMenu::BatchCleanup {
+                                        batch_idx,
+                                        hub_batch_id,
+                                        repo_path,
+                                        branch_names,
+                                        agent_ids,
+                                        ..
+                                    } => {
                                         match idx {
                                             0 => {
                                                 // Cancel — do nothing, batch survives
@@ -2743,12 +2884,18 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                                 if let Some(ref bid) = hub_batch_id {
                                                     let bid = bid.clone();
                                                     tokio::spawn(async move {
-                                                        if let Ok(mut stream) = ipc::try_connect().await {
+                                                        if let Ok(mut stream) =
+                                                            ipc::try_connect().await
+                                                        {
                                                             let msg = CliMessage::CancelQueuedBatch {
                                                                 batch_id: bid,
                                                                 cleanup_mode: clust_ipc::BatchCleanupMode::NoCleanup,
                                                             };
-                                                            let _ = clust_ipc::send_message(&mut stream, &msg).await;
+                                                            let _ = clust_ipc::send_message(
+                                                                &mut stream,
+                                                                &msg,
+                                                            )
+                                                            .await;
                                                         }
                                                     });
                                                 }
@@ -2764,12 +2911,18 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                                 if let Some(ref bid) = hub_batch_id {
                                                     let bid = bid.clone();
                                                     tokio::spawn(async move {
-                                                        if let Ok(mut stream) = ipc::try_connect().await {
+                                                        if let Ok(mut stream) =
+                                                            ipc::try_connect().await
+                                                        {
                                                             let msg = CliMessage::CancelQueuedBatch {
                                                                 batch_id: bid,
                                                                 cleanup_mode: clust_ipc::BatchCleanupMode::StopAgents,
                                                             };
-                                                            let _ = clust_ipc::send_message(&mut stream, &msg).await;
+                                                            let _ = clust_ipc::send_message(
+                                                                &mut stream,
+                                                                &msg,
+                                                            )
+                                                            .await;
                                                         }
                                                     });
                                                 } else {
@@ -2777,17 +2930,27 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                                     for aid in &agent_ids {
                                                         let aid = aid.clone();
                                                         tokio::spawn(async move {
-                                                            if let Ok(mut stream) = ipc::try_connect().await {
-                                                                let msg = CliMessage::StopAgent { id: aid };
-                                                                let _ = clust_ipc::send_message(&mut stream, &msg).await;
+                                                            if let Ok(mut stream) =
+                                                                ipc::try_connect().await
+                                                            {
+                                                                let msg = CliMessage::StopAgent {
+                                                                    id: aid,
+                                                                };
+                                                                let _ = clust_ipc::send_message(
+                                                                    &mut stream,
+                                                                    &msg,
+                                                                )
+                                                                .await;
                                                             }
                                                         });
                                                     }
                                                 }
                                                 tasks_state.remove_batch(batch_idx);
-                                                last_agent_fetch = Instant::now() - Duration::from_secs(10);
+                                                last_agent_fetch =
+                                                    Instant::now() - Duration::from_secs(10);
                                                 status_message = Some(StatusMessage {
-                                                    text: "Batch removed, agents stopped".to_string(),
+                                                    text: "Batch removed, agents stopped"
+                                                        .to_string(),
                                                     level: StatusLevel::Info,
                                                     created: Instant::now(),
                                                 });
@@ -2797,12 +2960,18 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                                 if let Some(ref bid) = hub_batch_id {
                                                     let bid = bid.clone();
                                                     tokio::spawn(async move {
-                                                        if let Ok(mut stream) = ipc::try_connect().await {
+                                                        if let Ok(mut stream) =
+                                                            ipc::try_connect().await
+                                                        {
                                                             let msg = CliMessage::CancelQueuedBatch {
                                                                 batch_id: bid,
                                                                 cleanup_mode: clust_ipc::BatchCleanupMode::StopAgentsAndRemoveBranches,
                                                             };
-                                                            let _ = clust_ipc::send_message(&mut stream, &msg).await;
+                                                            let _ = clust_ipc::send_message(
+                                                                &mut stream,
+                                                                &msg,
+                                                            )
+                                                            .await;
                                                         }
                                                     });
                                                 } else {
@@ -2810,19 +2979,31 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                                     for aid in &agent_ids {
                                                         let aid = aid.clone();
                                                         tokio::spawn(async move {
-                                                            if let Ok(mut stream) = ipc::try_connect().await {
-                                                                let msg = CliMessage::StopAgent { id: aid };
-                                                                let _ = clust_ipc::send_message(&mut stream, &msg).await;
+                                                            if let Ok(mut stream) =
+                                                                ipc::try_connect().await
+                                                            {
+                                                                let msg = CliMessage::StopAgent {
+                                                                    id: aid,
+                                                                };
+                                                                let _ = clust_ipc::send_message(
+                                                                    &mut stream,
+                                                                    &msg,
+                                                                )
+                                                                .await;
                                                             }
                                                         });
                                                     }
                                                     for branch in &branch_names {
-                                                        remove_worktree_ipc(&repo_path, branch, true, true);
+                                                        remove_worktree_ipc(
+                                                            &repo_path, branch, true, true,
+                                                        );
                                                     }
                                                 }
                                                 tasks_state.remove_batch(batch_idx);
-                                                last_agent_fetch = Instant::now() - Duration::from_secs(10);
-                                                last_repo_fetch = Instant::now() - Duration::from_secs(10);
+                                                last_agent_fetch =
+                                                    Instant::now() - Duration::from_secs(10);
+                                                last_repo_fetch =
+                                                    Instant::now() - Duration::from_secs(10);
                                                 // Mark batch agent panels as already cleaned up so the
                                                 // worktree-removal modal won't fire when they exit.
                                                 for panel in overview_state.panels.iter_mut() {
@@ -2830,7 +3011,9 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                                         panel.worktree_cleanup_shown = true;
                                                     }
                                                 }
-                                                pending_worktree_cleanups.retain(|c| !branch_names.contains(&c.branch_name));
+                                                pending_worktree_cleanups.retain(|c| {
+                                                    !branch_names.contains(&c.branch_name)
+                                                });
                                                 status_message = Some(StatusMessage {
                                                     text: "Batch removed, agents stopped, branches cleaned up".to_string(),
                                                     level: StatusLevel::Info,
@@ -2845,7 +3028,9 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                             MenuResult::Dismissed => {
                                 active_menu = None;
                                 // If dismissed during worktree cleanup, show next if any
-                                if let Some(m) = pop_worktree_cleanup_menu(&mut pending_worktree_cleanups) {
+                                if let Some(m) =
+                                    pop_worktree_cleanup_menu(&mut pending_worktree_cleanups)
+                                {
                                     active_menu = Some(m);
                                 }
                             }
@@ -2863,15 +3048,16 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                 let hub = hub_name.to_string();
                                 let bp = bypass_permissions;
                                 let plan = output.plan_mode;
-                                let (cols, rows) =
-                                    crossterm::terminal::size().unwrap_or((80, 24));
+                                let (cols, rows) = crossterm::terminal::size().unwrap_or((80, 24));
                                 tokio::spawn(async move {
                                     let mut stream = match ipc::try_connect().await {
                                         Ok(s) => s,
                                         Err(e) => {
-                                            let _ = tx.send(AgentStartResult::Failed(
-                                                format!("Agent create failed: hub connect error: {e}")
-                                            )).await;
+                                            let _ = tx
+                                                .send(AgentStartResult::Failed(format!(
+                                                    "Agent create failed: hub connect error: {e}"
+                                                )))
+                                                .await;
                                             return;
                                         }
                                     };
@@ -2888,17 +3074,16 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                         allow_bypass: bp,
                                         hub,
                                     };
-                                    if let Err(e) =
-                                        clust_ipc::send_message(&mut stream, &msg).await
+                                    if let Err(e) = clust_ipc::send_message(&mut stream, &msg).await
                                     {
-                                        let _ = tx.send(AgentStartResult::Failed(
-                                            format!("Agent create failed: send error: {e}")
-                                        )).await;
+                                        let _ = tx
+                                            .send(AgentStartResult::Failed(format!(
+                                                "Agent create failed: send error: {e}"
+                                            )))
+                                            .await;
                                         return;
                                     }
-                                    match clust_ipc::recv_message::<HubMessage>(&mut stream)
-                                        .await
-                                    {
+                                    match clust_ipc::recv_message::<HubMessage>(&mut stream).await {
                                         Ok(HubMessage::WorktreeAgentStarted {
                                             id,
                                             agent_binary,
@@ -2918,19 +3103,26 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                                 .await;
                                         }
                                         Ok(HubMessage::Error { message }) => {
-                                            let _ = tx.send(AgentStartResult::Failed(
-                                                format!("Agent create failed: {message}")
-                                            )).await;
+                                            let _ = tx
+                                                .send(AgentStartResult::Failed(format!(
+                                                    "Agent create failed: {message}"
+                                                )))
+                                                .await;
                                         }
                                         Ok(_) => {
-                                            let _ = tx.send(AgentStartResult::Failed(
-                                                "Agent create failed: unexpected hub response".to_string()
-                                            )).await;
+                                            let _ = tx
+                                                .send(AgentStartResult::Failed(
+                                                    "Agent create failed: unexpected hub response"
+                                                        .to_string(),
+                                                ))
+                                                .await;
                                         }
                                         Err(e) => {
-                                            let _ = tx.send(AgentStartResult::Failed(
-                                                format!("Agent create failed: recv error: {e}")
-                                            )).await;
+                                            let _ = tx
+                                                .send(AgentStartResult::Failed(format!(
+                                                    "Agent create failed: recv error: {e}"
+                                                )))
+                                                .await;
                                         }
                                     }
                                 });
@@ -2952,7 +3144,9 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                 let reg_msg = CliMessage::RegisterBatch {
                                     repo_path: output.repo_path.clone(),
                                     target_branch: output.branch_name.clone(),
-                                    title: output.title.clone().unwrap_or_else(|| format!("Batch {}", tasks_state.batches.len() + 1)),
+                                    title: output.title.clone().unwrap_or_else(|| {
+                                        format!("Batch {}", tasks_state.batches.len() + 1)
+                                    }),
                                     max_concurrent: output.max_concurrent,
                                     prompt_prefix: None,
                                     prompt_suffix: None,
@@ -2969,14 +3163,19 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                 let tx = agent_start_tx.clone();
                                 tokio::spawn(async move {
                                     if let Ok(mut stream) = ipc::try_connect().await {
-                                        if let Ok(()) = clust_ipc::send_message(&mut stream, &reg_msg).await {
+                                        if let Ok(()) =
+                                            clust_ipc::send_message(&mut stream, &reg_msg).await
+                                        {
                                             if let Ok(HubMessage::BatchRegistered { batch_id }) =
-                                                clust_ipc::recv_message::<HubMessage>(&mut stream).await
+                                                clust_ipc::recv_message::<HubMessage>(&mut stream)
+                                                    .await
                                             {
-                                                let _ = tx.send(AgentStartResult::BatchRegistered {
-                                                    local_batch_idx: batch_idx,
-                                                    hub_batch_id: batch_id,
-                                                }).await;
+                                                let _ = tx
+                                                    .send(AgentStartResult::BatchRegistered {
+                                                        local_batch_idx: batch_idx,
+                                                        hub_batch_id: batch_id,
+                                                    })
+                                                    .await;
                                             }
                                         }
                                     }
@@ -2994,7 +3193,8 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                             ImportBatchResult::Completed(output) => {
                                 import_batch_modal = None;
                                 let batch_count = output.batches.len();
-                                let total_task_count: usize = output.batches.iter().map(|b| b.tasks.len()).sum();
+                                let total_task_count: usize =
+                                    output.batches.iter().map(|b| b.tasks.len()).sum();
                                 let mut all_unresolved: Vec<String> = Vec::new();
 
                                 for batch_json in output.batches {
@@ -3008,7 +3208,9 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                     // Resolve depends_on titles to hub batch IDs
                                     let mut resolved_deps: Vec<String> = Vec::new();
                                     for dep_title in &batch_json.depends_on {
-                                        if let Some(hub_id) = tasks_state.batches.iter()
+                                        if let Some(hub_id) = tasks_state
+                                            .batches
+                                            .iter()
                                             .find(|b| b.title == *dep_title)
                                             .and_then(|b| b.hub_batch_id.clone())
                                         {
@@ -3017,14 +3219,15 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                             all_unresolved.push(dep_title.clone());
                                         }
                                     }
-                                    let batch_output = crate::create_batch_modal::BatchModalOutput {
-                                        repo_path: output.repo_path.clone(),
-                                        repo_name: output.repo_name.clone(),
-                                        branch_name: output.branch_name.clone(),
-                                        title: batch_json.title.clone(),
-                                        max_concurrent: batch_json.max_concurrent,
-                                        launch_mode,
-                                    };
+                                    let batch_output =
+                                        crate::create_batch_modal::BatchModalOutput {
+                                            repo_path: output.repo_path.clone(),
+                                            repo_name: output.repo_name.clone(),
+                                            branch_name: output.branch_name.clone(),
+                                            title: batch_json.title.clone(),
+                                            max_concurrent: batch_json.max_concurrent,
+                                            launch_mode,
+                                        };
                                     let batch_idx = tasks_state.add_batch(batch_output);
                                     // Apply prefix/suffix
                                     if let Some(ref prefix) = batch_json.prefix {
@@ -3045,7 +3248,8 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                         batch.depends_on = resolved_deps.clone();
                                     }
                                     // Add all tasks (using per-task values)
-                                    let ipc_tasks: Vec<clust_ipc::QueuedTask> = batch_json.tasks
+                                    let ipc_tasks: Vec<clust_ipc::QueuedTask> = batch_json
+                                        .tasks
                                         .iter()
                                         .map(|t| clust_ipc::QueuedTask {
                                             branch_name: t.branch.clone(),
@@ -3053,17 +3257,27 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                             use_prefix: t.use_prefix,
                                             use_suffix: t.use_suffix,
                                             plan_mode: t.plan_mode,
+                                            is_manager: false,
                                         })
                                         .collect();
                                     for task in &batch_json.tasks {
-                                        tasks_state.add_task(batch_idx, task.branch.clone(), task.prompt.clone(), task.use_prefix, task.use_suffix, task.plan_mode);
+                                        tasks_state.add_task(
+                                            batch_idx,
+                                            task.branch.clone(),
+                                            task.prompt.clone(),
+                                            task.use_prefix,
+                                            task.use_suffix,
+                                            task.plan_mode,
+                                        );
                                     }
                                     // Register with hub
                                     let reg_msg = CliMessage::RegisterBatch {
                                         repo_path: output.repo_path.clone(),
                                         target_branch: output.branch_name.clone(),
                                         title: batch_json.title.unwrap_or_else(|| {
-                                            tasks_state.batches.get(batch_idx)
+                                            tasks_state
+                                                .batches
+                                                .get(batch_idx)
                                                 .map(|b| b.title.clone())
                                                 .unwrap_or_else(|| "Batch".to_string())
                                         }),
@@ -3081,14 +3295,22 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                     let tx = agent_start_tx.clone();
                                     tokio::spawn(async move {
                                         if let Ok(mut stream) = ipc::try_connect().await {
-                                            if let Ok(()) = clust_ipc::send_message(&mut stream, &reg_msg).await {
-                                                if let Ok(HubMessage::BatchRegistered { batch_id }) =
-                                                    clust_ipc::recv_message::<HubMessage>(&mut stream).await
+                                            if let Ok(()) =
+                                                clust_ipc::send_message(&mut stream, &reg_msg).await
+                                            {
+                                                if let Ok(HubMessage::BatchRegistered {
+                                                    batch_id,
+                                                }) = clust_ipc::recv_message::<HubMessage>(
+                                                    &mut stream,
+                                                )
+                                                .await
                                                 {
-                                                    let _ = tx.send(AgentStartResult::BatchRegistered {
-                                                        local_batch_idx: batch_idx,
-                                                        hub_batch_id: batch_id,
-                                                    }).await;
+                                                    let _ = tx
+                                                        .send(AgentStartResult::BatchRegistered {
+                                                            local_batch_idx: batch_idx,
+                                                            hub_batch_id: batch_id,
+                                                        })
+                                                        .await;
                                                 }
                                             }
                                         }
@@ -3104,7 +3326,10 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                     if total_task_count == 1 { "" } else { "s" },
                                 );
                                 if !all_unresolved.is_empty() {
-                                    msg_text.push_str(&format!(" (unresolved deps: {})", all_unresolved.join(", ")));
+                                    msg_text.push_str(&format!(
+                                        " (unresolved deps: {})",
+                                        all_unresolved.join(", ")
+                                    ));
                                 }
                                 status_message = Some(StatusMessage {
                                     text: msg_text,
@@ -3132,13 +3357,24 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                         };
                                         tokio::spawn(async move {
                                             if let Ok(mut stream) = ipc::try_connect().await {
-                                                let _ = clust_ipc::send_message(&mut stream, &msg).await;
-                                                let _ = clust_ipc::recv_message::<HubMessage>(&mut stream).await;
+                                                let _ = clust_ipc::send_message(&mut stream, &msg)
+                                                    .await;
+                                                let _ = clust_ipc::recv_message::<HubMessage>(
+                                                    &mut stream,
+                                                )
+                                                .await;
                                             }
                                         });
                                     }
                                 }
-                                tasks_state.add_task(output.batch_idx, output.branch_name, output.prompt, output.use_prefix, output.use_suffix, output.plan_mode);
+                                tasks_state.add_task(
+                                    output.batch_idx,
+                                    output.branch_name,
+                                    output.prompt,
+                                    output.use_prefix,
+                                    output.use_suffix,
+                                    output.plan_mode,
+                                );
                             }
                             AddTaskResult::Pending => {}
                         }
@@ -3160,8 +3396,12 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                         };
                                         tokio::spawn(async move {
                                             if let Ok(mut stream) = ipc::try_connect().await {
-                                                let _ = clust_ipc::send_message(&mut stream, &msg).await;
-                                                let _ = clust_ipc::recv_message::<HubMessage>(&mut stream).await;
+                                                let _ = clust_ipc::send_message(&mut stream, &msg)
+                                                    .await;
+                                                let _ = clust_ipc::recv_message::<HubMessage>(
+                                                    &mut stream,
+                                                )
+                                                .await;
                                             }
                                         });
                                     }
@@ -3209,6 +3449,7 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                                 use_prefix: t.use_prefix,
                                                 use_suffix: t.use_suffix,
                                                 plan_mode: t.plan_mode,
+                                                is_manager: false,
                                             })
                                             .collect();
                                         let msg = CliMessage::QueueBatch {
@@ -3234,36 +3475,68 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                             if let Ok(mut stream) = ipc::try_connect().await {
                                                 // Delete old registration first
                                                 if let Some(old_id) = old_hub_id {
-                                                    let del = CliMessage::DeleteBatch { batch_id: old_id };
-                                                    let _ = clust_ipc::send_message(&mut stream, &del).await;
-                                                    let _ = clust_ipc::recv_message::<HubMessage>(&mut stream).await;
+                                                    let del = CliMessage::DeleteBatch {
+                                                        batch_id: old_id,
+                                                    };
+                                                    let _ =
+                                                        clust_ipc::send_message(&mut stream, &del)
+                                                            .await;
+                                                    let _ = clust_ipc::recv_message::<HubMessage>(
+                                                        &mut stream,
+                                                    )
+                                                    .await;
                                                     // Need a fresh connection for the next message
                                                     drop(stream);
-                                                    let Ok(mut stream) = ipc::try_connect().await else { return };
-                                                    if let Ok(()) = clust_ipc::send_message(&mut stream, &msg).await {
-                                                        if let Ok(HubMessage::BatchQueued { batch_id, .. }) =
-                                                            clust_ipc::recv_message::<HubMessage>(&mut stream).await
+                                                    let Ok(mut stream) = ipc::try_connect().await
+                                                    else {
+                                                        return;
+                                                    };
+                                                    if let Ok(()) =
+                                                        clust_ipc::send_message(&mut stream, &msg)
+                                                            .await
+                                                    {
+                                                        if let Ok(HubMessage::BatchQueued {
+                                                            batch_id,
+                                                            ..
+                                                        }) =
+                                                            clust_ipc::recv_message::<HubMessage>(
+                                                                &mut stream,
+                                                            )
+                                                            .await
                                                         {
                                                             let _ = tx
-                                                                .send(AgentStartResult::BatchQueued {
-                                                                    local_batch_idx: bidx,
-                                                                    hub_batch_id: batch_id,
-                                                                    scheduled_at: sched,
-                                                                })
+                                                                .send(
+                                                                    AgentStartResult::BatchQueued {
+                                                                        local_batch_idx: bidx,
+                                                                        hub_batch_id: batch_id,
+                                                                        scheduled_at: sched,
+                                                                    },
+                                                                )
                                                                 .await;
                                                         }
                                                     }
                                                 } else {
-                                                    if let Ok(()) = clust_ipc::send_message(&mut stream, &msg).await {
-                                                        if let Ok(HubMessage::BatchQueued { batch_id, .. }) =
-                                                            clust_ipc::recv_message::<HubMessage>(&mut stream).await
+                                                    if let Ok(()) =
+                                                        clust_ipc::send_message(&mut stream, &msg)
+                                                            .await
+                                                    {
+                                                        if let Ok(HubMessage::BatchQueued {
+                                                            batch_id,
+                                                            ..
+                                                        }) =
+                                                            clust_ipc::recv_message::<HubMessage>(
+                                                                &mut stream,
+                                                            )
+                                                            .await
                                                         {
                                                             let _ = tx
-                                                                .send(AgentStartResult::BatchQueued {
-                                                                    local_batch_idx: bidx,
-                                                                    hub_batch_id: batch_id,
-                                                                    scheduled_at: sched,
-                                                                })
+                                                                .send(
+                                                                    AgentStartResult::BatchQueued {
+                                                                        local_batch_idx: bidx,
+                                                                        hub_batch_id: batch_id,
+                                                                        scheduled_at: sched,
+                                                                    },
+                                                                )
                                                                 .await;
                                                         }
                                                     }
@@ -3287,8 +3560,7 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                 let fm_cols = (last_content_area.width * 40 / 100)
                                     .saturating_sub(2)
                                     .max(1);
-                                let fm_rows =
-                                    last_content_area.height.saturating_sub(3).max(1);
+                                let fm_rows = last_content_area.height.saturating_sub(3).max(1);
                                 let existing_terminals =
                                     overview_state.take_agent_terminals(&agent.id);
                                 focus_mode_state.open_agent(
@@ -3319,16 +3591,17 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                 let hub = hub_name.to_string();
                                 let bp = bypass_permissions;
                                 let plan = output.plan_mode;
-                                let (cols, rows) =
-                                    crossterm::terminal::size().unwrap_or((80, 24));
+                                let (cols, rows) = crossterm::terminal::size().unwrap_or((80, 24));
                                 let wd = output.working_dir.clone();
                                 tokio::spawn(async move {
                                     let mut stream = match ipc::try_connect().await {
                                         Ok(s) => s,
                                         Err(e) => {
-                                            let _ = tx.send(AgentStartResult::Failed(
-                                                format!("Agent start failed: hub connect error: {e}")
-                                            )).await;
+                                            let _ = tx
+                                                .send(AgentStartResult::Failed(format!(
+                                                    "Agent start failed: hub connect error: {e}"
+                                                )))
+                                                .await;
                                             return;
                                         }
                                     };
@@ -3343,17 +3616,16 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                         allow_bypass: bp,
                                         hub,
                                     };
-                                    if let Err(e) =
-                                        clust_ipc::send_message(&mut stream, &msg).await
+                                    if let Err(e) = clust_ipc::send_message(&mut stream, &msg).await
                                     {
-                                        let _ = tx.send(AgentStartResult::Failed(
-                                            format!("Agent start failed: send error: {e}")
-                                        )).await;
+                                        let _ = tx
+                                            .send(AgentStartResult::Failed(format!(
+                                                "Agent start failed: send error: {e}"
+                                            )))
+                                            .await;
                                         return;
                                     }
-                                    match clust_ipc::recv_message::<HubMessage>(&mut stream)
-                                        .await
-                                    {
+                                    match clust_ipc::recv_message::<HubMessage>(&mut stream).await {
                                         Ok(HubMessage::AgentStarted {
                                             id,
                                             agent_binary,
@@ -3373,24 +3645,134 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                                 .await;
                                         }
                                         Ok(HubMessage::Error { message }) => {
-                                            let _ = tx.send(AgentStartResult::Failed(
-                                                format!("Agent start failed: {message}")
-                                            )).await;
+                                            let _ = tx
+                                                .send(AgentStartResult::Failed(format!(
+                                                    "Agent start failed: {message}"
+                                                )))
+                                                .await;
                                         }
                                         Ok(_) => {
-                                            let _ = tx.send(AgentStartResult::Failed(
-                                                "Agent start failed: unexpected hub response".to_string()
-                                            )).await;
+                                            let _ = tx
+                                                .send(AgentStartResult::Failed(
+                                                    "Agent start failed: unexpected hub response"
+                                                        .to_string(),
+                                                ))
+                                                .await;
                                         }
                                         Err(e) => {
-                                            let _ = tx.send(AgentStartResult::Failed(
-                                                format!("Agent start failed: recv error: {e}")
-                                            )).await;
+                                            let _ = tx
+                                                .send(AgentStartResult::Failed(format!(
+                                                    "Agent start failed: recv error: {e}"
+                                                )))
+                                                .await;
                                         }
                                     }
                                 });
                             }
                             DetachedModalResult::Pending => {}
+                        }
+                    } else if let Some(ref mut modal) = orchestrator_modal {
+                        use crate::orchestrator_modal::OrchestratorResult;
+                        match modal.handle_key(key) {
+                            OrchestratorResult::Cancelled => {
+                                orchestrator_modal = None;
+                            }
+                            OrchestratorResult::Completed(output) => {
+                                orchestrator_modal = None;
+                                let tx = agent_start_tx.clone();
+                                let status_tx_local = status_tx.clone();
+                                let hub = hub_name.to_string();
+                                let (cols, rows) = crossterm::terminal::size().unwrap_or((80, 24));
+                                tokio::spawn(async move {
+                                    let mut stream = match ipc::try_connect().await {
+                                        Ok(s) => s,
+                                        Err(e) => {
+                                            let _ = status_tx_local
+                                                .send(StatusMessage {
+                                                    text: format!(
+                                                        "Orchestrator launch failed: {e}"
+                                                    ),
+                                                    level: StatusLevel::Error,
+                                                    created: Instant::now(),
+                                                })
+                                                .await;
+                                            return;
+                                        }
+                                    };
+                                    let msg = CliMessage::CreateOrchestratorAgent {
+                                        repo_path: output.repo_path.clone(),
+                                        source_branch: output.source_branch.clone(),
+                                        new_branch: output.new_branch.clone(),
+                                        prompt: output.prompt,
+                                        cols,
+                                        rows: rows.saturating_sub(2).max(1),
+                                        hub,
+                                    };
+                                    if let Err(e) = clust_ipc::send_message(&mut stream, &msg).await
+                                    {
+                                        let _ = status_tx_local
+                                            .send(StatusMessage {
+                                                text: format!("Orchestrator launch failed: {e}"),
+                                                level: StatusLevel::Error,
+                                                created: Instant::now(),
+                                            })
+                                            .await;
+                                        return;
+                                    }
+                                    match clust_ipc::recv_message::<HubMessage>(&mut stream).await {
+                                        Ok(HubMessage::OrchestratorStarted {
+                                            agent_id,
+                                            working_dir,
+                                            repo_path,
+                                            branch_name,
+                                            ..
+                                        }) => {
+                                            let _ = tx
+                                                .send(AgentStartResult::Started {
+                                                    agent_id,
+                                                    agent_binary: String::new(),
+                                                    working_dir,
+                                                    repo_path: Some(repo_path),
+                                                    branch_name: Some(branch_name),
+                                                    is_worktree: true,
+                                                })
+                                                .await;
+                                        }
+                                        Ok(HubMessage::Error { message }) => {
+                                            let _ = status_tx_local
+                                                .send(StatusMessage {
+                                                    text: format!(
+                                                        "Orchestrator launch failed: {message}"
+                                                    ),
+                                                    level: StatusLevel::Error,
+                                                    created: Instant::now(),
+                                                })
+                                                .await;
+                                        }
+                                        Ok(_) => {
+                                            let _ = status_tx_local
+                                                .send(StatusMessage {
+                                                    text: "Orchestrator launch failed: unexpected hub response".to_string(),
+                                                    level: StatusLevel::Error,
+                                                    created: Instant::now(),
+                                                })
+                                                .await;
+                                        }
+                                        Err(e) => {
+                                            let _ = status_tx_local
+                                                .send(StatusMessage {
+                                                    text: format!(
+                                                        "Orchestrator launch failed: {e}"
+                                                    ),
+                                                    level: StatusLevel::Error,
+                                                    created: Instant::now(),
+                                                })
+                                                .await;
+                                        }
+                                    }
+                                });
+                            }
+                            OrchestratorResult::Pending => {}
                         }
                     } else if let Some(ref mut modal) = repo_modal {
                         match modal.handle_key(key) {
@@ -3404,11 +3786,13 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                     let mut stream = match ipc::try_connect().await {
                                         Ok(s) => s,
                                         Err(e) => {
-                                            let _ = tx.send(StatusMessage {
-                                                text: format!("Create failed: {e}"),
-                                                level: StatusLevel::Error,
-                                                created: Instant::now(),
-                                            }).await;
+                                            let _ = tx
+                                                .send(StatusMessage {
+                                                    text: format!("Create failed: {e}"),
+                                                    level: StatusLevel::Error,
+                                                    created: Instant::now(),
+                                                })
+                                                .await;
                                             return;
                                         }
                                     };
@@ -3416,35 +3800,44 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                         parent_dir: output.parent_dir,
                                         name: output.name,
                                     };
-                                    if let Err(e) = clust_ipc::send_message(&mut stream, &msg).await {
-                                        let _ = tx.send(StatusMessage {
-                                            text: format!("Create failed: {e}"),
-                                            level: StatusLevel::Error,
-                                            created: Instant::now(),
-                                        }).await;
+                                    if let Err(e) = clust_ipc::send_message(&mut stream, &msg).await
+                                    {
+                                        let _ = tx
+                                            .send(StatusMessage {
+                                                text: format!("Create failed: {e}"),
+                                                level: StatusLevel::Error,
+                                                created: Instant::now(),
+                                            })
+                                            .await;
                                         return;
                                     }
                                     match clust_ipc::recv_message::<HubMessage>(&mut stream).await {
                                         Ok(HubMessage::RepoCreated { name, .. }) => {
-                                            let _ = tx.send(StatusMessage {
-                                                text: format!("Created repository \"{name}\""),
-                                                level: StatusLevel::Success,
-                                                created: Instant::now(),
-                                            }).await;
+                                            let _ = tx
+                                                .send(StatusMessage {
+                                                    text: format!("Created repository \"{name}\""),
+                                                    level: StatusLevel::Success,
+                                                    created: Instant::now(),
+                                                })
+                                                .await;
                                         }
                                         Ok(HubMessage::Error { message }) => {
-                                            let _ = tx.send(StatusMessage {
-                                                text: message,
-                                                level: StatusLevel::Error,
-                                                created: Instant::now(),
-                                            }).await;
+                                            let _ = tx
+                                                .send(StatusMessage {
+                                                    text: message,
+                                                    level: StatusLevel::Error,
+                                                    created: Instant::now(),
+                                                })
+                                                .await;
                                         }
                                         Err(e) => {
-                                            let _ = tx.send(StatusMessage {
-                                                text: format!("Create failed: {e}"),
-                                                level: StatusLevel::Error,
-                                                created: Instant::now(),
-                                            }).await;
+                                            let _ = tx
+                                                .send(StatusMessage {
+                                                    text: format!("Create failed: {e}"),
+                                                    level: StatusLevel::Error,
+                                                    created: Instant::now(),
+                                                })
+                                                .await;
                                         }
                                         _ => {}
                                     }
@@ -3544,6 +3937,16 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                             import_batch_modal = Some(ImportBatchModal::new(repos.clone()));
                             show_help = false;
                         }
+                    } else if key.code == KeyCode::Char('o')
+                        && key.modifiers.contains(KeyModifiers::ALT)
+                    {
+                        // Global shortcut: Alt+O launches the orchestrator agent modal
+                        if !repos.is_empty() {
+                            orchestrator_modal = Some(
+                                crate::orchestrator_modal::OrchestratorModal::new(repos.clone()),
+                            );
+                            show_help = false;
+                        }
                     } else if key.code == KeyCode::Char('p')
                         && key.modifiers.contains(KeyModifiers::ALT)
                         && active_tab == ActiveTab::Tasks
@@ -3576,12 +3979,17 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                             if let Some(task_idx) = tasks_state.focused_task {
                                 // If the task is idle in a manual-mode batch, start it;
                                 // otherwise toggle suffix.
-                                let can_start = tasks_state.batches.get(batch_idx).is_some_and(|b| {
-                                    b.launch_mode == tasks::LaunchMode::Manual
-                                        && b.tasks.get(task_idx).is_some_and(|t| t.status == tasks::TaskStatus::Idle)
-                                });
+                                let can_start =
+                                    tasks_state.batches.get(batch_idx).is_some_and(|b| {
+                                        b.launch_mode == tasks::LaunchMode::Manual
+                                            && b.tasks.get(task_idx).is_some_and(|t| {
+                                                t.status == tasks::TaskStatus::Idle
+                                            })
+                                    });
                                 if can_start {
-                                    if let Some(start_info) = tasks_state.start_single_task(batch_idx, task_idx) {
+                                    if let Some(start_info) =
+                                        tasks_state.start_single_task(batch_idx, task_idx)
+                                    {
                                         spawn_batch_tasks(
                                             &tasks_state,
                                             &start_info,
@@ -3593,7 +4001,11 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                     tasks_state.toggle_task_use_suffix(batch_idx, task_idx);
                                 }
                             } else {
-                                let mod_key = if cfg!(target_os = "macos") { "Opt" } else { "Alt" };
+                                let mod_key = if cfg!(target_os = "macos") {
+                                    "Opt"
+                                } else {
+                                    "Alt"
+                                };
                                 status_message = Some(StatusMessage {
                                     text: format!("Select a task first (\u{2191}/\u{2193} to navigate), then {mod_key}+S to start"),
                                     level: StatusLevel::Error,
@@ -3603,13 +4015,9 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                         }
                     } else
                     // Focus mode: behavior depends on which side has focus
-                    if in_focus_mode
-                        && focus_mode_state.is_active()
-                    {
+                    if in_focus_mode && focus_mode_state.is_active() {
                         let shift = key.modifiers.contains(KeyModifiers::SHIFT);
-                        if focus_mode_state.focus_side
-                            == overview::FocusSide::Left
-                        {
+                        if focus_mode_state.focus_side == overview::FocusSide::Left {
                             // Left panel focused
                             if shift {
                                 match key.code {
@@ -3617,7 +4025,8 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                         // Exit focus mode — return to batch screen if opened from one
                                         if let Some(origin) = focus_mode_state.batch_origin.take() {
                                             active_tab = ActiveTab::Tasks;
-                                            tasks_state.focus = tasks::TasksFocus::BatchCard(origin.batch_idx);
+                                            tasks_state.focus =
+                                                tasks::TasksFocus::BatchCard(origin.batch_idx);
                                             tasks_state.focused_task = Some(origin.task_idx);
                                         } else if active_tab == ActiveTab::Overview
                                             && overview_state.initialized
@@ -3630,8 +4039,7 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                         in_focus_mode = false;
                                     }
                                     KeyCode::Right => {
-                                        focus_mode_state.focus_side =
-                                            overview::FocusSide::Right;
+                                        focus_mode_state.focus_side = overview::FocusSide::Right;
                                     }
                                     KeyCode::BackTab => {
                                         focus_mode_state.left_tab =
@@ -3641,44 +4049,35 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                         if focus_mode_state.left_tab
                                             == overview::LeftPanelTab::Terminal =>
                                     {
-                                        if let Some(panel) =
-                                            focus_mode_state.current_terminal_mut()
+                                        if let Some(panel) = focus_mode_state.current_terminal_mut()
                                         {
                                             let page = panel.vterm.rows();
-                                            let max =
-                                                panel.vterm.scrollback_len();
+                                            let max = panel.vterm.scrollback_len();
                                             panel.scroll_offset =
-                                                (panel.scroll_offset + page)
-                                                    .min(max);
+                                                (panel.scroll_offset + page).min(max);
                                         }
                                     }
                                     KeyCode::PageDown
                                         if focus_mode_state.left_tab
                                             == overview::LeftPanelTab::Terminal =>
                                     {
-                                        if let Some(panel) =
-                                            focus_mode_state.current_terminal_mut()
+                                        if let Some(panel) = focus_mode_state.current_terminal_mut()
                                         {
                                             let page = panel.vterm.rows();
-                                            panel.scroll_offset = panel
-                                                .scroll_offset
-                                                .saturating_sub(page);
+                                            panel.scroll_offset =
+                                                panel.scroll_offset.saturating_sub(page);
                                         }
                                     }
                                     _ if focus_mode_state.left_tab
                                         == overview::LeftPanelTab::Terminal
-                                        && focus_mode_state
-                                            .terminal_input_focused =>
+                                        && focus_mode_state.terminal_input_focused =>
                                     {
                                         // Forward shifted keys to the active
                                         // terminal only when in Type mode.
                                         if let Some(bytes) =
-                                            overview::input::key_event_to_bytes(
-                                                &key,
-                                            )
+                                            overview::input::key_event_to_bytes(&key)
                                         {
-                                            focus_mode_state
-                                                .send_terminal_input(bytes);
+                                            focus_mode_state.send_terminal_input(bytes);
                                         }
                                     }
                                     _ => {}
@@ -3687,14 +4086,11 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                 match focus_mode_state.left_tab {
                                     overview::LeftPanelTab::Changes => {
                                         // tab bar (1) + hint bar (1) = 2 rows overhead
-                                        let vh = last_content_area.height.saturating_sub(2) as usize;
+                                        let vh =
+                                            last_content_area.height.saturating_sub(2) as usize;
                                         match key.code {
-                                            KeyCode::Up => {
-                                                focus_mode_state.diff_cursor_up(vh)
-                                            }
-                                            KeyCode::Down => {
-                                                focus_mode_state.diff_cursor_down(vh)
-                                            }
+                                            KeyCode::Up => focus_mode_state.diff_cursor_up(vh),
+                                            KeyCode::Down => focus_mode_state.diff_cursor_down(vh),
                                             KeyCode::Char('v') => {
                                                 focus_mode_state.diff_toggle_anchor()
                                             }
@@ -3716,32 +4112,32 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                     overview::LeftPanelTab::Compare => {
                                         match focus_mode_state.compare_picker.mode {
                                             overview::BranchPickerMode::Searching => {
-                                                let changed = focus_mode_state
-                                                    .compare_picker
-                                                    .handle_key(key);
+                                                let changed =
+                                                    focus_mode_state.compare_picker.handle_key(key);
                                                 if changed {
                                                     focus_mode_state.start_compare_diff();
                                                 }
                                             }
                                             overview::BranchPickerMode::Selected => {
-                                                let vh = last_content_area.height.saturating_sub(3) as usize;
+                                                let vh = last_content_area.height.saturating_sub(3)
+                                                    as usize;
                                                 match key.code {
                                                     KeyCode::Up => {
-                                                        focus_mode_state
-                                                            .compare_cursor_up(vh)
+                                                        focus_mode_state.compare_cursor_up(vh)
                                                     }
                                                     KeyCode::Down => {
-                                                        focus_mode_state
-                                                            .compare_cursor_down(vh)
+                                                        focus_mode_state.compare_cursor_down(vh)
                                                     }
                                                     KeyCode::Char('v') => {
-                                                        focus_mode_state
-                                                            .compare_toggle_anchor()
+                                                        focus_mode_state.compare_toggle_anchor()
                                                     }
                                                     KeyCode::Enter => {
-                                                        if focus_mode_state.compare_has_selection() {
-                                                            focus_mode_state.compare_send_selection();
-                                                            focus_mode_state.compare_cancel_selection();
+                                                        if focus_mode_state.compare_has_selection()
+                                                        {
+                                                            focus_mode_state
+                                                                .compare_send_selection();
+                                                            focus_mode_state
+                                                                .compare_cancel_selection();
                                                         } else {
                                                             focus_mode_state
                                                                 .compare_picker
@@ -3749,15 +4145,12 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                                         }
                                                     }
                                                     KeyCode::Esc => {
-                                                        focus_mode_state
-                                                            .compare_cancel_selection()
+                                                        focus_mode_state.compare_cancel_selection()
                                                     }
                                                     KeyCode::Tab => {
                                                         focus_mode_state.compare_cancel_selection();
                                                         focus_mode_state.left_tab =
-                                                            focus_mode_state
-                                                                .left_tab
-                                                                .next();
+                                                            focus_mode_state.left_tab.next();
                                                     }
                                                     _ => {}
                                                 }
@@ -3769,45 +4162,31 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                         // keys = TUI commands) and Type (keys
                                         // forwarded to the active PTY).
                                         // Ctrl+\ toggles in both directions.
-                                        let is_ctrl_backslash = key
-                                            .modifiers
-                                            .contains(KeyModifiers::CONTROL)
-                                            && matches!(
-                                                key.code,
-                                                KeyCode::Char('\\')
-                                            );
+                                        let is_ctrl_backslash =
+                                            key.modifiers.contains(KeyModifiers::CONTROL)
+                                                && matches!(key.code, KeyCode::Char('\\'));
                                         if is_ctrl_backslash {
-                                            focus_mode_state
-                                                .terminal_input_focused = !focus_mode_state
-                                                .terminal_input_focused;
-                                        } else if focus_mode_state
-                                            .terminal_input_focused
-                                        {
+                                            focus_mode_state.terminal_input_focused =
+                                                !focus_mode_state.terminal_input_focused;
+                                        } else if focus_mode_state.terminal_input_focused {
                                             // Type mode: forward everything to
                                             // the PTY (existing behaviour).
                                             if key.code == KeyCode::Esc {
-                                                focus_mode_state
-                                                    .send_terminal_input(vec![0x1b]);
+                                                focus_mode_state.send_terminal_input(vec![0x1b]);
                                             } else if let Some(bytes) =
-                                                overview::input::key_event_to_bytes(
-                                                    &key,
-                                                )
+                                                overview::input::key_event_to_bytes(&key)
                                             {
-                                                focus_mode_state
-                                                    .send_terminal_input(bytes);
+                                                focus_mode_state.send_terminal_input(bytes);
                                             }
                                         } else {
                                             // Navigate mode: TUI commands.
                                             match key.code {
                                                 KeyCode::Tab => {
                                                     focus_mode_state.left_tab =
-                                                        focus_mode_state
-                                                            .left_tab
-                                                            .next();
+                                                        focus_mode_state.left_tab.next();
                                                 }
                                                 KeyCode::Enter => {
-                                                    focus_mode_state
-                                                        .terminal_input_focused = true;
+                                                    focus_mode_state.terminal_input_focused = true;
                                                 }
                                                 KeyCode::Char(']') => {
                                                     focus_mode_state.next_terminal();
@@ -3819,12 +4198,10 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                                     focus_mode_state.add_terminal();
                                                     // Land in Type mode on the
                                                     // freshly-spawned shell.
-                                                    focus_mode_state
-                                                        .terminal_input_focused = true;
+                                                    focus_mode_state.terminal_input_focused = true;
                                                 }
                                                 KeyCode::Char('x') => {
-                                                    focus_mode_state
-                                                        .close_current_terminal();
+                                                    focus_mode_state.close_current_terminal();
                                                 }
                                                 _ => {}
                                             }
@@ -3840,7 +4217,8 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                         // Exit focus mode — return to batch screen if opened from one
                                         if let Some(origin) = focus_mode_state.batch_origin.take() {
                                             active_tab = ActiveTab::Tasks;
-                                            tasks_state.focus = tasks::TasksFocus::BatchCard(origin.batch_idx);
+                                            tasks_state.focus =
+                                                tasks::TasksFocus::BatchCard(origin.batch_idx);
                                             tasks_state.focused_task = Some(origin.task_idx);
                                         } else if active_tab == ActiveTab::Overview
                                             && overview_state.initialized
@@ -3853,39 +4231,30 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                         in_focus_mode = false;
                                     }
                                     KeyCode::Left if focus_mode_state.repo_path.is_some() => {
-                                        focus_mode_state.focus_side =
-                                            overview::FocusSide::Left;
+                                        focus_mode_state.focus_side = overview::FocusSide::Left;
                                         // Place cursor at top of visible viewport
                                         focus_mode_state.diff_cursor = focus_mode_state.diff_scroll;
-                                        focus_mode_state.compare_cursor = focus_mode_state.compare_diff_scroll;
+                                        focus_mode_state.compare_cursor =
+                                            focus_mode_state.compare_diff_scroll;
                                     }
                                     KeyCode::PageUp => {
-                                        if let Some(panel) =
-                                            &mut focus_mode_state.panel
-                                        {
+                                        if let Some(panel) = &mut focus_mode_state.panel {
                                             let page = panel.vterm.rows();
-                                            let max =
-                                                panel.vterm.scrollback_len();
+                                            let max = panel.vterm.scrollback_len();
                                             panel.panel_scroll_offset =
-                                                (panel.panel_scroll_offset + page)
-                                                    .min(max);
+                                                (panel.panel_scroll_offset + page).min(max);
                                         }
                                     }
                                     KeyCode::PageDown => {
-                                        if let Some(panel) =
-                                            &mut focus_mode_state.panel
-                                        {
+                                        if let Some(panel) = &mut focus_mode_state.panel {
                                             let page = panel.vterm.rows();
-                                            panel.panel_scroll_offset = panel
-                                                .panel_scroll_offset
-                                                .saturating_sub(page);
+                                            panel.panel_scroll_offset =
+                                                panel.panel_scroll_offset.saturating_sub(page);
                                         }
                                     }
                                     _ => {
                                         if let Some(bytes) =
-                                            overview::input::key_event_to_bytes(
-                                                &key,
-                                            )
+                                            overview::input::key_event_to_bytes(&key)
                                         {
                                             focus_mode_state.send_input(bytes);
                                         }
@@ -3894,9 +4263,7 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                             } else if key.code == KeyCode::Esc {
                                 // Forward Esc to agent process
                                 focus_mode_state.send_input(vec![0x1b]);
-                            } else if let Some(bytes) =
-                                overview::input::key_event_to_bytes(&key)
-                            {
+                            } else if let Some(bytes) = overview::input::key_event_to_bytes(&key) {
                                 focus_mode_state.send_input(bytes);
                             }
                         }
@@ -3912,37 +4279,24 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                 KeyCode::Up => overview_state.exit_terminal(),
                                 KeyCode::Down => {
                                     // Enter focus mode with the focused agent
-                                    if let OverviewFocus::Terminal(idx) =
-                                        overview_state.focus
-                                    {
-                                        if let Some(panel) =
-                                            overview_state.panels.get(idx)
-                                        {
+                                    if let OverviewFocus::Terminal(idx) = overview_state.focus {
+                                        if let Some(panel) = overview_state.panels.get(idx) {
                                             let agent_id = panel.id.clone();
-                                            let agent_binary =
-                                                panel.agent_binary.clone();
-                                            let found = agents
-                                                .iter()
-                                                .find(|a| a.id == agent_id);
+                                            let agent_binary = panel.agent_binary.clone();
+                                            let found = agents.iter().find(|a| a.id == agent_id);
                                             let working_dir = found
                                                 .map(|a| a.working_dir.clone())
                                                 .unwrap_or_default();
-                                            let repo_path = found
-                                                .and_then(|a| a.repo_path.clone());
-                                            let branch_name = found
-                                                .and_then(|a| a.branch_name.clone());
-                                            let is_wt = found
-                                                .map(|a| a.is_worktree)
-                                                .unwrap_or(false);
-                                            let fm_cols = (last_content_area.width
-                                                * 40
-                                                / 100)
+                                            let repo_path = found.and_then(|a| a.repo_path.clone());
+                                            let branch_name =
+                                                found.and_then(|a| a.branch_name.clone());
+                                            let is_wt =
+                                                found.map(|a| a.is_worktree).unwrap_or(false);
+                                            let fm_cols = (last_content_area.width * 40 / 100)
                                                 .saturating_sub(2)
                                                 .max(1);
-                                            let fm_rows = last_content_area
-                                                .height
-                                                .saturating_sub(3)
-                                                .max(1);
+                                            let fm_rows =
+                                                last_content_area.height.saturating_sub(3).max(1);
                                             let existing_terminals =
                                                 overview_state.take_agent_terminals(&agent_id);
                                             focus_mode_state.open_agent(
@@ -3976,9 +4330,7 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                 }
                                 _ => {
                                     // Shift+other key — forward to agent
-                                    if let Some(bytes) =
-                                        overview::input::key_event_to_bytes(&key)
-                                    {
+                                    if let Some(bytes) = overview::input::key_event_to_bytes(&key) {
                                         overview_state.send_input(bytes);
                                     }
                                 }
@@ -3989,20 +4341,30 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                     if is_double_esc(&mut last_esc_press) {
                                         // Check for worktree cleanup before exiting terminal
                                         if let OverviewFocus::Terminal(idx) = overview_state.focus {
-                                            if let Some(panel) = overview_state.panels.get_mut(idx) {
-                                                if panel.exited && panel.is_worktree && !panel.worktree_cleanup_shown {
+                                            if let Some(panel) = overview_state.panels.get_mut(idx)
+                                            {
+                                                if panel.exited
+                                                    && panel.is_worktree
+                                                    && !panel.worktree_cleanup_shown
+                                                {
                                                     panel.worktree_cleanup_shown = true;
-                                                    if let (Some(rp), Some(bn)) = (&panel.repo_path, &panel.branch_name) {
-                                                        pending_worktree_cleanups = vec![crate::worktree::WorktreeCleanup {
-                                                            repo_path: rp.clone(),
-                                                            branch_name: bn.clone(),
-                                                        }];
+                                                    if let (Some(rp), Some(bn)) =
+                                                        (&panel.repo_path, &panel.branch_name)
+                                                    {
+                                                        pending_worktree_cleanups = vec![
+                                                            crate::worktree::WorktreeCleanup {
+                                                                repo_path: rp.clone(),
+                                                                branch_name: bn.clone(),
+                                                            },
+                                                        ];
                                                     }
                                                 }
                                             }
                                         }
                                         overview_state.exit_terminal();
-                                        if let Some(m) = pop_worktree_cleanup_menu(&mut pending_worktree_cleanups) {
+                                        if let Some(m) = pop_worktree_cleanup_menu(
+                                            &mut pending_worktree_cleanups,
+                                        ) {
                                             active_menu = Some(m);
                                         }
                                     } else {
@@ -4013,9 +4375,7 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                 KeyCode::PageUp => overview_state.panel_scroll_up(),
                                 KeyCode::PageDown => overview_state.panel_scroll_down(),
                                 _ => {
-                                    if let Some(bytes) =
-                                        overview::input::key_event_to_bytes(&key)
-                                    {
+                                    if let Some(bytes) = overview::input::key_event_to_bytes(&key) {
                                         overview_state.send_input(bytes);
                                     }
                                 }
@@ -4028,9 +4388,7 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                             KeyCode::Esc if is_double_esc(&mut last_esc_press) => {
                                 break;
                             }
-                            KeyCode::Char('c')
-                                if key.modifiers.contains(KeyModifiers::CONTROL) =>
-                            {
+                            KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                                 break
                             }
                             KeyCode::Char('Q') => {
@@ -4040,9 +4398,8 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                 names.dedup();
                                 hub_count = names.len().max(1);
                                 // Collect worktree info before stopping
-                                worktree_cleanups = crate::worktree::collect_worktree_cleanups(
-                                    &agents, &agents,
-                                );
+                                worktree_cleanups =
+                                    crate::worktree::collect_worktree_cleanups(&agents, &agents);
                                 block_on_async(async {
                                     if let Ok(mut stream) = ipc::try_connect().await {
                                         let _ = ipc::send_stop(&mut stream).await;
@@ -4055,8 +4412,7 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                 active_tab = active_tab.next();
                                 if active_tab == ActiveTab::Overview {
                                     if !overview_state.initialized {
-                                        overview_state
-                                            .sync_agents(&agents, last_content_area);
+                                        overview_state.sync_agents(&agents, last_content_area);
                                     } else {
                                         overview_state.force_resize_all();
                                     }
@@ -4066,8 +4422,7 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                 active_tab = active_tab.prev();
                                 if active_tab == ActiveTab::Overview {
                                     if !overview_state.initialized {
-                                        overview_state
-                                            .sync_agents(&agents, last_content_area);
+                                        overview_state.sync_agents(&agents, last_content_area);
                                     } else {
                                         overview_state.force_resize_all();
                                     }
@@ -4078,42 +4433,50 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                             }
                             // Overview OptionsBar navigation
                             _ if active_tab == ActiveTab::Overview => {
-                                let shift =
-                                    key.modifiers.contains(KeyModifiers::SHIFT);
+                                let shift = key.modifiers.contains(KeyModifiers::SHIFT);
                                 match key.code {
                                     KeyCode::Down if shift => {
                                         overview_state.enter_terminal();
                                         overview_state.force_resize_focused();
                                     }
                                     KeyCode::Left if shift => {
-                                        overview_state
-                                            .scroll_left();
+                                        overview_state.scroll_left();
                                     }
                                     KeyCode::Right if shift => {
-                                        overview_state
-                                            .scroll_right(last_content_area.width);
+                                        overview_state.scroll_right(last_content_area.width);
                                     }
                                     // Filter group navigation
-                                    KeyCode::Left
-                                        if !shift && overview_state.filter_cursor > 0 =>
-                                    {
+                                    KeyCode::Left if !shift && overview_state.filter_cursor > 0 => {
                                         overview_state.filter_cursor -= 1;
                                     }
                                     KeyCode::Right if !shift => {
-                                        let has_other = agents.iter().any(|a| a.repo_path.is_none());
-                                        let group_count = repos.len() + if has_other { 1 } else { 0 };
-                                        if group_count > 0 && overview_state.filter_cursor + 1 < group_count {
+                                        let has_other =
+                                            agents.iter().any(|a| a.repo_path.is_none());
+                                        let group_count =
+                                            repos.len() + if has_other { 1 } else { 0 };
+                                        if group_count > 0
+                                            && overview_state.filter_cursor + 1 < group_count
+                                        {
                                             overview_state.filter_cursor += 1;
                                         }
                                     }
                                     KeyCode::Enter | KeyCode::Char(' ') => {
                                         // Toggle collapse for the selected repo group
                                         if overview_state.filter_cursor < repos.len() {
-                                            if let Some(repo) = repos.get(overview_state.filter_cursor) {
-                                                if overview_state.collapsed_repos.contains(&repo.path) {
-                                                    overview_state.collapsed_repos.remove(&repo.path);
+                                            if let Some(repo) =
+                                                repos.get(overview_state.filter_cursor)
+                                            {
+                                                if overview_state
+                                                    .collapsed_repos
+                                                    .contains(&repo.path)
+                                                {
+                                                    overview_state
+                                                        .collapsed_repos
+                                                        .remove(&repo.path);
                                                 } else {
-                                                    overview_state.collapsed_repos.insert(repo.path.clone());
+                                                    overview_state
+                                                        .collapsed_repos
+                                                        .insert(repo.path.clone());
                                                 }
                                             }
                                         } else {
@@ -4147,8 +4510,11 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                         tasks_state.focus_next_card();
                                         // Auto-scroll to keep focused batch visible
                                         if let TasksFocus::BatchCard(idx) = tasks_state.focus {
-                                            let visible = tasks_state.visible_batch_count(last_content_area.width);
-                                            if visible > 0 && idx >= tasks_state.scroll_offset + visible {
+                                            let visible = tasks_state
+                                                .visible_batch_count(last_content_area.width);
+                                            if visible > 0
+                                                && idx >= tasks_state.scroll_offset + visible
+                                            {
                                                 tasks_state.scroll_offset = idx + 1 - visible;
                                             }
                                         }
@@ -4160,7 +4526,8 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                         {
                                             let aid = agent_id.to_string();
                                             let btitle = batch_title.to_string();
-                                            if let Some(agent) = agents.iter().find(|a| a.id == aid) {
+                                            if let Some(agent) = agents.iter().find(|a| a.id == aid)
+                                            {
                                                 let fm_cols = (last_content_area.width * 40 / 100)
                                                     .saturating_sub(2)
                                                     .max(1);
@@ -4197,12 +4564,10 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                     KeyCode::Right => {
                                         tasks_state.scroll_right(last_content_area.width);
                                     }
-                                    KeyCode::Down => {
-                                        match tasks_state.focus {
-                                            TasksFocus::BatchList => tasks_state.focus_first_card(),
-                                            TasksFocus::BatchCard(_) => tasks_state.focus_task_down(),
-                                        }
-                                    }
+                                    KeyCode::Down => match tasks_state.focus {
+                                        TasksFocus::BatchList => tasks_state.focus_first_card(),
+                                        TasksFocus::BatchCard(_) => tasks_state.focus_task_down(),
+                                    },
                                     KeyCode::Up => {
                                         if tasks_state.focused_task.is_some() {
                                             tasks_state.focus_task_up();
@@ -4215,8 +4580,16 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                             if let Some(batch) = tasks_state.batches.get(idx) {
                                                 let hub_batch_id = batch.hub_batch_id.clone();
                                                 let rp = batch.repo_path.clone();
-                                                let bnames: Vec<String> = batch.tasks.iter().map(|t| t.branch_name.clone()).collect();
-                                                let aids: Vec<String> = batch.tasks.iter().filter_map(|t| t.agent_id.clone()).collect();
+                                                let bnames: Vec<String> = batch
+                                                    .tasks
+                                                    .iter()
+                                                    .map(|t| t.branch_name.clone())
+                                                    .collect();
+                                                let aids: Vec<String> = batch
+                                                    .tasks
+                                                    .iter()
+                                                    .filter_map(|t| t.agent_id.clone())
+                                                    .collect();
                                                 active_menu = Some(ActiveMenu::BatchCleanup {
                                                     batch_idx: idx,
                                                     hub_batch_id,
@@ -4229,9 +4602,14 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                                             "Cancel".to_string(),
                                                             "Don't clean up".to_string(),
                                                             "Stop agents".to_string(),
-                                                            "Stop agents and remove branches".to_string(),
+                                                            "Stop agents and remove branches"
+                                                                .to_string(),
                                                         ],
-                                                    ).with_description("Choose cleanup action for this batch:".to_string()),
+                                                    )
+                                                    .with_description(
+                                                        "Choose cleanup action for this batch:"
+                                                            .to_string(),
+                                                    ),
                                                 });
                                             }
                                         }
@@ -4253,7 +4631,8 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                     KeyCode::Char('p') => {
                                         if let TasksFocus::BatchCard(idx) = tasks_state.focus {
                                             if let Some(batch) = tasks_state.batches.get(idx) {
-                                                let current = batch.prompt_prefix.clone().unwrap_or_default();
+                                                let current =
+                                                    batch.prompt_prefix.clone().unwrap_or_default();
                                                 edit_field_modal = Some(EditFieldModal::new(
                                                     format!("Edit Prefix \u{2014} {}", batch.title),
                                                     "Enter prompt prefix, Enter to save, Esc to cancel".to_string(),
@@ -4267,7 +4646,8 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                     KeyCode::Char('s') => {
                                         if let TasksFocus::BatchCard(idx) = tasks_state.focus {
                                             if let Some(batch) = tasks_state.batches.get(idx) {
-                                                let current = batch.prompt_suffix.clone().unwrap_or_default();
+                                                let current =
+                                                    batch.prompt_suffix.clone().unwrap_or_default();
                                                 edit_field_modal = Some(EditFieldModal::new(
                                                     format!("Edit Suffix \u{2014} {}", batch.title),
                                                     "Enter prompt suffix, Enter to save, Esc to cancel".to_string(),
@@ -4293,20 +4673,34 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                     KeyCode::Char('c') => {
                                         if let TasksFocus::BatchCard(idx) = tasks_state.focus {
                                             if let Some(batch) = tasks_state.batches.get(idx) {
-                                                let dep_titles: Vec<String> = batch.depends_on.iter()
+                                                let dep_titles: Vec<String> = batch
+                                                    .depends_on
+                                                    .iter()
                                                     .filter_map(|hub_id| {
-                                                        tasks_state.batches.iter()
-                                                            .find(|b| b.hub_batch_id.as_deref() == Some(hub_id))
+                                                        tasks_state
+                                                            .batches
+                                                            .iter()
+                                                            .find(|b| {
+                                                                b.hub_batch_id.as_deref()
+                                                                    == Some(hub_id)
+                                                            })
                                                             .map(|b| b.title.clone())
                                                     })
                                                     .collect();
-                                                let batch_json_str = batch.to_batch_json(&dep_titles);
-                                                let batch_value: serde_json::Value = serde_json::from_str(&batch_json_str).unwrap_or_default();
-                                                let json = serde_json::to_string_pretty(&serde_json::json!([batch_value])).unwrap_or_default();
+                                                let batch_json_str =
+                                                    batch.to_batch_json(&dep_titles);
+                                                let batch_value: serde_json::Value =
+                                                    serde_json::from_str(&batch_json_str)
+                                                        .unwrap_or_default();
+                                                let json = serde_json::to_string_pretty(
+                                                    &serde_json::json!([batch_value]),
+                                                )
+                                                .unwrap_or_default();
                                                 match tasks::copy_to_clipboard(&json) {
                                                     Ok(()) => {
                                                         status_message = Some(StatusMessage {
-                                                            text: "Batch JSON copied to clipboard".to_string(),
+                                                            text: "Batch JSON copied to clipboard"
+                                                                .to_string(),
                                                             level: StatusLevel::Success,
                                                             created: Instant::now(),
                                                         });
@@ -4326,16 +4720,24 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                         if let TasksFocus::BatchCard(idx) = tasks_state.focus {
                                             if let Some(batch) = tasks_state.batches.get(idx) {
                                                 // Collect other batches for the modal
-                                                let other_batches: Vec<(String, String, Vec<String>)> = tasks_state
+                                                let other_batches: Vec<(
+                                                    String,
+                                                    String,
+                                                    Vec<String>,
+                                                )> = tasks_state
                                                     .batches
                                                     .iter()
                                                     .enumerate()
-                                                    .filter(|(i, b)| *i != idx && b.hub_batch_id.is_some())
-                                                    .map(|(_, b)| (
-                                                        b.hub_batch_id.clone().unwrap(),
-                                                        b.title.clone(),
-                                                        b.depends_on.clone(),
-                                                    ))
+                                                    .filter(|(i, b)| {
+                                                        *i != idx && b.hub_batch_id.is_some()
+                                                    })
+                                                    .map(|(_, b)| {
+                                                        (
+                                                            b.hub_batch_id.clone().unwrap(),
+                                                            b.title.clone(),
+                                                            b.depends_on.clone(),
+                                                        )
+                                                    })
                                                     .collect();
                                                 batch_deps_modal = Some(BatchDepsModal::new(
                                                     idx,
@@ -4350,26 +4752,42 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                     KeyCode::Char(' ') => {
                                         if let TasksFocus::BatchCard(idx) = tasks_state.focus {
                                             // If queued, cancel the queue via hub IPC
-                                            let is_queued = tasks_state.batches.get(idx).and_then(|b| {
-                                                if let tasks::BatchStatus::Queued { batch_id, .. } = &b.status {
-                                                    Some(batch_id.clone())
-                                                } else {
-                                                    None
-                                                }
-                                            });
+                                            let is_queued =
+                                                tasks_state.batches.get(idx).and_then(|b| {
+                                                    if let tasks::BatchStatus::Queued {
+                                                        batch_id,
+                                                        ..
+                                                    } = &b.status
+                                                    {
+                                                        Some(batch_id.clone())
+                                                    } else {
+                                                        None
+                                                    }
+                                                });
 
                                             if let Some(hub_batch_id) = is_queued {
                                                 // Cancel the queued batch timer, keep batch as idle
                                                 let bid = hub_batch_id.clone();
                                                 tokio::spawn(async move {
-                                                    if let Ok(mut stream) = ipc::try_connect().await {
+                                                    if let Ok(mut stream) = ipc::try_connect().await
+                                                    {
                                                         let msg = CliMessage::CancelQueuedBatch { batch_id: bid, cleanup_mode: clust_ipc::BatchCleanupMode::StopAgents };
-                                                        let _ = clust_ipc::send_message(&mut stream, &msg).await;
-                                                        let _ = clust_ipc::recv_message::<HubMessage>(&mut stream).await;
+                                                        let _ = clust_ipc::send_message(
+                                                            &mut stream,
+                                                            &msg,
+                                                        )
+                                                        .await;
+                                                        let _ =
+                                                            clust_ipc::recv_message::<HubMessage>(
+                                                                &mut stream,
+                                                            )
+                                                            .await;
                                                     }
                                                 });
                                                 // Revert local status to Idle
-                                                if let Some(batch) = tasks_state.batches.get_mut(idx) {
+                                                if let Some(batch) =
+                                                    tasks_state.batches.get_mut(idx)
+                                                {
                                                     batch.status = tasks::BatchStatus::Idle;
                                                 }
                                                 status_message = Some(StatusMessage {
@@ -4379,8 +4797,14 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                                 });
                                             } else {
                                                 if let Some(batch) = tasks_state.batches.get(idx) {
-                                                    if batch.launch_mode == tasks::LaunchMode::Manual {
-                                                        let mod_key = if cfg!(target_os = "macos") { "Opt" } else { "Alt" };
+                                                    if batch.launch_mode
+                                                        == tasks::LaunchMode::Manual
+                                                    {
+                                                        let mod_key = if cfg!(target_os = "macos") {
+                                                            "Opt"
+                                                        } else {
+                                                            "Alt"
+                                                        };
                                                         status_message = Some(StatusMessage {
                                                             text: format!("Manual batch \u{2014} use {mod_key}+S on a task to start it"),
                                                             level: StatusLevel::Error,
@@ -4388,9 +4812,13 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                                         });
                                                     }
                                                 }
-                                                if let Some(start_info) = tasks_state.toggle_batch_status(idx) {
+                                                if let Some(start_info) =
+                                                    tasks_state.toggle_batch_status(idx)
+                                                {
                                                     // Sync status to hub
-                                                    if let Some(batch) = tasks_state.batches.get(idx) {
+                                                    if let Some(batch) =
+                                                        tasks_state.batches.get(idx)
+                                                    {
                                                         sync_batch_status_to_hub(batch);
                                                     }
                                                     spawn_batch_tasks(
@@ -4399,7 +4827,9 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                                         hub_name,
                                                         agent_start_tx.clone(),
                                                     );
-                                                } else if let Some(batch) = tasks_state.batches.get(idx) {
+                                                } else if let Some(batch) =
+                                                    tasks_state.batches.get(idx)
+                                                {
                                                     // toggle returned None but status may have changed (Active -> Idle)
                                                     sync_batch_status_to_hub(batch);
                                                 }
@@ -4410,11 +4840,24 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                         if let TasksFocus::BatchCard(idx) = tasks_state.focus {
                                             if let Some(batch) = tasks_state.batches.get(idx) {
                                                 if let Some(ref hub_id) = batch.hub_batch_id {
-                                                    let msg = CliMessage::RemoveDoneBatchTasks { batch_id: hub_id.clone() };
+                                                    let msg = CliMessage::RemoveDoneBatchTasks {
+                                                        batch_id: hub_id.clone(),
+                                                    };
                                                     tokio::spawn(async move {
-                                                        if let Ok(mut stream) = ipc::try_connect().await {
-                                                            let _ = clust_ipc::send_message(&mut stream, &msg).await;
-                                                            let _ = clust_ipc::recv_message::<HubMessage>(&mut stream).await;
+                                                        if let Ok(mut stream) =
+                                                            ipc::try_connect().await
+                                                        {
+                                                            let _ = clust_ipc::send_message(
+                                                                &mut stream,
+                                                                &msg,
+                                                            )
+                                                            .await;
+                                                            let _ = clust_ipc::recv_message::<
+                                                                HubMessage,
+                                                            >(
+                                                                &mut stream
+                                                            )
+                                                            .await;
                                                         }
                                                     });
                                                 }
@@ -4431,13 +4874,17 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                                         level: StatusLevel::Error,
                                                         created: Instant::now(),
                                                     });
-                                                } else if matches!(batch.status, tasks::BatchStatus::Queued { .. }) {
+                                                } else if matches!(
+                                                    batch.status,
+                                                    tasks::BatchStatus::Queued { .. }
+                                                ) {
                                                     status_message = Some(StatusMessage {
                                                         text: "Batch is already queued \u{2014} press Space to cancel".to_string(),
                                                         level: StatusLevel::Error,
                                                         created: Instant::now(),
                                                     });
-                                                } else if batch.status == tasks::BatchStatus::Active {
+                                                } else if batch.status == tasks::BatchStatus::Active
+                                                {
                                                     status_message = Some(StatusMessage {
                                                         text: "Stop the batch first before setting a timer".to_string(),
                                                         level: StatusLevel::Error,
@@ -4450,7 +4897,8 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                                         created: Instant::now(),
                                                     });
                                                 } else {
-                                                    timer_modal = Some(TimerModal::new(batch.title.clone()));
+                                                    timer_modal =
+                                                        Some(TimerModal::new(batch.title.clone()));
                                                     timer_modal_batch_idx = Some(idx);
                                                     show_help = false;
                                                 }
@@ -4464,16 +4912,12 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                             _ if active_tab == ActiveTab::Repositories => {
                                 match key.code {
                                     KeyCode::Left
-                                        if key
-                                            .modifiers
-                                            .contains(KeyModifiers::SHIFT) =>
+                                        if key.modifiers.contains(KeyModifiers::SHIFT) =>
                                     {
                                         focus = FocusPanel::Left;
                                     }
                                     KeyCode::Right
-                                        if key
-                                            .modifiers
-                                            .contains(KeyModifiers::SHIFT) =>
+                                        if key.modifiers.contains(KeyModifiers::SHIFT) =>
                                     {
                                         focus = FocusPanel::Right;
                                     }
@@ -4481,28 +4925,37 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                         if focus == FocusPanel::Left {
                                             match selection.level {
                                                 TreeLevel::Repo => {
-                                                    if let Some(repo) = display_repos.get(selection.repo_idx) {
+                                                    if let Some(repo) =
+                                                        display_repos.get(selection.repo_idx)
+                                                    {
                                                         if repo.path == ADD_REPO_SENTINEL {
                                                             // Open the repo create/clone modal
                                                             repo_modal = Some(RepoModal::new());
                                                             show_help = false;
                                                         } else if !repo.path.is_empty() {
-                                                            active_menu = Some(ActiveMenu::RepoActions {
-                                                                repo_path: repo.path.clone(),
-                                                                menu: ContextMenu::new(
-                                                                    &repo.name,
-                                                                    vec![
-                                                                        "Change Color".to_string(),
-                                                                        "Open in File System".to_string(),
-                                                                        "Open in Terminal".to_string(),
-                                                                        "Stop All Agents".to_string(),
-                                                                        "Unregister".to_string(),
-                                                                        "Clean Stale Refs".to_string(),
-                                                                        "Detach".to_string(),
-                                                                        "Purge".to_string(),
-                                                                    ],
-                                                                ),
-                                                            });
+                                                            active_menu =
+                                                                Some(ActiveMenu::RepoActions {
+                                                                    repo_path: repo.path.clone(),
+                                                                    menu: ContextMenu::new(
+                                                                        &repo.name,
+                                                                        vec![
+                                                                            "Change Color"
+                                                                                .to_string(),
+                                                                            "Open in File System"
+                                                                                .to_string(),
+                                                                            "Open in Terminal"
+                                                                                .to_string(),
+                                                                            "Stop All Agents"
+                                                                                .to_string(),
+                                                                            "Unregister"
+                                                                                .to_string(),
+                                                                            "Clean Stale Refs"
+                                                                                .to_string(),
+                                                                            "Detach".to_string(),
+                                                                            "Purge".to_string(),
+                                                                        ],
+                                                                    ),
+                                                                });
                                                         }
                                                     }
                                                 }
@@ -4511,82 +4964,165 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                                 }
                                                 TreeLevel::Branch => {
                                                     // Open context menu for branches
-                                                    if let Some(repo) = display_repos.get(selection.repo_idx) {
+                                                    if let Some(repo) =
+                                                        display_repos.get(selection.repo_idx)
+                                                    {
                                                         if repo.path.is_empty() {
                                                             // Skip "No Repository"
                                                         } else if selection.category_idx == 0 {
                                                             // Local branch context menu
-                                                            if let Some(branch) = repo.local_branches.get(selection.branch_idx) {
-                                                                let matching: Vec<AgentInfo> = agents
-                                                                    .iter()
-                                                                    .filter(|a| {
-                                                                        a.repo_path.as_deref() == Some(&*repo.path)
-                                                                            && a.branch_name.as_deref() == Some(&*branch.name)
-                                                                    })
-                                                                    .cloned()
-                                                                    .collect();
+                                                            if let Some(branch) = repo
+                                                                .local_branches
+                                                                .get(selection.branch_idx)
+                                                            {
+                                                                let matching: Vec<AgentInfo> =
+                                                                    agents
+                                                                        .iter()
+                                                                        .filter(|a| {
+                                                                            a.repo_path.as_deref()
+                                                                                == Some(&*repo.path)
+                                                                                && a.branch_name
+                                                                                    .as_deref()
+                                                                                    == Some(
+                                                                                        &*branch
+                                                                                            .name,
+                                                                                    )
+                                                                        })
+                                                                        .cloned()
+                                                                        .collect();
                                                                 let mut labels = Vec::new();
                                                                 let mut actions = Vec::new();
                                                                 if branch.active_agent_count > 0 {
-                                                                    labels.push("Open Agent".to_string());
-                                                                    actions.push(BranchAction::OpenAgent);
+                                                                    labels.push(
+                                                                        "Open Agent".to_string(),
+                                                                    );
+                                                                    actions.push(
+                                                                        BranchAction::OpenAgent,
+                                                                    );
                                                                 }
-                                                                labels.push("Start Agent (worktree)".to_string());
-                                                                actions.push(BranchAction::StartAgent);
+                                                                labels.push(
+                                                                    "Start Agent (worktree)"
+                                                                        .to_string(),
+                                                                );
+                                                                actions
+                                                                    .push(BranchAction::StartAgent);
                                                                 if branch.is_head {
-                                                                    labels.push("Start Agent (in place)".to_string());
+                                                                    labels.push(
+                                                                        "Start Agent (in place)"
+                                                                            .to_string(),
+                                                                    );
                                                                     actions.push(BranchAction::StartAgentInPlace);
-                                                                    labels.push("Detach".to_string());
-                                                                    actions.push(BranchAction::DetachHead);
+                                                                    labels
+                                                                        .push("Detach".to_string());
+                                                                    actions.push(
+                                                                        BranchAction::DetachHead,
+                                                                    );
                                                                 }
-                                                                if !branch.is_head && !branch.is_worktree {
-                                                                    labels.push("Checkout".to_string());
-                                                                    actions.push(BranchAction::CheckoutLocal);
+                                                                if !branch.is_head
+                                                                    && !branch.is_worktree
+                                                                {
+                                                                    labels.push(
+                                                                        "Checkout".to_string(),
+                                                                    );
+                                                                    actions.push(
+                                                                        BranchAction::CheckoutLocal,
+                                                                    );
                                                                 }
-                                                                labels.push("Base Worktree Off".to_string());
-                                                                actions.push(BranchAction::BaseWorktreeOff);
+                                                                labels.push(
+                                                                    "Base Worktree Off".to_string(),
+                                                                );
+                                                                actions.push(
+                                                                    BranchAction::BaseWorktreeOff,
+                                                                );
                                                                 labels.push("Pull".to_string());
                                                                 actions.push(BranchAction::Pull);
                                                                 if branch.active_agent_count > 0 {
-                                                                    labels.push("Stop Agents".to_string());
-                                                                    actions.push(BranchAction::StopAgents);
+                                                                    labels.push(
+                                                                        "Stop Agents".to_string(),
+                                                                    );
+                                                                    actions.push(
+                                                                        BranchAction::StopAgents,
+                                                                    );
                                                                 }
                                                                 if branch.is_worktree {
-                                                                    labels.push("Remove Worktree".to_string());
+                                                                    labels.push(
+                                                                        "Remove Worktree"
+                                                                            .to_string(),
+                                                                    );
                                                                     actions.push(BranchAction::RemoveWorktree);
                                                                 }
-                                                                labels.push("Delete Branch".to_string());
-                                                                actions.push(BranchAction::DeleteBranch);
-                                                                active_menu = Some(ActiveMenu::BranchActions {
-                                                                    repo_path: repo.path.clone(),
-                                                                    branch_name: branch.name.clone(),
-                                                                    is_head: branch.is_head,
-                                                                    agents: matching,
-                                                                    actions,
-                                                                    menu: ContextMenu::new(&branch.name, labels),
-                                                                });
+                                                                labels.push(
+                                                                    "Delete Branch".to_string(),
+                                                                );
+                                                                actions.push(
+                                                                    BranchAction::DeleteBranch,
+                                                                );
+                                                                active_menu = Some(
+                                                                    ActiveMenu::BranchActions {
+                                                                        repo_path: repo
+                                                                            .path
+                                                                            .clone(),
+                                                                        branch_name: branch
+                                                                            .name
+                                                                            .clone(),
+                                                                        is_head: branch.is_head,
+                                                                        agents: matching,
+                                                                        actions,
+                                                                        menu: ContextMenu::new(
+                                                                            &branch.name,
+                                                                            labels,
+                                                                        ),
+                                                                    },
+                                                                );
                                                             }
                                                         } else if selection.category_idx == 1 {
                                                             // Remote branch context menu
-                                                            if let Some(branch) = repo.remote_branches.get(selection.branch_idx) {
+                                                            if let Some(branch) = repo
+                                                                .remote_branches
+                                                                .get(selection.branch_idx)
+                                                            {
                                                                 let mut labels = Vec::new();
                                                                 let mut actions = Vec::new();
-                                                                labels.push("Checkout & Track Locally".to_string());
-                                                                actions.push(BranchAction::CheckoutRemote);
-                                                                labels.push("Start Agent (checkout)".to_string());
-                                                                actions.push(BranchAction::RemoteStartAgent);
-                                                                labels.push("Create Worktree".to_string());
+                                                                labels.push(
+                                                                    "Checkout & Track Locally"
+                                                                        .to_string(),
+                                                                );
+                                                                actions.push(
+                                                                    BranchAction::CheckoutRemote,
+                                                                );
+                                                                labels.push(
+                                                                    "Start Agent (checkout)"
+                                                                        .to_string(),
+                                                                );
+                                                                actions.push(
+                                                                    BranchAction::RemoteStartAgent,
+                                                                );
+                                                                labels.push(
+                                                                    "Create Worktree".to_string(),
+                                                                );
                                                                 actions.push(BranchAction::RemoteCreateWorktree);
-                                                                labels.push("Delete Remote Branch".to_string());
+                                                                labels.push(
+                                                                    "Delete Remote Branch"
+                                                                        .to_string(),
+                                                                );
                                                                 actions.push(BranchAction::DeleteRemoteBranch);
-                                                                active_menu = Some(ActiveMenu::BranchActions {
-                                                                    repo_path: repo.path.clone(),
-                                                                    branch_name: branch.name.clone(),
-                                                                    is_head: false,
-                                                                    agents: vec![],
-                                                                    actions,
-                                                                    menu: ContextMenu::new(&branch.name, labels),
-                                                                });
+                                                                active_menu = Some(
+                                                                    ActiveMenu::BranchActions {
+                                                                        repo_path: repo
+                                                                            .path
+                                                                            .clone(),
+                                                                        branch_name: branch
+                                                                            .name
+                                                                            .clone(),
+                                                                        is_head: false,
+                                                                        agents: vec![],
+                                                                        actions,
+                                                                        menu: ContextMenu::new(
+                                                                            &branch.name,
+                                                                            labels,
+                                                                        ),
+                                                                    },
+                                                                );
                                                             }
                                                         }
                                                     }
@@ -4599,16 +5135,12 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                                 agent_view_mode,
                                             ) {
                                                 let agent_id = agent.id.clone();
-                                                let agent_binary =
-                                                    agent.agent_binary.clone();
-                                                let working_dir =
-                                                    agent.working_dir.clone();
+                                                let agent_binary = agent.agent_binary.clone();
+                                                let working_dir = agent.working_dir.clone();
                                                 let agent_repo_path = agent.repo_path.clone();
                                                 let agent_branch = agent.branch_name.clone();
                                                 let agent_is_wt = agent.is_worktree;
-                                                let fm_cols = (last_content_area.width
-                                                    * 40
-                                                    / 100)
+                                                let fm_cols = (last_content_area.width * 40 / 100)
                                                     .saturating_sub(2)
                                                     .max(1);
                                                 let fm_rows = last_content_area
@@ -4632,67 +5164,47 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                             }
                                         }
                                     }
-                                    KeyCode::Char('v')
-                                        if focus == FocusPanel::Right =>
-                                    {
+                                    KeyCode::Char('v') if focus == FocusPanel::Right => {
                                         agent_view_mode = match agent_view_mode {
-                                            AgentViewMode::ByHub => {
-                                                AgentViewMode::ByRepo
-                                            }
-                                            AgentViewMode::ByRepo => {
-                                                AgentViewMode::ByHub
-                                            }
+                                            AgentViewMode::ByHub => AgentViewMode::ByRepo,
+                                            AgentViewMode::ByRepo => AgentViewMode::ByHub,
                                         };
                                         agent_selection = AgentSelection::default();
                                     }
                                     KeyCode::Up
-                                        if key
-                                            .modifiers
-                                            .contains(KeyModifiers::SHIFT)
+                                        if key.modifiers.contains(KeyModifiers::SHIFT)
                                             && focus == FocusPanel::Left =>
                                     {
                                         selection.jump_prev_repo(&display_repos);
                                     }
                                     KeyCode::Down
-                                        if key
-                                            .modifiers
-                                            .contains(KeyModifiers::SHIFT)
+                                        if key.modifiers.contains(KeyModifiers::SHIFT)
                                             && focus == FocusPanel::Left =>
                                     {
                                         selection.jump_next_repo(&display_repos);
                                     }
                                     KeyCode::Up => match focus {
-                                        FocusPanel::Left => {
-                                            selection.move_up(&display_repos)
-                                        }
+                                        FocusPanel::Left => selection.move_up(&display_repos),
                                         FocusPanel::Right => {
-                                            agent_selection
-                                                .move_up(&agents, agent_view_mode)
+                                            agent_selection.move_up(&agents, agent_view_mode)
                                         }
                                     },
                                     KeyCode::Down => match focus {
-                                        FocusPanel::Left => {
-                                            selection.move_down(&display_repos)
-                                        }
+                                        FocusPanel::Left => selection.move_down(&display_repos),
                                         FocusPanel::Right => {
-                                            agent_selection
-                                                .move_down(&agents, agent_view_mode)
+                                            agent_selection.move_down(&agents, agent_view_mode)
                                         }
                                     },
                                     KeyCode::Right => match focus {
-                                        FocusPanel::Left => {
-                                            selection.descend(&display_repos)
-                                        }
+                                        FocusPanel::Left => selection.descend(&display_repos),
                                         FocusPanel::Right => {
-                                            agent_selection
-                                                .next_group(&agents, agent_view_mode)
+                                            agent_selection.next_group(&agents, agent_view_mode)
                                         }
                                     },
                                     KeyCode::Left => match focus {
                                         FocusPanel::Left => selection.ascend(&display_repos),
                                         FocusPanel::Right => {
-                                            agent_selection
-                                                .prev_group(&agents, agent_view_mode)
+                                            agent_selection.prev_group(&agents, agent_view_mode)
                                         }
                                     },
                                     KeyCode::Char(' ') if focus == FocusPanel::Left => {
@@ -4723,6 +5235,8 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                     } else if let Some(ref mut modal) = search_modal {
                         modal.handle_paste(text);
                     } else if let Some(ref mut modal) = detached_modal {
+                        modal.handle_paste(text);
+                    } else if let Some(ref mut modal) = orchestrator_modal {
                         modal.handle_paste(text);
                     } else if let Some(ref mut modal) = repo_modal {
                         modal.handle_paste(text);
@@ -4770,22 +5284,15 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                         height: rows.saturating_sub(2), // tab bar + status bar
                     };
                     if active_tab == ActiveTab::Overview && !in_focus_mode {
-                        overview_state
-                            .handle_resize(agents.len(), new_content_area);
+                        overview_state.handle_resize(agents.len(), new_content_area);
                     }
                     if in_focus_mode {
-                        let fm_cols = (new_content_area.width * 40 / 100)
-                            .saturating_sub(2)
-                            .max(1);
-                        let fm_rows =
-                            new_content_area.height.saturating_sub(3).max(1);
+                        let fm_cols = (new_content_area.width * 40 / 100).saturating_sub(2).max(1);
+                        let fm_rows = new_content_area.height.saturating_sub(3).max(1);
                         focus_mode_state.handle_resize(fm_cols, fm_rows);
-                        let term_cols =
-                            (new_content_area.width * 60 / 100).max(1);
-                        let term_rows =
-                            new_content_area.height.saturating_sub(2).max(1);
-                        focus_mode_state
-                            .handle_terminal_resize(term_cols, term_rows);
+                        let term_cols = (new_content_area.width * 60 / 100).max(1);
+                        let term_rows = new_content_area.height.saturating_sub(2).max(1);
+                        focus_mode_state.handle_terminal_resize(term_cols, term_rows);
                     }
                 }
                 Event::FocusGained => {
@@ -4800,28 +5307,27 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                         };
                         last_content_area = new_content_area;
                         if active_tab == ActiveTab::Overview && !in_focus_mode {
-                            overview_state
-                                .handle_resize(agents.len(), new_content_area);
+                            overview_state.handle_resize(agents.len(), new_content_area);
                             overview_state.force_resize_all();
                         }
                         if in_focus_mode && focus_mode_state.is_active() {
-                            let fm_cols = (new_content_area.width * 40 / 100)
-                                .saturating_sub(2)
-                                .max(1);
-                            let fm_rows =
-                                new_content_area.height.saturating_sub(3).max(1);
+                            let fm_cols =
+                                (new_content_area.width * 40 / 100).saturating_sub(2).max(1);
+                            let fm_rows = new_content_area.height.saturating_sub(3).max(1);
                             focus_mode_state.handle_resize(fm_cols, fm_rows);
                             focus_mode_state.force_resize();
-                            let term_cols =
-                                (new_content_area.width * 60 / 100).max(1);
-                            let term_rows =
-                                new_content_area.height.saturating_sub(2).max(1);
-                            focus_mode_state
-                                .handle_terminal_resize(term_cols, term_rows);
+                            let term_cols = (new_content_area.width * 60 / 100).max(1);
+                            let term_rows = new_content_area.height.saturating_sub(2).max(1);
+                            focus_mode_state.handle_terminal_resize(term_cols, term_rows);
                         }
                     }
                 }
-                Event::Mouse(MouseEvent { kind: MouseEventKind::Down(MouseButton::Left), column, row, modifiers }) if mouse_captured => {
+                Event::Mouse(MouseEvent {
+                    kind: MouseEventKind::Down(MouseButton::Left),
+                    column,
+                    row,
+                    modifiers,
+                }) if mouse_captured => {
                     let pos = Position { x: column, y: row };
 
                     // Ignore clicks while purge progress is shown
@@ -4858,16 +5364,31 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                     ActiveMenu::AgentPicker { menu, .. } => menu.selected_idx = idx,
                                     ActiveMenu::RepoActions { menu, .. } => menu.selected_idx = idx,
                                     ActiveMenu::ColorPicker { menu, .. } => menu.selected_idx = idx,
-                                    ActiveMenu::BranchActions { menu, .. } => menu.selected_idx = idx,
-                                    ActiveMenu::ConfirmAction { menu, .. } => menu.selected_idx = idx,
-                                    ActiveMenu::WorktreeCleanup { menu, .. } => menu.selected_idx = idx,
-                                    ActiveMenu::EditorPicker { menu, .. } => menu.selected_idx = idx,
-                                    ActiveMenu::EditorRemember { menu, .. } => menu.selected_idx = idx,
-                                    ActiveMenu::BatchCleanup { menu, .. } => menu.selected_idx = idx,
+                                    ActiveMenu::BranchActions { menu, .. } => {
+                                        menu.selected_idx = idx
+                                    }
+                                    ActiveMenu::ConfirmAction { menu, .. } => {
+                                        menu.selected_idx = idx
+                                    }
+                                    ActiveMenu::WorktreeCleanup { menu, .. } => {
+                                        menu.selected_idx = idx
+                                    }
+                                    ActiveMenu::EditorPicker { menu, .. } => {
+                                        menu.selected_idx = idx
+                                    }
+                                    ActiveMenu::EditorRemember { menu, .. } => {
+                                        menu.selected_idx = idx
+                                    }
+                                    ActiveMenu::BatchCleanup { menu, .. } => {
+                                        menu.selected_idx = idx
+                                    }
                                 }
                                 let taken = active_menu.take().unwrap();
                                 match taken {
-                                    ActiveMenu::AgentPicker { agents: picker_agents, .. } => {
+                                    ActiveMenu::AgentPicker {
+                                        agents: picker_agents,
+                                        ..
+                                    } => {
                                         if let Some(agent) = picker_agents.get(idx) {
                                             let agent_id = agent.id.clone();
                                             let agent_binary = agent.agent_binary.clone();
@@ -4923,7 +5444,9 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                                 // Collect worktree agents for this repo before stopping
                                                 let repo_agents: Vec<_> = agents
                                                     .iter()
-                                                    .filter(|a| a.repo_path.as_deref() == Some(&*repo_path))
+                                                    .filter(|a| {
+                                                        a.repo_path.as_deref() == Some(&*repo_path)
+                                                    })
                                                     .cloned()
                                                     .collect();
                                                 stop_repo_agents_ipc(&repo_path);
@@ -4931,12 +5454,16 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                                     Instant::now() - Duration::from_secs(10);
                                                 last_agent_fetch =
                                                     Instant::now() - Duration::from_secs(10);
-                                                let cleanups = crate::worktree::collect_worktree_cleanups(
-                                                    &repo_agents, &agents,
-                                                );
+                                                let cleanups =
+                                                    crate::worktree::collect_worktree_cleanups(
+                                                        &repo_agents,
+                                                        &agents,
+                                                    );
                                                 if !cleanups.is_empty() {
                                                     pending_worktree_cleanups = cleanups;
-                                                    active_menu = pop_worktree_cleanup_menu(&mut pending_worktree_cleanups);
+                                                    active_menu = pop_worktree_cleanup_menu(
+                                                        &mut pending_worktree_cleanups,
+                                                    );
                                                 }
                                             }
                                             4 => {
@@ -4956,26 +5483,23 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                                 let tx = status_tx.clone();
                                                 let rp = repo_path.clone();
                                                 tokio::spawn(async move {
-                                                    let mut stream =
-                                                        match ipc::try_connect().await {
-                                                            Ok(s) => s,
-                                                            Err(e) => {
-                                                                let _ = tx.send(StatusMessage {
+                                                    let mut stream = match ipc::try_connect().await
+                                                    {
+                                                        Ok(s) => s,
+                                                        Err(e) => {
+                                                            let _ = tx.send(StatusMessage {
                                                                     text: format!("Detach failed: hub connect error: {e}"),
                                                                     level: StatusLevel::Error,
                                                                     created: Instant::now(),
                                                                 }).await;
-                                                                return;
-                                                            }
-                                                        };
-                                                    let msg = CliMessage::DetachHead {
-                                                        repo_path: rp,
+                                                            return;
+                                                        }
                                                     };
-                                                    if let Err(e) = clust_ipc::send_message(
-                                                        &mut stream,
-                                                        &msg,
-                                                    )
-                                                    .await
+                                                    let msg =
+                                                        CliMessage::DetachHead { repo_path: rp };
+                                                    if let Err(e) =
+                                                        clust_ipc::send_message(&mut stream, &msg)
+                                                            .await
                                                     {
                                                         let _ = tx.send(StatusMessage {
                                                             text: format!("Detach failed: send error: {e}"),
@@ -4990,18 +5514,25 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                                     .await
                                                     {
                                                         Ok(HubMessage::HeadDetached) => {
-                                                            let _ = tx.send(StatusMessage {
-                                                                text: "HEAD detached".to_string(),
-                                                                level: StatusLevel::Success,
-                                                                created: Instant::now(),
-                                                            }).await;
+                                                            let _ = tx
+                                                                .send(StatusMessage {
+                                                                    text: "HEAD detached"
+                                                                        .to_string(),
+                                                                    level: StatusLevel::Success,
+                                                                    created: Instant::now(),
+                                                                })
+                                                                .await;
                                                         }
                                                         Ok(HubMessage::Error { message }) => {
-                                                            let _ = tx.send(StatusMessage {
-                                                                text: format!("Detach failed: {message}"),
-                                                                level: StatusLevel::Error,
-                                                                created: Instant::now(),
-                                                            }).await;
+                                                            let _ = tx
+                                                                .send(StatusMessage {
+                                                                    text: format!(
+                                                                        "Detach failed: {message}"
+                                                                    ),
+                                                                    level: StatusLevel::Error,
+                                                                    created: Instant::now(),
+                                                                })
+                                                                .await;
                                                         }
                                                         Ok(_) => {
                                                             let _ = tx.send(StatusMessage {
@@ -5043,8 +5574,7 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                         }
                                     }
                                     ActiveMenu::ColorPicker { repo_path, .. } => {
-                                        if let Some(&color_name) =
-                                            theme::REPO_COLOR_NAMES.get(idx)
+                                        if let Some(&color_name) = theme::REPO_COLOR_NAMES.get(idx)
                                         {
                                             set_repo_color_ipc(&repo_path, color_name);
                                             last_repo_fetch =
@@ -5086,36 +5616,33 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                                     let rp = repo_path.clone();
                                                     let bn = branch_name.clone();
                                                     let bp = bypass_permissions;
-                                                    let (cols, rows) =
-                                                        crossterm::terminal::size()
-                                                            .unwrap_or((80, 24));
+                                                    let (cols, rows) = crossterm::terminal::size()
+                                                        .unwrap_or((80, 24));
                                                     tokio::spawn(async move {
-                                                        let mut stream =
-                                                            match ipc::try_connect().await {
-                                                                Ok(s) => s,
-                                                                Err(e) => {
-                                                                    let _ = tx.send(AgentStartResult::Failed(
+                                                        let mut stream = match ipc::try_connect()
+                                                            .await
+                                                        {
+                                                            Ok(s) => s,
+                                                            Err(e) => {
+                                                                let _ = tx.send(AgentStartResult::Failed(
                                                                         format!("Agent create failed: hub connect error: {e}")
                                                                     )).await;
-                                                                    return;
-                                                                }
-                                                            };
-                                                        let msg =
-                                                            CliMessage::CreateWorktreeAgent {
-                                                                repo_path: rp,
-                                                                target_branch: Some(bn),
-                                                                new_branch: None,
-                                                                prompt: None,
-                                                                agent_binary: None,
-                                                                cols,
-                                                                rows: rows
-                                                                    .saturating_sub(2)
-                                                                    .max(1),
-                                                                accept_edits: false,
-                                                                plan_mode: bp,
-                                                                allow_bypass: bp,
-                                                                hub,
-                                                            };
+                                                                return;
+                                                            }
+                                                        };
+                                                        let msg = CliMessage::CreateWorktreeAgent {
+                                                            repo_path: rp,
+                                                            target_branch: Some(bn),
+                                                            new_branch: None,
+                                                            prompt: None,
+                                                            agent_binary: None,
+                                                            cols,
+                                                            rows: rows.saturating_sub(2).max(1),
+                                                            accept_edits: false,
+                                                            plan_mode: bp,
+                                                            allow_bypass: bp,
+                                                            hub,
+                                                        };
                                                         if let Err(e) = clust_ipc::send_message(
                                                             &mut stream,
                                                             &msg,
@@ -5132,22 +5659,26 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                                         )
                                                         .await
                                                         {
-                                                            Ok(HubMessage::WorktreeAgentStarted {
-                                                                id,
-                                                                agent_binary,
-                                                                working_dir,
-                                                                repo_path,
-                                                                branch_name,
-                                                            }) => {
+                                                            Ok(
+                                                                HubMessage::WorktreeAgentStarted {
+                                                                    id,
+                                                                    agent_binary,
+                                                                    working_dir,
+                                                                    repo_path,
+                                                                    branch_name,
+                                                                },
+                                                            ) => {
                                                                 let _ = tx
-                                                                    .send(AgentStartResult::Started {
-                                                                        agent_id: id,
-                                                                        agent_binary,
-                                                                        working_dir,
-                                                                        repo_path,
-                                                                        branch_name,
-                                                                        is_worktree: true,
-                                                                    })
+                                                                    .send(
+                                                                        AgentStartResult::Started {
+                                                                            agent_id: id,
+                                                                            agent_binary,
+                                                                            working_dir,
+                                                                            repo_path,
+                                                                            branch_name,
+                                                                            is_worktree: true,
+                                                                        },
+                                                                    )
                                                                     .await;
                                                             }
                                                             Ok(HubMessage::Error { message }) => {
@@ -5173,28 +5704,26 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                                     let hub = hub_name.to_string();
                                                     let rp = repo_path.clone();
                                                     let bp = bypass_permissions;
-                                                    let (cols, rows) =
-                                                        crossterm::terminal::size()
-                                                            .unwrap_or((80, 24));
+                                                    let (cols, rows) = crossterm::terminal::size()
+                                                        .unwrap_or((80, 24));
                                                     tokio::spawn(async move {
-                                                        let mut stream =
-                                                            match ipc::try_connect().await {
-                                                                Ok(s) => s,
-                                                                Err(e) => {
-                                                                    let _ = tx.send(AgentStartResult::Failed(
+                                                        let mut stream = match ipc::try_connect()
+                                                            .await
+                                                        {
+                                                            Ok(s) => s,
+                                                            Err(e) => {
+                                                                let _ = tx.send(AgentStartResult::Failed(
                                                                         format!("Agent create failed: hub connect error: {e}")
                                                                     )).await;
-                                                                    return;
-                                                                }
-                                                            };
+                                                                return;
+                                                            }
+                                                        };
                                                         let msg = CliMessage::StartAgent {
                                                             prompt: None,
                                                             agent_binary: None,
                                                             working_dir: rp,
                                                             cols,
-                                                            rows: rows
-                                                                .saturating_sub(2)
-                                                                .max(1),
+                                                            rows: rows.saturating_sub(2).max(1),
                                                             accept_edits: false,
                                                             plan_mode: bp,
                                                             allow_bypass: bp,
@@ -5227,14 +5756,16 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                                                     .clone()
                                                                     .unwrap_or_default();
                                                                 let _ = tx
-                                                                    .send(AgentStartResult::Started {
-                                                                        agent_id: id,
-                                                                        agent_binary,
-                                                                        working_dir,
-                                                                        repo_path,
-                                                                        branch_name,
-                                                                        is_worktree,
-                                                                    })
+                                                                    .send(
+                                                                        AgentStartResult::Started {
+                                                                            agent_id: id,
+                                                                            agent_binary,
+                                                                            working_dir,
+                                                                            repo_path,
+                                                                            branch_name,
+                                                                            is_worktree,
+                                                                        },
+                                                                    )
                                                                     .await;
                                                             }
                                                             Ok(HubMessage::Error { message }) => {
@@ -5260,18 +5791,19 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                                     let rp = repo_path.clone();
                                                     let bn = branch_name.clone();
                                                     tokio::spawn(async move {
-                                                        let mut stream =
-                                                            match ipc::try_connect().await {
-                                                                Ok(s) => s,
-                                                                Err(e) => {
-                                                                    let _ = tx.send(StatusMessage {
+                                                        let mut stream = match ipc::try_connect()
+                                                            .await
+                                                        {
+                                                            Ok(s) => s,
+                                                            Err(e) => {
+                                                                let _ = tx.send(StatusMessage {
                                                                         text: format!("Pull failed: hub connect error: {e}"),
                                                                         level: StatusLevel::Error,
                                                                         created: Instant::now(),
                                                                     }).await;
-                                                                    return;
-                                                                }
-                                                            };
+                                                                return;
+                                                            }
+                                                        };
                                                         let msg = CliMessage::PullBranch {
                                                             repo_path: rp,
                                                             branch_name: bn.clone(),
@@ -5294,12 +5826,19 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                                         )
                                                         .await
                                                         {
-                                                            Ok(HubMessage::BranchPulled { branch_name, .. }) => {
-                                                                let _ = tx.send(StatusMessage {
-                                                                    text: format!("Pulled {branch_name}"),
-                                                                    level: StatusLevel::Success,
-                                                                    created: Instant::now(),
-                                                                }).await;
+                                                            Ok(HubMessage::BranchPulled {
+                                                                branch_name,
+                                                                ..
+                                                            }) => {
+                                                                let _ = tx
+                                                                    .send(StatusMessage {
+                                                                        text: format!(
+                                                                            "Pulled {branch_name}"
+                                                                        ),
+                                                                        level: StatusLevel::Success,
+                                                                        created: Instant::now(),
+                                                                    })
+                                                                    .await;
                                                             }
                                                             Ok(HubMessage::Error { message }) => {
                                                                 let _ = tx.send(StatusMessage {
@@ -5338,12 +5877,16 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                                     last_agent_fetch =
                                                         Instant::now() - Duration::from_secs(10);
                                                     // Queue worktree cleanup if applicable
-                                                    let cleanups = crate::worktree::collect_worktree_cleanups(
-                                                        &branch_agents, &agents,
-                                                    );
+                                                    let cleanups =
+                                                        crate::worktree::collect_worktree_cleanups(
+                                                            &branch_agents,
+                                                            &agents,
+                                                        );
                                                     if !cleanups.is_empty() {
                                                         pending_worktree_cleanups = cleanups;
-                                                        active_menu = pop_worktree_cleanup_menu(&mut pending_worktree_cleanups);
+                                                        active_menu = pop_worktree_cleanup_menu(
+                                                            &mut pending_worktree_cleanups,
+                                                        );
                                                     }
                                                 }
                                                 BranchAction::OpenAgent => {
@@ -5414,12 +5957,17 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                                         Instant::now() - Duration::from_secs(10);
                                                 }
                                                 BranchAction::BaseWorktreeOff => {
-                                                    if let Some(repo_info) = repos.iter().find(|r| r.path == repo_path).cloned() {
-                                                        let modal = CreateAgentModal::new_with_branch(
-                                                            repos.clone(),
-                                                            repo_info,
-                                                            branch_name.clone(),
-                                                        );
+                                                    if let Some(repo_info) = repos
+                                                        .iter()
+                                                        .find(|r| r.path == repo_path)
+                                                        .cloned()
+                                                    {
+                                                        let modal =
+                                                            CreateAgentModal::new_with_branch(
+                                                                repos.clone(),
+                                                                repo_info,
+                                                                branch_name.clone(),
+                                                            );
                                                         create_modal = Some(modal);
                                                     }
                                                 }
@@ -5427,18 +5975,19 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                                     let tx = status_tx.clone();
                                                     let rp = repo_path.clone();
                                                     tokio::spawn(async move {
-                                                        let mut stream =
-                                                            match ipc::try_connect().await {
-                                                                Ok(s) => s,
-                                                                Err(e) => {
-                                                                    let _ = tx.send(StatusMessage {
+                                                        let mut stream = match ipc::try_connect()
+                                                            .await
+                                                        {
+                                                            Ok(s) => s,
+                                                            Err(e) => {
+                                                                let _ = tx.send(StatusMessage {
                                                                         text: format!("Detach failed: hub connect error: {e}"),
                                                                         level: StatusLevel::Error,
                                                                         created: Instant::now(),
                                                                     }).await;
-                                                                    return;
-                                                                }
-                                                            };
+                                                                return;
+                                                            }
+                                                        };
                                                         let msg = CliMessage::DetachHead {
                                                             repo_path: rp,
                                                         };
@@ -5461,11 +6010,14 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                                         .await
                                                         {
                                                             Ok(HubMessage::HeadDetached) => {
-                                                                let _ = tx.send(StatusMessage {
-                                                                    text: "HEAD detached".to_string(),
-                                                                    level: StatusLevel::Success,
-                                                                    created: Instant::now(),
-                                                                }).await;
+                                                                let _ = tx
+                                                                    .send(StatusMessage {
+                                                                        text: "HEAD detached"
+                                                                            .to_string(),
+                                                                        level: StatusLevel::Success,
+                                                                        created: Instant::now(),
+                                                                    })
+                                                                    .await;
                                                             }
                                                             Ok(HubMessage::Error { message }) => {
                                                                 let _ = tx.send(StatusMessage {
@@ -5498,18 +6050,19 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                                     let rp = repo_path.clone();
                                                     let bn = branch_name.clone();
                                                     tokio::spawn(async move {
-                                                        let mut stream =
-                                                            match ipc::try_connect().await {
-                                                                Ok(s) => s,
-                                                                Err(e) => {
-                                                                    let _ = tx.send(StatusMessage {
+                                                        let mut stream = match ipc::try_connect()
+                                                            .await
+                                                        {
+                                                            Ok(s) => s,
+                                                            Err(e) => {
+                                                                let _ = tx.send(StatusMessage {
                                                                         text: format!("Checkout failed: hub connect error: {e}"),
                                                                         level: StatusLevel::Error,
                                                                         created: Instant::now(),
                                                                     }).await;
-                                                                    return;
-                                                                }
-                                                            };
+                                                                return;
+                                                            }
+                                                        };
                                                         let msg = CliMessage::CheckoutLocalBranch {
                                                             repo_path: rp,
                                                             branch_name: bn.clone(),
@@ -5532,7 +6085,11 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                                         )
                                                         .await
                                                         {
-                                                            Ok(HubMessage::LocalBranchCheckedOut { branch_name }) => {
+                                                            Ok(
+                                                                HubMessage::LocalBranchCheckedOut {
+                                                                    branch_name,
+                                                                },
+                                                            ) => {
                                                                 let _ = tx.send(StatusMessage {
                                                                     text: format!("Checked out {branch_name}"),
                                                                     level: StatusLevel::Success,
@@ -5579,27 +6136,23 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                                             crossterm::terminal::size()
                                                                 .unwrap_or((80, 24));
                                                         tokio::spawn(async move {
-                                                            let mut stream =
-                                                                match ipc::try_connect().await
-                                                                {
-                                                                    Ok(s) => s,
-                                                                    Err(e) => {
-                                                                        let _ = tx.send(AgentStartResult::Failed(
+                                                            let mut stream = match ipc::try_connect(
+                                                            )
+                                                            .await
+                                                            {
+                                                                Ok(s) => s,
+                                                                Err(e) => {
+                                                                    let _ = tx.send(AgentStartResult::Failed(
                                                                             format!("Agent create failed: hub connect error: {e}")
                                                                         )).await;
-                                                                        return;
-                                                                    }
-                                                                };
+                                                                    return;
+                                                                }
+                                                            };
                                                             let msg =
-                                                                CliMessage::CreateWorktreeAgent
-                                                                {
+                                                                CliMessage::CreateWorktreeAgent {
                                                                     repo_path: rp,
-                                                                    target_branch: Some(
-                                                                        remote_ref,
-                                                                    ),
-                                                                    new_branch: Some(
-                                                                        local_name,
-                                                                    ),
+                                                                    target_branch: Some(remote_ref),
+                                                                    new_branch: Some(local_name),
                                                                     prompt: None,
                                                                     agent_binary: None,
                                                                     cols,
@@ -5690,23 +6243,25 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                                     let rp = repo_path.clone();
                                                     let bn = branch_name.clone();
                                                     tokio::spawn(async move {
-                                                        let mut stream =
-                                                            match ipc::try_connect().await {
-                                                                Ok(s) => s,
-                                                                Err(e) => {
-                                                                    let _ = tx.send(StatusMessage {
+                                                        let mut stream = match ipc::try_connect()
+                                                            .await
+                                                        {
+                                                            Ok(s) => s,
+                                                            Err(e) => {
+                                                                let _ = tx.send(StatusMessage {
                                                                         text: format!("Checkout failed: hub connect error: {e}"),
                                                                         level: StatusLevel::Error,
                                                                         created: Instant::now(),
                                                                     }).await;
-                                                                    return;
-                                                                }
-                                                            };
-                                                        let msg = CliMessage::CheckoutRemoteBranch {
-                                                            working_dir: Some(rp),
-                                                            repo_name: None,
-                                                            remote_branch: bn.clone(),
+                                                                return;
+                                                            }
                                                         };
+                                                        let msg =
+                                                            CliMessage::CheckoutRemoteBranch {
+                                                                working_dir: Some(rp),
+                                                                repo_name: None,
+                                                                remote_branch: bn.clone(),
+                                                            };
                                                         if let Err(e) = clust_ipc::send_message(
                                                             &mut stream,
                                                             &msg,
@@ -5765,42 +6320,43 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                         if idx == 0 {
                                             match action {
                                                 ConfirmedAction::PurgeRepo { repo_path } => {
-                                                    purge_progress = Some(start_purge_async(&repo_path));
+                                                    purge_progress =
+                                                        Some(start_purge_async(&repo_path));
                                                 }
-                                                ConfirmedAction::StartAgentDetach { repo_path, branch_name } => {
+                                                ConfirmedAction::StartAgentDetach {
+                                                    repo_path,
+                                                    branch_name,
+                                                } => {
                                                     let tx = agent_start_tx.clone();
                                                     let hub = hub_name.to_string();
                                                     let bp = bypass_permissions;
-                                                    let (cols, rows) =
-                                                        crossterm::terminal::size()
-                                                            .unwrap_or((80, 24));
+                                                    let (cols, rows) = crossterm::terminal::size()
+                                                        .unwrap_or((80, 24));
                                                     tokio::spawn(async move {
-                                                        let mut stream =
-                                                            match ipc::try_connect().await {
-                                                                Ok(s) => s,
-                                                                Err(e) => {
-                                                                    let _ = tx.send(AgentStartResult::Failed(
+                                                        let mut stream = match ipc::try_connect()
+                                                            .await
+                                                        {
+                                                            Ok(s) => s,
+                                                            Err(e) => {
+                                                                let _ = tx.send(AgentStartResult::Failed(
                                                                         format!("Agent create failed: hub connect error: {e}")
                                                                     )).await;
-                                                                    return;
-                                                                }
-                                                            };
-                                                        let msg =
-                                                            CliMessage::CreateWorktreeAgent {
-                                                                repo_path,
-                                                                target_branch: Some(branch_name),
-                                                                new_branch: None,
-                                                                prompt: None,
-                                                                agent_binary: None,
-                                                                cols,
-                                                                rows: rows
-                                                                    .saturating_sub(2)
-                                                                    .max(1),
-                                                                accept_edits: false,
-                                                                plan_mode: bp,
-                                                                allow_bypass: bp,
-                                                                hub,
-                                                            };
+                                                                return;
+                                                            }
+                                                        };
+                                                        let msg = CliMessage::CreateWorktreeAgent {
+                                                            repo_path,
+                                                            target_branch: Some(branch_name),
+                                                            new_branch: None,
+                                                            prompt: None,
+                                                            agent_binary: None,
+                                                            cols,
+                                                            rows: rows.saturating_sub(2).max(1),
+                                                            accept_edits: false,
+                                                            plan_mode: bp,
+                                                            allow_bypass: bp,
+                                                            hub,
+                                                        };
                                                         if let Err(e) = clust_ipc::send_message(
                                                             &mut stream,
                                                             &msg,
@@ -5817,22 +6373,26 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                                         )
                                                         .await
                                                         {
-                                                            Ok(HubMessage::WorktreeAgentStarted {
-                                                                id,
-                                                                agent_binary,
-                                                                working_dir,
-                                                                repo_path,
-                                                                branch_name,
-                                                            }) => {
+                                                            Ok(
+                                                                HubMessage::WorktreeAgentStarted {
+                                                                    id,
+                                                                    agent_binary,
+                                                                    working_dir,
+                                                                    repo_path,
+                                                                    branch_name,
+                                                                },
+                                                            ) => {
                                                                 let _ = tx
-                                                                    .send(AgentStartResult::Started {
-                                                                        agent_id: id,
-                                                                        agent_binary,
-                                                                        working_dir,
-                                                                        repo_path,
-                                                                        branch_name,
-                                                                        is_worktree: true,
-                                                                    })
+                                                                    .send(
+                                                                        AgentStartResult::Started {
+                                                                            agent_id: id,
+                                                                            agent_binary,
+                                                                            working_dir,
+                                                                            repo_path,
+                                                                            branch_name,
+                                                                            is_worktree: true,
+                                                                        },
+                                                                    )
                                                                     .await;
                                                             }
                                                             Ok(HubMessage::Error { message }) => {
@@ -5856,39 +6416,71 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                             }
                                         }
                                     }
-                                    ActiveMenu::WorktreeCleanup { repo_path, branch_name, .. } => {
+                                    ActiveMenu::WorktreeCleanup {
+                                        repo_path,
+                                        branch_name,
+                                        ..
+                                    } => {
                                         match idx {
                                             1 => {
-                                                remove_worktree_ipc(&repo_path, &branch_name, false, true);
-                                                last_repo_fetch = Instant::now() - Duration::from_secs(10);
-                                                last_agent_fetch = Instant::now() - Duration::from_secs(10);
+                                                remove_worktree_ipc(
+                                                    &repo_path,
+                                                    &branch_name,
+                                                    false,
+                                                    true,
+                                                );
+                                                last_repo_fetch =
+                                                    Instant::now() - Duration::from_secs(10);
+                                                last_agent_fetch =
+                                                    Instant::now() - Duration::from_secs(10);
                                             }
                                             2 => {
-                                                remove_worktree_ipc(&repo_path, &branch_name, true, true);
-                                                last_repo_fetch = Instant::now() - Duration::from_secs(10);
-                                                last_agent_fetch = Instant::now() - Duration::from_secs(10);
+                                                remove_worktree_ipc(
+                                                    &repo_path,
+                                                    &branch_name,
+                                                    true,
+                                                    true,
+                                                );
+                                                last_repo_fetch =
+                                                    Instant::now() - Duration::from_secs(10);
+                                                last_agent_fetch =
+                                                    Instant::now() - Duration::from_secs(10);
                                             }
                                             _ => {}
                                         }
                                         if let Some(next) = pending_worktree_cleanups.pop() {
-                                            let dirty = crate::worktree::is_worktree_dirty(&next.repo_path, &next.branch_name);
+                                            let dirty = crate::worktree::is_worktree_dirty(
+                                                &next.repo_path,
+                                                &next.branch_name,
+                                            );
                                             let title = if dirty {
-                                                format!("Worktree '{}' (uncommitted changes)", next.branch_name)
+                                                format!(
+                                                    "Worktree '{}' (uncommitted changes)",
+                                                    next.branch_name
+                                                )
                                             } else {
                                                 format!("Worktree '{}'", next.branch_name)
                                             };
                                             active_menu = Some(ActiveMenu::WorktreeCleanup {
                                                 repo_path: next.repo_path,
                                                 branch_name: next.branch_name,
-                                                menu: ContextMenu::new(&title, vec![
-                                                    "Keep".to_string(),
-                                                    "Discard worktree".to_string(),
-                                                    "Discard worktree + branch".to_string(),
-                                                ]),
+                                                menu: ContextMenu::new(
+                                                    &title,
+                                                    vec![
+                                                        "Keep".to_string(),
+                                                        "Discard worktree".to_string(),
+                                                        "Discard worktree + branch".to_string(),
+                                                    ],
+                                                ),
                                             });
                                         }
                                     }
-                                    ActiveMenu::EditorPicker { target_path, repo_path, editors, .. } => {
+                                    ActiveMenu::EditorPicker {
+                                        target_path,
+                                        repo_path,
+                                        editors,
+                                        ..
+                                    } => {
                                         if let Some(editor) = editors.get(idx).cloned() {
                                             crate::editor::open_in_editor(&editor, &target_path);
                                             if repo_path.is_some() {
@@ -5907,88 +6499,145 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                             }
                                         }
                                     }
-                                    ActiveMenu::EditorRemember { repo_path, editor, .. } => {
-                                        match idx {
-                                            1 => {
-                                                if let Some(rp) = repo_path {
-                                                    set_repo_editor_ipc(&rp, &editor.binary);
-                                                    if let Some(repo) = repos.iter_mut().find(|r| r.path == rp) {
-                                                        repo.editor = Some(editor.binary);
-                                                    }
+                                    ActiveMenu::EditorRemember {
+                                        repo_path, editor, ..
+                                    } => match idx {
+                                        1 => {
+                                            if let Some(rp) = repo_path {
+                                                set_repo_editor_ipc(&rp, &editor.binary);
+                                                if let Some(repo) =
+                                                    repos.iter_mut().find(|r| r.path == rp)
+                                                {
+                                                    repo.editor = Some(editor.binary);
                                                 }
                                             }
-                                            2 => {
-                                                set_default_editor_ipc(&editor.binary);
-                                            }
-                                            _ => {}
                                         }
-                                    }
-                                    ActiveMenu::BatchCleanup { batch_idx, hub_batch_id, repo_path, branch_names, agent_ids, .. } => {
+                                        2 => {
+                                            set_default_editor_ipc(&editor.binary);
+                                        }
+                                        _ => {}
+                                    },
+                                    ActiveMenu::BatchCleanup {
+                                        batch_idx,
+                                        hub_batch_id,
+                                        repo_path,
+                                        branch_names,
+                                        agent_ids,
+                                        ..
+                                    } => {
                                         match idx {
                                             0 => {} // Cancel
                                             1 => {
                                                 if let Some(ref bid) = hub_batch_id {
                                                     let bid = bid.clone();
                                                     tokio::spawn(async move {
-                                                        if let Ok(mut stream) = ipc::try_connect().await {
+                                                        if let Ok(mut stream) =
+                                                            ipc::try_connect().await
+                                                        {
                                                             let msg = CliMessage::CancelQueuedBatch { batch_id: bid, cleanup_mode: clust_ipc::BatchCleanupMode::NoCleanup };
-                                                            let _ = clust_ipc::send_message(&mut stream, &msg).await;
+                                                            let _ = clust_ipc::send_message(
+                                                                &mut stream,
+                                                                &msg,
+                                                            )
+                                                            .await;
                                                         }
                                                     });
                                                 }
                                                 tasks_state.remove_batch(batch_idx);
-                                                status_message = Some(StatusMessage { text: "Batch removed".to_string(), level: StatusLevel::Info, created: Instant::now() });
+                                                status_message = Some(StatusMessage {
+                                                    text: "Batch removed".to_string(),
+                                                    level: StatusLevel::Info,
+                                                    created: Instant::now(),
+                                                });
                                             }
                                             2 => {
                                                 if let Some(ref bid) = hub_batch_id {
                                                     let bid = bid.clone();
                                                     tokio::spawn(async move {
-                                                        if let Ok(mut stream) = ipc::try_connect().await {
+                                                        if let Ok(mut stream) =
+                                                            ipc::try_connect().await
+                                                        {
                                                             let msg = CliMessage::CancelQueuedBatch { batch_id: bid, cleanup_mode: clust_ipc::BatchCleanupMode::StopAgents };
-                                                            let _ = clust_ipc::send_message(&mut stream, &msg).await;
+                                                            let _ = clust_ipc::send_message(
+                                                                &mut stream,
+                                                                &msg,
+                                                            )
+                                                            .await;
                                                         }
                                                     });
                                                 } else {
                                                     for aid in &agent_ids {
                                                         let aid = aid.clone();
                                                         tokio::spawn(async move {
-                                                            if let Ok(mut stream) = ipc::try_connect().await {
-                                                                let msg = CliMessage::StopAgent { id: aid };
-                                                                let _ = clust_ipc::send_message(&mut stream, &msg).await;
+                                                            if let Ok(mut stream) =
+                                                                ipc::try_connect().await
+                                                            {
+                                                                let msg = CliMessage::StopAgent {
+                                                                    id: aid,
+                                                                };
+                                                                let _ = clust_ipc::send_message(
+                                                                    &mut stream,
+                                                                    &msg,
+                                                                )
+                                                                .await;
                                                             }
                                                         });
                                                     }
                                                 }
                                                 tasks_state.remove_batch(batch_idx);
-                                                last_agent_fetch = Instant::now() - Duration::from_secs(10);
-                                                status_message = Some(StatusMessage { text: "Batch removed, agents stopped".to_string(), level: StatusLevel::Info, created: Instant::now() });
+                                                last_agent_fetch =
+                                                    Instant::now() - Duration::from_secs(10);
+                                                status_message = Some(StatusMessage {
+                                                    text: "Batch removed, agents stopped"
+                                                        .to_string(),
+                                                    level: StatusLevel::Info,
+                                                    created: Instant::now(),
+                                                });
                                             }
                                             3 => {
                                                 if let Some(ref bid) = hub_batch_id {
                                                     let bid = bid.clone();
                                                     tokio::spawn(async move {
-                                                        if let Ok(mut stream) = ipc::try_connect().await {
+                                                        if let Ok(mut stream) =
+                                                            ipc::try_connect().await
+                                                        {
                                                             let msg = CliMessage::CancelQueuedBatch { batch_id: bid, cleanup_mode: clust_ipc::BatchCleanupMode::StopAgentsAndRemoveBranches };
-                                                            let _ = clust_ipc::send_message(&mut stream, &msg).await;
+                                                            let _ = clust_ipc::send_message(
+                                                                &mut stream,
+                                                                &msg,
+                                                            )
+                                                            .await;
                                                         }
                                                     });
                                                 } else {
                                                     for aid in &agent_ids {
                                                         let aid = aid.clone();
                                                         tokio::spawn(async move {
-                                                            if let Ok(mut stream) = ipc::try_connect().await {
-                                                                let msg = CliMessage::StopAgent { id: aid };
-                                                                let _ = clust_ipc::send_message(&mut stream, &msg).await;
+                                                            if let Ok(mut stream) =
+                                                                ipc::try_connect().await
+                                                            {
+                                                                let msg = CliMessage::StopAgent {
+                                                                    id: aid,
+                                                                };
+                                                                let _ = clust_ipc::send_message(
+                                                                    &mut stream,
+                                                                    &msg,
+                                                                )
+                                                                .await;
                                                             }
                                                         });
                                                     }
                                                     for branch in &branch_names {
-                                                        remove_worktree_ipc(&repo_path, branch, true, true);
+                                                        remove_worktree_ipc(
+                                                            &repo_path, branch, true, true,
+                                                        );
                                                     }
                                                 }
                                                 tasks_state.remove_batch(batch_idx);
-                                                last_agent_fetch = Instant::now() - Duration::from_secs(10);
-                                                last_repo_fetch = Instant::now() - Duration::from_secs(10);
+                                                last_agent_fetch =
+                                                    Instant::now() - Duration::from_secs(10);
+                                                last_repo_fetch =
+                                                    Instant::now() - Duration::from_secs(10);
                                                 // Mark batch agent panels as already cleaned up so the
                                                 // worktree-removal modal won't fire when they exit.
                                                 for panel in overview_state.panels.iter_mut() {
@@ -5996,7 +6645,9 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                                         panel.worktree_cleanup_shown = true;
                                                     }
                                                 }
-                                                pending_worktree_cleanups.retain(|c| !branch_names.contains(&c.branch_name));
+                                                pending_worktree_cleanups.retain(|c| {
+                                                    !branch_names.contains(&c.branch_name)
+                                                });
                                                 status_message = Some(StatusMessage { text: "Batch removed, agents stopped, branches cleaned up".to_string(), level: StatusLevel::Info, created: Instant::now() });
                                             }
                                             _ => {}
@@ -6029,8 +6680,8 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                             // here are checked before the generic left-area
                             // handler so they don't get swallowed by it. Only
                             // active when the Terminal tab is the visible one.
-                            let in_terminal_tab = focus_mode_state.left_tab
-                                == overview::LeftPanelTab::Terminal;
+                            let in_terminal_tab =
+                                focus_mode_state.left_tab == overview::LeftPanelTab::Terminal;
                             let label_hit = if in_terminal_tab {
                                 click_map
                                     .focus_terminal_labels
@@ -6040,8 +6691,7 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                             } else {
                                 None
                             };
-                            if in_terminal_tab
-                                && click_map.focus_terminal_new_button.contains(pos)
+                            if in_terminal_tab && click_map.focus_terminal_new_button.contains(pos)
                             {
                                 focus_mode_state.add_terminal();
                                 focus_mode_state.focus_side = overview::FocusSide::Left;
@@ -6055,7 +6705,11 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                 // Click into the active terminal area = enter Type mode.
                                 focus_mode_state.focus_side = overview::FocusSide::Left;
                                 focus_mode_state.terminal_input_focused = true;
-                            } else if let Some((_, tab)) = click_map.focus_left_tabs.iter().find(|(r, _)| r.contains(pos)) {
+                            } else if let Some((_, tab)) = click_map
+                                .focus_left_tabs
+                                .iter()
+                                .find(|(r, _)| r.contains(pos))
+                            {
                                 focus_mode_state.left_tab = *tab;
                                 focus_mode_state.focus_side = overview::FocusSide::Left;
                                 // Switching to a non-Terminal tab leaves Type mode.
@@ -6072,7 +6726,9 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                             focus_mode_state.focus_side = overview::FocusSide::Right;
                             focus_mode_state.terminal_input_focused = false;
                         }
-                    } else if let Some((_, tab)) = click_map.tabs.iter().find(|(r, _)| r.contains(pos)) {
+                    } else if let Some((_, tab)) =
+                        click_map.tabs.iter().find(|(r, _)| r.contains(pos))
+                    {
                         // Tab bar clicks
                         active_tab = *tab;
                     } else {
@@ -6084,7 +6740,9 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                     if let Some(target) = click_map.tree_items.get(line_idx) {
                                         match target {
                                             TreeClickTarget::Repo(ri) => {
-                                                if selection.level == TreeLevel::Repo && selection.repo_idx == *ri {
+                                                if selection.level == TreeLevel::Repo
+                                                    && selection.repo_idx == *ri
+                                                {
                                                     selection.toggle_collapse();
                                                 } else {
                                                     selection.repo_idx = *ri;
@@ -6123,7 +6781,11 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                     focus = FocusPanel::Right;
                                 }
                                 // Agent card clicks (right panel)
-                                else if let Some((_, gidx, aidx)) = click_map.agent_cards.iter().find(|(r, _, _)| r.contains(pos)) {
+                                else if let Some((_, gidx, aidx)) = click_map
+                                    .agent_cards
+                                    .iter()
+                                    .find(|(r, _, _)| r.contains(pos))
+                                {
                                     agent_selection.group_idx = *gidx;
                                     agent_selection.agent_idx = *aidx;
                                     focus = FocusPanel::Right;
@@ -6137,14 +6799,22 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                             }
                             ActiveTab::Overview => {
                                 // Agent indicator clicks → focus that agent
-                                if let Some((_, global_idx)) = click_map.overview_agent_indicators.iter().find(|(r, _)| r.contains(pos)) {
+                                if let Some((_, global_idx)) = click_map
+                                    .overview_agent_indicators
+                                    .iter()
+                                    .find(|(r, _)| r.contains(pos))
+                                {
                                     let idx = *global_idx;
                                     overview_state.focus = overview::OverviewFocus::Terminal(idx);
                                     overview_state.last_terminal_idx = idx;
                                     overview_state.ensure_visible_sorted(idx);
                                 }
                                 // Repo button clicks → toggle collapse
-                                else if let Some((_, repo_path)) = click_map.overview_repo_buttons.iter().find(|(r, _)| r.contains(pos)) {
+                                else if let Some((_, repo_path)) = click_map
+                                    .overview_repo_buttons
+                                    .iter()
+                                    .find(|(r, _)| r.contains(pos))
+                                {
                                     let rp = repo_path.clone();
                                     if overview_state.collapsed_repos.contains(&rp) {
                                         overview_state.collapsed_repos.remove(&rp);
@@ -6153,19 +6823,32 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                     }
                                 }
                                 // Panel clicks
-                                else if let Some((_, idx)) = click_map.overview_panels.iter().find(|(r, _)| r.contains(pos)) {
+                                else if let Some((_, idx)) = click_map
+                                    .overview_panels
+                                    .iter()
+                                    .find(|(r, _)| r.contains(pos))
+                                {
                                     overview_state.focus = overview::OverviewFocus::Terminal(*idx);
                                 }
                             }
                             ActiveTab::Tasks => {
-                                if let Some((_, batch_idx)) = click_map.tasks_batch_cards.iter().find(|(r, _)| r.contains(pos)) {
+                                if let Some((_, batch_idx)) = click_map
+                                    .tasks_batch_cards
+                                    .iter()
+                                    .find(|(r, _)| r.contains(pos))
+                                {
                                     tasks_state.focus = TasksFocus::BatchCard(*batch_idx);
                                 }
                             }
                         }
                     }
                 }
-                Event::Mouse(MouseEvent { kind: MouseEventKind::ScrollUp, column, row, .. }) if mouse_captured => {
+                Event::Mouse(MouseEvent {
+                    kind: MouseEventKind::ScrollUp,
+                    column,
+                    row,
+                    ..
+                }) if mouse_captured => {
                     let pos = Position { x: column, y: row };
                     if let Some(ref mut menu_variant) = active_menu {
                         match menu_variant {
@@ -6201,27 +6884,37 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                         } else if click_map.focus_left_area.contains(pos) {
                             match focus_mode_state.left_tab {
                                 overview::LeftPanelTab::Terminal => {
-                                    if let Some(panel) =
-                                        focus_mode_state.current_terminal_mut()
-                                    {
+                                    if let Some(panel) = focus_mode_state.current_terminal_mut() {
                                         let max = panel.vterm.scrollback_len();
                                         panel.scroll_offset = (panel.scroll_offset + 3).min(max);
                                     }
                                 }
-                                overview::LeftPanelTab::Compare => focus_mode_state.compare_scroll_up(),
+                                overview::LeftPanelTab::Compare => {
+                                    focus_mode_state.compare_scroll_up()
+                                }
                                 _ => focus_mode_state.diff_scroll_up(),
                             }
                         }
                     } else if active_tab == ActiveTab::Overview {
-                        if let Some((_, idx)) = click_map.overview_panels.iter().find(|(r, _)| r.contains(pos)) {
+                        if let Some((_, idx)) = click_map
+                            .overview_panels
+                            .iter()
+                            .find(|(r, _)| r.contains(pos))
+                        {
                             if let Some(panel) = overview_state.panels.get_mut(*idx) {
                                 let max = panel.vterm.scrollback_len();
-                                panel.panel_scroll_offset = (panel.panel_scroll_offset + 3).min(max);
+                                panel.panel_scroll_offset =
+                                    (panel.panel_scroll_offset + 3).min(max);
                             }
                         }
                     }
                 }
-                Event::Mouse(MouseEvent { kind: MouseEventKind::ScrollDown, column, row, .. }) if mouse_captured => {
+                Event::Mouse(MouseEvent {
+                    kind: MouseEventKind::ScrollDown,
+                    column,
+                    row,
+                    ..
+                }) if mouse_captured => {
                     let pos = Position { x: column, y: row };
                     if let Some(ref mut menu_variant) = active_menu {
                         match menu_variant {
@@ -6235,7 +6928,8 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                             | ActiveMenu::EditorRemember { menu, .. }
                             | ActiveMenu::BatchCleanup { menu, .. } => {
                                 if !menu.items.is_empty() {
-                                    menu.selected_idx = (menu.selected_idx + 1).min(menu.items.len() - 1);
+                                    menu.selected_idx =
+                                        (menu.selected_idx + 1).min(menu.items.len() - 1);
                                 }
                             }
                         }
@@ -6258,18 +6952,22 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                         } else if click_map.focus_left_area.contains(pos) {
                             match focus_mode_state.left_tab {
                                 overview::LeftPanelTab::Terminal => {
-                                    if let Some(panel) =
-                                        focus_mode_state.current_terminal_mut()
-                                    {
+                                    if let Some(panel) = focus_mode_state.current_terminal_mut() {
                                         panel.scroll_offset = panel.scroll_offset.saturating_sub(3);
                                     }
                                 }
-                                overview::LeftPanelTab::Compare => focus_mode_state.compare_scroll_down(),
+                                overview::LeftPanelTab::Compare => {
+                                    focus_mode_state.compare_scroll_down()
+                                }
                                 _ => focus_mode_state.diff_scroll_down(),
                             }
                         }
                     } else if active_tab == ActiveTab::Overview {
-                        if let Some((_, idx)) = click_map.overview_panels.iter().find(|(r, _)| r.contains(pos)) {
+                        if let Some((_, idx)) = click_map
+                            .overview_panels
+                            .iter()
+                            .find(|(r, _)| r.contains(pos))
+                        {
                             if let Some(panel) = overview_state.panels.get_mut(*idx) {
                                 panel.panel_scroll_offset =
                                     panel.panel_scroll_offset.saturating_sub(3);
@@ -6355,7 +7053,11 @@ fn find_url_at_click(
 // ---------------------------------------------------------------------------
 
 fn render_tab_bar(frame: &mut Frame, area: Rect, active_tab: ActiveTab, click_map: &mut ClickMap) {
-    let tabs = [ActiveTab::Repositories, ActiveTab::Overview, ActiveTab::Tasks];
+    let tabs = [
+        ActiveTab::Repositories,
+        ActiveTab::Overview,
+        ActiveTab::Tasks,
+    ];
     let mut spans = Vec::new();
     let mut cursor_x = area.x;
 
@@ -6382,7 +7084,12 @@ fn render_tab_bar(frame: &mut Frame, area: Rect, active_tab: ActiveTab, click_ma
         let label = format!(" {} ", tab.label());
         let label_width = label.chars().count() as u16;
         click_map.tabs.push((
-            Rect { x: cursor_x, y: area.y, width: label_width, height: 1 },
+            Rect {
+                x: cursor_x,
+                y: area.y,
+                width: label_width,
+                height: 1,
+            },
             *tab,
         ));
         cursor_x += label_width;
@@ -6437,7 +7144,11 @@ fn render_focus_back_bar(
             .bg(theme::R_BG_RAISED)
             .add_modifier(Modifier::BOLD),
     ));
-    let back_target = if state.batch_origin.is_some() { ActiveTab::Tasks.label() } else { origin_tab.label() };
+    let back_target = if state.batch_origin.is_some() {
+        ActiveTab::Tasks.label()
+    } else {
+        origin_tab.label()
+    };
     let back_label = format!("  Back to {}", back_target);
     spans.push(Span::styled(
         &back_label,
@@ -6447,7 +7158,10 @@ fn render_focus_back_bar(
     ));
 
     // Record the entire back button region (arrow + Esc + label)
-    let back_width: u16 = spans.iter().map(|s| s.content.chars().count()).sum::<usize>() as u16;
+    let back_width: u16 = spans
+        .iter()
+        .map(|s| s.content.chars().count())
+        .sum::<usize>() as u16;
     click_map.focus_back_button = Rect {
         x: cursor_x,
         y: area.y,
@@ -6469,9 +7183,7 @@ fn render_focus_back_bar(
         ));
         spans.push(Span::styled(
             format!(" task {}", origin.task_idx + 1),
-            Style::default()
-                .fg(theme::R_INFO)
-                .bg(theme::R_BG_RAISED),
+            Style::default().fg(theme::R_INFO).bg(theme::R_BG_RAISED),
         ));
     }
 
@@ -6644,7 +7356,11 @@ fn build_repo_tree_lines(
         // "Add Repository" action entry — rendered as a distinct button-like row
         if repo.path == ADD_REPO_SENTINEL {
             let (bg, plus_fg, name_fg) = if repo_selected {
-                (Some(theme::R_BG_HOVER), theme::R_ACCENT_BRIGHT, theme::R_TEXT_PRIMARY)
+                (
+                    Some(theme::R_BG_HOVER),
+                    theme::R_ACCENT_BRIGHT,
+                    theme::R_TEXT_PRIMARY,
+                )
             } else {
                 (None, theme::R_TEXT_TERTIARY, theme::R_TEXT_SECONDARY)
             };
@@ -6682,9 +7398,19 @@ fn build_repo_tree_lines(
 
         // Selected: hover bg with colored text; otherwise: reverse-video (repo color bg, dark text)
         let (line_bg, chev_fg, dot_fg, name_fg) = if repo_selected {
-            (Some(theme::R_BG_HOVER), theme::R_TEXT_TERTIARY, repo_clr, repo_clr)
+            (
+                Some(theme::R_BG_HOVER),
+                theme::R_TEXT_TERTIARY,
+                repo_clr,
+                repo_clr,
+            )
         } else {
-            (Some(repo_clr), theme::R_BG_BASE, theme::R_BG_BASE, theme::R_BG_BASE)
+            (
+                Some(repo_clr),
+                theme::R_BG_BASE,
+                theme::R_BG_BASE,
+                theme::R_BG_BASE,
+            )
         };
 
         let mut spans = Vec::new();
@@ -6753,8 +7479,7 @@ fn build_repo_tree_lines(
                 } else {
                     theme::R_TEXT_PRIMARY
                 };
-                let mut name_style =
-                    Style::default().fg(name_color).add_modifier(Modifier::BOLD);
+                let mut name_style = Style::default().fg(name_color).add_modifier(Modifier::BOLD);
                 if let Some(bg_color) = bg {
                     name_style = name_style.bg(bg_color);
                 }
@@ -6878,7 +7603,6 @@ fn build_repo_tree_lines(
                 }
             }
         }
-
     }
 
     (lines, targets)
@@ -7006,7 +7730,16 @@ fn render_right_panel(
         };
         frame.render_widget(indicator, indicator_area);
     } else {
-        render_agent_list(frame, area, agents, agent_sel, focused, mode, click_map, repo_colors);
+        render_agent_list(
+            frame,
+            area,
+            agents,
+            agent_sel,
+            focused,
+            mode,
+            click_map,
+            repo_colors,
+        );
     }
 }
 
@@ -7094,10 +7827,26 @@ fn render_agent_list(
 
     match mode {
         AgentViewMode::ByHub => render_agent_list_by_hub(
-            frame, inner, agents, agent_sel, focused, &mode_line, &indicator, click_map, repo_colors,
+            frame,
+            inner,
+            agents,
+            agent_sel,
+            focused,
+            &mode_line,
+            &indicator,
+            click_map,
+            repo_colors,
         ),
         AgentViewMode::ByRepo => render_agent_list_by_repo(
-            frame, inner, agents, agent_sel, focused, &mode_line, &indicator, click_map, repo_colors,
+            frame,
+            inner,
+            agents,
+            agent_sel,
+            focused,
+            &mode_line,
+            &indicator,
+            click_map,
+            repo_colors,
         ),
     }
 }
@@ -7288,14 +8037,12 @@ fn render_agent_list_by_repo(
                 .get(repo.as_str())
                 .map(|c| theme::repo_color(c))
                 .unwrap_or(theme::R_ACCENT);
-            let repo_header = Paragraph::new(Line::from(vec![
-                Span::styled(
-                    format!(" {repo_display} "),
-                    Style::default()
-                        .fg(header_color)
-                        .add_modifier(Modifier::BOLD),
-                ),
-            ]));
+            let repo_header = Paragraph::new(Line::from(vec![Span::styled(
+                format!(" {repo_display} "),
+                Style::default()
+                    .fg(header_color)
+                    .add_modifier(Modifier::BOLD),
+            )]));
             frame.render_widget(repo_header, areas[area_idx]);
             area_idx += 1;
         }
@@ -7331,7 +8078,9 @@ fn render_agent_list_by_repo(
             for (bidx, agent) in branch_agents.into_iter().enumerate() {
                 let is_selected =
                     focused && gidx == agent_sel.group_idx && flat_agent_idx == agent_sel.agent_idx;
-                click_map.agent_cards.push((areas[area_idx], gidx, flat_agent_idx));
+                click_map
+                    .agent_cards
+                    .push((areas[area_idx], gidx, flat_agent_idx));
                 render_agent_card(
                     frame,
                     areas[area_idx],
@@ -7379,7 +8128,10 @@ fn render_agent_card(
                 Span::styled("  Enter", Style::default().fg(theme::R_TEXT_TERTIARY)),
             ]
         } else {
-            vec![Span::styled(&agent.id, Style::default().fg(theme::R_ACCENT))]
+            vec![Span::styled(
+                &agent.id,
+                Style::default().fg(theme::R_ACCENT),
+            )]
         }),
         Line::from({
             let mut spans = vec![
@@ -7435,7 +8187,9 @@ fn build_task_terminal_previews(
             if task.status != tasks::TaskStatus::Active {
                 continue;
             }
-            let Some(ref agent_id) = task.agent_id else { continue };
+            let Some(ref agent_id) = task.agent_id else {
+                continue;
+            };
             let Some(panel) = overview_state.panels.iter().find(|p| p.id == *agent_id) else {
                 continue;
             };
@@ -7477,7 +8231,6 @@ fn state_to_agent_info(
         .unwrap_or_default();
     Some((repo_display, repo_clr, branch))
 }
-
 
 /// Sub-state shown in the focus-mode status hint.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -7593,14 +8346,19 @@ fn render_status_bar(
             ),
         ]);
     } else {
-        let mod_key = if cfg!(target_os = "macos") { "Opt" } else { "Alt" };
+        let mod_key = if cfg!(target_os = "macos") {
+            "Opt"
+        } else {
+            "Alt"
+        };
         let hint_text = if in_focus_mode {
             match focus_hint {
                 FocusModeHint::TerminalType => {
                     "Ctrl+\\ stop typing  Shift+\u{2191} exit".to_string()
                 }
                 FocusModeHint::TerminalNavigate => {
-                    "Ctrl+\\ or Enter type  ] / [ next/prev  n new  x close  Shift+\u{2191} exit".to_string()
+                    "Ctrl+\\ or Enter type  ] / [ next/prev  n new  x close  Shift+\u{2191} exit"
+                        .to_string()
                 }
                 FocusModeHint::Other => {
                     format!("Shift+\u{2190}/\u{2192} switch panel  Shift+\u{2191} exit  {mod_key}+R new agent")
@@ -7678,10 +8436,7 @@ fn render_help_overlay(frame: &mut Frame, area: Rect, active_tab: ActiveTab, in_
                 format!(" {:<16}", key),
                 Style::default().fg(theme::R_ACCENT),
             ),
-            Span::styled(
-                desc.to_string(),
-                Style::default().fg(theme::R_TEXT_PRIMARY),
-            ),
+            Span::styled(desc.to_string(), Style::default().fg(theme::R_TEXT_PRIMARY)),
         ])
     };
     let header_line = |title: &str| -> Line<'static> {
@@ -7749,7 +8504,10 @@ fn render_help_overlay(frame: &mut Frame, area: Rect, active_tab: ActiveTab, in_
         lines.push(header_line("Batches"));
         lines.push(binding_line("Shift+\u{2190}/\u{2192}", "Switch batch"));
         lines.push(binding_line("\u{2190} / \u{2192}", "Scroll viewport"));
-        lines.push(binding_line("\u{2191} / \u{2193}", "Navigate tasks in batch"));
+        lines.push(binding_line(
+            "\u{2191} / \u{2193}",
+            "Navigate tasks in batch",
+        ));
         lines.push(binding_line("Space", "Toggle batch status (auto)"));
         lines.push(binding_line("Alt+S", "Start selected task (manual)"));
         lines.push(binding_line("Enter", "Add task to batch"));
@@ -7939,11 +8697,8 @@ fn set_bypass_permissions_ipc(enabled: bool) {
         let Ok(mut stream) = ipc::try_connect().await else {
             return;
         };
-        let _ = clust_ipc::send_message(
-            &mut stream,
-            &CliMessage::SetBypassPermissions { enabled },
-        )
-        .await;
+        let _ = clust_ipc::send_message(&mut stream, &CliMessage::SetBypassPermissions { enabled })
+            .await;
         let _ = clust_ipc::recv_message::<HubMessage>(&mut stream).await;
     });
 }
@@ -7955,11 +8710,8 @@ fn set_repo_color_ipc(path: &str, color: &str) {
         let Ok(mut stream) = ipc::try_connect().await else {
             return;
         };
-        let _ = clust_ipc::send_message(
-            &mut stream,
-            &CliMessage::SetRepoColor { path, color },
-        )
-        .await;
+        let _ =
+            clust_ipc::send_message(&mut stream, &CliMessage::SetRepoColor { path, color }).await;
         let _ = clust_ipc::recv_message::<HubMessage>(&mut stream).await;
     });
 }
@@ -7970,11 +8722,7 @@ fn stop_repo_agents_ipc(path: &str) {
         let Ok(mut stream) = ipc::try_connect().await else {
             return;
         };
-        let _ = clust_ipc::send_message(
-            &mut stream,
-            &CliMessage::StopRepoAgents { path },
-        )
-        .await;
+        let _ = clust_ipc::send_message(&mut stream, &CliMessage::StopRepoAgents { path }).await;
         let _ = clust_ipc::recv_message::<HubMessage>(&mut stream).await;
     });
 }
@@ -7985,11 +8733,7 @@ fn unregister_repo_ipc(path: &str) {
         let Ok(mut stream) = ipc::try_connect().await else {
             return;
         };
-        let _ = clust_ipc::send_message(
-            &mut stream,
-            &CliMessage::UnregisterRepo { path },
-        )
-        .await;
+        let _ = clust_ipc::send_message(&mut stream, &CliMessage::UnregisterRepo { path }).await;
         let _ = clust_ipc::recv_message::<HubMessage>(&mut stream).await;
     });
 }
@@ -8001,11 +8745,7 @@ fn stop_agents_ipc(agent_ids: &[String]) {
             let Ok(mut stream) = ipc::try_connect().await else {
                 return;
             };
-            let _ = clust_ipc::send_message(
-                &mut stream,
-                &CliMessage::StopAgent { id },
-            )
-            .await;
+            let _ = clust_ipc::send_message(&mut stream, &CliMessage::StopAgent { id }).await;
             let _ = clust_ipc::recv_message::<HubMessage>(&mut stream).await;
         });
     }
@@ -8047,11 +8787,14 @@ fn pop_worktree_cleanup_menu(
     Some(ActiveMenu::WorktreeCleanup {
         repo_path: next.repo_path,
         branch_name: next.branch_name,
-        menu: ContextMenu::new(&title, vec![
-            "Keep".to_string(),
-            "Discard worktree".to_string(),
-            "Discard worktree + branch".to_string(),
-        ]),
+        menu: ContextMenu::new(
+            &title,
+            vec![
+                "Keep".to_string(),
+                "Discard worktree".to_string(),
+                "Discard worktree + branch".to_string(),
+            ],
+        ),
     })
 }
 
@@ -8170,8 +8913,7 @@ fn start_purge_async(repo_path: &str) -> PurgeProgress {
 }
 
 fn render_purge_progress(frame: &mut Frame, area: Rect, progress: &PurgeProgress) {
-    let spinner_idx =
-        (progress.started.elapsed().as_millis() / 120) as usize % SPINNER_CHARS.len();
+    let spinner_idx = (progress.started.elapsed().as_millis() / 120) as usize % SPINNER_CHARS.len();
     let spinner = SPINNER_CHARS[spinner_idx];
 
     let mut lines: Vec<Line> = Vec::new();
@@ -8296,10 +9038,7 @@ fn start_clone_async(url: &str, parent_dir: &str, name: Option<&str>) -> ClonePr
             parent_dir: parent_dir_owned,
             name: name_owned,
         };
-        if clust_ipc::send_message(&mut stream, &msg)
-            .await
-            .is_err()
-        {
+        if clust_ipc::send_message(&mut stream, &msg).await.is_err() {
             let _ = tx.send(CloneEvent::Error("Failed to send clone request".into()));
             return;
         }
@@ -8335,8 +9074,7 @@ fn start_clone_async(url: &str, parent_dir: &str, name: Option<&str>) -> ClonePr
 }
 
 fn render_clone_progress(frame: &mut Frame, area: Rect, progress: &CloneProgress) {
-    let spinner_idx =
-        (progress.started.elapsed().as_millis() / 120) as usize % SPINNER_CHARS.len();
+    let spinner_idx = (progress.started.elapsed().as_millis() / 120) as usize % SPINNER_CHARS.len();
     let spinner = SPINNER_CHARS[spinner_idx];
 
     let mut lines: Vec<Line> = Vec::new();
@@ -8517,11 +9255,8 @@ fn set_repo_editor_ipc(path: &str, editor: &str) {
         let Ok(mut stream) = ipc::try_connect().await else {
             return;
         };
-        let _ = clust_ipc::send_message(
-            &mut stream,
-            &CliMessage::SetRepoEditor { path, editor },
-        )
-        .await;
+        let _ =
+            clust_ipc::send_message(&mut stream, &CliMessage::SetRepoEditor { path, editor }).await;
         let _ = clust_ipc::recv_message::<HubMessage>(&mut stream).await;
     });
 }
@@ -8532,11 +9267,8 @@ fn set_default_editor_ipc(editor: &str) {
         let Ok(mut stream) = ipc::try_connect().await else {
             return;
         };
-        let _ = clust_ipc::send_message(
-            &mut stream,
-            &CliMessage::SetDefaultEditor { editor },
-        )
-        .await;
+        let _ =
+            clust_ipc::send_message(&mut stream, &CliMessage::SetDefaultEditor { editor }).await;
         let _ = clust_ipc::recv_message::<HubMessage>(&mut stream).await;
     });
 }
@@ -8630,7 +9362,9 @@ fn trigger_open_in_editor(
     if let Some(rp) = repo_path {
         if let Some(repo) = repos.iter().find(|r| r.path == rp) {
             if let Some(ref editor_binary) = repo.editor {
-                if let Some(editor) = crate::editor::find_editor_by_binary(editors_cache, editor_binary) {
+                if let Some(editor) =
+                    crate::editor::find_editor_by_binary(editors_cache, editor_binary)
+                {
                     crate::editor::open_in_editor(editor, target_path);
                     return;
                 }
@@ -8679,7 +9413,11 @@ fn spawn_batch_tasks(
     hub_name: &str,
     agent_start_tx: tokio::sync::mpsc::Sender<AgentStartResult>,
 ) {
-    let batch = match tasks_state.batches.iter().find(|b| b.id == start_info.batch_id) {
+    let batch = match tasks_state
+        .batches
+        .iter()
+        .find(|b| b.id == start_info.batch_id)
+    {
         Some(b) => b,
         None => return,
     };
@@ -8692,7 +9430,10 @@ fn spawn_batch_tasks(
                 .get(*idx)
                 .map(|t| (t.use_prefix, t.use_suffix, t.plan_mode))
                 .unwrap_or((true, true, batch.plan_mode));
-            (batch.build_prompt(raw_prompt, use_prefix, use_suffix), task_plan_mode)
+            (
+                batch.build_prompt(raw_prompt, use_prefix, use_suffix),
+                task_plan_mode,
+            )
         })
         .collect();
     let batch_allow_bypass = batch.allow_bypass;

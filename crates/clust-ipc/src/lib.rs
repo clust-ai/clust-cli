@@ -1,4 +1,5 @@
 pub mod agents;
+pub mod batch_json;
 pub mod branch;
 
 use std::io;
@@ -14,7 +15,7 @@ pub const DEFAULT_HUB: &str = "default_hub";
 
 /// Protocol version for IPC compatibility checks.
 /// Bump this whenever `CliMessage` or `HubMessage` enum shapes change.
-pub const PROTOCOL_VERSION: u32 = 7;
+pub const PROTOCOL_VERSION: u32 = 8;
 
 /// Cleanup mode when cancelling/deleting a batch.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
@@ -41,22 +42,46 @@ pub enum CliMessage {
         allow_bypass: bool,
         hub: String,
     },
-    AttachAgent { id: String },
-    DetachAgent { id: String },
-    AgentInput { id: String, data: Vec<u8> },
-    ResizeAgent { id: String, cols: u16, rows: u16 },
+    AttachAgent {
+        id: String,
+    },
+    DetachAgent {
+        id: String,
+    },
+    AgentInput {
+        id: String,
+        data: Vec<u8>,
+    },
+    ResizeAgent {
+        id: String,
+        cols: u16,
+        rows: u16,
+    },
     ListAgents {
         hub: Option<String>,
         batch: Option<String>,
     },
     StopHub,
-    StopAgent { id: String },
-    SetDefault { agent_binary: String },
+    StopAgent {
+        id: String,
+    },
+    SetDefault {
+        agent_binary: String,
+    },
     GetDefault,
-    RegisterRepo { path: String },
-    UnregisterRepo { path: String },
-    StopRepoAgents { path: String },
-    SetRepoColor { path: String, color: String },
+    RegisterRepo {
+        path: String,
+    },
+    UnregisterRepo {
+        path: String,
+    },
+    StopRepoAgents {
+        path: String,
+    },
+    SetRepoColor {
+        path: String,
+        color: String,
+    },
     ListRepos,
     ListWorktrees {
         working_dir: Option<String>,
@@ -158,11 +183,24 @@ pub enum CliMessage {
         rows: u16,
         agent_id: Option<String>,
     },
-    AttachTerminal { id: String },
-    DetachTerminal { id: String },
-    TerminalInput { id: String, data: Vec<u8> },
-    ResizeTerminal { id: String, cols: u16, rows: u16 },
-    StopTerminal { id: String },
+    AttachTerminal {
+        id: String,
+    },
+    DetachTerminal {
+        id: String,
+    },
+    TerminalInput {
+        id: String,
+        data: Vec<u8>,
+    },
+    ResizeTerminal {
+        id: String,
+        cols: u16,
+        rows: u16,
+    },
+    StopTerminal {
+        id: String,
+    },
     // Queued batch management
     QueueBatch {
         repo_path: String,
@@ -178,7 +216,10 @@ pub enum CliMessage {
         tasks: Vec<QueuedTask>,
         scheduled_at: String,
     },
-    CancelQueuedBatch { batch_id: String, cleanup_mode: BatchCleanupMode },
+    CancelQueuedBatch {
+        batch_id: String,
+        cleanup_mode: BatchCleanupMode,
+    },
     ListQueuedBatches,
     /// Register a batch with the hub for persistence (status = idle, no timer).
     RegisterBatch {
@@ -235,6 +276,19 @@ pub enum CliMessage {
     /// Delete a batch entirely.
     DeleteBatch {
         batch_id: String,
+    },
+    /// Spawn an orchestrator agent. The hub creates a worktree on `new_branch`
+    /// branched from `source_branch`, allocates an inbox dir under
+    /// `~/.clust/inbox/<orchestrator-id>/`, and runs the agent there with the
+    /// orchestrator prefix prepended to `prompt`.
+    CreateOrchestratorAgent {
+        repo_path: String,
+        source_branch: String,
+        new_branch: String,
+        prompt: String,
+        cols: u16,
+        rows: u16,
+        hub: String,
     },
 }
 
@@ -301,6 +355,8 @@ pub struct QueuedTask {
     pub use_suffix: bool,
     #[serde(default)]
     pub plan_mode: bool,
+    #[serde(default)]
+    pub is_manager: bool,
 }
 
 /// Per-task detail within a batch, returned in QueuedBatchList.
@@ -316,6 +372,8 @@ pub struct QueuedBatchTaskInfo {
     pub use_suffix: bool,
     #[serde(default)]
     pub plan_mode: bool,
+    #[serde(default)]
+    pub is_manager: bool,
 }
 
 /// Full info about a batch, returned in QueuedBatchList.
@@ -360,21 +418,55 @@ pub enum HubMessage {
         repo_path: Option<String>,
         branch_name: Option<String>,
     },
-    AgentOutput { id: String, data: Vec<u8> },
-    AgentExited { id: String, exit_code: i32 },
-    AgentList { agents: Vec<AgentInfo> },
-    DefaultAgent { agent_binary: Option<String> },
-    AgentStopped { id: String },
+    AgentOutput {
+        id: String,
+        data: Vec<u8>,
+    },
+    AgentExited {
+        id: String,
+        exit_code: i32,
+    },
+    AgentList {
+        agents: Vec<AgentInfo>,
+    },
+    DefaultAgent {
+        agent_binary: Option<String>,
+    },
+    AgentStopped {
+        id: String,
+    },
     HubShutdown,
-    Error { message: String },
-    RepoRegistered { path: String, name: String },
-    RepoUnregistered { path: String, name: String, stopped_agents: usize },
-    RepoAgentsStopped { path: String, stopped_count: usize },
-    RepoColorSet { path: String, color: String },
-    RepoEditorSet { path: String, editor: String },
+    Error {
+        message: String,
+    },
+    RepoRegistered {
+        path: String,
+        name: String,
+    },
+    RepoUnregistered {
+        path: String,
+        name: String,
+        stopped_agents: usize,
+    },
+    RepoAgentsStopped {
+        path: String,
+        stopped_count: usize,
+    },
+    RepoColorSet {
+        path: String,
+        color: String,
+    },
+    RepoEditorSet {
+        path: String,
+        editor: String,
+    },
     DefaultEditorSet,
-    RepoList { repos: Vec<RepoInfo> },
-    AgentReplayComplete { id: String },
+    RepoList {
+        repos: Vec<RepoInfo>,
+    },
+    AgentReplayComplete {
+        id: String,
+    },
     WorktreeList {
         repo_name: String,
         repo_path: String,
@@ -446,18 +538,63 @@ pub enum HubMessage {
         enabled: bool,
     },
     // Terminal session messages
-    TerminalStarted { id: String },
-    TerminalAttached { id: String },
-    TerminalOutput { id: String, data: Vec<u8> },
-    TerminalExited { id: String, exit_code: i32 },
-    TerminalReplayComplete { id: String },
-    TerminalStopped { id: String },
+    TerminalStarted {
+        id: String,
+    },
+    TerminalAttached {
+        id: String,
+    },
+    TerminalOutput {
+        id: String,
+        data: Vec<u8>,
+    },
+    TerminalExited {
+        id: String,
+        exit_code: i32,
+    },
+    TerminalReplayComplete {
+        id: String,
+    },
+    TerminalStopped {
+        id: String,
+    },
     // Queued batch responses
-    BatchQueued { batch_id: String, scheduled_at: String },
-    BatchCancelled { batch_id: String },
-    QueuedBatchList { batches: Vec<QueuedBatchInfo> },
+    BatchQueued {
+        batch_id: String,
+        scheduled_at: String,
+    },
+    BatchCancelled {
+        batch_id: String,
+    },
+    QueuedBatchList {
+        batches: Vec<QueuedBatchInfo>,
+    },
     /// Batch registered for persistence (response to RegisterBatch).
-    BatchRegistered { batch_id: String },
+    BatchRegistered {
+        batch_id: String,
+    },
+    /// Orchestrator agent spawned. `id` is the orchestrator id (also used as
+    /// inbox dir name); `agent_id` is the underlying running agent.
+    OrchestratorStarted {
+        orchestrator_id: String,
+        agent_id: String,
+        inbox_dir: String,
+        working_dir: String,
+        repo_path: String,
+        branch_name: String,
+    },
+    /// The orchestrator's manifest could not be imported. The orchestrator has
+    /// been terminated; the inbox is preserved for inspection.
+    OrchestratorFailed {
+        orchestrator_id: String,
+        errors: Vec<String>,
+    },
+    /// The orchestrator's plan was successfully imported as `batch_ids`. The
+    /// orchestrator process has been terminated.
+    OrchestratorCompleted {
+        orchestrator_id: String,
+        batch_ids: Vec<String>,
+    },
 }
 
 /// Returns the clust data directory: `~/.clust/`.
@@ -479,8 +616,8 @@ pub fn log_path() -> PathBuf {
 
 /// Send a length-prefixed MessagePack message over a Unix stream.
 pub async fn send_message<T: Serialize>(stream: &mut UnixStream, msg: &T) -> io::Result<()> {
-    let payload = rmp_serde::to_vec(msg)
-        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+    let payload =
+        rmp_serde::to_vec(msg).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
     let len = payload.len() as u32;
     stream.write_all(&len.to_be_bytes()).await?;
     stream.write_all(&payload).await?;
@@ -495,8 +632,7 @@ pub async fn recv_message<T: DeserializeOwned>(stream: &mut UnixStream) -> io::R
     let len = u32::from_be_bytes(len_buf) as usize;
     let mut payload = vec![0u8; len];
     stream.read_exact(&mut payload).await?;
-    rmp_serde::from_slice(&payload)
-        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
+    rmp_serde::from_slice(&payload).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
 }
 
 /// Send a length-prefixed MessagePack message over a split write half.
@@ -516,16 +652,13 @@ pub async fn send_message_write<T: Serialize>(
 
 /// Receive a length-prefixed MessagePack message from a split read half.
 /// Used for bidirectional streaming sessions where read and write happen concurrently.
-pub async fn recv_message_read<T: DeserializeOwned>(
-    reader: &mut OwnedReadHalf,
-) -> io::Result<T> {
+pub async fn recv_message_read<T: DeserializeOwned>(reader: &mut OwnedReadHalf) -> io::Result<T> {
     let mut len_buf = [0u8; 4];
     reader.read_exact(&mut len_buf).await?;
     let len = u32::from_be_bytes(len_buf) as usize;
     let mut payload = vec![0u8; len];
     reader.read_exact(&mut payload).await?;
-    rmp_serde::from_slice(&payload)
-        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
+    rmp_serde::from_slice(&payload).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
 }
 
 #[cfg(test)]
@@ -775,10 +908,7 @@ mod tests {
 
     #[tokio::test]
     async fn hub_default_agent_none() {
-        assert_hub_round_trip(HubMessage::DefaultAgent {
-            agent_binary: None,
-        })
-        .await;
+        assert_hub_round_trip(HubMessage::DefaultAgent { agent_binary: None }).await;
     }
 
     #[tokio::test]

@@ -4,24 +4,25 @@ mod cli;
 mod context_menu;
 mod create_agent_modal;
 mod create_batch_modal;
-mod import_batch_modal;
 mod detached_agent_modal;
 mod edit_field_modal;
 mod editor;
 mod format;
+mod hub_launcher;
+mod import_batch_modal;
 mod ipc;
+mod orchestrator_modal;
 mod output_filter;
 mod overview;
 mod repo_modal;
-mod hub_launcher;
 mod scroll_break;
 mod search_modal;
 mod syntax;
 mod tasks;
 mod terminal;
-mod timer_modal;
 pub mod terminal_emulator;
 mod theme;
+mod timer_modal;
 mod ui;
 mod version;
 mod worktree;
@@ -84,12 +85,7 @@ async fn main() {
     }
 
     // Subcommand: ls
-    if let Some(cli::Commands::Ls {
-        select,
-        hub,
-        batch,
-    }) = args.command
-    {
+    if let Some(cli::Commands::Ls { select, hub, batch }) = args.command {
         // Validate hub filter if provided
         if let Some(ref p) = hub {
             if let Err(e) = cli::validate_hub_name(p) {
@@ -138,12 +134,7 @@ async fn main() {
     }
 
     // Subcommand: repo
-    if let Some(cli::Commands::Repo {
-        add,
-        remove,
-        stop,
-    }) = args.command
-    {
+    if let Some(cli::Commands::Repo { add, remove, stop }) = args.command {
         if add {
             handle_add().await;
         } else if remove {
@@ -491,8 +482,10 @@ async fn handle_start(
                     if let (Some(repo_path), Some(branch_name)) = (&ag_repo_path, &ag_branch_name) {
                         // Check if other agents remain in this worktree
                         let cleanups = worktree::query_and_collect_worktree_cleanups_for_agent(
-                            repo_path, branch_name,
-                        ).await;
+                            repo_path,
+                            branch_name,
+                        )
+                        .await;
                         worktree::prompt_worktree_cleanup(&cleanups);
                     }
                 }
@@ -594,8 +587,10 @@ async fn handle_attach(id: String) {
                 Ok(terminal::SessionEnd::AgentExited(_)) if ag_is_worktree => {
                     if let (Some(repo_path), Some(branch_name)) = (&ag_repo_path, &ag_branch_name) {
                         let cleanups = worktree::query_and_collect_worktree_cleanups_for_agent(
-                            repo_path, branch_name,
-                        ).await;
+                            repo_path,
+                            branch_name,
+                        )
+                        .await;
                         worktree::prompt_worktree_cleanup(&cleanups);
                     }
                 }
@@ -750,16 +745,8 @@ fn print_agent_row(agent: &clust_ipc::AgentInfo) {
         .as_deref()
         .map(format_repo_display)
         .unwrap_or_else(|| "—".to_string());
-    let branch = agent
-        .branch_name
-        .as_deref()
-        .unwrap_or("—")
-        .to_string();
-    let batch_display = agent
-        .batch_title
-        .as_deref()
-        .unwrap_or("—")
-        .to_string();
+    let branch = agent.branch_name.as_deref().unwrap_or("—").to_string();
+    let batch_display = agent.batch_title.as_deref().unwrap_or("—").to_string();
     println!(
         "  {}{:<8}{} {}{:<12}{} {}{:<16}{} {}{:<20}{} {}{:<10}{} {}{:<14}{} {}{:<12}{} {}{}{}",
         theme::ACCENT,
@@ -963,11 +950,7 @@ fn render_selector(
                 .as_deref()
                 .map(format_repo_display)
                 .unwrap_or_else(|| "—".to_string());
-            let branch = agent
-                .branch_name
-                .as_deref()
-                .unwrap_or("—")
-                .to_string();
+            let branch = agent.branch_name.as_deref().unwrap_or("—").to_string();
             let (text_color, status_color) = if is_selected {
                 (theme::TEXT_PRIMARY, theme::SUCCESS)
             } else {
@@ -1132,38 +1115,49 @@ async fn handle_bypass(on: bool, off: bool) {
 
     if on || off {
         let enabled = on;
-        clust_ipc::send_message(
-            &mut stream,
-            &CliMessage::SetBypassPermissions { enabled },
-        )
-        .await
-        .unwrap_or_else(|e| {
-            eprintln!(
-                "  {}✘{} {}failed to set bypass permissions: {e}{}",
-                theme::ERROR, theme::RESET, theme::TEXT_PRIMARY, theme::RESET,
-            );
-            std::process::exit(1);
-        });
+        clust_ipc::send_message(&mut stream, &CliMessage::SetBypassPermissions { enabled })
+            .await
+            .unwrap_or_else(|e| {
+                eprintln!(
+                    "  {}✘{} {}failed to set bypass permissions: {e}{}",
+                    theme::ERROR,
+                    theme::RESET,
+                    theme::TEXT_PRIMARY,
+                    theme::RESET,
+                );
+                std::process::exit(1);
+            });
 
         match clust_ipc::recv_message::<HubMessage>(&mut stream).await {
             Ok(HubMessage::Ok) => {
                 let state = if enabled { "on" } else { "off" };
                 println!(
                     "  {}✔{} {}bypass permissions: {}{}{}\n",
-                    theme::SUCCESS, theme::RESET, theme::TEXT_PRIMARY, theme::ACCENT, state, theme::RESET,
+                    theme::SUCCESS,
+                    theme::RESET,
+                    theme::TEXT_PRIMARY,
+                    theme::ACCENT,
+                    state,
+                    theme::RESET,
                 );
             }
             Ok(HubMessage::Error { message }) => {
                 eprintln!(
                     "  {}✘{} {}failed to set bypass permissions: {message}{}\n",
-                    theme::ERROR, theme::RESET, theme::TEXT_PRIMARY, theme::RESET,
+                    theme::ERROR,
+                    theme::RESET,
+                    theme::TEXT_PRIMARY,
+                    theme::RESET,
                 );
                 std::process::exit(1);
             }
             _ => {
                 eprintln!(
                     "  {}✘{} {}unexpected response from hub{}\n",
-                    theme::ERROR, theme::RESET, theme::TEXT_PRIMARY, theme::RESET,
+                    theme::ERROR,
+                    theme::RESET,
+                    theme::TEXT_PRIMARY,
+                    theme::RESET,
                 );
                 std::process::exit(1);
             }
@@ -1175,7 +1169,10 @@ async fn handle_bypass(on: bool, off: bool) {
             .unwrap_or_else(|e| {
                 eprintln!(
                     "  {}✘{} {}failed to query bypass permissions: {e}{}",
-                    theme::ERROR, theme::RESET, theme::TEXT_PRIMARY, theme::RESET,
+                    theme::ERROR,
+                    theme::RESET,
+                    theme::TEXT_PRIMARY,
+                    theme::RESET,
                 );
                 std::process::exit(1);
             });
@@ -1185,13 +1182,19 @@ async fn handle_bypass(on: bool, off: bool) {
                 let state = if enabled { "on" } else { "off" };
                 println!(
                     "  {}bypass permissions: {}{}{}\n",
-                    theme::TEXT_PRIMARY, theme::ACCENT, state, theme::RESET,
+                    theme::TEXT_PRIMARY,
+                    theme::ACCENT,
+                    state,
+                    theme::RESET,
                 );
             }
             _ => {
                 eprintln!(
                     "  {}✘{} {}unexpected response from hub{}\n",
-                    theme::ERROR, theme::RESET, theme::TEXT_PRIMARY, theme::RESET,
+                    theme::ERROR,
+                    theme::RESET,
+                    theme::TEXT_PRIMARY,
+                    theme::RESET,
                 );
                 std::process::exit(1);
             }
@@ -1418,18 +1421,9 @@ async fn handle_wt_ls(repo_name: Option<String>) {
             );
             println!();
             if worktrees.is_empty() {
-                println!(
-                    "  {}no worktrees{}",
-                    theme::TEXT_SECONDARY,
-                    theme::RESET
-                );
+                println!("  {}no worktrees{}", theme::TEXT_SECONDARY, theme::RESET);
             } else {
-                println!(
-                    "  {}{}{}",
-                    theme::ACCENT,
-                    name,
-                    theme::RESET
-                );
+                println!("  {}{}{}", theme::ACCENT, name, theme::RESET);
                 println!();
                 println!(
                     "  {}  {:<24} {:<8} STATUS{}",
@@ -1619,9 +1613,7 @@ async fn handle_wt_rm(
     }
 
     match clust_ipc::recv_message::<HubMessage>(&mut stream).await {
-        Ok(HubMessage::WorktreeRemoved {
-            stopped_agents, ..
-        }) => {
+        Ok(HubMessage::WorktreeRemoved { stopped_agents, .. }) => {
             let mut msg = format!("worktree '{branch_name}' removed");
             if stopped_agents > 0 {
                 msg.push_str(&format!(
@@ -1722,9 +1714,7 @@ async fn handle_wt_info(repo_name: Option<String>, name: String) {
                 if agent_count == 0 {
                     "none".to_string()
                 } else {
-                    format!(
-                        "{agent_count} running"
-                    )
+                    format!("{agent_count} running")
                 },
                 theme::RESET,
             );
