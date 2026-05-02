@@ -108,6 +108,38 @@ impl TerminalPanel {
     }
 }
 
+/// Cached focus-mode terminals for one agent. Stashed on `OverviewState` while
+/// focus mode is closed so shell sessions and their scrollback survive across
+/// re-entries. `current_idx` remembers which terminal was active.
+pub struct AgentTerminalCache {
+    pub panels: Vec<TerminalPanel>,
+    pub current_idx: usize,
+}
+
+impl AgentTerminalCache {
+    pub fn new() -> Self {
+        Self {
+            panels: Vec::new(),
+            current_idx: 0,
+        }
+    }
+
+    /// Drain events for every cached panel so backgrounded shells keep
+    /// accumulating scrollback while focus mode is closed or while the user is
+    /// looking at a sibling terminal.
+    pub fn drain_events(&mut self) {
+        for panel in &mut self.panels {
+            panel.drain_events();
+        }
+    }
+}
+
+impl Default for AgentTerminalCache {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// A single agent panel in the overview.
 pub struct AgentPanel {
     pub id: String,
@@ -151,9 +183,10 @@ pub struct OverviewState {
     /// Used by both rendering and keyboard navigation.
     pub sorted_indices: Vec<usize>,
     /// Cached focus-mode terminal panels, keyed by agent_id. Stashed here while
-    /// focus mode is closed so the shell session and its scrollback survive
-    /// across re-entries for the same agent.
-    pub agent_terminals: HashMap<String, TerminalPanel>,
+    /// focus mode is closed so shell sessions and their scrollback survive
+    /// across re-entries for the same agent. Each agent may own multiple
+    /// terminals; `current_idx` tracks which one was active.
+    pub agent_terminals: HashMap<String, AgentTerminalCache>,
 }
 
 impl OverviewState {
@@ -177,22 +210,28 @@ impl OverviewState {
         }
     }
 
-    /// Take the cached focus-mode terminal panel for an agent, if one exists.
-    pub fn take_agent_terminal(&mut self, agent_id: &str) -> Option<TerminalPanel> {
-        self.agent_terminals.remove(agent_id)
+    /// Take the cached focus-mode terminals for an agent. Returns an empty
+    /// cache if none exist yet.
+    pub fn take_agent_terminals(&mut self, agent_id: &str) -> AgentTerminalCache {
+        self.agent_terminals
+            .remove(agent_id)
+            .unwrap_or_default()
     }
 
-    /// Stash a focus-mode terminal panel for an agent so it can be reused next
-    /// time focus mode is opened for that agent.
-    pub fn store_agent_terminal(&mut self, agent_id: String, panel: TerminalPanel) {
-        self.agent_terminals.insert(agent_id, panel);
+    /// Stash focus-mode terminals for an agent so they can be reused next time
+    /// focus mode is opened for that agent. An empty cache is dropped instead
+    /// of stored.
+    pub fn store_agent_terminals(&mut self, agent_id: String, cache: AgentTerminalCache) {
+        if !cache.panels.is_empty() {
+            self.agent_terminals.insert(agent_id, cache);
+        }
     }
 
     /// Drain pending output events for every cached focus-mode terminal so
     /// scrollback keeps accumulating while focus mode is closed.
     pub fn drain_cached_terminal_events(&mut self) {
-        for panel in self.agent_terminals.values_mut() {
-            panel.drain_events();
+        for cache in self.agent_terminals.values_mut() {
+            cache.drain_events();
         }
     }
 
@@ -214,11 +253,14 @@ impl OverviewState {
 
         // Prune cached focus-mode terminal panels whose agent is gone. A
         // cache entry can outlive its agent's overview panel if the user
-        // closed focus mode just before the agent disappeared.
-        self.agent_terminals.retain(|id, panel| {
+        // closed focus mode just before the agent disappeared. Each cache
+        // may hold multiple panels — abort every background task.
+        self.agent_terminals.retain(|id, cache| {
             let alive = agents.iter().any(|a| a.id == *id);
             if !alive {
-                panel.task_handle.abort();
+                for panel in &cache.panels {
+                    panel.task_handle.abort();
+                }
             }
             alive
         });
@@ -1844,8 +1886,14 @@ pub struct FocusModeState {
     pr_detection_rx: mpsc::Receiver<Option<gitdiff::PrInfo>>,
     pr_detection_tx: mpsc::Sender<Option<gitdiff::PrInfo>>,
     pr_detection_task: Option<JoinHandle<()>>,
-    // Terminal tab state
-    pub terminal_panel: Option<TerminalPanel>,
+    // Terminal tab state — multiple shells per agent
+    pub terminal_panels: Vec<TerminalPanel>,
+    pub current_terminal_idx: usize,
+    /// Sub-mode within the Terminal tab. `false` = Navigate (keys are TUI
+    /// commands), `true` = Type (keys forwarded to the active PTY). Default is
+    /// Navigate so the user is never accidentally typing into a shell they
+    /// didn't expect to be in.
+    pub terminal_input_focused: bool,
     terminal_cols: u16,
     terminal_rows: u16,
 }
@@ -1891,7 +1939,9 @@ impl FocusModeState {
             pr_detection_rx,
             pr_detection_tx,
             pr_detection_task: None,
-            terminal_panel: None,
+            terminal_panels: Vec::new(),
+            current_terminal_idx: 0,
+            terminal_input_focused: false,
             terminal_cols: 80,
             terminal_rows: 24,
         }
@@ -1899,10 +1949,10 @@ impl FocusModeState {
 
     /// Open an agent in focus mode, replacing any existing panel.
     ///
-    /// `existing_terminal`, if provided, is a cached `TerminalPanel` from a
-    /// previous focus-mode session for the same agent. When present, the
-    /// shell session and its scrollback are reused instead of spawning a new
-    /// terminal.
+    /// `existing_terminals`, if non-empty, are cached `TerminalPanel`s from a
+    /// previous focus-mode session for the same agent. When non-empty, the
+    /// shell sessions and their scrollback are reused instead of spawning a
+    /// new terminal.
     #[allow(clippy::too_many_arguments)]
     pub fn open_agent(
         &mut self,
@@ -1914,7 +1964,7 @@ impl FocusModeState {
         repo_path: Option<&str>,
         branch_name: Option<&str>,
         is_worktree: bool,
-        existing_terminal: Option<TerminalPanel>,
+        existing_terminals: AgentTerminalCache,
     ) {
         self.close_panel();
 
@@ -1984,42 +2034,51 @@ impl FocusModeState {
             }
         }
 
-        // Start (or restore) terminal session. The terminal is linked to this
-        // agent so the shell is killed alongside the agent (prevents orphaned
-        // dev servers, etc.). If a cached panel was handed in, reuse its
-        // existing shell session and scrollback rather than spawning anew.
-        if let Some(panel) = existing_terminal {
-            self.install_existing_terminal(panel);
-        } else {
-            self.open_terminal(
+        // Start (or restore) terminal sessions. Each terminal is linked to
+        // this agent so its shell is killed alongside the agent (prevents
+        // orphaned dev servers, etc.). If cached panels were handed in, reuse
+        // their existing shell sessions and scrollback rather than spawning
+        // anew.
+        // Default sub-mode is Navigate so the user is never accidentally
+        // typing into a shell they didn't expect to be in.
+        self.terminal_input_focused = false;
+        if existing_terminals.panels.is_empty() {
+            self.terminal_panels = Vec::new();
+            self.current_terminal_idx = 0;
+            self.spawn_new_terminal(
                 working_dir,
-                self.terminal_cols,
-                self.terminal_rows,
                 Some(agent_id.to_string()),
             );
+        } else {
+            self.install_existing_terminals(existing_terminals);
         }
     }
 
-    /// Install a previously-cached terminal panel and refit it to the current
-    /// focus-mode dimensions. The background `terminal_connection_task` is
-    /// already running, so no IPC is needed beyond an optional resize.
-    fn install_existing_terminal(&mut self, mut panel: TerminalPanel) {
-        // Defensive: drop any half-initialized current panel.
-        self.close_terminal();
+    /// Install previously-cached terminal panels and refit each to the
+    /// current focus-mode dimensions. The background `terminal_connection_task`
+    /// for each is already running, so no IPC is needed beyond an optional
+    /// resize.
+    fn install_existing_terminals(&mut self, mut cache: AgentTerminalCache) {
+        // Defensive: drop any half-initialized current panels.
+        self.close_all_terminals();
 
         let cols = self.terminal_cols;
         let rows = self.terminal_rows;
-        let needs_resize =
-            panel.vterm.cols() != cols as usize || panel.vterm.rows() != rows as usize;
-        if needs_resize
-            && panel
-                .command_tx
-                .try_send(PanelCommand::Resize { cols, rows })
-                .is_ok()
-        {
-            panel.vterm.resize(cols as usize, rows as usize);
+        for panel in &mut cache.panels {
+            let needs_resize =
+                panel.vterm.cols() != cols as usize || panel.vterm.rows() != rows as usize;
+            if needs_resize
+                && panel
+                    .command_tx
+                    .try_send(PanelCommand::Resize { cols, rows })
+                    .is_ok()
+            {
+                panel.vterm.resize(cols as usize, rows as usize);
+            }
         }
-        self.terminal_panel = Some(panel);
+        let panels_len = cache.panels.len();
+        self.terminal_panels = cache.panels;
+        self.current_terminal_idx = cache.current_idx.min(panels_len.saturating_sub(1));
     }
 
     /// Drain all pending output events from the background task.
@@ -2116,19 +2175,28 @@ impl FocusModeState {
         self.close_panel();
     }
 
-    /// Step out of focus mode while keeping the terminal panel alive. Returns
-    /// `(agent_id, terminal_panel)` so the caller can stash the terminal for
-    /// reuse next time focus mode opens for the same agent. The agent panel
-    /// (a focus-mode-only second connection) and all auxiliary tasks are torn
-    /// down as usual.
-    pub fn detach(&mut self) -> Option<(String, TerminalPanel)> {
-        let agent_id = self.panel.as_ref().map(|p| p.id.clone());
+    /// Step out of focus mode while keeping the terminal panels alive.
+    /// Returns `(agent_id, AgentTerminalCache)` so the caller can stash the
+    /// terminals for reuse next time focus mode opens for the same agent. The
+    /// agent panel (a focus-mode-only second connection) and all auxiliary
+    /// tasks are torn down as usual.
+    pub fn detach(&mut self) -> Option<(String, AgentTerminalCache)> {
+        let agent_id = self.panel.as_ref().map(|p| p.id.clone())?;
         self.close_panel_keep_terminal();
-        let terminal = self.terminal_panel.take();
-        match (agent_id, terminal) {
-            (Some(id), Some(panel)) => Some((id, panel)),
-            _ => None,
+        let panels = std::mem::take(&mut self.terminal_panels);
+        let current_idx = self.current_terminal_idx;
+        self.current_terminal_idx = 0;
+        self.terminal_input_focused = false;
+        if panels.is_empty() {
+            return None;
         }
+        Some((
+            agent_id,
+            AgentTerminalCache {
+                panels,
+                current_idx,
+            },
+        ))
     }
 
     pub fn is_active(&self) -> bool {
@@ -2137,8 +2205,8 @@ impl FocusModeState {
 
     fn close_panel(&mut self) {
         self.close_panel_keep_terminal();
-        // Stop terminal
-        self.close_terminal();
+        // Stop all terminals
+        self.close_all_terminals();
     }
 
     /// Same as `close_panel` except the terminal panel is left untouched. Used
@@ -2184,18 +2252,18 @@ impl FocusModeState {
         self.compare_diff_error = None;
     }
 
-    // Terminal session management
+    // Terminal session management — supports multiple terminals per agent
 
-    fn open_terminal(
+    /// Spawn a new terminal session, append it to `terminal_panels`, and make
+    /// it the active terminal. The new terminal inherits the agent's lifetime
+    /// (hub kills it when the agent exits) by passing `agent_id`.
+    fn spawn_new_terminal(
         &mut self,
         working_dir: &str,
-        cols: u16,
-        rows: u16,
         agent_id: Option<String>,
     ) {
-        self.close_terminal();
-        self.terminal_cols = cols;
-        self.terminal_rows = rows;
+        let cols = self.terminal_cols;
+        let rows = self.terminal_rows;
 
         let (event_tx, event_rx) = mpsc::channel::<TerminalOutputEvent>(512);
         let (command_tx, command_rx) = mpsc::channel::<PanelCommand>(64);
@@ -2205,7 +2273,7 @@ impl FocusModeState {
             terminal_connection_task(wd, cols, rows, agent_id, event_tx, command_rx).await;
         });
 
-        self.terminal_panel = Some(TerminalPanel {
+        self.terminal_panels.push(TerminalPanel {
             id: String::new(),
             vterm: TerminalEmulator::new(cols as usize, rows as usize),
             command_tx,
@@ -2214,39 +2282,110 @@ impl FocusModeState {
             event_rx,
             task_handle: handle,
         });
+        self.current_terminal_idx = self.terminal_panels.len() - 1;
     }
 
-    fn close_terminal(&mut self) {
-        if let Some(panel) = self.terminal_panel.take() {
-            let _ = panel.command_tx.try_send(PanelCommand::Detach);
-            panel.task_handle.abort();
+    /// Add a new terminal session for the currently-open agent. No-op if no
+    /// agent is open (call from focus mode only).
+    pub fn add_terminal(&mut self) {
+        let Some(working_dir) = self.working_dir.clone() else {
+            return;
+        };
+        let agent_id = self.panel.as_ref().map(|p| p.id.clone());
+        self.spawn_new_terminal(&working_dir, agent_id);
+    }
+
+    /// Close the currently-active terminal. The hub kills its PTY and the
+    /// background task is aborted. The active index is clamped to the new
+    /// length.
+    pub fn close_current_terminal(&mut self) {
+        if self.current_terminal_idx >= self.terminal_panels.len() {
+            return;
+        }
+        let panel = self.terminal_panels.remove(self.current_terminal_idx);
+        let _ = panel.command_tx.try_send(PanelCommand::Detach);
+        panel.task_handle.abort();
+        if self.terminal_panels.is_empty() {
+            self.current_terminal_idx = 0;
+        } else if self.current_terminal_idx >= self.terminal_panels.len() {
+            self.current_terminal_idx = self.terminal_panels.len() - 1;
         }
     }
 
-    /// Drain terminal output events into the vterm of the active terminal
-    /// panel. Cached panels in `OverviewState::agent_terminals` drain their
-    /// own events via `OverviewState::drain_cached_terminal_events`.
+    /// Switch to the next terminal in the list (wraps around).
+    pub fn next_terminal(&mut self) {
+        if self.terminal_panels.len() <= 1 {
+            return;
+        }
+        self.current_terminal_idx = (self.current_terminal_idx + 1) % self.terminal_panels.len();
+    }
+
+    /// Switch to the previous terminal in the list (wraps around).
+    pub fn prev_terminal(&mut self) {
+        if self.terminal_panels.len() <= 1 {
+            return;
+        }
+        self.current_terminal_idx = if self.current_terminal_idx == 0 {
+            self.terminal_panels.len() - 1
+        } else {
+            self.current_terminal_idx - 1
+        };
+    }
+
+    /// Switch to the terminal at the given index, if valid.
+    pub fn select_terminal(&mut self, idx: usize) {
+        if idx < self.terminal_panels.len() {
+            self.current_terminal_idx = idx;
+        }
+    }
+
+    /// Borrow the active terminal panel, if any.
+    pub fn current_terminal(&self) -> Option<&TerminalPanel> {
+        self.terminal_panels.get(self.current_terminal_idx)
+    }
+
+    /// Mutably borrow the active terminal panel, if any.
+    pub fn current_terminal_mut(&mut self) -> Option<&mut TerminalPanel> {
+        self.terminal_panels.get_mut(self.current_terminal_idx)
+    }
+
+    /// Tear down every terminal in the list. Used when the focus-mode panel
+    /// is fully closed (not on detach — detach hands ownership out instead).
+    fn close_all_terminals(&mut self) {
+        for panel in self.terminal_panels.drain(..) {
+            let _ = panel.command_tx.try_send(PanelCommand::Detach);
+            panel.task_handle.abort();
+        }
+        self.current_terminal_idx = 0;
+        self.terminal_input_focused = false;
+    }
+
+    /// Drain terminal output events into the vterm of every live panel so
+    /// backgrounded shells keep accumulating scrollback. Cached panels in
+    /// `OverviewState::agent_terminals` drain their own events via
+    /// `OverviewState::drain_cached_terminal_events`.
     pub fn drain_terminal_events(&mut self) {
-        if let Some(panel) = self.terminal_panel.as_mut() {
+        for panel in &mut self.terminal_panels {
             panel.drain_events();
         }
     }
 
-    /// Send input bytes to the terminal.
+    /// Send input bytes to the active terminal.
     pub fn send_terminal_input(&self, data: Vec<u8>) {
-        if let Some(panel) = &self.terminal_panel {
+        if let Some(panel) = self.current_terminal() {
             let _ = panel.command_tx.try_send(PanelCommand::Input(data));
         }
     }
 
-    /// Handle terminal panel resize.
+    /// Handle terminal panel resize. Resizes every panel so the user sees
+    /// consistent geometry whichever terminal they switch to.
     pub fn handle_terminal_resize(&mut self, cols: u16, rows: u16) {
         if cols == self.terminal_cols && rows == self.terminal_rows {
             return;
         }
         self.terminal_cols = cols;
         self.terminal_rows = rows;
-        if let Some(panel) = &mut self.terminal_panel {
+        for panel in &mut self.terminal_panels {
             if panel
                 .command_tx
                 .try_send(PanelCommand::Resize { cols, rows })
@@ -2594,7 +2733,20 @@ fn render_left_panel(frame: &mut Frame, area: Rect, state: &mut FocusModeState, 
 
     // Render tab bar
     let left_focused = state.focus_side == FocusSide::Left;
-    render_left_tab_bar(frame, tab_area, state.left_tab, left_focused, click_map, state.pr_info.as_ref());
+    let terminal_sub_mode = if state.terminal_input_focused {
+        Some(TerminalSubMode::Type)
+    } else {
+        Some(TerminalSubMode::Navigate)
+    };
+    render_left_tab_bar(
+        frame,
+        tab_area,
+        state.left_tab,
+        left_focused,
+        click_map,
+        state.pr_info.as_ref(),
+        terminal_sub_mode,
+    );
 
     // Render active tab content
     match state.left_tab {
@@ -2611,57 +2763,200 @@ fn render_left_panel(frame: &mut Frame, area: Rect, state: &mut FocusModeState, 
         ),
         LeftPanelTab::Compare => render_compare_tab(frame, content_area, state, repo_color),
         LeftPanelTab::Terminal => {
-            render_terminal_tab(frame, content_area, state);
+            render_terminal_tab(frame, content_area, state, click_map);
         }
     }
 }
 
-fn render_terminal_tab(frame: &mut Frame, area: Rect, state: &mut FocusModeState) {
-    let is_focused = state.focus_side == FocusSide::Left;
-    match &mut state.terminal_panel {
-        Some(panel) if !panel.exited => {
-            let lines = if panel.scroll_offset > 0 {
-                panel.vterm.to_ratatui_lines_scrolled(panel.scroll_offset)
-            } else {
-                panel.vterm.to_ratatui_lines()
-            };
-            let paragraph = Paragraph::new(lines)
-                .style(Style::default().bg(theme::R_BG_BASE));
-            frame.render_widget(paragraph, area);
+/// Visual sub-mode within the Terminal tab — used by the tab bar to show
+/// `· type` / `· nav` when the Terminal tab is active.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum TerminalSubMode {
+    Navigate,
+    Type,
+}
 
-            // Show hardware cursor when terminal is the active input target
-            if is_focused && panel.scroll_offset == 0 && !panel.vterm.hide_cursor() {
-                let (cursor_row, cursor_col) = panel.vterm.cursor_position();
-                let x = area.x + cursor_col;
-                let y = area.y + cursor_row;
-                if x < area.x + area.width && y < area.y + area.height {
-                    frame.set_cursor_position(Position { x, y });
-                }
-            }
-        }
-        Some(_) => {
-            frame.render_widget(
-                Paragraph::new(Line::from(Span::styled(
-                    "Terminal session ended",
-                    Style::default().fg(theme::R_TEXT_TERTIARY),
-                )))
-                .alignment(ratatui::layout::Alignment::Center)
-                .style(Style::default().bg(theme::R_BG_BASE)),
-                area,
-            );
-        }
-        None => {
-            frame.render_widget(
-                Paragraph::new(Line::from(Span::styled(
-                    "Starting terminal...",
-                    Style::default().fg(theme::R_TEXT_TERTIARY),
-                )))
-                .alignment(ratatui::layout::Alignment::Center)
-                .style(Style::default().bg(theme::R_BG_BASE)),
-                area,
-            );
+fn render_terminal_tab(
+    frame: &mut Frame,
+    area: Rect,
+    state: &mut FocusModeState,
+    click_map: &mut ClickMap,
+) {
+    // Reset click regions for this frame.
+    click_map.focus_terminal_labels.clear();
+    click_map.focus_terminal_new_button = Rect::default();
+    click_map.focus_terminal_content_area = Rect::default();
+
+    let panel_focused = state.focus_side == FocusSide::Left;
+    let in_type_mode = state.terminal_input_focused;
+
+    // Split into label strip (1 row) + content.
+    if area.height < 1 {
+        return;
+    }
+    let [label_area, content_area] = Layout::vertical([
+        Constraint::Length(1),
+        Constraint::Min(0),
+    ])
+    .areas(area);
+
+    render_terminal_label_strip(
+        frame,
+        label_area,
+        &state.terminal_panels,
+        state.current_terminal_idx,
+        panel_focused,
+        click_map,
+    );
+
+    click_map.focus_terminal_content_area = content_area;
+
+    let panels_len = state.terminal_panels.len();
+    let current_idx = state.current_terminal_idx;
+    if panels_len == 0 {
+        frame.render_widget(
+            Paragraph::new(Line::from(Span::styled(
+                "No terminals — press n (or click [+]) to start one",
+                Style::default().fg(theme::R_TEXT_TERTIARY),
+            )))
+            .alignment(ratatui::layout::Alignment::Center)
+            .style(Style::default().bg(theme::R_BG_BASE)),
+            content_area,
+        );
+        return;
+    }
+
+    let panel = &mut state.terminal_panels[current_idx];
+    if panel.exited {
+        frame.render_widget(
+            Paragraph::new(Line::from(Span::styled(
+                "Terminal session ended — press x to close, n to start a new one",
+                Style::default().fg(theme::R_TEXT_TERTIARY),
+            )))
+            .alignment(ratatui::layout::Alignment::Center)
+            .style(Style::default().bg(theme::R_BG_BASE)),
+            content_area,
+        );
+        return;
+    }
+
+    let lines = if panel.scroll_offset > 0 {
+        panel.vterm.to_ratatui_lines_scrolled(panel.scroll_offset)
+    } else {
+        panel.vterm.to_ratatui_lines()
+    };
+    let paragraph = Paragraph::new(lines)
+        .style(Style::default().bg(theme::R_BG_BASE));
+    frame.render_widget(paragraph, content_area);
+
+    // Show the hardware cursor only when the terminal is the active input
+    // target — i.e., focus_side == Left AND sub-mode == Type. In Navigate
+    // mode the cursor is hidden so the user has a clear visual cue that
+    // typing won't reach the shell.
+    if panel_focused
+        && in_type_mode
+        && panel.scroll_offset == 0
+        && !panel.vterm.hide_cursor()
+    {
+        let (cursor_row, cursor_col) = panel.vterm.cursor_position();
+        let x = content_area.x + cursor_col;
+        let y = content_area.y + cursor_row;
+        if x < content_area.x + content_area.width
+            && y < content_area.y + content_area.height
+        {
+            frame.set_cursor_position(Position { x, y });
         }
     }
+}
+
+/// Render the per-terminal label strip: `[1] [2*] [3]    [+]`. The active
+/// terminal is shown with the strong overlay background; idle terminals use
+/// the surface background. The `[+]` affordance always appears at the right.
+fn render_terminal_label_strip(
+    frame: &mut Frame,
+    area: Rect,
+    panels: &[TerminalPanel],
+    current_idx: usize,
+    panel_focused: bool,
+    click_map: &mut ClickMap,
+) {
+    let mut spans: Vec<Span> = Vec::new();
+    let mut cursor_x = area.x;
+
+    for (idx, panel) in panels.iter().enumerate() {
+        let is_active = idx == current_idx;
+        let label = if panel.exited {
+            format!(" {}× ", idx + 1)
+        } else if is_active {
+            format!(" {}* ", idx + 1)
+        } else {
+            format!(" {} ", idx + 1)
+        };
+        let (fg, bg) = if is_active && panel_focused {
+            (theme::R_TEXT_PRIMARY, theme::R_BG_OVERLAY)
+        } else if is_active {
+            (theme::R_TEXT_SECONDARY, theme::R_BG_RAISED)
+        } else {
+            (theme::R_TEXT_TERTIARY, theme::R_BG_SURFACE)
+        };
+        let style = if is_active {
+            Style::default().fg(fg).bg(bg).add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(fg).bg(bg)
+        };
+        let label_width = label.chars().count() as u16;
+        click_map.focus_terminal_labels.push((
+            Rect {
+                x: cursor_x,
+                y: area.y,
+                width: label_width,
+                height: 1,
+            },
+            idx,
+        ));
+        spans.push(Span::styled(label, style));
+        cursor_x += label_width;
+
+        // separator between labels (small gap)
+        if idx + 1 < panels.len() {
+            spans.push(Span::styled(
+                " ",
+                Style::default().bg(theme::R_BG_SURFACE),
+            ));
+            cursor_x += 1;
+        }
+    }
+
+    // Spacer up to the right-aligned [+] button
+    let plus_label = " + ";
+    let plus_width = plus_label.chars().count() as u16;
+    let used: u16 = spans.iter().map(|s| s.content.chars().count() as u16).sum();
+    let total_avail = area.width;
+    if used + plus_width <= total_avail {
+        let gap = total_avail - used - plus_width;
+        if gap > 0 {
+            spans.push(Span::styled(
+                " ".repeat(gap as usize),
+                Style::default().bg(theme::R_BG_SURFACE),
+            ));
+            cursor_x += gap;
+        }
+    }
+    let plus_style = Style::default()
+        .fg(theme::R_TEXT_SECONDARY)
+        .bg(theme::R_BG_RAISED)
+        .add_modifier(Modifier::BOLD);
+    spans.push(Span::styled(plus_label, plus_style));
+    click_map.focus_terminal_new_button = Rect {
+        x: cursor_x,
+        y: area.y,
+        width: plus_width,
+        height: 1,
+    };
+
+    let para = Paragraph::new(Line::from(spans))
+        .style(Style::default().bg(theme::R_BG_SURFACE));
+    frame.render_widget(para, area);
 }
 
 fn render_no_repo_left_panel(frame: &mut Frame, area: Rect) {
@@ -2683,6 +2978,7 @@ fn render_left_tab_bar(
     panel_focused: bool,
     click_map: &mut ClickMap,
     pr_info: Option<&gitdiff::PrInfo>,
+    terminal_sub_mode: Option<TerminalSubMode>,
 ) {
     let mut spans = Vec::new();
     let mut cursor_x = area.x;
@@ -2741,6 +3037,31 @@ fn render_left_tab_bar(
                 Style::default().fg(theme::R_INFO).bg(bg)
             };
             spans.push(Span::styled(pr_label, pr_style));
+            cursor_x += total_width;
+        } else if *tab == LeftPanelTab::Terminal && is_active {
+            // When the Terminal tab is active, append a sub-mode hint so the
+            // user can see at a glance whether typing reaches the shell.
+            let sub_label = match terminal_sub_mode {
+                Some(TerminalSubMode::Type) => " · type ",
+                _ => " · nav ",
+            };
+            let label_width = label.chars().count() as u16;
+            let sub_width = sub_label.chars().count() as u16;
+            let total_width = label_width + sub_width;
+            click_map.focus_left_tabs.push((
+                Rect { x: cursor_x, y: area.y, width: total_width, height: 1 },
+                *tab,
+            ));
+            spans.push(Span::styled(label, style));
+            let sub_fg = match terminal_sub_mode {
+                Some(TerminalSubMode::Type) => theme::R_INFO,
+                _ => theme::R_TEXT_TERTIARY,
+            };
+            let sub_style = Style::default()
+                .fg(sub_fg)
+                .bg(bg)
+                .add_modifier(Modifier::BOLD);
+            spans.push(Span::styled(sub_label, sub_style));
             cursor_x += total_width;
         } else {
             let label_width = label.chars().count() as u16;
