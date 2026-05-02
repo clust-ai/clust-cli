@@ -1,6 +1,6 @@
 use std::time::Duration;
 
-use crate::agent::{self, SharedHubState, HubState, SpawnAgentParams};
+use crate::agent::{self, HubState, SharedHubState, SpawnAgentParams};
 use crate::db;
 
 // ---------------------------------------------------------------------------
@@ -68,6 +68,10 @@ pub struct HubTaskEntry {
     pub use_prefix: bool,
     pub use_suffix: bool,
     pub plan_mode: bool,
+    /// Auto-injected manager task that watches sibling task branches and merges
+    /// them locally to the integration branch. Does not consume a `max_concurrent`
+    /// slot and is always eligible to spawn alongside worker tasks.
+    pub is_manager: bool,
 }
 
 pub struct HubBatchEntry {
@@ -108,26 +112,37 @@ impl HubBatchEntry {
         parts.join("\n\n")
     }
 
-    /// How many more agents can be started for this batch.
+    /// How many more worker agents can be started for this batch. Manager tasks
+    /// are excluded from the active count — they are extra and don't consume a slot.
     fn available_slots(&self) -> usize {
         let active = self
             .tasks
             .iter()
-            .filter(|t| t.status == HubTaskStatus::Active)
+            .filter(|t| t.status == HubTaskStatus::Active && !t.is_manager)
             .count();
         let max = self.max_concurrent.unwrap_or(usize::MAX);
         max.saturating_sub(active)
     }
 
-    /// Collect the next idle tasks that can be started, up to available slots.
+    /// Collect the next idle tasks that can be started. Manager tasks are
+    /// always returned regardless of slots; worker tasks are returned up to
+    /// `available_slots`.
     fn next_tasks_to_start(&self) -> Vec<(usize, &HubTaskEntry)> {
         let slots = self.available_slots();
-        self.tasks
-            .iter()
-            .enumerate()
-            .filter(|(_, t)| t.status == HubTaskStatus::Idle)
-            .take(slots)
-            .collect()
+        let mut out: Vec<(usize, &HubTaskEntry)> = Vec::new();
+        for (i, t) in self.tasks.iter().enumerate() {
+            if t.is_manager && t.status == HubTaskStatus::Idle {
+                out.push((i, t));
+            }
+        }
+        out.extend(
+            self.tasks
+                .iter()
+                .enumerate()
+                .filter(|(_, t)| !t.is_manager && t.status == HubTaskStatus::Idle)
+                .take(slots),
+        );
+        out
     }
 
     /// Whether all tasks have completed.
@@ -313,11 +328,7 @@ async fn check_and_advance_batches(state: &SharedHubState) {
 
         // Phase 3: Update task state with the result (under lock)
         let mut hub = state.lock().await;
-        if let Some(batch) = hub
-            .queued_batches
-            .iter_mut()
-            .find(|b| b.id == req.batch_id)
-        {
+        if let Some(batch) = hub.queued_batches.iter_mut().find(|b| b.id == req.batch_id) {
             if let Some(task) = batch.tasks.get_mut(req.task_index) {
                 match result {
                     Ok((agent_id, _, _)) => {
@@ -452,18 +463,17 @@ pub async fn create_worktree_and_spawn_agent(
         None
     };
 
-    let worktree_path =
-        crate::repo::add_worktree(repo_root, &branch_name, base, checkout_existing)
-            .map_err(|e| {
-                if e.contains("already checked out") {
-                    format!(
-                        "Branch '{}' is already checked out and cannot be used as a worktree.",
-                        branch_name
-                    )
-                } else {
-                    e
-                }
-            })?;
+    let worktree_path = crate::repo::add_worktree(repo_root, &branch_name, base, checkout_existing)
+        .map_err(|e| {
+            if e.contains("already checked out") {
+                format!(
+                    "Branch '{}' is already checked out and cannot be used as a worktree.",
+                    branch_name
+                )
+            } else {
+                e
+            }
+        })?;
 
     let working_dir = worktree_path.to_string_lossy().into_owned();
 
@@ -554,6 +564,7 @@ pub fn load_batches_from_db(hub: &HubState) -> Vec<HubBatchEntry> {
                     use_prefix: t.use_prefix,
                     use_suffix: t.use_suffix,
                     plan_mode: t.plan_mode,
+                    is_manager: t.is_manager,
                 })
                 .collect();
 

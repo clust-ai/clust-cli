@@ -1,7 +1,10 @@
 pub mod agent;
 pub mod batch;
 pub mod db;
+pub mod inbox;
 pub mod ipc;
+pub mod orchestrator;
+pub mod orchestrator_validate;
 pub mod repo;
 pub mod tray;
 
@@ -58,4 +61,3 @@ pub fn has_display() -> bool {
     }
     std::env::var_os("DISPLAY").is_some() || std::env::var_os("WAYLAND_DISPLAY").is_some()
 }
-

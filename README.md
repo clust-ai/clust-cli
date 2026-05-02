@@ -163,6 +163,16 @@ The TUI dashboard (`clust ui`) has three tabs:
 
 Mouse support includes click navigation, scroll, and Cmd+click to open URLs.
 
+## Orchestrator Agent
+
+Press `Alt+O` to launch an orchestrator agent. It opens a 4-step modal: pick a repository, the source branch to clone from, the new integration branch to clone toward, and a (required, non-empty) prompt describing what to plan.
+
+The orchestrator runs in a worktree on the new branch, asks you clarifying questions, and emits a DAG of batch JSON files to `~/.clust/inbox/<orchestrator-id>/`. When it writes `manifest.json` (with `complete: true`), the hub validates and imports the batches, auto-injects a per-batch merge manager task, and terminates the orchestrator. Imported inboxes are archived under `~/.clust/inbox/.processed/`.
+
+Each orchestrator-imported batch automatically gets:
+- An additional **manager task** that watches sibling task branches and locally merges them into the integration branch as commits arrive. The manager does not consume a `max_concurrent` slot.
+- The suffix `Commit when you are finished with your implementation.` appended to every worker task's prompt.
+
 ## Batch JSON Import
 
 Batches can be imported from JSON files using `Alt+I` in the TUI. The file browser opens in `~/Downloads` by default and filters for `.json` files.
@@ -231,6 +241,12 @@ Batches can depend on other batches. When a dependency batch completes all its t
 |-------|------|----------|-------------|
 | `branch` | string | Yes | Branch name for the worktree. |
 | `prompt` | string | Yes | The prompt for the agent. |
+
+**Internal task field — do not author:**
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `is_manager` | boolean | Reserved. Auto-set by the hub for the orchestrator-injected manager task. Setting this in human-authored or orchestrator-emitted JSON causes import to fail. |
 
 After selecting a JSON file, you'll be prompted to choose a repository and branch. The batch is created with all tasks pre-populated. Dependencies can also be configured after creation using `Shift+D` in the TUI.
 
