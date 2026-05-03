@@ -8472,6 +8472,7 @@ fn render_help_overlay(frame: &mut Frame, area: Rect, active_tab: ActiveTab, in_
     lines.push(binding_line("Alt+P", "Toggle plan mode (in modals)"));
     lines.push(binding_line("Alt+T", "Create batch"));
     lines.push(binding_line("Alt+I", "Import batch from JSON"));
+    lines.push(binding_line("Alt+O", "Launch orchestrator agent"));
 
     // -- Repositories --
     if active_tab == ActiveTab::Repositories {
