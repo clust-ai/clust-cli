@@ -6,9 +6,6 @@
 //! more than one agent. So an N-agent grid is a binary space partition tree
 //! whose leaves are agents.
 
-// Helpers land staged across several commits; suppress until callers exist.
-#![allow(dead_code)]
-
 use std::collections::HashMap;
 
 use ratatui::layout::{Alignment, Constraint, Flex, Layout, Rect};
@@ -293,7 +290,7 @@ pub fn neighbor(cells: &[Rect], current: usize, dir: Direction) -> usize {
             Direction::Up | Direction::Down => dy + 2 * dx,
             Direction::Left | Direction::Right => dx + 2 * dy,
         };
-        if best.map_or(true, |(_, s)| score < s) {
+        if best.is_none_or(|(_, s)| score < s) {
             best = Some((idx, score));
         }
     }
