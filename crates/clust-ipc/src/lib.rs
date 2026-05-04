@@ -75,6 +75,9 @@ pub enum CliMessage {
     UnregisterRepo {
         path: String,
     },
+    DeleteRepo {
+        path: String,
+    },
     StopRepoAgents {
         path: String,
     },
@@ -444,6 +447,11 @@ pub enum HubMessage {
         name: String,
     },
     RepoUnregistered {
+        path: String,
+        name: String,
+        stopped_agents: usize,
+    },
+    RepoDeleted {
         path: String,
         name: String,
         stopped_agents: usize,

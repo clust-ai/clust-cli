@@ -64,6 +64,40 @@ async fn run(shutdown_signal: Arc<dyn ShutdownSignal>, state: SharedHubState) ->
     }
 }
 
+/// Verify that `target` is safe to recursively delete. Returns the canonical
+/// path on success.
+///
+/// Refuses the filesystem root, the user's home directory, the clust state
+/// directory, and any ancestor of either.
+fn check_safe_to_delete(target: &std::path::Path) -> Result<std::path::PathBuf, String> {
+    let canonical = std::fs::canonicalize(target)
+        .map_err(|e| format!("could not resolve {}: {e}", target.display()))?;
+    if !canonical.is_dir() {
+        return Err(format!("{} is not a directory", canonical.display()));
+    }
+    if canonical.parent().is_none() {
+        return Err("refusing to delete the filesystem root".into());
+    }
+    if let Some(home) = std::env::var_os("HOME") {
+        if let Ok(home_canonical) = std::fs::canonicalize(std::path::PathBuf::from(home)) {
+            if canonical == home_canonical {
+                return Err("refusing to delete the home directory".into());
+            }
+            if home_canonical.starts_with(&canonical) {
+                return Err(
+                    "refusing to delete a directory that contains the home directory".into(),
+                );
+            }
+        }
+    }
+    if let Ok(clust_canonical) = std::fs::canonicalize(clust_ipc::clust_dir()) {
+        if canonical == clust_canonical || clust_canonical.starts_with(&canonical) {
+            return Err("refusing to delete the clust state directory".into());
+        }
+    }
+    Ok(canonical)
+}
+
 async fn handle_connection(
     stream: tokio::net::UnixStream,
     shutdown_signal: Arc<dyn ShutdownSignal>,
@@ -576,6 +610,119 @@ async fn handle_connection(
                         },
                     )
                     .await?;
+                }
+                Err(e) => {
+                    clust_ipc::send_message_write(&mut writer, &HubMessage::Error { message: e })
+                        .await?;
+                }
+            }
+        }
+        CliMessage::DeleteRepo { path } => {
+            let git_root = crate::repo::detect_git_root(&path);
+            // Stage 1: validate, run safety checks, collect agent IDs.
+            // We do NOT touch the DB or filesystem yet — if anything below
+            // fails we want to leave the repo registered.
+            let prepared = {
+                let hub_state = state.lock().await;
+                if let Some(db) = hub_state.db.as_ref() {
+                    match git_root {
+                        Some(root) => {
+                            let root_str = root.to_string_lossy().into_owned();
+                            if !crate::db::is_repo_registered(db, &root_str) {
+                                Err("repository is not registered".into())
+                            } else {
+                                match check_safe_to_delete(&root) {
+                                    Err(e) => Err(e),
+                                    Ok(canonical) => {
+                                        let name = root
+                                            .file_name()
+                                            .map(|n| n.to_string_lossy().into_owned())
+                                            .unwrap_or_else(|| root_str.clone());
+                                        let agent_ids: Vec<String> = hub_state
+                                            .agents
+                                            .values()
+                                            .filter(|e| {
+                                                e.repo_path.as_deref()
+                                                    == Some(root_str.as_str())
+                                            })
+                                            .map(|e| e.id.clone())
+                                            .collect();
+                                        let count = agent_ids.len();
+                                        Ok((root_str, name, canonical, agent_ids, count))
+                                    }
+                                }
+                            }
+                        }
+                        None => Err(format!("{path} is not inside a git repository")),
+                    }
+                } else {
+                    Err("database not initialized".into())
+                }
+            };
+            match prepared {
+                Ok((root_str, name, canonical, agent_ids, count)) => {
+                    // Stop agents outside the lock so their tasks can drain.
+                    for id in agent_ids {
+                        let state = state.clone();
+                        tokio::spawn(async move {
+                            let _ = agent::stop_agent(&state, &id).await;
+                        });
+                    }
+                    // Delete on disk first; only unregister from the DB if
+                    // the directory is actually gone.
+                    if let Err(e) = std::fs::remove_dir_all(&canonical) {
+                        clust_ipc::send_message_write(
+                            &mut writer,
+                            &HubMessage::Error {
+                                message: format!(
+                                    "Failed to delete {}: {e}",
+                                    canonical.display()
+                                ),
+                            },
+                        )
+                        .await?;
+                    } else {
+                        let db_result = {
+                            let hub_state = state.lock().await;
+                            hub_state
+                                .db
+                                .as_ref()
+                                .map(|db| crate::db::unregister_repo(db, &root_str))
+                        };
+                        match db_result {
+                            Some(Ok(_)) => {
+                                clust_ipc::send_message_write(
+                                    &mut writer,
+                                    &HubMessage::RepoDeleted {
+                                        path: root_str,
+                                        name,
+                                        stopped_agents: count,
+                                    },
+                                )
+                                .await?;
+                            }
+                            Some(Err(e)) => {
+                                clust_ipc::send_message_write(
+                                    &mut writer,
+                                    &HubMessage::Error {
+                                        message: format!(
+                                            "Folder deleted but failed to unregister: {e}"
+                                        ),
+                                    },
+                                )
+                                .await?;
+                            }
+                            None => {
+                                clust_ipc::send_message_write(
+                                    &mut writer,
+                                    &HubMessage::Error {
+                                        message: "database not initialized".into(),
+                                    },
+                                )
+                                .await?;
+                            }
+                        }
+                    }
                 }
                 Err(e) => {
                     clust_ipc::send_message_write(&mut writer, &HubMessage::Error { message: e })
