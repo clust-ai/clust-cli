@@ -234,11 +234,13 @@ impl OverviewState {
         }
     }
 
-    /// Synchronize panels with the current agent list.
-    pub fn sync_agents(&mut self, agents: &[AgentInfo], content_area: Rect) {
-        // Calculate panel dimensions based on agent count and available space
-        self.recalculate_panel_size(agents.len(), content_area);
-
+    /// Synchronize the panel set with the current agent list (lifecycle only).
+    ///
+    /// Adds panels for new agents, removes/aborts panels for agents that
+    /// disappeared, prunes stale `agent_terminals` cache entries, and
+    /// updates per-panel metadata. Does **not** touch panel dimensions —
+    /// callers that own a layout call [`resize_panels_to`] separately.
+    pub fn sync_agent_set(&mut self, agents: &[AgentInfo]) {
         // Remove panels for agents no longer running
         let mut i = 0;
         while i < self.panels.len() {
@@ -279,8 +281,16 @@ impl OverviewState {
             }
         }
 
-        // Resize existing panels if dimensions changed.
-        // Send the resize command before clearing the local screen so that
+        self.clamp_focus();
+        self.initialized = true;
+    }
+
+    /// Recalculate the overview-grid panel dimensions from the content area
+    /// and push the result to every panel (vterm resize + SIGWINCH).
+    pub fn resize_panels_to(&mut self, content_area: Rect) {
+        self.recalculate_panel_size(self.panels.len(), content_area);
+
+        // Send the resize command before resizing the local vterm so that
         // if the send fails the grid is not left empty without a SIGWINCH.
         for panel in &mut self.panels {
             let (pw, ph) = (self.panel_cols as usize, self.panel_rows as usize);
@@ -296,9 +306,14 @@ impl OverviewState {
                 panel.vterm.resize(pw, ph);
             }
         }
+    }
 
-        self.clamp_focus();
-        self.initialized = true;
+    /// Synchronize panels with the current agent list **and** resize them
+    /// for the overview grid. Convenience wrapper used by callers that own
+    /// the overview layout (i.e. the Overview tab).
+    pub fn sync_agents(&mut self, agents: &[AgentInfo], content_area: Rect) {
+        self.sync_agent_set(agents);
+        self.resize_panels_to(content_area);
     }
 
     /// Drain all pending output events from background tasks.
