@@ -4,7 +4,7 @@ use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
 
 use portable_pty::{CommandBuilder, MasterPty, PtySize};
-use tokio::sync::{broadcast, Mutex, Notify};
+use tokio::sync::{broadcast, Mutex};
 
 // ---------------------------------------------------------------------------
 // ReplayBuffer — per-agent ring buffer of raw PTY output
@@ -63,14 +63,6 @@ pub struct HubState {
     pub bypass_permissions: bool,
     pub db: Option<rusqlite::Connection>,
     pub queued_batches: Vec<crate::batch::HubBatchEntry>,
-    /// Live orchestrator agents, keyed by orchestrator id.
-    pub orchestrators: HashMap<String, crate::orchestrator::OrchestratorEntry>,
-    /// Per-(repo, target_branch) lock so two manager agents do not race to
-    /// check out the same branch.
-    pub manager_locks: crate::orchestrator::ManagerLockMap,
-    /// Notified when an orchestrator agent exits, to wake the inbox watcher
-    /// so users don't see a 0–5s gap before their batches appear.
-    pub inbox_scan_signal: Arc<Notify>,
 }
 
 impl HubState {
@@ -388,30 +380,16 @@ fn spawn_pty_reader(
         // servers, etc.) don't linger after the agent dies.
         let handle = tokio::runtime::Handle::current();
         handle.block_on(async {
-            let (terminal_ids, scan_signal) = {
+            let terminal_ids: Vec<String> = {
                 let mut hub = state.lock().await;
                 hub.agents.remove(&agent_id);
                 crate::batch::on_agent_exited(&mut hub, &agent_id);
-                // If this agent owned an orchestrator, nudge the inbox watcher
-                // so any pending manifest is imported immediately rather than
-                // waiting up to 5 seconds for the next tick.
-                let is_orchestrator = hub.orchestrators.values().any(|o| o.agent_id == agent_id);
-                let scan_signal = if is_orchestrator {
-                    Some(hub.inbox_scan_signal.clone())
-                } else {
-                    None
-                };
-                let tids: Vec<String> = hub
-                    .terminals
+                hub.terminals
                     .values()
                     .filter(|t| t.agent_id.as_deref() == Some(agent_id.as_str()))
                     .map(|t| t.id.clone())
-                    .collect();
-                (tids, scan_signal)
+                    .collect()
             };
-            if let Some(signal) = scan_signal {
-                signal.notify_one();
-            }
             for tid in terminal_ids {
                 let state = state.clone();
                 tokio::spawn(async move {
@@ -433,7 +411,9 @@ pub async fn stop_agent(state: &SharedHubState, id: &str) -> Result<(), String> 
             .agents
             .get(id)
             .ok_or_else(|| format!("agent {id} not found"))?;
-        entry.pid.ok_or_else(|| format!("agent {id} has no PID"))?
+        entry
+            .pid
+            .ok_or_else(|| format!("agent {id} has no PID"))?
     };
 
     // SIGTERM
@@ -526,7 +506,8 @@ pub fn spawn_terminal(
 ) -> Result<String, String> {
     let id = generate_terminal_id(&state.terminals);
 
-    let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".to_string());
+    let shell = std::env::var("SHELL")
+        .unwrap_or_else(|_| "/bin/zsh".to_string());
 
     let pty_system = portable_pty::native_pty_system();
     let pair = pty_system

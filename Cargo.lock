@@ -380,7 +380,6 @@ dependencies = [
  "portable-pty",
  "rand",
  "rusqlite",
- "serde",
  "serde_json",
  "tao",
  "tempfile",

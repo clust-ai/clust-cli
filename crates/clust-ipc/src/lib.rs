@@ -1,5 +1,4 @@
 pub mod agents;
-pub mod batch_json;
 pub mod branch;
 
 use std::io;
@@ -15,7 +14,7 @@ pub const DEFAULT_HUB: &str = "default_hub";
 
 /// Protocol version for IPC compatibility checks.
 /// Bump this whenever `CliMessage` or `HubMessage` enum shapes change.
-pub const PROTOCOL_VERSION: u32 = 8;
+pub const PROTOCOL_VERSION: u32 = 7;
 
 /// Cleanup mode when cancelling/deleting a batch.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
@@ -280,19 +279,6 @@ pub enum CliMessage {
     DeleteBatch {
         batch_id: String,
     },
-    /// Spawn an orchestrator agent. The hub creates a worktree on `new_branch`
-    /// branched from `source_branch`, allocates an inbox dir under
-    /// `~/.clust/inbox/<orchestrator-id>/`, and runs the agent there with the
-    /// orchestrator prefix prepended to `prompt`.
-    CreateOrchestratorAgent {
-        repo_path: String,
-        source_branch: String,
-        new_branch: String,
-        prompt: String,
-        cols: u16,
-        rows: u16,
-        hub: String,
-    },
 }
 
 /// Info about a running agent, returned in AgentList.
@@ -358,8 +344,6 @@ pub struct QueuedTask {
     pub use_suffix: bool,
     #[serde(default)]
     pub plan_mode: bool,
-    #[serde(default)]
-    pub is_manager: bool,
 }
 
 /// Per-task detail within a batch, returned in QueuedBatchList.
@@ -375,8 +359,6 @@ pub struct QueuedBatchTaskInfo {
     pub use_suffix: bool,
     #[serde(default)]
     pub plan_mode: bool,
-    #[serde(default)]
-    pub is_manager: bool,
 }
 
 /// Full info about a batch, returned in QueuedBatchList.
@@ -580,28 +562,6 @@ pub enum HubMessage {
     /// Batch registered for persistence (response to RegisterBatch).
     BatchRegistered {
         batch_id: String,
-    },
-    /// Orchestrator agent spawned. `id` is the orchestrator id (also used as
-    /// inbox dir name); `agent_id` is the underlying running agent.
-    OrchestratorStarted {
-        orchestrator_id: String,
-        agent_id: String,
-        inbox_dir: String,
-        working_dir: String,
-        repo_path: String,
-        branch_name: String,
-    },
-    /// The orchestrator's manifest could not be imported. The orchestrator has
-    /// been terminated; the inbox is preserved for inspection.
-    OrchestratorFailed {
-        orchestrator_id: String,
-        errors: Vec<String>,
-    },
-    /// The orchestrator's plan was successfully imported as `batch_ids`. The
-    /// orchestrator process has been terminated.
-    OrchestratorCompleted {
-        orchestrator_id: String,
-        batch_ids: Vec<String>,
     },
 }
 

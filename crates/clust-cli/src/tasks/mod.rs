@@ -908,7 +908,7 @@ fn render_options_bar(frame: &mut Frame, area: Rect, state: &TasksState) {
                 .bg(theme::R_BG_RAISED),
         ),
         Span::styled(
-            format!("  {mod_key}+T create  {mod_key}+I import  {mod_key}+O orchestrator  Space toggle  T timer  {mod_key}+S start  M mode  B bypass  D deps  d clear done"),
+            format!("  {mod_key}+T create  {mod_key}+I import  Space toggle  T timer  {mod_key}+S start  M mode  B bypass  D deps  d clear done"),
             Style::default()
                 .fg(theme::R_TEXT_TERTIARY)
                 .bg(theme::R_BG_RAISED),

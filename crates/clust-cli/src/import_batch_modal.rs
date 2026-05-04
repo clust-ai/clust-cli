@@ -8,12 +8,60 @@ use ratatui::{
     widgets::{Block, Borders, Clear, Padding, Paragraph, Wrap},
     Frame,
 };
-
-#[allow(unused_imports)]
-pub use clust_ipc::batch_json::{BatchJson, TaskJson};
+use serde::Deserialize;
 
 use crate::tasks::LaunchMode;
 use crate::theme;
+
+// ---------------------------------------------------------------------------
+// Batch JSON schema
+// ---------------------------------------------------------------------------
+
+#[derive(Deserialize)]
+pub struct BatchJson {
+    /// Optional batch title. Falls back to auto-naming ("Batch N") if omitted.
+    pub title: Option<String>,
+    /// Optional prompt prefix prepended to every task prompt.
+    pub prefix: Option<String>,
+    /// Optional prompt suffix appended to every task prompt.
+    pub suffix: Option<String>,
+    /// Launch mode: "auto" (default) or "manual".
+    pub launch_mode: Option<String>,
+    /// Max concurrent agents (auto mode only). Null/omitted = unlimited.
+    pub max_concurrent: Option<usize>,
+    /// Whether agents start in plan mode.
+    #[serde(default)]
+    pub plan_mode: bool,
+    /// Whether agents can bypass permission prompts.
+    #[serde(default)]
+    pub allow_bypass: bool,
+    /// The tasks to create in this batch.
+    pub tasks: Vec<TaskJson>,
+    /// Optional list of batch titles this batch depends on.
+    #[serde(default)]
+    pub depends_on: Vec<String>,
+}
+
+#[derive(Deserialize)]
+pub struct TaskJson {
+    /// Branch name for the worktree.
+    pub branch: String,
+    /// The prompt for the agent.
+    pub prompt: String,
+    /// Whether the batch prompt prefix is applied to this task. Defaults to `true`.
+    #[serde(default = "default_true")]
+    pub use_prefix: bool,
+    /// Whether the batch prompt suffix is applied to this task. Defaults to `true`.
+    #[serde(default = "default_true")]
+    pub use_suffix: bool,
+    /// Whether this task starts in plan mode. Defaults to batch-level plan_mode if omitted.
+    #[serde(default)]
+    pub plan_mode: bool,
+}
+
+fn default_true() -> bool {
+    true
+}
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -113,7 +161,10 @@ impl ImportBatchModal {
         self.file_entries.clear();
         if let Ok(read) = std::fs::read_dir(&self.base_path) {
             for entry in read.flatten() {
-                let is_dir = entry.file_type().map(|ft| ft.is_dir()).unwrap_or(false);
+                let is_dir = entry
+                    .file_type()
+                    .map(|ft| ft.is_dir())
+                    .unwrap_or(false);
                 if let Some(name) = entry.file_name().to_str() {
                     if name.starts_with('.') {
                         continue;
@@ -133,8 +184,9 @@ impl ImportBatchModal {
             }
         }
         // Sort: directories first, then files, both alphabetically
-        self.file_entries
-            .sort_by(|a, b| b.is_dir.cmp(&a.is_dir).then(a.name.cmp(&b.name)));
+        self.file_entries.sort_by(|a, b| {
+            b.is_dir.cmp(&a.is_dir).then(a.name.cmp(&b.name))
+        });
         self.selected_idx = 0;
     }
 
@@ -166,7 +218,9 @@ impl ImportBatchModal {
             Ok(contents) => {
                 // Try list format first, then single-object format (backward compat)
                 let batches = serde_json::from_str::<Vec<BatchJson>>(&contents)
-                    .or_else(|_| serde_json::from_str::<BatchJson>(&contents).map(|b| vec![b]));
+                    .or_else(|_| {
+                        serde_json::from_str::<BatchJson>(&contents).map(|b| vec![b])
+                    });
                 match batches {
                     Ok(list) => {
                         if list.is_empty() || list.iter().all(|b| b.tasks.is_empty()) {
@@ -280,7 +334,10 @@ impl ImportBatchModal {
                 ImportBatchResult::Pending
             }
             KeyCode::Backspace => {
-                if self.step == Step::File && self.input.is_empty() && self.base_path != "/" {
+                if self.step == Step::File
+                    && self.input.is_empty()
+                    && self.base_path != "/"
+                {
                     // Navigate up
                     let trimmed = self.base_path.trim_end_matches('/');
                     if let Some(pos) = trimmed.rfind('/') {
@@ -314,11 +371,8 @@ impl ImportBatchModal {
             }
             KeyCode::Right => {
                 if self.cursor_pos < self.input.len() {
-                    self.cursor_pos += self.input[self.cursor_pos..]
-                        .chars()
-                        .next()
-                        .unwrap()
-                        .len_utf8();
+                    self.cursor_pos +=
+                        self.input[self.cursor_pos..].chars().next().unwrap().len_utf8();
                 }
                 ImportBatchResult::Pending
             }
@@ -585,7 +639,10 @@ impl ImportBatchModal {
                 let is_selected = vis_idx + scroll == self.selected_idx;
                 let mut spans = self.list_item_spans(&branch.name, is_selected);
                 if branch.is_head {
-                    spans.push(Span::styled(" HEAD", Style::default().fg(theme::R_SUCCESS)));
+                    spans.push(Span::styled(
+                        " HEAD",
+                        Style::default().fg(theme::R_SUCCESS),
+                    ));
                 }
                 if branch.is_worktree {
                     spans.push(Span::styled(
@@ -598,11 +655,7 @@ impl ImportBatchModal {
                         format!(
                             " ({} agent{})",
                             branch.active_agent_count,
-                            if branch.active_agent_count == 1 {
-                                ""
-                            } else {
-                                "s"
-                            }
+                            if branch.active_agent_count == 1 { "" } else { "s" }
                         ),
                         Style::default().fg(theme::R_WARNING),
                     ));
@@ -627,7 +680,10 @@ impl ImportBatchModal {
                 let is_selected = vis_idx + scroll == self.selected_idx;
                 if entry.is_dir {
                     let mut spans = self.list_item_spans(&entry.name, is_selected);
-                    spans.push(Span::styled("/", Style::default().fg(theme::R_ACCENT)));
+                    spans.push(Span::styled(
+                        "/",
+                        Style::default().fg(theme::R_ACCENT),
+                    ));
                     Line::from(spans)
                 } else {
                     Line::from(self.list_item_spans(&entry.name, is_selected))
@@ -640,11 +696,7 @@ impl ImportBatchModal {
     fn render_input(&self, frame: &mut Frame, area: Rect) {
         let before_cursor = &self.input[..self.cursor_pos];
         let (cursor_char, after_cursor) = if self.cursor_pos < self.input.len() {
-            let ch_len = self.input[self.cursor_pos..]
-                .chars()
-                .next()
-                .unwrap()
-                .len_utf8();
+            let ch_len = self.input[self.cursor_pos..].chars().next().unwrap().len_utf8();
             (
                 &self.input[self.cursor_pos..self.cursor_pos + ch_len],
                 &self.input[self.cursor_pos + ch_len..],
@@ -692,12 +744,7 @@ impl ImportBatchModal {
     // Helpers
     // -----------------------------------------------------------------------
 
-    fn render_list_item<'a>(
-        &self,
-        name: &'a str,
-        detail: Option<&'a str>,
-        selected: bool,
-    ) -> Line<'a> {
+    fn render_list_item<'a>(&self, name: &'a str, detail: Option<&'a str>, selected: bool) -> Line<'a> {
         let mut all = self.list_item_spans(name, selected);
         if let Some(d) = detail {
             all.push(Span::styled("  ", Style::default()));

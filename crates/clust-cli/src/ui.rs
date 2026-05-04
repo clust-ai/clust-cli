@@ -944,8 +944,6 @@ pub fn run(hub_name: &str) -> io::Result<()> {
     let mut pending_overview_select: Option<String> = None;
     // Detached (directory) agent modal state
     let mut detached_modal: Option<DetachedAgentModal> = None;
-    // Orchestrator agent modal state
-    let mut orchestrator_modal: Option<crate::orchestrator_modal::OrchestratorModal> = None;
     // Purge progress modal state
     let mut purge_progress: Option<PurgeProgress> = None;
     // Repository create/clone modal state
@@ -1332,8 +1330,7 @@ pub fn run(hub_name: &str) -> io::Result<()> {
             || edit_field_modal.is_some()
             || timer_modal.is_some()
             || detached_modal.is_some()
-            || repo_modal.is_some()
-            || orchestrator_modal.is_some();
+            || repo_modal.is_some();
         let show_search = search_modal.is_some();
         let purge_ref = &purge_progress;
         let clone_ref = &clone_progress;
@@ -1542,9 +1539,6 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                     modal.render(frame, content_area);
                 }
                 if let Some(ref modal) = repo_modal {
-                    modal.render(frame, content_area);
-                }
-                if let Some(ref modal) = orchestrator_modal {
                     modal.render(frame, content_area);
                 }
             }
@@ -3238,7 +3232,6 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                             use_prefix: t.use_prefix,
                                             use_suffix: t.use_suffix,
                                             plan_mode: t.plan_mode,
-                                            is_manager: false,
                                         })
                                         .collect();
                                     for task in &batch_json.tasks {
@@ -3430,7 +3423,6 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                                 use_prefix: t.use_prefix,
                                                 use_suffix: t.use_suffix,
                                                 plan_mode: t.plan_mode,
-                                                is_manager: false,
                                             })
                                             .collect();
                                         let msg = CliMessage::QueueBatch {
@@ -3652,109 +3644,6 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                             }
                             DetachedModalResult::Pending => {}
                         }
-                    } else if let Some(ref mut modal) = orchestrator_modal {
-                        use crate::orchestrator_modal::OrchestratorResult;
-                        match modal.handle_key(key) {
-                            OrchestratorResult::Cancelled => {
-                                orchestrator_modal = None;
-                            }
-                            OrchestratorResult::Completed(output) => {
-                                orchestrator_modal = None;
-                                let tx = agent_start_tx.clone();
-                                let status_tx_local = status_tx.clone();
-                                let hub = hub_name.to_string();
-                                let (cols, rows) = crossterm::terminal::size().unwrap_or((80, 24));
-                                tokio::spawn(async move {
-                                    let mut stream = match ipc::try_connect().await {
-                                        Ok(s) => s,
-                                        Err(e) => {
-                                            let _ = status_tx_local
-                                                .send(StatusMessage {
-                                                    text: format!(
-                                                        "Orchestrator launch failed: {e}"
-                                                    ),
-                                                    level: StatusLevel::Error,
-                                                    created: Instant::now(),
-                                                })
-                                                .await;
-                                            return;
-                                        }
-                                    };
-                                    let msg = CliMessage::CreateOrchestratorAgent {
-                                        repo_path: output.repo_path.clone(),
-                                        source_branch: output.source_branch.clone(),
-                                        new_branch: output.new_branch.clone(),
-                                        prompt: output.prompt,
-                                        cols,
-                                        rows: rows.saturating_sub(2).max(1),
-                                        hub,
-                                    };
-                                    if let Err(e) = clust_ipc::send_message(&mut stream, &msg).await
-                                    {
-                                        let _ = status_tx_local
-                                            .send(StatusMessage {
-                                                text: format!("Orchestrator launch failed: {e}"),
-                                                level: StatusLevel::Error,
-                                                created: Instant::now(),
-                                            })
-                                            .await;
-                                        return;
-                                    }
-                                    match clust_ipc::recv_message::<HubMessage>(&mut stream).await {
-                                        Ok(HubMessage::OrchestratorStarted {
-                                            agent_id,
-                                            working_dir,
-                                            repo_path,
-                                            branch_name,
-                                            ..
-                                        }) => {
-                                            let _ = tx
-                                                .send(AgentStartResult::Started {
-                                                    agent_id,
-                                                    agent_binary: String::new(),
-                                                    working_dir,
-                                                    repo_path: Some(repo_path),
-                                                    branch_name: Some(branch_name),
-                                                    is_worktree: true,
-                                                })
-                                                .await;
-                                        }
-                                        Ok(HubMessage::Error { message }) => {
-                                            let _ = status_tx_local
-                                                .send(StatusMessage {
-                                                    text: format!(
-                                                        "Orchestrator launch failed: {message}"
-                                                    ),
-                                                    level: StatusLevel::Error,
-                                                    created: Instant::now(),
-                                                })
-                                                .await;
-                                        }
-                                        Ok(_) => {
-                                            let _ = status_tx_local
-                                                .send(StatusMessage {
-                                                    text: "Orchestrator launch failed: unexpected hub response".to_string(),
-                                                    level: StatusLevel::Error,
-                                                    created: Instant::now(),
-                                                })
-                                                .await;
-                                        }
-                                        Err(e) => {
-                                            let _ = status_tx_local
-                                                .send(StatusMessage {
-                                                    text: format!(
-                                                        "Orchestrator launch failed: {e}"
-                                                    ),
-                                                    level: StatusLevel::Error,
-                                                    created: Instant::now(),
-                                                })
-                                                .await;
-                                        }
-                                    }
-                                });
-                            }
-                            OrchestratorResult::Pending => {}
-                        }
                     } else if let Some(ref mut modal) = repo_modal {
                         match modal.handle_key(key) {
                             RepoModalResult::Cancelled => {
@@ -3916,16 +3805,6 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                         // Global shortcut: Alt+I opens import-batch modal
                         if !repos.is_empty() {
                             import_batch_modal = Some(ImportBatchModal::new(repos.clone()));
-                            show_help = false;
-                        }
-                    } else if key.code == KeyCode::Char('o')
-                        && key.modifiers.contains(KeyModifiers::ALT)
-                    {
-                        // Global shortcut: Alt+O launches the orchestrator agent modal
-                        if !repos.is_empty() {
-                            orchestrator_modal = Some(
-                                crate::orchestrator_modal::OrchestratorModal::new(repos.clone()),
-                            );
                             show_help = false;
                         }
                     } else if key.code == KeyCode::Char('p')
@@ -5237,8 +5116,6 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                     } else if let Some(ref mut modal) = search_modal {
                         modal.handle_paste(text);
                     } else if let Some(ref mut modal) = detached_modal {
-                        modal.handle_paste(text);
-                    } else if let Some(ref mut modal) = orchestrator_modal {
                         modal.handle_paste(text);
                     } else if let Some(ref mut modal) = repo_modal {
                         modal.handle_paste(text);
@@ -8054,7 +7931,6 @@ fn render_help_overlay(frame: &mut Frame, area: Rect, active_tab: ActiveTab, in_
     lines.push(binding_line("Alt+P", "Toggle plan mode (in modals)"));
     lines.push(binding_line("Alt+T", "Create batch"));
     lines.push(binding_line("Alt+I", "Import batch from JSON"));
-    lines.push(binding_line("Alt+O", "Launch orchestrator agent"));
 
     // -- Repositories --
     if active_tab == ActiveTab::Repositories {
