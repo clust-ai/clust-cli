@@ -1,6 +1,7 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;
 
 use crate::agent::{self, SharedHubState, SpawnAgentParams};
@@ -20,6 +21,68 @@ pub struct OrchestratorEntry {
     pub repo_path: String,
     pub source_branch: String,
     pub target_branch: String,
+}
+
+impl OrchestratorEntry {
+    /// Snapshot the persistent fields for the on-disk sidecar.
+    pub fn sidecar(&self) -> OrchestratorSidecar {
+        OrchestratorSidecar {
+            id: self.id.clone(),
+            agent_id: self.agent_id.clone(),
+            repo_path: self.repo_path.clone(),
+            source_branch: self.source_branch.clone(),
+            target_branch: self.target_branch.clone(),
+        }
+    }
+
+    /// Reconstruct a tracking entry from a sidecar + the on-disk inbox path.
+    /// Used after a hub restart, where the live in-memory entry is gone.
+    pub fn from_sidecar(s: OrchestratorSidecar, inbox_dir: PathBuf) -> Self {
+        Self {
+            id: s.id,
+            agent_id: s.agent_id,
+            inbox_dir,
+            repo_path: s.repo_path,
+            source_branch: s.source_branch,
+            target_branch: s.target_branch,
+        }
+    }
+}
+
+/// Filename for the per-inbox sidecar that lets the watcher rebuild the
+/// metadata it needs after a hub restart.
+pub const SIDECAR_FILENAME: &str = "orch.json";
+
+/// Persistent metadata written next to `manifest.json` so the inbox is
+/// self-contained — the watcher can import the batches even after a hub
+/// restart that wiped `state.orchestrators`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OrchestratorSidecar {
+    pub id: String,
+    pub agent_id: String,
+    pub repo_path: String,
+    pub source_branch: String,
+    pub target_branch: String,
+}
+
+/// Write the sidecar atomically (write tmp → rename) so a partial file is
+/// never observed by the watcher.
+pub fn write_sidecar(inbox_dir: &Path, sidecar: &OrchestratorSidecar) -> Result<(), String> {
+    let final_path = inbox_dir.join(SIDECAR_FILENAME);
+    let tmp_path = inbox_dir.join(format!("{SIDECAR_FILENAME}.tmp"));
+    let body =
+        serde_json::to_vec_pretty(sidecar).map_err(|e| format!("serialize orch sidecar: {e}"))?;
+    std::fs::write(&tmp_path, body).map_err(|e| format!("write orch sidecar tmp: {e}"))?;
+    std::fs::rename(&tmp_path, &final_path).map_err(|e| format!("rename orch sidecar: {e}"))?;
+    Ok(())
+}
+
+/// Read the sidecar from an inbox dir.
+pub fn read_sidecar(inbox_dir: &Path) -> Result<OrchestratorSidecar, String> {
+    let path = inbox_dir.join(SIDECAR_FILENAME);
+    let body = std::fs::read_to_string(&path)
+        .map_err(|e| format!("read orch sidecar {}: {e}", path.display()))?;
+    serde_json::from_str(&body).map_err(|e| format!("parse orch sidecar: {e}"))
 }
 
 /// Generate a 12-char hex orchestrator id, matching the agent-id style.
@@ -128,6 +191,13 @@ pub async fn spawn_orchestrator(
         source_branch: source_branch.to_string(),
         target_branch: sanitized_new,
     };
+
+    // Persist a sidecar so the watcher can finish importing this orchestrator's
+    // batches even if the hub is restarted before the manifest is processed.
+    if let Err(e) = write_sidecar(&inbox, &entry.sidecar()) {
+        return Err(format!("failed to write orchestrator sidecar: {e}"));
+    }
+
     {
         let mut hub_state = state.lock().await;
         hub_state.orchestrators.insert(orch_id.clone(), entry);
@@ -351,5 +421,41 @@ mod tests {
         assert_eq!(t.branch_name, "manager/models");
         assert!(t.prompt.contains("b00001"));
         assert!(t.prompt.contains("feat/x"));
+    }
+
+    #[test]
+    fn sidecar_roundtrips_via_disk() {
+        let dir = tempfile::tempdir().unwrap();
+        let original = OrchestratorSidecar {
+            id: "oabcdef123456".to_string(),
+            agent_id: "a000111222".to_string(),
+            repo_path: "/tmp/repo".to_string(),
+            source_branch: "main".to_string(),
+            target_branch: "feat/x".to_string(),
+        };
+        write_sidecar(dir.path(), &original).unwrap();
+        let read_back = read_sidecar(dir.path()).unwrap();
+        assert_eq!(read_back.id, original.id);
+        assert_eq!(read_back.agent_id, original.agent_id);
+        assert_eq!(read_back.repo_path, original.repo_path);
+        assert_eq!(read_back.source_branch, original.source_branch);
+        assert_eq!(read_back.target_branch, original.target_branch);
+    }
+
+    #[test]
+    fn sidecar_write_is_atomic() {
+        // Writing twice should overwrite cleanly without leaving a tmp file.
+        let dir = tempfile::tempdir().unwrap();
+        let s = OrchestratorSidecar {
+            id: "o1".to_string(),
+            agent_id: "a1".to_string(),
+            repo_path: "/r".to_string(),
+            source_branch: "s".to_string(),
+            target_branch: "t".to_string(),
+        };
+        write_sidecar(dir.path(), &s).unwrap();
+        write_sidecar(dir.path(), &s).unwrap();
+        assert!(dir.path().join(SIDECAR_FILENAME).exists());
+        assert!(!dir.path().join(format!("{SIDECAR_FILENAME}.tmp")).exists());
     }
 }

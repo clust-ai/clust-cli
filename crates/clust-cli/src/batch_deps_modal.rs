@@ -148,7 +148,12 @@ impl BatchDepsModal {
         let title = format!("Dependencies \u{2014} {}", self.batch_title);
         let hint = "Space toggle  Enter confirm  Esc cancel";
 
-        let label_max: usize = self.items.iter().map(|i| i.title.chars().count()).max().unwrap_or(0);
+        let label_max: usize = self
+            .items
+            .iter()
+            .map(|i| i.title.chars().count())
+            .max()
+            .unwrap_or(0);
         // "  [x] label  " => 2 + 3 + 1 + label + 2
         let item_width = 6 + label_max + 2;
         let content_width = item_width
@@ -214,20 +219,14 @@ impl BatchDepsModal {
 
             let spans = vec![
                 Span::styled(format!(" {check} "), Style::default().fg(check_fg).bg(bg)),
-                Span::styled(
-                    item.title.clone(),
-                    Style::default().fg(label_fg).bg(bg),
-                ),
+                Span::styled(item.title.clone(), Style::default().fg(label_fg).bg(bg)),
             ];
 
             let content_len: usize = spans.iter().map(|s| s.content.chars().count()).sum();
             let remaining = (inner.width as usize).saturating_sub(content_len);
             let mut row_spans = spans;
             if remaining > 0 {
-                row_spans.push(Span::styled(
-                    " ".repeat(remaining),
-                    Style::default().bg(bg),
-                ));
+                row_spans.push(Span::styled(" ".repeat(remaining), Style::default().bg(bg)));
             }
             lines.push(Line::from(row_spans));
         }
@@ -235,7 +234,9 @@ impl BatchDepsModal {
         // Hint line
         lines.push(Line::from(Span::styled(
             format!(" {hint}"),
-            Style::default().fg(theme::R_TEXT_TERTIARY).bg(theme::R_BG_OVERLAY),
+            Style::default()
+                .fg(theme::R_TEXT_TERTIARY)
+                .bg(theme::R_BG_OVERLAY),
         )));
 
         frame.render_widget(Paragraph::new(lines), inner);
@@ -282,7 +283,9 @@ impl BatchDepsModal {
         frame.render_widget(
             Paragraph::new(Line::from(Span::styled(
                 format!(" {msg}"),
-                Style::default().fg(theme::R_TEXT_TERTIARY).bg(theme::R_BG_OVERLAY),
+                Style::default()
+                    .fg(theme::R_TEXT_TERTIARY)
+                    .bg(theme::R_BG_OVERLAY),
             ))),
             inner,
         );

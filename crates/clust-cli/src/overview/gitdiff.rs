@@ -87,7 +87,8 @@ pub fn parse_unified_diff(raw: &str) -> ParsedDiff {
                 new_lineno: None,
                 file_idx,
             });
-        } else if text.starts_with("--- ") || text.starts_with("+++ ") || text.starts_with("index ") {
+        } else if text.starts_with("--- ") || text.starts_with("+++ ") || text.starts_with("index ")
+        {
             lines.push(DiffLine {
                 kind: DiffLineKind::FileMetadata,
                 content: text.to_string(),
@@ -248,7 +249,11 @@ pub fn spawn_branch_diff_task(
     stop_rx: watch::Receiver<bool>,
 ) -> JoinHandle<()> {
     tokio::task::spawn(branch_diff_refresh_loop(
-        working_dir, base_branch, head_branch, tx, stop_rx,
+        working_dir,
+        base_branch,
+        head_branch,
+        tx,
+        stop_rx,
     ))
 }
 
@@ -269,8 +274,7 @@ async fn branch_diff_refresh_loop(
         let dir = working_dir.clone();
         let base = base_branch.clone();
         let head = head_branch.clone();
-        let result =
-            tokio::task::spawn_blocking(move || run_branch_diff(&dir, &base, &head)).await;
+        let result = tokio::task::spawn_blocking(move || run_branch_diff(&dir, &base, &head)).await;
 
         let event = match result {
             Ok(Ok(raw)) => DiffEvent::Updated(parse_unified_diff(&raw)),
@@ -389,8 +393,14 @@ diff --git a/README.md b/README.md
     fn parse_file_start_indices() {
         let diff = parse_unified_diff(SAMPLE_DIFF);
         assert_eq!(diff.file_start_indices.len(), 2);
-        assert_eq!(diff.lines[diff.file_start_indices[0]].kind, DiffLineKind::FileHeader);
-        assert_eq!(diff.lines[diff.file_start_indices[1]].kind, DiffLineKind::FileHeader);
+        assert_eq!(
+            diff.lines[diff.file_start_indices[0]].kind,
+            DiffLineKind::FileHeader
+        );
+        assert_eq!(
+            diff.lines[diff.file_start_indices[1]].kind,
+            DiffLineKind::FileHeader
+        );
     }
 
     #[test]
@@ -405,15 +415,15 @@ diff --git a/README.md b/README.md
         assert_eq!(kinds[2], DiffLineKind::FileMetadata); // ---
         assert_eq!(kinds[3], DiffLineKind::FileMetadata); // +++
         assert_eq!(kinds[4], DiffLineKind::HunkHeader);
-        assert_eq!(kinds[5], DiffLineKind::Context);      // fn main()
-        assert_eq!(kinds[6], DiffLineKind::Delete);        // -println
-        assert_eq!(kinds[7], DiffLineKind::Add);           // +println hello world
-        assert_eq!(kinds[8], DiffLineKind::Add);           // +println goodbye
-        assert_eq!(kinds[9], DiffLineKind::Context);       // let x
-        assert_eq!(kinds[10], DiffLineKind::Context);      // let y
-        assert_eq!(kinds[11], DiffLineKind::Context);      // }
-        assert_eq!(kinds[12], DiffLineKind::Separator);     // gap between files
-        assert_eq!(kinds[13], DiffLineKind::FileHeader);    // second file
+        assert_eq!(kinds[5], DiffLineKind::Context); // fn main()
+        assert_eq!(kinds[6], DiffLineKind::Delete); // -println
+        assert_eq!(kinds[7], DiffLineKind::Add); // +println hello world
+        assert_eq!(kinds[8], DiffLineKind::Add); // +println goodbye
+        assert_eq!(kinds[9], DiffLineKind::Context); // let x
+        assert_eq!(kinds[10], DiffLineKind::Context); // let y
+        assert_eq!(kinds[11], DiffLineKind::Context); // }
+        assert_eq!(kinds[12], DiffLineKind::Separator); // gap between files
+        assert_eq!(kinds[13], DiffLineKind::FileHeader); // second file
     }
 
     #[test]

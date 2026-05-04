@@ -102,7 +102,12 @@ impl ContextMenu {
     /// Returns `(modal_rect, inner_rect)` for mouse hit-testing.
     pub fn render(&self, frame: &mut Frame, area: Rect) -> (Rect, Rect) {
         // Calculate dimensions
-        let label_max: usize = self.items.iter().map(|i| i.label.chars().count()).max().unwrap_or(0);
+        let label_max: usize = self
+            .items
+            .iter()
+            .map(|i| i.label.chars().count())
+            .max()
+            .unwrap_or(0);
         let title_len = self.title.chars().count();
         // "  N  ● label  " => 2 + 1 + 2 + 2 + label + 2
         let item_width = 5 + 2 + label_max + 2; // number prefix + optional dot + label + padding
@@ -111,10 +116,18 @@ impl ContextMenu {
             .as_deref()
             .map(|d| d.lines().collect())
             .unwrap_or_default();
-        let desc_max_width: usize = desc_lines.iter().map(|l| l.chars().count()).max().unwrap_or(0);
+        let desc_max_width: usize = desc_lines
+            .iter()
+            .map(|l| l.chars().count())
+            .max()
+            .unwrap_or(0);
         let content_width = item_width.max(title_len + 4).max(desc_max_width + 2);
         let modal_width = (content_width + 2) as u16; // +2 for borders
-        let desc_height = if desc_lines.is_empty() { 0 } else { desc_lines.len() + 1 }; // +1 blank line after
+        let desc_height = if desc_lines.is_empty() {
+            0
+        } else {
+            desc_lines.len() + 1
+        }; // +1 blank line after
         let modal_height = (self.items.len() + desc_height + 3) as u16; // +2 borders, +1 title line
 
         let [horz_area] = Layout::horizontal([Constraint::Length(modal_width)])
@@ -155,7 +168,9 @@ impl ContextMenu {
         for line_text in &desc_lines {
             lines.push(Line::from(Span::styled(
                 format!(" {line_text}"),
-                Style::default().fg(theme::R_TEXT_SECONDARY).bg(theme::R_BG_OVERLAY),
+                Style::default()
+                    .fg(theme::R_TEXT_SECONDARY)
+                    .bg(theme::R_BG_OVERLAY),
             )));
         }
         if !desc_lines.is_empty() {
@@ -177,10 +192,7 @@ impl ContextMenu {
             )];
 
             if let Some(color) = item.color {
-                spans.push(Span::styled(
-                    "● ",
-                    Style::default().fg(color).bg(bg),
-                ));
+                spans.push(Span::styled("● ", Style::default().fg(color).bg(bg)));
             }
 
             let label_fg = if is_selected {
@@ -197,10 +209,7 @@ impl ContextMenu {
             let content_len: usize = spans.iter().map(|s| s.content.chars().count()).sum();
             let remaining = (inner.width as usize).saturating_sub(content_len);
             if remaining > 0 {
-                spans.push(Span::styled(
-                    " ".repeat(remaining),
-                    Style::default().bg(bg),
-                ));
+                spans.push(Span::styled(" ".repeat(remaining), Style::default().bg(bg)));
             }
 
             lines.push(Line::from(spans));

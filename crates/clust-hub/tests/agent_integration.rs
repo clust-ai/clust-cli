@@ -152,7 +152,10 @@ async fn spawn_agent_cat_receives_input_and_echoes() {
     assert!(timeout.is_ok(), "timed out waiting for echo");
     let data = timeout.unwrap();
     let output = String::from_utf8_lossy(&data);
-    assert!(output.contains("hello"), "output should contain 'hello', got: {output}");
+    assert!(
+        output.contains("hello"),
+        "output should contain 'hello', got: {output}"
+    );
 
     // Send EOF to cat (Ctrl+D) to make it exit
     {
@@ -205,10 +208,7 @@ async fn multiple_subscribers_receive_same_output() {
         let mut hub = state.lock().await;
         if let Some(entry) = hub.agents.get_mut(&id) {
             use std::io::Write;
-            entry
-                .pty_writer
-                .write_all(b"hello from test\n")
-                .unwrap();
+            entry.pty_writer.write_all(b"hello from test\n").unwrap();
             // Send EOF so cat exits
             entry.pty_writer.write_all(&[0x04]).unwrap();
         }

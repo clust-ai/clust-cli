@@ -19,7 +19,9 @@ use fuzzy_matcher::FuzzyMatcher;
 
 use clust_ipc::{AgentInfo, BranchInfo, CliMessage, HubMessage, RepoInfo};
 
-use crate::{ipc, syntax, tasks::BatchAgentInfo, terminal_emulator::TerminalEmulator, theme, ui::ClickMap};
+use crate::{
+    ipc, syntax, tasks::BatchAgentInfo, terminal_emulator::TerminalEmulator, theme, ui::ClickMap,
+};
 
 /// Minimum width in columns for a single agent panel.
 const MIN_PANEL_WIDTH: u16 = 60;
@@ -97,8 +99,7 @@ impl TerminalPanel {
                         self.vterm.process(&data);
                     }
                 }
-                TerminalOutputEvent::Exited { id }
-                | TerminalOutputEvent::ConnectionLost { id } => {
+                TerminalOutputEvent::Exited { id } | TerminalOutputEvent::ConnectionLost { id } => {
                     if self.id.is_empty() || self.id == id {
                         self.exited = true;
                     }
@@ -213,9 +214,7 @@ impl OverviewState {
     /// Take the cached focus-mode terminals for an agent. Returns an empty
     /// cache if none exist yet.
     pub fn take_agent_terminals(&mut self, agent_id: &str) -> AgentTerminalCache {
-        self.agent_terminals
-            .remove(agent_id)
-            .unwrap_or_default()
+        self.agent_terminals.remove(agent_id).unwrap_or_default()
     }
 
     /// Stash focus-mode terminals for an agent so they can be reused next time
@@ -311,8 +310,7 @@ impl OverviewState {
                         panel.vterm.process(&data);
                     }
                 }
-                AgentOutputEvent::Exited { id, .. }
-                | AgentOutputEvent::ConnectionLost { id } => {
+                AgentOutputEvent::Exited { id, .. } | AgentOutputEvent::ConnectionLost { id } => {
                     if let Some(panel) = self.panels.iter_mut().find(|p| p.id == id) {
                         panel.exited = true;
                     }
@@ -525,8 +523,7 @@ impl OverviewState {
         }
         if let OverviewFocus::Terminal(idx) = self.focus {
             if idx >= self.panels.len() {
-                self.focus =
-                    OverviewFocus::Terminal(self.panels.len().saturating_sub(1));
+                self.focus = OverviewFocus::Terminal(self.panels.len().saturating_sub(1));
             }
         }
         self.last_terminal_idx = self
@@ -667,9 +664,7 @@ async fn agent_connection_task(
         Ok(s) => s,
         Err(_) => {
             let _ = event_tx
-                .send(AgentOutputEvent::ConnectionLost {
-                    id: agent_id,
-                })
+                .send(AgentOutputEvent::ConnectionLost { id: agent_id })
                 .await;
             return;
         }
@@ -688,9 +683,7 @@ async fn agent_connection_task(
     .is_err()
     {
         let _ = event_tx
-            .send(AgentOutputEvent::ConnectionLost {
-                id: agent_id,
-            })
+            .send(AgentOutputEvent::ConnectionLost { id: agent_id })
             .await;
         return;
     }
@@ -700,9 +693,7 @@ async fn agent_connection_task(
         Ok(HubMessage::AgentAttached { .. }) => {}
         _ => {
             let _ = event_tx
-                .send(AgentOutputEvent::ConnectionLost {
-                    id: agent_id,
-                })
+                .send(AgentOutputEvent::ConnectionLost { id: agent_id })
                 .await;
             return;
         }
@@ -732,9 +723,7 @@ async fn agent_connection_task(
             }
             _ => {
                 let _ = event_tx
-                    .send(AgentOutputEvent::ConnectionLost {
-                        id: agent_id,
-                    })
+                    .send(AgentOutputEvent::ConnectionLost { id: agent_id })
                     .await;
                 return;
             }
@@ -854,9 +843,7 @@ async fn terminal_connection_task(
         Ok(s) => s,
         Err(_) => {
             let _ = event_tx
-                .send(TerminalOutputEvent::ConnectionLost {
-                    id: String::new(),
-                })
+                .send(TerminalOutputEvent::ConnectionLost { id: String::new() })
                 .await;
             return;
         }
@@ -878,9 +865,7 @@ async fn terminal_connection_task(
     .is_err()
     {
         let _ = event_tx
-            .send(TerminalOutputEvent::ConnectionLost {
-                id: String::new(),
-            })
+            .send(TerminalOutputEvent::ConnectionLost { id: String::new() })
             .await;
         return;
     }
@@ -890,9 +875,7 @@ async fn terminal_connection_task(
         Ok(HubMessage::TerminalStarted { id }) => id,
         _ => {
             let _ = event_tx
-                .send(TerminalOutputEvent::ConnectionLost {
-                    id: String::new(),
-                })
+                .send(TerminalOutputEvent::ConnectionLost { id: String::new() })
                 .await;
             return;
         }
@@ -920,9 +903,7 @@ async fn terminal_connection_task(
             }
             _ => {
                 let _ = event_tx
-                    .send(TerminalOutputEvent::ConnectionLost {
-                        id: terminal_id,
-                    })
+                    .send(TerminalOutputEvent::ConnectionLost { id: terminal_id })
                     .await;
                 return;
             }
@@ -1030,11 +1011,8 @@ pub fn render_overview(
     batch_map: &HashMap<String, BatchAgentInfo>,
 ) {
     // Split into filter bar (1 row) + panels area
-    let [options_area, panels_area] = Layout::vertical([
-        Constraint::Length(1),
-        Constraint::Min(0),
-    ])
-    .areas(area);
+    let [options_area, panels_area] =
+        Layout::vertical([Constraint::Length(1), Constraint::Min(0)]).areas(area);
 
     // 1. Compute sorted+filtered panel indices (populates state.sorted_indices)
     state.compute_sorted_indices(repos, batch_map);
@@ -1094,12 +1072,24 @@ pub fn render_overview(
         let panel = &mut state.panels[global_idx];
         let is_focused = matches!(focus, OverviewFocus::Terminal(idx) if idx == global_idx);
         click_map.overview_panels.push((panel_areas[i], global_idx));
-        let panel_color = panel.repo_path.as_ref()
+        let panel_color = panel
+            .repo_path
+            .as_ref()
             .and_then(|rp| repo_colors.get(rp.as_str()))
             .map(|cn| theme::repo_color(cn));
         let batch_info = batch_map.get(&panel.id);
-        if let Some(content_area) = render_agent_panel(frame, panel_areas[i], panel, is_focused, false, panel_color, batch_info) {
-            click_map.overview_content_areas.push((content_area, global_idx));
+        if let Some(content_area) = render_agent_panel(
+            frame,
+            panel_areas[i],
+            panel,
+            is_focused,
+            false,
+            panel_color,
+            batch_info,
+        ) {
+            click_map
+                .overview_content_areas
+                .push((content_area, global_idx));
         }
     }
 
@@ -1250,10 +1240,7 @@ fn render_options_bar(
         };
 
         let dot_span = Span::styled(" \u{25cf} ", Style::default().fg(dot_color).bg(chip_bg));
-        let name_span = Span::styled(
-            "Other ",
-            Style::default().fg(text_color).bg(chip_bg),
-        );
+        let name_span = Span::styled("Other ", Style::default().fg(text_color).bg(chip_bg));
 
         let chip_width: u16 = 3 + 6; // " ● " + "Other "
         if x + chip_width <= area.x + area.width {
@@ -1278,9 +1265,7 @@ fn render_options_bar(
     if !panels.is_empty() {
         spans.push(Span::styled(
             " \u{2502} ",
-            Style::default()
-                .fg(theme::R_TEXT_TERTIARY)
-                .bg(bar_bg),
+            Style::default().fg(theme::R_TEXT_TERTIARY).bg(bar_bg),
         ));
         x += 3;
     }
@@ -1368,17 +1353,11 @@ fn render_options_bar(
 
         let style = if is_visible {
             // Inverse video: repo color background, primary text
-            Style::default()
-                .fg(theme::R_TEXT_PRIMARY)
-                .bg(repo_color)
+            Style::default().fg(theme::R_TEXT_PRIMARY).bg(repo_color)
         } else if is_repo_collapsed {
-            Style::default()
-                .fg(theme::R_TEXT_DISABLED)
-                .bg(bar_bg)
+            Style::default().fg(theme::R_TEXT_DISABLED).bg(bar_bg)
         } else {
-            Style::default()
-                .fg(repo_color)
-                .bg(bar_bg)
+            Style::default().fg(repo_color).bg(bar_bg)
         };
 
         let branch_text = format!(" {branch} ");
@@ -1477,11 +1456,8 @@ fn render_agent_panel(
     }
 
     // Split inner area into header (1 row) + terminal content
-    let [header_area, content_area] = Layout::vertical([
-        Constraint::Length(1),
-        Constraint::Min(0),
-    ])
-    .areas(inner);
+    let [header_area, content_area] =
+        Layout::vertical([Constraint::Length(1), Constraint::Min(0)]).areas(inner);
 
     // Header
     let header_bg = if focused {
@@ -1497,21 +1473,14 @@ fn render_agent_panel(
 
     let mut header_spans = vec![
         Span::styled(" ", Style::default().bg(header_bg)),
-        Span::styled(
-            &panel.id,
-            Style::default().fg(id_color).bg(header_bg),
-        ),
+        Span::styled(&panel.id, Style::default().fg(id_color).bg(header_bg)),
         Span::styled(
             " · ",
-            Style::default()
-                .fg(theme::R_TEXT_TERTIARY)
-                .bg(header_bg),
+            Style::default().fg(theme::R_TEXT_TERTIARY).bg(header_bg),
         ),
         Span::styled(
             &panel.agent_binary,
-            Style::default()
-                .fg(theme::R_TEXT_SECONDARY)
-                .bg(header_bg),
+            Style::default().fg(theme::R_TEXT_SECONDARY).bg(header_bg),
         ),
         Span::styled(" ", Style::default().bg(header_bg)),
     ];
@@ -1524,9 +1493,7 @@ fn render_agent_panel(
         let repo_fg = repo_color.unwrap_or(theme::R_ACCENT);
         header_spans.push(Span::styled(
             "· ",
-            Style::default()
-                .fg(theme::R_TEXT_TERTIARY)
-                .bg(header_bg),
+            Style::default().fg(theme::R_TEXT_TERTIARY).bg(header_bg),
         ));
         header_spans.push(Span::styled(
             repo_display,
@@ -1535,24 +1502,18 @@ fn render_agent_panel(
         if let Some(ref branch) = panel.branch_name {
             header_spans.push(Span::styled(
                 format!("/{branch}"),
-                Style::default()
-                    .fg(theme::R_TEXT_TERTIARY)
-                    .bg(header_bg),
+                Style::default().fg(theme::R_TEXT_TERTIARY).bg(header_bg),
             ));
         }
         header_spans.push(Span::styled(" ", Style::default().bg(header_bg)));
     } else if let Some(ref branch) = panel.branch_name {
         header_spans.push(Span::styled(
             "· ",
-            Style::default()
-                .fg(theme::R_TEXT_TERTIARY)
-                .bg(header_bg),
+            Style::default().fg(theme::R_TEXT_TERTIARY).bg(header_bg),
         ));
         header_spans.push(Span::styled(
             branch.as_str(),
-            Style::default()
-                .fg(theme::R_TEXT_TERTIARY)
-                .bg(header_bg),
+            Style::default().fg(theme::R_TEXT_TERTIARY).bg(header_bg),
         ));
         header_spans.push(Span::styled(" ", Style::default().bg(header_bg)));
     }
@@ -1590,10 +1551,7 @@ fn render_agent_panel(
         ));
     }
 
-    frame.render_widget(
-        Paragraph::new(Line::from(header_spans)),
-        header_area,
-    );
+    frame.render_widget(Paragraph::new(Line::from(header_spans)), header_area);
 
     // Terminal content
     let lines = if panel.panel_scroll_offset > 0 {
@@ -1720,7 +1678,12 @@ impl BranchPicker {
     /// Returns filtered branches as (original_index, score) sorted by score descending.
     pub fn filtered_branches(&self) -> Vec<(usize, i64)> {
         if self.input.is_empty() {
-            return self.branches.iter().enumerate().map(|(i, _)| (i, 0)).collect();
+            return self
+                .branches
+                .iter()
+                .enumerate()
+                .map(|(i, _)| (i, 0))
+                .collect();
         }
         let mut results: Vec<(usize, i64)> = self
             .branches
@@ -1802,8 +1765,11 @@ impl BranchPicker {
             }
             KeyCode::Right => {
                 if self.cursor_pos < self.input.len() {
-                    self.cursor_pos +=
-                        self.input[self.cursor_pos..].chars().next().unwrap().len_utf8();
+                    self.cursor_pos += self.input[self.cursor_pos..]
+                        .chars()
+                        .next()
+                        .unwrap()
+                        .len_utf8();
                 }
                 false
             }
@@ -2020,16 +1986,14 @@ impl FocusModeState {
         if repo_path.is_some() {
             let (stop_tx, stop_rx) = watch::channel(false);
             let diff_tx = self.diff_tx.clone();
-            let diff_handle =
-                gitdiff::spawn_diff_task(working_dir.to_string(), diff_tx, stop_rx);
+            let diff_handle = gitdiff::spawn_diff_task(working_dir.to_string(), diff_tx, stop_rx);
             self.diff_stop_tx = Some(stop_tx);
             self.diff_task = Some(diff_handle);
 
             // Spawn one-shot PR detection task
             if branch_name.is_some() {
                 let pr_tx = self.pr_detection_tx.clone();
-                let pr_handle =
-                    gitdiff::spawn_pr_detection_task(working_dir.to_string(), pr_tx);
+                let pr_handle = gitdiff::spawn_pr_detection_task(working_dir.to_string(), pr_tx);
                 self.pr_detection_task = Some(pr_handle);
             }
         }
@@ -2045,10 +2009,7 @@ impl FocusModeState {
         if existing_terminals.panels.is_empty() {
             self.terminal_panels = Vec::new();
             self.current_terminal_idx = 0;
-            self.spawn_new_terminal(
-                working_dir,
-                Some(agent_id.to_string()),
-            );
+            self.spawn_new_terminal(working_dir, Some(agent_id.to_string()));
         } else {
             self.install_existing_terminals(existing_terminals);
         }
@@ -2090,8 +2051,7 @@ impl FocusModeState {
                         panel.vterm.process(&data);
                     }
                 }
-                AgentOutputEvent::Exited { id, .. }
-                | AgentOutputEvent::ConnectionLost { id } => {
+                AgentOutputEvent::Exited { id, .. } | AgentOutputEvent::ConnectionLost { id } => {
                     if let Some(panel) = self.panel.as_mut().filter(|p| p.id == id) {
                         panel.exited = true;
                     }
@@ -2257,11 +2217,7 @@ impl FocusModeState {
     /// Spawn a new terminal session, append it to `terminal_panels`, and make
     /// it the active terminal. The new terminal inherits the agent's lifetime
     /// (hub kills it when the agent exits) by passing `agent_id`.
-    fn spawn_new_terminal(
-        &mut self,
-        working_dir: &str,
-        agent_id: Option<String>,
-    ) {
+    fn spawn_new_terminal(&mut self, working_dir: &str, agent_id: Option<String>) {
         let cols = self.terminal_cols;
         let rows = self.terminal_rows;
 
@@ -2683,17 +2639,22 @@ fn build_selection_text(
 }
 
 /// Render the focus mode view: 60% left panel with tabs, 40% agent panel right.
-pub fn render_focus_mode(frame: &mut Frame, area: Rect, state: &mut FocusModeState, click_map: &mut ClickMap, repo_colors: &HashMap<String, String>) {
-    let [left_area, right_area] = Layout::horizontal([
-        Constraint::Percentage(60),
-        Constraint::Percentage(40),
-    ])
-    .areas(area);
+pub fn render_focus_mode(
+    frame: &mut Frame,
+    area: Rect,
+    state: &mut FocusModeState,
+    click_map: &mut ClickMap,
+    repo_colors: &HashMap<String, String>,
+) {
+    let [left_area, right_area] =
+        Layout::horizontal([Constraint::Percentage(60), Constraint::Percentage(40)]).areas(area);
 
     click_map.focus_left_area = left_area;
     click_map.focus_right_area = right_area;
 
-    let panel_color = state.repo_path.as_ref()
+    let panel_color = state
+        .repo_path
+        .as_ref()
         .and_then(|rp| repo_colors.get(rp.as_str()))
         .map(|cn| theme::repo_color(cn));
 
@@ -2708,7 +2669,15 @@ pub fn render_focus_mode(frame: &mut Frame, area: Rect, state: &mut FocusModeSta
     let right_focused = state.focus_side == FocusSide::Right;
     match &mut state.panel {
         Some(panel) => {
-            if let Some(content_area) = render_agent_panel(frame, right_area, panel, right_focused, true, panel_color, None) {
+            if let Some(content_area) = render_agent_panel(
+                frame,
+                right_area,
+                panel,
+                right_focused,
+                true,
+                panel_color,
+                None,
+            ) {
                 click_map.focus_right_content_area = content_area;
             }
         }
@@ -2716,7 +2685,13 @@ pub fn render_focus_mode(frame: &mut Frame, area: Rect, state: &mut FocusModeSta
     }
 }
 
-fn render_left_panel(frame: &mut Frame, area: Rect, state: &mut FocusModeState, click_map: &mut ClickMap, repo_color: Option<Color>) {
+fn render_left_panel(
+    frame: &mut Frame,
+    area: Rect,
+    state: &mut FocusModeState,
+    click_map: &mut ClickMap,
+    repo_color: Option<Color>,
+) {
     if area.height < 2 {
         frame.render_widget(
             Block::default().style(Style::default().bg(theme::R_BG_BASE)),
@@ -2725,11 +2700,8 @@ fn render_left_panel(frame: &mut Frame, area: Rect, state: &mut FocusModeState, 
         return;
     }
 
-    let [tab_area, content_area] = Layout::vertical([
-        Constraint::Length(1),
-        Constraint::Min(0),
-    ])
-    .areas(area);
+    let [tab_area, content_area] =
+        Layout::vertical([Constraint::Length(1), Constraint::Min(0)]).areas(area);
 
     // Render tab bar
     let left_focused = state.focus_side == FocusSide::Left;
@@ -2758,7 +2730,11 @@ fn render_left_panel(frame: &mut Frame, area: Rect, state: &mut FocusModeState, 
             state.diff_error.as_deref(),
             "No uncommitted changes",
             repo_color,
-            if left_focused { Some(state.diff_cursor) } else { None },
+            if left_focused {
+                Some(state.diff_cursor)
+            } else {
+                None
+            },
             state.diff_sel_anchor,
         ),
         LeftPanelTab::Compare => render_compare_tab(frame, content_area, state, repo_color),
@@ -2794,11 +2770,8 @@ fn render_terminal_tab(
     if area.height < 1 {
         return;
     }
-    let [label_area, content_area] = Layout::vertical([
-        Constraint::Length(1),
-        Constraint::Min(0),
-    ])
-    .areas(area);
+    let [label_area, content_area] =
+        Layout::vertical([Constraint::Length(1), Constraint::Min(0)]).areas(area);
 
     render_terminal_label_strip(
         frame,
@@ -2845,25 +2818,18 @@ fn render_terminal_tab(
     } else {
         panel.vterm.to_ratatui_lines()
     };
-    let paragraph = Paragraph::new(lines)
-        .style(Style::default().bg(theme::R_BG_BASE));
+    let paragraph = Paragraph::new(lines).style(Style::default().bg(theme::R_BG_BASE));
     frame.render_widget(paragraph, content_area);
 
     // Show the hardware cursor only when the terminal is the active input
     // target — i.e., focus_side == Left AND sub-mode == Type. In Navigate
     // mode the cursor is hidden so the user has a clear visual cue that
     // typing won't reach the shell.
-    if panel_focused
-        && in_type_mode
-        && panel.scroll_offset == 0
-        && !panel.vterm.hide_cursor()
-    {
+    if panel_focused && in_type_mode && panel.scroll_offset == 0 && !panel.vterm.hide_cursor() {
         let (cursor_row, cursor_col) = panel.vterm.cursor_position();
         let x = content_area.x + cursor_col;
         let y = content_area.y + cursor_row;
-        if x < content_area.x + content_area.width
-            && y < content_area.y + content_area.height
-        {
+        if x < content_area.x + content_area.width && y < content_area.y + content_area.height {
             frame.set_cursor_position(Position { x, y });
         }
     }
@@ -2919,10 +2885,7 @@ fn render_terminal_label_strip(
 
         // separator between labels (small gap)
         if idx + 1 < panels.len() {
-            spans.push(Span::styled(
-                " ",
-                Style::default().bg(theme::R_BG_SURFACE),
-            ));
+            spans.push(Span::styled(" ", Style::default().bg(theme::R_BG_SURFACE)));
             cursor_x += 1;
         }
     }
@@ -2954,8 +2917,7 @@ fn render_terminal_label_strip(
         height: 1,
     };
 
-    let para = Paragraph::new(Line::from(spans))
-        .style(Style::default().bg(theme::R_BG_SURFACE));
+    let para = Paragraph::new(Line::from(spans)).style(Style::default().bg(theme::R_BG_SURFACE));
     frame.render_widget(para, area);
 }
 
@@ -3004,10 +2966,7 @@ fn render_left_tab_bar(
         };
 
         let style = if is_active {
-            Style::default()
-                .fg(fg)
-                .bg(bg)
-                .add_modifier(Modifier::BOLD)
+            Style::default().fg(fg).bg(bg).add_modifier(Modifier::BOLD)
         } else {
             Style::default().fg(fg).bg(bg)
         };
@@ -3023,7 +2982,12 @@ fn render_left_tab_bar(
             let total_width = label_width + pr_width;
 
             click_map.focus_left_tabs.push((
-                Rect { x: cursor_x, y: area.y, width: total_width, height: 1 },
+                Rect {
+                    x: cursor_x,
+                    y: area.y,
+                    width: total_width,
+                    height: 1,
+                },
                 *tab,
             ));
 
@@ -3049,7 +3013,12 @@ fn render_left_tab_bar(
             let sub_width = sub_label.chars().count() as u16;
             let total_width = label_width + sub_width;
             click_map.focus_left_tabs.push((
-                Rect { x: cursor_x, y: area.y, width: total_width, height: 1 },
+                Rect {
+                    x: cursor_x,
+                    y: area.y,
+                    width: total_width,
+                    height: 1,
+                },
                 *tab,
             ));
             spans.push(Span::styled(label, style));
@@ -3066,7 +3035,12 @@ fn render_left_tab_bar(
         } else {
             let label_width = label.chars().count() as u16;
             click_map.focus_left_tabs.push((
-                Rect { x: cursor_x, y: area.y, width: label_width, height: 1 },
+                Rect {
+                    x: cursor_x,
+                    y: area.y,
+                    width: label_width,
+                    height: 1,
+                },
                 *tab,
             ));
             cursor_x += label_width;
@@ -3192,11 +3166,8 @@ fn render_diff_viewer(
 
     // Split area for hint bar when cursor is active
     let (body_area, hint_area) = if cursor.is_some() && area.height >= 2 {
-        let [body, hint] = Layout::vertical([
-            Constraint::Min(0),
-            Constraint::Length(1),
-        ])
-        .areas(area);
+        let [body, hint] =
+            Layout::vertical([Constraint::Min(0), Constraint::Length(1)]).areas(area);
         (body, Some(hint))
     } else {
         (area, None)
@@ -3267,7 +3238,10 @@ fn render_diff_viewer(
         let gutter_style = Style::default().fg(theme::R_TEXT_TERTIARY).bg(row_bg);
         let sep_style = Style::default().fg(theme::R_TEXT_DISABLED).bg(row_bg);
         let content_style = if diff_line.kind == gitdiff::DiffLineKind::FileHeader {
-            Style::default().fg(content_fg).bg(row_bg).add_modifier(Modifier::BOLD)
+            Style::default()
+                .fg(content_fg)
+                .bg(row_bg)
+                .add_modifier(Modifier::BOLD)
         } else {
             Style::default().fg(content_fg).bg(row_bg)
         };
@@ -3292,7 +3266,8 @@ fn render_diff_viewer(
 
         // File headers: show clean file name instead of raw "diff --git ..." line
         let display_content = if diff_line.kind == gitdiff::DiffLineKind::FileHeader {
-            diff.file_names.get(diff_line.file_idx)
+            diff.file_names
+                .get(diff_line.file_idx)
                 .map(|s| format!(" {s}"))
                 .unwrap_or_else(|| diff_line.content.clone())
         } else {
@@ -3308,9 +3283,8 @@ fn render_diff_viewer(
                 let file_syntax = file_name.and_then(syntax::syntax_for_file);
                 match file_syntax {
                     Some(syn) => {
-                        let spans = syntax::highlight_line(
-                            &display_content, syn, row_bg, content_fg,
-                        );
+                        let spans =
+                            syntax::highlight_line(&display_content, syn, row_bg, content_fg);
                         if spans.is_empty() {
                             vec![Span::styled(display_content, content_style)]
                         } else {
@@ -3343,9 +3317,8 @@ fn render_diff_viewer(
                 Span::styled(sep_for_row, sep_style),
             ];
 
-            let row_content_chars: usize = row_spans.iter()
-                .map(|s| s.content.chars().count())
-                .sum();
+            let row_content_chars: usize =
+                row_spans.iter().map(|s| s.content.chars().count()).sum();
             spans.extend(row_spans);
 
             let pad = (content_width as usize).saturating_sub(row_content_chars);
@@ -3416,11 +3389,8 @@ fn render_compare_tab(
             render_picker_branch_list(frame, list_area, &state.compare_picker);
         }
         BranchPickerMode::Selected => {
-            let [label_area, diff_area] = Layout::vertical([
-                Constraint::Length(1),
-                Constraint::Min(0),
-            ])
-            .areas(area);
+            let [label_area, diff_area] =
+                Layout::vertical([Constraint::Length(1), Constraint::Min(0)]).areas(area);
 
             render_compare_label(frame, label_area, &state.compare_picker);
 
@@ -3434,7 +3404,11 @@ fn render_compare_tab(
                     state.compare_diff_error.as_deref(),
                     "No differences",
                     repo_color,
-                    if left_focused { Some(state.compare_cursor) } else { None },
+                    if left_focused {
+                        Some(state.compare_cursor)
+                    } else {
+                        None
+                    },
                     state.compare_sel_anchor,
                 );
             } else {
@@ -3454,14 +3428,8 @@ fn render_compare_tab(
 
 fn render_compare_label(frame: &mut Frame, area: Rect, picker: &BranchPicker) {
     let (label, hint) = match &picker.selected_branch {
-        Some(branch) => (
-            format!(" Comparing: {branch}"),
-            " [Enter] change ",
-        ),
-        None => (
-            " No branch selected".to_string(),
-            " [Enter] select ",
-        ),
+        Some(branch) => (format!(" Comparing: {branch}"), " [Enter] change "),
+        None => (" No branch selected".to_string(), " [Enter] select "),
     };
 
     let hint_width = hint.chars().count();
@@ -3469,7 +3437,11 @@ fn render_compare_label(frame: &mut Frame, area: Rect, picker: &BranchPicker) {
 
     // Truncate label if needed
     let display_label: String = if label.chars().count() > label_width {
-        label.chars().take(label_width.saturating_sub(1)).collect::<String>() + "…"
+        label
+            .chars()
+            .take(label_width.saturating_sub(1))
+            .collect::<String>()
+            + "…"
     } else {
         let pad = label_width.saturating_sub(label.chars().count());
         format!("{}{}", label, " ".repeat(pad))
@@ -3597,10 +3569,7 @@ fn render_picker_branch_list(frame: &mut Frame, area: Rect, picker: &BranchPicke
                 ));
             }
             if branch.is_head {
-                spans.push(Span::styled(
-                    " HEAD",
-                    Style::default().fg(theme::R_SUCCESS),
-                ));
+                spans.push(Span::styled(" HEAD", Style::default().fg(theme::R_SUCCESS)));
             }
             if branch.is_worktree {
                 spans.push(Span::styled(
@@ -3613,7 +3582,11 @@ fn render_picker_branch_list(frame: &mut Frame, area: Rect, picker: &BranchPicke
                     format!(
                         " ({} agent{})",
                         branch.active_agent_count,
-                        if branch.active_agent_count == 1 { "" } else { "s" }
+                        if branch.active_agent_count == 1 {
+                            ""
+                        } else {
+                            "s"
+                        }
                     ),
                     Style::default().fg(theme::R_WARNING),
                 ));

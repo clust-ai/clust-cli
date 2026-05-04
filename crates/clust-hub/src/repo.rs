@@ -175,8 +175,7 @@ fn list_branches<A: AgentMatcher>(
                 agents
                     .values()
                     .filter(|a| {
-                        a.repo_path() == Some(rp.as_str())
-                            && a.branch_name() == Some(&name)
+                        a.repo_path() == Some(rp.as_str()) && a.branch_name() == Some(&name)
                     })
                     .count()
             });
@@ -288,8 +287,7 @@ pub fn ensure_global_worktree_exclude() -> Result<(), String> {
     if !content.is_empty() && !content.ends_with('\n') {
         writeln!(file).map_err(|e| format!("failed to write exclude: {e}"))?;
     }
-    writeln!(file, "{exclude_entry}")
-        .map_err(|e| format!("failed to write exclude entry: {e}"))?;
+    writeln!(file, "{exclude_entry}").map_err(|e| format!("failed to write exclude entry: {e}"))?;
 
     Ok(())
 }
@@ -306,8 +304,7 @@ fn ensure_clust_dir_excluded(repo_root: &Path) -> Result<(), String> {
     }
 
     if let Some(parent) = exclude_path.parent() {
-        std::fs::create_dir_all(parent)
-            .map_err(|e| format!("failed to create .git/info/: {e}"))?;
+        std::fs::create_dir_all(parent).map_err(|e| format!("failed to create .git/info/: {e}"))?;
     }
 
     use std::io::Write;
@@ -320,8 +317,7 @@ fn ensure_clust_dir_excluded(repo_root: &Path) -> Result<(), String> {
     if !content.is_empty() && !content.ends_with('\n') {
         writeln!(file).map_err(|e| format!("failed to write exclude: {e}"))?;
     }
-    writeln!(file, "{exclude_entry}")
-        .map_err(|e| format!("failed to write exclude entry: {e}"))?;
+    writeln!(file, "{exclude_entry}").map_err(|e| format!("failed to write exclude entry: {e}"))?;
 
     Ok(())
 }
@@ -406,8 +402,7 @@ pub fn list_worktrees<A: AgentMatcher>(
                     let matching_agents: Vec<AgentInfo> = agents
                         .values()
                         .filter(|a| {
-                            a.repo_path()
-                                .map(|rp| rp.trim_end_matches('/'))
+                            a.repo_path().map(|rp| rp.trim_end_matches('/'))
                                 == Some(repo_root_str.as_str())
                                 && a.branch_name() == Some(branch.as_str())
                         })
@@ -638,11 +633,7 @@ pub fn remove_worktree(
 }
 
 /// Delete a local branch, removing its worktree first if one exists.
-pub fn delete_local_branch(
-    repo_root: &Path,
-    branch: &str,
-    force: bool,
-) -> Result<(), String> {
+pub fn delete_local_branch(repo_root: &Path, branch: &str, force: bool) -> Result<(), String> {
     let wt_path = worktree_path(repo_root, branch);
     if wt_path.exists() {
         // remove_worktree with delete_branch=true handles both
@@ -677,8 +668,8 @@ pub fn delete_local_branch(
 /// - Not checked out: `git fetch origin <branch>:<branch>` (fast-forward only)
 pub fn pull_branch(repo_root: &Path, branch: &str) -> Result<String, String> {
     // Determine head branch of the main worktree
-    let repo = git2::Repository::open(repo_root)
-        .map_err(|e| format!("failed to open repo: {e}"))?;
+    let repo =
+        git2::Repository::open(repo_root).map_err(|e| format!("failed to open repo: {e}"))?;
     let head_branch = repo
         .head()
         .ok()
@@ -731,10 +722,7 @@ pub fn pull_branch(repo_root: &Path, branch: &str) -> Result<String, String> {
 }
 
 /// Delete a remote branch (e.g. "origin/feature-x").
-pub fn delete_remote_branch(
-    repo_root: &Path,
-    remote_branch: &str,
-) -> Result<(), String> {
+pub fn delete_remote_branch(repo_root: &Path, remote_branch: &str) -> Result<(), String> {
     let mut parts = remote_branch.splitn(2, '/');
     let remote = parts
         .next()
@@ -758,10 +746,7 @@ pub fn delete_remote_branch(
 }
 
 /// Checkout a remote branch locally with tracking (e.g. "origin/feature-x").
-pub fn checkout_remote_branch(
-    repo_root: &Path,
-    remote_branch: &str,
-) -> Result<String, String> {
+pub fn checkout_remote_branch(repo_root: &Path, remote_branch: &str) -> Result<String, String> {
     let mut parts = remote_branch.splitn(2, '/');
     let _remote = parts
         .next()
@@ -821,7 +806,9 @@ pub fn purge_worktrees(repo_root: &Path) -> Result<usize, String> {
         if let Some(path) = line.strip_prefix("worktree ") {
             current_path = Some(path.to_string());
             is_main = false;
-        } else if line == "bare" || current_path.as_deref() == Some(repo_root.to_string_lossy().trim_end_matches('/')) {
+        } else if line == "bare"
+            || current_path.as_deref() == Some(repo_root.to_string_lossy().trim_end_matches('/'))
+        {
             is_main = true;
         } else if line.is_empty() {
             if let Some(ref path) = current_path {
@@ -855,9 +842,12 @@ pub fn purge_worktrees(repo_root: &Path) -> Result<usize, String> {
 
 /// Delete all non-HEAD local branches.
 pub fn purge_branches(repo_root: &Path) -> Result<usize, String> {
-    let repo = git2::Repository::open(repo_root)
-        .map_err(|e| format!("failed to open repo: {e}"))?;
-    let head_name = repo.head().ok().and_then(|h| h.shorthand().map(String::from));
+    let repo =
+        git2::Repository::open(repo_root).map_err(|e| format!("failed to open repo: {e}"))?;
+    let head_name = repo
+        .head()
+        .ok()
+        .and_then(|h| h.shorthand().map(String::from));
 
     let mut deleted_branches = 0;
     if let Ok(branches) = repo.branches(Some(git2::BranchType::Local)) {
@@ -970,7 +960,14 @@ pub fn ensure_main_branch(repo_path: &Path) {
         Ok(t) => t,
         Err(_) => return,
     };
-    let _ = repo.commit(Some("refs/heads/main"), &sig, &sig, "Initial commit", &tree, &[]);
+    let _ = repo.commit(
+        Some("refs/heads/main"),
+        &sig,
+        &sig,
+        "Initial commit",
+        &tree,
+        &[],
+    );
     let _ = repo.set_head("refs/heads/main");
 }
 
@@ -1178,12 +1175,7 @@ mod tests {
     #[test]
     fn get_repo_state_shows_active_agent() {
         let (dir, repo) = create_test_repo();
-        let head_branch = repo
-            .head()
-            .unwrap()
-            .shorthand()
-            .unwrap()
-            .to_string();
+        let head_branch = repo.head().unwrap().shorthand().unwrap().to_string();
 
         let agents: HashMap<String, AgentEntry> = HashMap::new();
         let state = get_repo_state(dir.path(), "test-repo", &agents).unwrap();
@@ -1202,7 +1194,13 @@ mod tests {
 
         // Use git CLI to add worktree (git2's worktree API is cumbersome for creation)
         let status = Command::new("git")
-            .args(["worktree", "add", wt_path.to_str().unwrap(), "-b", "wt-branch"])
+            .args([
+                "worktree",
+                "add",
+                wt_path.to_str().unwrap(),
+                "-b",
+                "wt-branch",
+            ])
             .current_dir(dir.path())
             .output()
             .unwrap();
@@ -1257,7 +1255,12 @@ mod tests {
         let mut agents = HashMap::new();
         agents.insert(
             "abc123".to_string(),
-            test_agent("abc123", Some(&repo_path_str), Some("nonexistent-branch"), false),
+            test_agent(
+                "abc123",
+                Some(&repo_path_str),
+                Some("nonexistent-branch"),
+                false,
+            ),
         );
 
         let state = get_repo_state(&canon(dir.path()), "test-repo", &agents).unwrap();
@@ -1281,7 +1284,12 @@ mod tests {
         let mut agents = HashMap::new();
         agents.insert(
             "abc123".to_string(),
-            test_agent("abc123", Some("/some/other/repo"), Some(&head_branch), false),
+            test_agent(
+                "abc123",
+                Some("/some/other/repo"),
+                Some(&head_branch),
+                false,
+            ),
         );
 
         let state = get_repo_state(&canon(dir.path()), "test-repo", &agents).unwrap();
@@ -1304,7 +1312,13 @@ mod tests {
         let wt_path = dir.path().join("wt-test");
 
         let status = Command::new("git")
-            .args(["worktree", "add", wt_path.to_str().unwrap(), "-b", "wt-test"])
+            .args([
+                "worktree",
+                "add",
+                wt_path.to_str().unwrap(),
+                "-b",
+                "wt-test",
+            ])
             .current_dir(dir.path())
             .output()
             .unwrap();
@@ -1317,11 +1331,11 @@ mod tests {
         let state = get_repo_state(dir.path(), "test-repo", &agents).unwrap();
 
         // The worktree branch should be marked is_worktree: true
-        let wt_branch = state
-            .local_branches
-            .iter()
-            .find(|b| b.name == "wt-test");
-        assert!(wt_branch.is_some(), "worktree branch should appear in local branches");
+        let wt_branch = state.local_branches.iter().find(|b| b.name == "wt-test");
+        assert!(
+            wt_branch.is_some(),
+            "worktree branch should appear in local branches"
+        );
         assert!(
             wt_branch.unwrap().is_worktree,
             "worktree branch should have is_worktree=true"
@@ -1334,7 +1348,13 @@ mod tests {
         let wt_path = dir.path().join("wt-detect");
 
         let status = Command::new("git")
-            .args(["worktree", "add", wt_path.to_str().unwrap(), "-b", "wt-detect"])
+            .args([
+                "worktree",
+                "add",
+                wt_path.to_str().unwrap(),
+                "-b",
+                "wt-detect",
+            ])
             .current_dir(dir.path())
             .output()
             .unwrap();
@@ -1394,10 +1414,7 @@ mod tests {
     #[test]
     fn serialize_branch_name_with_slashes() {
         assert_eq!(serialize_branch_name("feature/auth"), "feature__auth");
-        assert_eq!(
-            serialize_branch_name("feat/sub/deep"),
-            "feat__sub__deep"
-        );
+        assert_eq!(serialize_branch_name("feat/sub/deep"), "feat__sub__deep");
     }
 
     #[test]
@@ -1437,10 +1454,8 @@ mod tests {
         let (dir, _repo) = create_test_repo();
         ensure_clust_dir_excluded(dir.path()).unwrap();
 
-        let exclude = std::fs::read_to_string(
-            dir.path().join(".git").join("info").join("exclude"),
-        )
-        .unwrap();
+        let exclude =
+            std::fs::read_to_string(dir.path().join(".git").join("info").join("exclude")).unwrap();
         assert!(exclude.contains(".clust/"));
     }
 
@@ -1450,10 +1465,8 @@ mod tests {
         ensure_clust_dir_excluded(dir.path()).unwrap();
         ensure_clust_dir_excluded(dir.path()).unwrap();
 
-        let exclude = std::fs::read_to_string(
-            dir.path().join(".git").join("info").join("exclude"),
-        )
-        .unwrap();
+        let exclude =
+            std::fs::read_to_string(dir.path().join(".git").join("info").join("exclude")).unwrap();
         assert_eq!(
             exclude.matches(".clust/").count(),
             1,

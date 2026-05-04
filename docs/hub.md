@@ -458,6 +458,68 @@ The CLI can also mutate batches at any point via `AddBatchTask`, `UpdateBatchTas
 
 On startup, the hub loads all non-completed batches (idle, scheduled, and running) from SQLite. Any tasks that were `Active` but whose agents no longer exist (due to hub restart) are marked as `Done` in both memory and the database. The batch timer then handles starting new tasks on the next tick. Idle batches are preserved as-is, allowing the CLI to reconstruct its Tasks tab state via `ListQueuedBatches`.
 
+## Orchestrator Inbox
+
+The orchestrator agent produces batch definitions to disk under `~/.clust/inbox/<orch_id>/` and the hub imports those into `queued_batches` once the orchestrator marks the manifest complete. The flow is restart-safe — the filesystem is the source of truth, not in-memory state.
+
+### Spawn-time Sidecar
+
+When `spawn_orchestrator` runs, the hub creates the inbox dir and immediately writes an **`orch.json` sidecar** containing the orchestrator id, agent id, repo path, source branch, and target branch. The write is atomic (write tmp -> rename), so the watcher can never observe a partial sidecar. The sidecar lets the watcher rebuild a usable `OrchestratorEntry` after a hub restart wiped `state.orchestrators`.
+
+### Inbox Layout
+
+```
+~/.clust/inbox/<orch_id>/
+├── orch.json                # Sidecar (always present once orch spawned)
+├── manifest.json            # Written by orch when batches ready (complete: true)
+├── manifest.processing      # Atomic-rename marker held during import
+├── batch-*.json             # Per-batch payloads referenced by the manifest
+└── error.log                # Validation/import errors (only on failure)
+```
+
+After a successful import, the entire dir is moved to `~/.clust/inbox/.processed/<orch_id>/` so the JSON files remain available for later cleanup (see "Cleanup on Batch Delete" below).
+
+### Watcher (`spawn_inbox_watcher`)
+
+A background tokio task runs `scan_inboxes` on two triggers:
+
+- **5s polling tick** (default cadence).
+- **`inbox_scan_signal: Arc<Notify>` on `HubState`**, which is nudged immediately whenever an orchestrator agent exits — this lets the watcher react to the most common case (orchestrator finished writing manifest) without waiting up to 5 seconds.
+
+`scan_inboxes` walks `~/.clust/inbox/*` directly from disk every tick. It does **not** iterate `state.orchestrators`, so a hub restart between the orchestrator writing the manifest and the next watcher tick can no longer cause the batches to be lost.
+
+### Atomic-Claim Import
+
+For each candidate inbox the watcher:
+
+1. If `manifest.processing` already exists, treat it as a resumed import (a previous scan crashed mid-import). Reads it directly.
+2. Otherwise reads `manifest.json`; if `complete` is not `true`, leaves it alone for the next tick.
+3. Atomically renames `manifest.json` -> `manifest.processing`. Failure here means another concurrent scan claimed the manifest first; skip silently.
+4. Resolves orchestrator metadata from the on-disk sidecar (preferred), falling back to the live in-memory entry. If neither is available, an error is written to `error.log` and the inbox is left in place (a future hub may resolve the entry; the GC handles truly stale dirs).
+5. Parses each referenced `batch-*.json`, dedups files already imported under this orchestrator id (via `imported_batches_for_orch`), runs validation, appends the orchestrator commit suffix, and inserts each batch into `queued_batches` with `orchestrator_id` and `orchestrator_batch_file` populated.
+6. Stops the orchestrator agent and archives the inbox dir to `.processed/<orch_id>/`.
+
+DB inserts are idempotent on `(orchestrator_id, batch_file)`, so a crash between step 5 and step 6 is safe — the next scan finds the leftover `manifest.processing` and re-imports without producing duplicates.
+
+### Conservative GC (`gc_orphan_inboxes`)
+
+Runs once at hub startup, **before the watcher spawns**. The previous behaviour archived any inbox dir lacking a live in-memory entry, which silently destroyed completed manifests across hub restarts. The current rules are:
+
+- Skip any dir with `manifest.json` having `complete: true`.
+- Skip any dir with a `manifest.processing` marker (resumable import).
+- Only archive dirs with no usable manifest **and** an mtime older than 24 hours.
+
+This guarantees that an orchestrator from a previous hub session is never yanked out from under itself, while still cleaning up genuinely abandoned inboxes.
+
+### Cleanup on Batch Delete
+
+When a batch is deleted via `DeleteBatch` in the UI:
+
+1. The IPC handler reads `(orchestrator_id, orchestrator_batch_file)` from the row before deleting it.
+2. After the DB row is removed, `inbox::delete_batch_source_file(orch_id, filename)` deletes the matching JSON from `~/.clust/inbox/.processed/<orch_id>/`.
+3. If that was the last remaining batch JSON in the dir, the helper also removes `manifest.json`/`manifest.processing`, the `orch.json` sidecar, and `error.log`, then `rmdir`s the now-empty dir.
+4. Both `orch_id` and `filename` are validated for path-traversal characters (`..`, `/`) before being joined, and the resolved path is checked to be inside `.processed/`.
+
 ## In-Memory State
 
 ```rust
@@ -468,6 +530,9 @@ struct HubState {
     bypass_permissions: bool,              // loaded from SQLite on startup; false if unset
     db: Option<rusqlite::Connection>,      // open SQLite connection; Some after init_db()
     queued_batches: Vec<HubBatchEntry>,    // loaded from SQLite on startup; managed by batch engine
+    orchestrators: HashMap<String, OrchestratorEntry>,  // live orchestrator agents; ephemeral (filesystem sidecar is the source of truth)
+    manager_locks: ManagerLockMap,         // per-(repo, target_branch) lock to serialize merge-manager checkouts
+    inbox_scan_signal: Arc<Notify>,        // nudged when an orchestrator exits, wakes the inbox watcher immediately
 }
 
 struct AgentEntry {
@@ -507,4 +572,7 @@ struct TerminalEntry {
 }
 ```
 
-This state is mostly in-memory and does not survive a hub restart. The exception is `queued_batches`, which are persisted in SQLite and reloaded on startup (see Batch Engine section above). The `HubBatchStatus` enum includes `Idle`, `Scheduled`, `Running`, and `Completed` states, with `Idle` being used for batches registered from the CLI that have not yet been scheduled or started.
+This state is mostly in-memory and does not survive a hub restart. The exceptions are:
+
+- **`queued_batches`** — persisted in SQLite and reloaded on startup (see Batch Engine section above). The `HubBatchStatus` enum includes `Idle`, `Scheduled`, `Running`, and `Completed` states, with `Idle` being used for batches registered from the CLI that have not yet been scheduled or started.
+- **`orchestrators`** — the in-memory map is ephemeral, but each entry has an on-disk `orch.json` sidecar in its inbox dir. The inbox watcher rebuilds an `OrchestratorEntry` from the sidecar after a hub restart, so completed manifests are still imported (see Orchestrator Inbox section above).

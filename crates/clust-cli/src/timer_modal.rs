@@ -118,15 +118,13 @@ impl TimerModal {
     pub fn handle_key(&mut self, key: KeyEvent) -> TimerResult {
         match key.code {
             KeyCode::Esc => TimerResult::Cancelled,
-            KeyCode::Enter => {
-                match self.try_parse() {
-                    Ok((rfc, _)) => TimerResult::Completed(rfc),
-                    Err(msg) => {
-                        self.error = Some(msg);
-                        TimerResult::Pending
-                    }
+            KeyCode::Enter => match self.try_parse() {
+                Ok((rfc, _)) => TimerResult::Completed(rfc),
+                Err(msg) => {
+                    self.error = Some(msg);
+                    TimerResult::Pending
                 }
-            }
+            },
             KeyCode::Backspace => {
                 if self.cursor_pos > 0 {
                     self.cursor_pos = self.input[..self.cursor_pos]
@@ -151,8 +149,11 @@ impl TimerModal {
             }
             KeyCode::Right => {
                 if self.cursor_pos < self.input.len() {
-                    self.cursor_pos +=
-                        self.input[self.cursor_pos..].chars().next().unwrap().len_utf8();
+                    self.cursor_pos += self.input[self.cursor_pos..]
+                        .chars()
+                        .next()
+                        .unwrap()
+                        .len_utf8();
                 }
                 TimerResult::Pending
             }

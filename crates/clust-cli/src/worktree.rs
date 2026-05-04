@@ -87,8 +87,7 @@ pub async fn query_and_collect_worktree_cleanups_for_agent(
 
     // If any agent still runs in this worktree, skip
     let still_running = agents.iter().any(|a| {
-        a.repo_path.as_deref() == Some(repo_path)
-            && a.branch_name.as_deref() == Some(branch_name)
+        a.repo_path.as_deref() == Some(repo_path) && a.branch_name.as_deref() == Some(branch_name)
     });
 
     if still_running {
@@ -193,7 +192,8 @@ fn run_worktree_selector(branch_name: &str, dirty: bool) -> CleanupChoice {
         if dirty {
             format!(
                 " {}⚠ has uncommitted changes{}",
-                theme::WARNING, theme::RESET
+                theme::WARNING,
+                theme::RESET
             )
         } else {
             String::new()
@@ -271,7 +271,15 @@ fn render_worktree_selector(stdout: &mut io::Stdout, selected: usize) {
         } else {
             theme::TEXT_TERTIARY
         };
-        write!(stdout, "\x1b[2K{}{}{}{}\r\n", prefix, color, label, theme::RESET).unwrap();
+        write!(
+            stdout,
+            "\x1b[2K{}{}{}{}\r\n",
+            prefix,
+            color,
+            label,
+            theme::RESET
+        )
+        .unwrap();
     }
     stdout.flush().unwrap();
 }
@@ -324,11 +332,7 @@ pub fn is_worktree_dirty(repo_path: &str, branch: &str) -> bool {
 }
 
 /// Remove a worktree locally using git commands.
-fn remove_worktree_local(
-    repo_path: &str,
-    branch: &str,
-    delete_branch: bool,
-) -> Result<(), String> {
+fn remove_worktree_local(repo_path: &str, branch: &str, delete_branch: bool) -> Result<(), String> {
     let serialized = branch.replace('/', "__");
     let wt_path = Path::new(repo_path)
         .join(".clust")

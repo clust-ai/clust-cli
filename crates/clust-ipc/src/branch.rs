@@ -87,7 +87,10 @@ mod tests {
 
     #[test]
     fn spaces_become_hyphens() {
-        assert_eq!(sanitize_branch_name("my feature branch"), "my-feature-branch");
+        assert_eq!(
+            sanitize_branch_name("my feature branch"),
+            "my-feature-branch"
+        );
     }
 
     #[test]

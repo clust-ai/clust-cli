@@ -7,7 +7,6 @@
 
 use std::time::{Duration, Instant};
 
-
 /// Maximum pending buffer size before safety-flush (8 KB).
 const MAX_PENDING: usize = 8192;
 
@@ -358,7 +357,10 @@ impl ScrollBreak {
 /// Input is the bytes after `<` and before the first `;` (or the end).
 /// Returns the parsed button number, or u32::MAX on parse failure.
 fn parse_sgr_button(params: &[u8]) -> u32 {
-    let end = params.iter().position(|&b| b == b';').unwrap_or(params.len());
+    let end = params
+        .iter()
+        .position(|&b| b == b';')
+        .unwrap_or(params.len());
     let digits = &params[..end];
     if digits.is_empty() {
         return u32::MAX;
@@ -434,10 +436,7 @@ mod tests {
         // Erase line
         assert_eq!(sb.filter(b"\x1b[2K"), b"\x1b[2K");
         // SGR color
-        assert_eq!(
-            sb.filter(b"\x1b[38;2;255;0;0m"),
-            b"\x1b[38;2;255;0;0m"
-        );
+        assert_eq!(sb.filter(b"\x1b[38;2;255;0;0m"), b"\x1b[38;2;255;0;0m");
     }
 
     #[test]
@@ -643,10 +642,9 @@ mod tests {
         let scroll = sgr_mouse(64, 10, 20, true);
         // All scrolls blocked, even the first
         assert!(sb.filter_at(&scroll, now).is_empty());
-        assert!(
-            sb.filter_at(&scroll, now + Duration::from_secs(100))
-                .is_empty()
-        );
+        assert!(sb
+            .filter_at(&scroll, now + Duration::from_secs(100))
+            .is_empty());
     }
 
     #[test]
@@ -830,10 +828,7 @@ mod tests {
         // CSI 1m = bold SGR, not a mouse event (params don't start with <)
         assert_eq!(sb.filter(b"\x1b[1m"), b"\x1b[1m");
         // CSI 38;2;255;0;0m = color SGR
-        assert_eq!(
-            sb.filter(b"\x1b[38;2;255;0;0m"),
-            b"\x1b[38;2;255;0;0m"
-        );
+        assert_eq!(sb.filter(b"\x1b[38;2;255;0;0m"), b"\x1b[38;2;255;0;0m");
     }
 
     #[test]

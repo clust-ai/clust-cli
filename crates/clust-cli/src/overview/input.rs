@@ -90,8 +90,7 @@ mod tests {
 
     #[test]
     fn test_ctrl_c() {
-        let bytes =
-            key_event_to_bytes(&make_key(KeyCode::Char('c'), KeyModifiers::CONTROL));
+        let bytes = key_event_to_bytes(&make_key(KeyCode::Char('c'), KeyModifiers::CONTROL));
         assert_eq!(bytes, Some(vec![0x03]));
     }
 

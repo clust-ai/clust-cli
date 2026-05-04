@@ -642,8 +642,7 @@ async fn handle_connection(
                                             .agents
                                             .values()
                                             .filter(|e| {
-                                                e.repo_path.as_deref()
-                                                    == Some(root_str.as_str())
+                                                e.repo_path.as_deref() == Some(root_str.as_str())
                                             })
                                             .map(|e| e.id.clone())
                                             .collect();
@@ -674,10 +673,7 @@ async fn handle_connection(
                         clust_ipc::send_message_write(
                             &mut writer,
                             &HubMessage::Error {
-                                message: format!(
-                                    "Failed to delete {}: {e}",
-                                    canonical.display()
-                                ),
+                                message: format!("Failed to delete {}: {e}", canonical.display()),
                             },
                         )
                         .await?;
@@ -1840,6 +1836,8 @@ async fn handle_connection(
                                 status: "scheduled".to_string(),
                                 launch_mode: "auto".to_string(),
                                 depends_on: "[]".to_string(),
+                                orchestrator_id: None,
+                                orchestrator_batch_file: None,
                             };
                             let _ = crate::db::insert_queued_batch(db, &row, &task_data);
                         }
@@ -2089,6 +2087,8 @@ async fn handle_connection(
                         status: "idle".to_string(),
                         launch_mode,
                         depends_on: depends_on_json,
+                        orchestrator_id: None,
+                        orchestrator_batch_file: None,
                     };
                     let _ = crate::db::insert_queued_batch(db, &row, &task_data);
                 }
@@ -2309,6 +2309,15 @@ async fn handle_connection(
             }
         }
         CliMessage::DeleteBatch { batch_id } => {
+            // Read before deleting the row.
+            let source_pair = {
+                let hub_state = state.lock().await;
+                hub_state
+                    .db
+                    .as_ref()
+                    .and_then(|db| crate::db::get_batch_source(db, &batch_id).ok().flatten())
+            };
+
             let mut hub_state = state.lock().await;
             let len_before = hub_state.queued_batches.len();
             hub_state.queued_batches.retain(|b| b.id != batch_id);
@@ -2318,6 +2327,14 @@ async fn handle_connection(
                     let _ = crate::db::delete_queued_batch(db, &batch_id);
                 }
             }
+            drop(hub_state);
+
+            if removed {
+                if let Some((orch_id, filename)) = source_pair {
+                    crate::inbox::delete_batch_source_file(&orch_id, &filename);
+                }
+            }
+
             clust_ipc::send_message_write(&mut writer, &HubMessage::Ok).await?;
         }
         _ => {

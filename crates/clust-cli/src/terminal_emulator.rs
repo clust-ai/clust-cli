@@ -275,7 +275,11 @@ fn row_text_from_screen(screen: &vt100::Screen, row: u16, cols: u16) -> (String,
         };
         if cell.is_wide_continuation() {
             // Map to the same byte as the wide char's first column.
-            let prev = if col_to_byte.is_empty() { 0 } else { col_to_byte[col_to_byte.len() - 1] };
+            let prev = if col_to_byte.is_empty() {
+                0
+            } else {
+                col_to_byte[col_to_byte.len() - 1]
+            };
             col_to_byte.push(prev);
             continue;
         }
@@ -359,7 +363,11 @@ mod tests {
                             .cell(row, col)
                             .map(|c| {
                                 let s = c.contents();
-                                if s.is_empty() { ' ' } else { s.chars().next().unwrap() }
+                                if s.is_empty() {
+                                    ' '
+                                } else {
+                                    s.chars().next().unwrap()
+                                }
                             })
                             .unwrap_or(' ')
                     })

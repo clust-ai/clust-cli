@@ -99,8 +99,11 @@ impl SearchModal {
             }
             KeyCode::Right => {
                 if self.cursor_pos < self.input.len() {
-                    self.cursor_pos +=
-                        self.input[self.cursor_pos..].chars().next().unwrap().len_utf8();
+                    self.cursor_pos += self.input[self.cursor_pos..]
+                        .chars()
+                        .next()
+                        .unwrap()
+                        .len_utf8();
                 }
                 SearchResult::Pending
             }
@@ -136,7 +139,12 @@ impl SearchModal {
 
     fn filtered_agents(&self) -> Vec<(usize, i64)> {
         if self.input.is_empty() {
-            return self.agents.iter().enumerate().map(|(i, _)| (i, 0)).collect();
+            return self
+                .agents
+                .iter()
+                .enumerate()
+                .map(|(i, _)| (i, 0))
+                .collect();
         }
         let mut results: Vec<(usize, i64)> = self
             .agents
@@ -165,10 +173,7 @@ impl SearchModal {
                 let best = fields
                     .iter()
                     .filter_map(|f| self.matcher.fuzzy_match(f, &self.input))
-                    .chain(
-                        repo_name
-                            .and_then(|n| self.matcher.fuzzy_match(n, &self.input)),
-                    )
+                    .chain(repo_name.and_then(|n| self.matcher.fuzzy_match(n, &self.input)))
                     .max();
 
                 best.map(|score| (i, score))
@@ -248,7 +253,11 @@ impl SearchModal {
     fn render_input(&self, frame: &mut Frame, area: Rect) {
         let before_cursor = &self.input[..self.cursor_pos];
         let (cursor_char, after_cursor) = if self.cursor_pos < self.input.len() {
-            let ch_len = self.input[self.cursor_pos..].chars().next().unwrap().len_utf8();
+            let ch_len = self.input[self.cursor_pos..]
+                .chars()
+                .next()
+                .unwrap()
+                .len_utf8();
             (
                 &self.input[self.cursor_pos..self.cursor_pos + ch_len],
                 &self.input[self.cursor_pos + ch_len..],

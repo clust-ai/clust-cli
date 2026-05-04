@@ -60,7 +60,6 @@ pub(crate) fn format_update_message(current: &Version, latest: &Version) -> Opti
 
 const REPO_URL: &str = "https://github.com/clust-ai/clust-cli.git";
 
-
 pub fn check_update() -> Option<String> {
     let output = Command::new("git")
         .args(["ls-remote", "--tags", REPO_URL])
@@ -98,13 +97,27 @@ mod tests {
     #[test]
     fn parse_with_v_prefix() {
         let v = Version::parse("v0.1.0").unwrap();
-        assert_eq!(v, Version { major: 0, minor: 1, patch: 0 });
+        assert_eq!(
+            v,
+            Version {
+                major: 0,
+                minor: 1,
+                patch: 0
+            }
+        );
     }
 
     #[test]
     fn parse_without_prefix() {
         let v = Version::parse("0.1.0").unwrap();
-        assert_eq!(v, Version { major: 0, minor: 1, patch: 0 });
+        assert_eq!(
+            v,
+            Version {
+                major: 0,
+                minor: 1,
+                patch: 0
+            }
+        );
     }
 
     #[test]
@@ -148,7 +161,11 @@ mod tests {
 
     #[test]
     fn display_format() {
-        let v = Version { major: 1, minor: 2, patch: 3 };
+        let v = Version {
+            major: 1,
+            minor: 2,
+            patch: 3,
+        };
         assert_eq!(v.to_string(), "v1.2.3");
     }
 
@@ -177,16 +194,31 @@ mod tests {
 
     #[test]
     fn parse_latest_tag_basic() {
-        let output = "abc123\trefs/tags/v0.0.1\ndef456\trefs/tags/v0.0.3\nghi789\trefs/tags/v0.0.2\n";
+        let output =
+            "abc123\trefs/tags/v0.0.1\ndef456\trefs/tags/v0.0.3\nghi789\trefs/tags/v0.0.2\n";
         let latest = parse_latest_tag(output).unwrap();
-        assert_eq!(latest, Version { major: 0, minor: 0, patch: 3 });
+        assert_eq!(
+            latest,
+            Version {
+                major: 0,
+                minor: 0,
+                patch: 3
+            }
+        );
     }
 
     #[test]
     fn parse_latest_tag_with_deref() {
         let output = "abc123\trefs/tags/v0.0.1\ndef456\trefs/tags/v0.0.1^{}\n";
         let latest = parse_latest_tag(output).unwrap();
-        assert_eq!(latest, Version { major: 0, minor: 0, patch: 1 });
+        assert_eq!(
+            latest,
+            Version {
+                major: 0,
+                minor: 0,
+                patch: 1
+            }
+        );
     }
 
     #[test]
@@ -202,9 +234,17 @@ mod tests {
 
     #[test]
     fn parse_latest_tag_mixed() {
-        let output = "aaa\trefs/tags/v1.0.0\nbbb\trefs/tags/release-candidate\nccc\trefs/tags/v0.9.0\n";
+        let output =
+            "aaa\trefs/tags/v1.0.0\nbbb\trefs/tags/release-candidate\nccc\trefs/tags/v0.9.0\n";
         let latest = parse_latest_tag(output).unwrap();
-        assert_eq!(latest, Version { major: 1, minor: 0, patch: 0 });
+        assert_eq!(
+            latest,
+            Version {
+                major: 1,
+                minor: 0,
+                patch: 0
+            }
+        );
     }
 
     #[test]
