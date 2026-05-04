@@ -34,7 +34,6 @@ use crate::{
     create_batch_modal::{BatchModalResult, CreateBatchModal},
     detached_agent_modal::{DetachedAgentModal, DetachedModalResult},
     edit_field_modal::{EditFieldModal, EditFieldResult},
-    format::{format_attached, format_started},
     import_batch_modal::{ImportBatchModal, ImportBatchResult},
     ipc,
     overview::{self, OverviewFocus, OverviewState},
@@ -215,22 +214,6 @@ impl ActiveTab {
     }
 }
 
-/// Label for agents that have no linked repository.
-const NO_REPOSITORY: &str = "No repository";
-
-// ---------------------------------------------------------------------------
-// Agent view mode
-// ---------------------------------------------------------------------------
-
-/// Controls how the right panel renders agents.
-#[derive(Clone, Copy, Debug, PartialEq)]
-enum AgentViewMode {
-    /// Recursive 2×2 live grid scoped to the selected repo (default).
-    Window,
-    /// Static "by repo" list (kept for one transition commit; deleted next).
-    ByRepo,
-}
-
 // ---------------------------------------------------------------------------
 // Click map – populated during rendering, consumed during mouse handling
 // ---------------------------------------------------------------------------
@@ -255,8 +238,6 @@ pub(crate) struct ClickMap {
     right_panel_area: Rect,
     tree_items: Vec<TreeClickTarget>,
     tree_inner_area: Rect,
-    agent_cards: Vec<(Rect, usize, usize)>, // (area, group_idx, agent_idx)
-    mode_label_area: Rect,
     pub(crate) window_cells: Vec<(Rect, String)>, // (cell area, agent_id)
 
     // Overview tab
@@ -391,135 +372,6 @@ enum ActiveMenu {
         agent_ids: Vec<String>,
         menu: ContextMenu,
     },
-}
-
-// ---------------------------------------------------------------------------
-// Agent selection state (right panel)
-// ---------------------------------------------------------------------------
-
-/// Returns sorted, deduplicated group names from an agent list based on view mode.
-fn group_names(agents: &[AgentInfo], _mode: AgentViewMode) -> Vec<String> {
-    let mut names: Vec<String> = agents
-        .iter()
-        .map(|a| {
-            a.repo_path
-                .clone()
-                .unwrap_or_else(|| NO_REPOSITORY.to_string())
-        })
-        .collect();
-    names.sort();
-    names.dedup();
-    names
-}
-
-/// Returns the group key for an agent based on view mode.
-fn agent_group_key(agent: &AgentInfo, _mode: AgentViewMode) -> String {
-    agent
-        .repo_path
-        .clone()
-        .unwrap_or_else(|| NO_REPOSITORY.to_string())
-}
-
-/// Tracks the user's cursor position within the agent panel (group + agent).
-#[derive(Default)]
-struct AgentSelection {
-    group_idx: usize,
-    agent_idx: usize,
-}
-
-impl AgentSelection {
-    /// Returns the number of agents in the currently selected group.
-    fn agent_count(&self, agents: &[AgentInfo], mode: AgentViewMode) -> usize {
-        let names = group_names(agents, mode);
-        names
-            .get(self.group_idx)
-            .map(|group| {
-                agents
-                    .iter()
-                    .filter(|a| agent_group_key(a, mode) == *group)
-                    .count()
-            })
-            .unwrap_or(0)
-    }
-
-    /// Adjust indices to stay within bounds after data refresh.
-    fn clamp(&mut self, agents: &[AgentInfo], mode: AgentViewMode) {
-        let names = group_names(agents, mode);
-        if names.is_empty() {
-            self.group_idx = 0;
-            self.agent_idx = 0;
-            return;
-        }
-        self.group_idx = self.group_idx.min(names.len() - 1);
-        let ac = self.agent_count(agents, mode);
-        if ac > 0 {
-            self.agent_idx = self.agent_idx.min(ac - 1);
-        } else {
-            self.agent_idx = 0;
-        }
-    }
-
-    fn move_up(&mut self, agents: &[AgentInfo], mode: AgentViewMode) {
-        if group_names(agents, mode).is_empty() {
-            return;
-        }
-        self.agent_idx = self.agent_idx.saturating_sub(1);
-    }
-
-    fn move_down(&mut self, agents: &[AgentInfo], mode: AgentViewMode) {
-        let ac = self.agent_count(agents, mode);
-        if ac > 0 {
-            self.agent_idx = (self.agent_idx + 1).min(ac - 1);
-        }
-    }
-
-    fn prev_group(&mut self, agents: &[AgentInfo], mode: AgentViewMode) {
-        if group_names(agents, mode).is_empty() {
-            return;
-        }
-        if self.group_idx > 0 {
-            self.group_idx -= 1;
-            self.agent_idx = 0;
-        }
-    }
-
-    fn next_group(&mut self, agents: &[AgentInfo], mode: AgentViewMode) {
-        let names = group_names(agents, mode);
-        if names.is_empty() {
-            return;
-        }
-        if self.group_idx + 1 < names.len() {
-            self.group_idx += 1;
-            self.agent_idx = 0;
-        }
-    }
-}
-
-/// Resolve the currently selected agent from the selection state.
-///
-/// Replicates the sorting/grouping logic used by the render functions to map
-/// `(group_idx, agent_idx)` back to an actual `AgentInfo`.
-fn resolve_selected_agent<'a>(
-    agents: &'a [AgentInfo],
-    sel: &AgentSelection,
-    mode: AgentViewMode,
-) -> Option<&'a AgentInfo> {
-    let names = group_names(agents, mode);
-    let group_name = names.get(sel.group_idx)?;
-
-    let _ = mode;
-    let mut sorted: Vec<&AgentInfo> = agents.iter().collect();
-    sorted.sort_by(|a, b| {
-        let ak = agent_group_key(a, AgentViewMode::ByRepo);
-        let bk = agent_group_key(b, AgentViewMode::ByRepo);
-        ak.cmp(&bk)
-            .then(a.branch_name.cmp(&b.branch_name))
-            .then(a.started_at.cmp(&b.started_at))
-    });
-    sorted
-        .into_iter()
-        .filter(|a| agent_group_key(a, AgentViewMode::ByRepo) == *group_name)
-        .nth(sel.agent_idx)
 }
 
 /// Compute the Repositories tab's right-panel `Rect` from the full content
@@ -1040,8 +892,6 @@ pub fn run(hub_name: &str) -> io::Result<()> {
     let mut repos: Vec<RepoInfo> = Vec::new();
     let mut selection = TreeSelection::default();
     let mut focus = FocusPanel::Left;
-    let mut agent_selection = AgentSelection::default();
-    let mut agent_view_mode = AgentViewMode::Window;
     let mut window_grid = window_view::WindowGridState::default();
     let mut active_tab = ActiveTab::Repositories;
     let mut last_agent_fetch = Instant::now() - Duration::from_secs(10);
@@ -1335,7 +1185,6 @@ pub fn run(hub_name: &str) -> io::Result<()> {
         let mut agents_refreshed = false;
         if hub_running && last_agent_fetch.elapsed() >= AGENT_FETCH_INTERVAL {
             agents = fetch_agents();
-            agent_selection.clamp(&agents, agent_view_mode);
             last_agent_fetch = Instant::now();
             agents_refreshed = true;
         }
@@ -1543,43 +1392,27 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                             &mut click_map,
                         );
                         render_divider(frame, divider_area);
-                        match agent_view_mode {
-                            AgentViewMode::Window => {
-                                let (scoped_ids, empty) = scoped_agent_ids(
-                                    &agents,
-                                    &display_repos,
-                                    &selection,
-                                );
-                                let batch_map = tasks_state.batch_agent_map();
-                                let mut window_click = window_view::ClickMapWindow {
-                                    window_cells: &mut click_map.window_cells,
-                                };
-                                window_view::render(
-                                    frame,
-                                    right_area,
-                                    &mut window_grid,
-                                    &mut overview_state,
-                                    &scoped_ids,
-                                    empty,
-                                    cur_focus == FocusPanel::Right,
-                                    &repo_colors,
-                                    &batch_map,
-                                    &mut window_click,
-                                );
-                            }
-                            AgentViewMode::ByRepo => {
-                                render_right_panel(
-                                    frame,
-                                    right_area,
-                                    &agents,
-                                    &agent_selection,
-                                    cur_focus == FocusPanel::Right,
-                                    agent_view_mode,
-                                    &mut click_map,
-                                    &repo_colors,
-                                );
-                            }
-                        }
+                        let (scoped_ids, empty) = scoped_agent_ids(
+                            &agents,
+                            &display_repos,
+                            &selection,
+                        );
+                        let batch_map = tasks_state.batch_agent_map();
+                        let mut window_click = window_view::ClickMapWindow {
+                            window_cells: &mut click_map.window_cells,
+                        };
+                        window_view::render(
+                            frame,
+                            right_area,
+                            &mut window_grid,
+                            &mut overview_state,
+                            &scoped_ids,
+                            empty,
+                            cur_focus == FocusPanel::Right,
+                            &repo_colors,
+                            &batch_map,
+                            &mut window_click,
+                        );
                     }
                     ActiveTab::Overview => {
                         let batch_map = tasks_state.batch_agent_map();
@@ -5279,30 +5112,16 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                                 }
                                             }
                                         } else if focus == FocusPanel::Right {
-                                            let target: Option<AgentInfo> = match agent_view_mode
-                                            {
-                                                AgentViewMode::Window => {
-                                                    let (scoped, _) = scoped_agent_ids(
-                                                        &agents,
-                                                        &display_repos,
-                                                        &selection,
-                                                    );
-                                                    scoped
-                                                        .get(window_grid.selected_idx)
-                                                        .and_then(|id| {
-                                                            agents
-                                                                .iter()
-                                                                .find(|a| &a.id == id)
-                                                                .cloned()
-                                                        })
-                                                }
-                                                AgentViewMode::ByRepo => resolve_selected_agent(
-                                                    &agents,
-                                                    &agent_selection,
-                                                    agent_view_mode,
-                                                )
-                                                .cloned(),
-                                            };
+                                            let (scoped, _) = scoped_agent_ids(
+                                                &agents,
+                                                &display_repos,
+                                                &selection,
+                                            );
+                                            let target: Option<AgentInfo> = scoped
+                                                .get(window_grid.selected_idx)
+                                                .and_then(|id| {
+                                                    agents.iter().find(|a| &a.id == id).cloned()
+                                                });
                                             if let Some(agent) = target {
                                                 let agent_id = agent.id.clone();
                                                 let agent_binary = agent.agent_binary.clone();
@@ -5334,14 +5153,6 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                             }
                                         }
                                     }
-                                    KeyCode::Char('v') if focus == FocusPanel::Right => {
-                                        agent_view_mode = match agent_view_mode {
-                                            AgentViewMode::Window => AgentViewMode::ByRepo,
-                                            AgentViewMode::ByRepo => AgentViewMode::Window,
-                                        };
-                                        agent_selection = AgentSelection::default();
-                                        window_grid = window_view::WindowGridState::default();
-                                    }
                                     KeyCode::Up
                                         if key.modifiers.contains(KeyModifiers::SHIFT)
                                             && focus == FocusPanel::Left =>
@@ -5354,77 +5165,49 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                     {
                                         selection.jump_next_repo(&display_repos);
                                     }
-                                    KeyCode::Up => match (focus, agent_view_mode) {
-                                        (FocusPanel::Left, _) => {
-                                            selection.move_up(&display_repos)
-                                        }
-                                        (FocusPanel::Right, AgentViewMode::Window) => {
-                                            window_nav(
-                                                last_content_area,
-                                                &agents,
-                                                &display_repos,
-                                                &selection,
-                                                &mut window_grid,
-                                                window_view::Direction::Up,
-                                            );
-                                        }
-                                        (FocusPanel::Right, AgentViewMode::ByRepo) => {
-                                            agent_selection.move_up(&agents, agent_view_mode)
-                                        }
+                                    KeyCode::Up => match focus {
+                                        FocusPanel::Left => selection.move_up(&display_repos),
+                                        FocusPanel::Right => window_nav(
+                                            last_content_area,
+                                            &agents,
+                                            &display_repos,
+                                            &selection,
+                                            &mut window_grid,
+                                            window_view::Direction::Up,
+                                        ),
                                     },
-                                    KeyCode::Down => match (focus, agent_view_mode) {
-                                        (FocusPanel::Left, _) => {
-                                            selection.move_down(&display_repos)
-                                        }
-                                        (FocusPanel::Right, AgentViewMode::Window) => {
-                                            window_nav(
-                                                last_content_area,
-                                                &agents,
-                                                &display_repos,
-                                                &selection,
-                                                &mut window_grid,
-                                                window_view::Direction::Down,
-                                            );
-                                        }
-                                        (FocusPanel::Right, AgentViewMode::ByRepo) => {
-                                            agent_selection.move_down(&agents, agent_view_mode)
-                                        }
+                                    KeyCode::Down => match focus {
+                                        FocusPanel::Left => selection.move_down(&display_repos),
+                                        FocusPanel::Right => window_nav(
+                                            last_content_area,
+                                            &agents,
+                                            &display_repos,
+                                            &selection,
+                                            &mut window_grid,
+                                            window_view::Direction::Down,
+                                        ),
                                     },
-                                    KeyCode::Right => match (focus, agent_view_mode) {
-                                        (FocusPanel::Left, _) => {
-                                            selection.descend(&display_repos)
-                                        }
-                                        (FocusPanel::Right, AgentViewMode::Window) => {
-                                            window_nav(
-                                                last_content_area,
-                                                &agents,
-                                                &display_repos,
-                                                &selection,
-                                                &mut window_grid,
-                                                window_view::Direction::Right,
-                                            );
-                                        }
-                                        (FocusPanel::Right, AgentViewMode::ByRepo) => {
-                                            agent_selection.next_group(&agents, agent_view_mode)
-                                        }
+                                    KeyCode::Right => match focus {
+                                        FocusPanel::Left => selection.descend(&display_repos),
+                                        FocusPanel::Right => window_nav(
+                                            last_content_area,
+                                            &agents,
+                                            &display_repos,
+                                            &selection,
+                                            &mut window_grid,
+                                            window_view::Direction::Right,
+                                        ),
                                     },
-                                    KeyCode::Left => match (focus, agent_view_mode) {
-                                        (FocusPanel::Left, _) => {
-                                            selection.ascend(&display_repos)
-                                        }
-                                        (FocusPanel::Right, AgentViewMode::Window) => {
-                                            window_nav(
-                                                last_content_area,
-                                                &agents,
-                                                &display_repos,
-                                                &selection,
-                                                &mut window_grid,
-                                                window_view::Direction::Left,
-                                            );
-                                        }
-                                        (FocusPanel::Right, AgentViewMode::ByRepo) => {
-                                            agent_selection.prev_group(&agents, agent_view_mode)
-                                        }
+                                    KeyCode::Left => match focus {
+                                        FocusPanel::Left => selection.ascend(&display_repos),
+                                        FocusPanel::Right => window_nav(
+                                            last_content_area,
+                                            &agents,
+                                            &display_repos,
+                                            &selection,
+                                            &mut window_grid,
+                                            window_view::Direction::Left,
+                                        ),
                                     },
                                     KeyCode::Char(' ') if focus == FocusPanel::Left => {
                                         selection.toggle_collapse();
@@ -7004,16 +6787,6 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                     }
                                     focus = FocusPanel::Left;
                                 }
-                                // Mode label click (right panel) → toggle view mode
-                                else if click_map.mode_label_area.contains(pos) {
-                                    agent_view_mode = match agent_view_mode {
-                                        AgentViewMode::Window => AgentViewMode::ByRepo,
-                                        AgentViewMode::ByRepo => AgentViewMode::Window,
-                                    };
-                                    agent_selection = AgentSelection::default();
-                                    window_grid = window_view::WindowGridState::default();
-                                    focus = FocusPanel::Right;
-                                }
                                 // Window-view cell clicks (right panel) → select that cell
                                 else if let Some((_, agent_id)) = click_map
                                     .window_cells
@@ -7031,16 +6804,6 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                     {
                                         window_grid.selected_idx = idx;
                                     }
-                                    focus = FocusPanel::Right;
-                                }
-                                // Agent card clicks (right panel)
-                                else if let Some((_, gidx, aidx)) = click_map
-                                    .agent_cards
-                                    .iter()
-                                    .find(|(r, _, _)| r.contains(pos))
-                                {
-                                    agent_selection.group_idx = *gidx;
-                                    agent_selection.agent_idx = *aidx;
                                     focus = FocusPanel::Right;
                                 }
                                 // Panel focus switching (click anywhere in a panel)
@@ -7946,56 +7709,6 @@ fn pad_line(spans: Vec<Span<'static>>, width: u16, bg: Option<Color>) -> Line<'s
     Line::from(all_spans)
 }
 
-#[allow(clippy::too_many_arguments)]
-fn render_right_panel(
-    frame: &mut Frame,
-    area: Rect,
-    agents: &[AgentInfo],
-    agent_sel: &AgentSelection,
-    focused: bool,
-    mode: AgentViewMode,
-    click_map: &mut ClickMap,
-    repo_colors: &HashMap<String, String>,
-) {
-    frame.render_widget(
-        Block::default().style(Style::default().bg(theme::R_BG_BASE)),
-        area,
-    );
-
-    if agents.is_empty() {
-        render_logo(frame, area);
-        // Focus indicator even when empty
-        let indicator_color = if focused {
-            theme::R_ACCENT_BRIGHT
-        } else {
-            theme::R_TEXT_TERTIARY
-        };
-        let indicator = Paragraph::new(Span::styled(
-            "●",
-            Style::default().fg(indicator_color).bg(theme::R_BG_BASE),
-        ))
-        .alignment(Alignment::Right);
-        let indicator_area = Rect {
-            x: area.x + 1,
-            y: area.y,
-            width: area.width.saturating_sub(2),
-            height: 1,
-        };
-        frame.render_widget(indicator, indicator_area);
-    } else {
-        render_agent_list(
-            frame,
-            area,
-            agents,
-            agent_sel,
-            focused,
-            mode,
-            click_map,
-            repo_colors,
-        );
-    }
-}
-
 pub(crate) fn render_logo(frame: &mut Frame, area: Rect) {
     let mut lines: Vec<Line> = Vec::new();
 
@@ -8041,283 +7754,6 @@ pub(crate) fn render_logo(frame: &mut Frame, area: Rect) {
 
     let paragraph = Paragraph::new(lines);
     frame.render_widget(paragraph, horz_area);
-}
-
-#[allow(clippy::too_many_arguments)]
-fn render_agent_list(
-    frame: &mut Frame,
-    area: Rect,
-    agents: &[AgentInfo],
-    agent_sel: &AgentSelection,
-    focused: bool,
-    mode: AgentViewMode,
-    click_map: &mut ClickMap,
-    repo_colors: &HashMap<String, String>,
-) {
-    let block = Block::default().padding(Padding::new(2, 2, 1, 0));
-
-    let inner = block.inner(area);
-    frame.render_widget(block, area);
-
-    // Mode label + hint
-    let _ = mode;
-    let mode_line = Paragraph::new(Line::from(vec![
-        Span::styled("by repo", Style::default().fg(theme::R_TEXT_TERTIARY)),
-    ]));
-
-    // Focus indicator in top-right corner (overlaid on mode label line)
-    let indicator_color = if focused {
-        theme::R_ACCENT_BRIGHT
-    } else {
-        theme::R_TEXT_TERTIARY
-    };
-    let indicator = Paragraph::new(Span::styled("●", Style::default().fg(indicator_color)))
-        .alignment(Alignment::Right);
-
-    render_agent_list_by_repo(
-        frame,
-        inner,
-        agents,
-        agent_sel,
-        focused,
-        &mode_line,
-        &indicator,
-        click_map,
-        repo_colors,
-    );
-}
-
-#[allow(clippy::too_many_arguments)]
-fn render_agent_list_by_repo(
-    frame: &mut Frame,
-    inner: Rect,
-    agents: &[AgentInfo],
-    agent_sel: &AgentSelection,
-    focused: bool,
-    mode_line: &Paragraph<'_>,
-    indicator: &Paragraph<'_>,
-    click_map: &mut ClickMap,
-    repo_colors: &HashMap<String, String>,
-) {
-    let mut sorted: Vec<&AgentInfo> = agents.iter().collect();
-    sorted.sort_by(|a, b| {
-        let ak = agent_group_key(a, AgentViewMode::ByRepo);
-        let bk = agent_group_key(b, AgentViewMode::ByRepo);
-        ak.cmp(&bk)
-            .then(a.branch_name.cmp(&b.branch_name))
-            .then(a.started_at.cmp(&b.started_at))
-    });
-
-    let gnames = group_names(agents, AgentViewMode::ByRepo);
-
-    let hide_headers = gnames.len() == 1 && gnames[0] == NO_REPOSITORY;
-
-    // Build layout: mode label + spacer + repo/branch headers + agent cards + gaps
-    let mut constraints: Vec<Constraint> = vec![
-        Constraint::Length(1), // mode label
-        Constraint::Length(1), // spacer
-    ];
-    for (ridx, repo) in gnames.iter().enumerate() {
-        let is_no_repo = repo == NO_REPOSITORY;
-        if !hide_headers {
-            if ridx > 0 {
-                constraints.push(Constraint::Length(1)); // empty line gap between repos
-            }
-            constraints.push(Constraint::Length(1)); // repo header
-        }
-        let mut branches: Vec<&str> = sorted
-            .iter()
-            .filter(|a| agent_group_key(a, AgentViewMode::ByRepo) == *repo)
-            .map(|a| a.branch_name.as_deref().unwrap_or("no branch"))
-            .collect();
-        branches.dedup();
-        for branch in &branches {
-            if !is_no_repo {
-                constraints.push(Constraint::Length(1)); // branch sub-header
-            }
-            let count = sorted
-                .iter()
-                .filter(|a| {
-                    agent_group_key(a, AgentViewMode::ByRepo) == *repo
-                        && a.branch_name.as_deref().unwrap_or("no branch") == *branch
-                })
-                .count();
-            for i in 0..count {
-                constraints.push(Constraint::Length(4)); // agent card
-                if i < count - 1 {
-                    constraints.push(Constraint::Length(1)); // gap between cards
-                }
-            }
-        }
-    }
-    constraints.push(Constraint::Min(0));
-
-    let areas = Layout::vertical(constraints).split(inner);
-
-    frame.render_widget(mode_line.clone(), areas[0]);
-    click_map.mode_label_area = areas[0];
-    frame.render_widget(
-        indicator.clone(),
-        Rect {
-            x: inner.x,
-            y: inner.y,
-            width: inner.width,
-            height: 1,
-        },
-    );
-
-    let mut area_idx = 2;
-    let mut flat_agent_idx = 0;
-    for (gidx, repo) in gnames.iter().enumerate() {
-        let is_no_repo = repo == NO_REPOSITORY;
-        if !hide_headers {
-            if gidx > 0 {
-                area_idx += 1; // skip empty line gap between repos
-            }
-            // Repo header — reverse video: repo color background, dark text
-            let repo_display = std::path::Path::new(repo)
-                .file_name()
-                .map(|n| n.to_string_lossy().into_owned())
-                .unwrap_or_else(|| repo.clone());
-            let header_color = repo_colors
-                .get(repo.as_str())
-                .map(|c| theme::repo_color(c))
-                .unwrap_or(theme::R_ACCENT);
-            let repo_header = Paragraph::new(Line::from(vec![Span::styled(
-                format!(" {repo_display} "),
-                Style::default()
-                    .fg(header_color)
-                    .add_modifier(Modifier::BOLD),
-            )]));
-            frame.render_widget(repo_header, areas[area_idx]);
-            area_idx += 1;
-        }
-
-        // Branch sub-groups
-        let repo_agents: Vec<&AgentInfo> = sorted
-            .iter()
-            .filter(|a| agent_group_key(a, AgentViewMode::ByRepo) == *repo)
-            .copied()
-            .collect();
-        let mut branches: Vec<&str> = repo_agents
-            .iter()
-            .map(|a| a.branch_name.as_deref().unwrap_or("no branch"))
-            .collect();
-        branches.dedup();
-
-        for branch in &branches {
-            if !is_no_repo {
-                // Branch sub-header
-                let branch_header = Paragraph::new(Line::from(vec![Span::styled(
-                    format!("   {branch}"),
-                    Style::default().fg(theme::R_TEXT_SECONDARY),
-                )]));
-                frame.render_widget(branch_header, areas[area_idx]);
-                area_idx += 1;
-            }
-
-            let branch_agents: Vec<&&AgentInfo> = repo_agents
-                .iter()
-                .filter(|a| a.branch_name.as_deref().unwrap_or("no branch") == *branch)
-                .collect();
-            let branch_agent_count = branch_agents.len();
-            for (bidx, agent) in branch_agents.into_iter().enumerate() {
-                let is_selected =
-                    focused && gidx == agent_sel.group_idx && flat_agent_idx == agent_sel.agent_idx;
-                click_map
-                    .agent_cards
-                    .push((areas[area_idx], gidx, flat_agent_idx));
-                render_agent_card(
-                    frame,
-                    areas[area_idx],
-                    agent,
-                    is_selected,
-                    agent.repo_path.is_none(),
-                );
-                area_idx += 1;
-                flat_agent_idx += 1;
-                if bidx < branch_agent_count - 1 {
-                    area_idx += 1; // skip gap between cards
-                }
-            }
-        }
-        flat_agent_idx = 0; // reset for next repo group
-    }
-}
-
-fn render_agent_card(
-    frame: &mut Frame,
-    area: Rect,
-    agent: &AgentInfo,
-    is_selected: bool,
-    show_working_dir: bool,
-) {
-    let bg = if is_selected {
-        theme::R_BG_HOVER
-    } else {
-        theme::R_BG_SURFACE
-    };
-    let block = Block::default()
-        .style(Style::default().bg(bg))
-        .padding(Padding::new(1, 1, 0, 0));
-
-    let inner = block.inner(area);
-    frame.render_widget(block, area);
-
-    let started = format_started(&agent.started_at);
-    let attached = format_attached(agent.attached_clients);
-
-    let mut lines = vec![
-        Line::from(if is_selected {
-            vec![
-                Span::styled(&agent.id, Style::default().fg(theme::R_ACCENT)),
-                Span::styled("  Enter", Style::default().fg(theme::R_TEXT_TERTIARY)),
-            ]
-        } else {
-            vec![Span::styled(
-                &agent.id,
-                Style::default().fg(theme::R_ACCENT),
-            )]
-        }),
-        Line::from({
-            let mut spans = vec![
-                Span::styled(
-                    agent.agent_binary.clone(),
-                    Style::default().fg(theme::R_TEXT_PRIMARY),
-                ),
-                Span::raw("  "),
-                Span::styled("● running", Style::default().fg(theme::R_SUCCESS)),
-            ];
-            if let Some(ref branch) = agent.branch_name {
-                spans.push(Span::raw("  "));
-                spans.push(Span::styled(
-                    format!("\u{e0a0} {branch}"),
-                    Style::default().fg(theme::R_TEXT_SECONDARY),
-                ));
-            }
-            spans
-        }),
-        Line::from(vec![
-            Span::styled(
-                format!("started {started}"),
-                Style::default().fg(theme::R_TEXT_SECONDARY),
-            ),
-            Span::raw("    "),
-            Span::styled(
-                format!("attached: {attached}"),
-                Style::default().fg(theme::R_TEXT_SECONDARY),
-            ),
-        ]),
-    ];
-
-    if show_working_dir {
-        lines.push(Line::from(Span::styled(
-            agent.working_dir.clone(),
-            Style::default().fg(theme::R_TEXT_TERTIARY),
-        )));
-    }
-
-    frame.render_widget(Paragraph::new(lines), inner);
 }
 
 fn build_task_terminal_previews(
@@ -8623,13 +8059,17 @@ fn render_help_overlay(frame: &mut Frame, area: Rect, active_tab: ActiveTab, in_
     // -- Repositories --
     if active_tab == ActiveTab::Repositories {
         lines.push(Line::from(""));
-        lines.push(header_line("Repositories"));
+        lines.push(header_line("Repositories — left tree"));
         lines.push(binding_line("\u{2191} / \u{2193}", "Navigate items"));
         lines.push(binding_line("\u{2190} / \u{2192}", "Navigate tree"));
+        lines.push(binding_line("Shift+\u{2191}/\u{2193}", "Jump prev / next repo"));
         lines.push(binding_line("Shift+\u{2190}/\u{2192}", "Switch panel"));
         lines.push(binding_line("Enter", "Open menu / focus agent"));
         lines.push(binding_line("Space", "Collapse / expand"));
-        lines.push(binding_line("v", "Toggle agent grouping"));
+        lines.push(Line::from(""));
+        lines.push(header_line("Repositories — right grid"));
+        lines.push(binding_line("\u{2190} / \u{2192} / \u{2191} / \u{2193}", "Navigate cells"));
+        lines.push(binding_line("Enter", "Open agent in focus mode"));
     }
 
     // -- Overview --
@@ -10182,51 +9622,48 @@ mod tests {
     }
 
     #[test]
-    fn agent_selection_default_is_first() {
-        let sel = AgentSelection::default();
-        assert_eq!(sel.group_idx, 0);
-        assert_eq!(sel.agent_idx, 0);
-    }
-
-    #[test]
-    fn agent_selection_clamp_empty() {
-        let mut sel = AgentSelection {
-            group_idx: 5,
-            agent_idx: 3,
-        };
-        sel.clamp(&[], AgentViewMode::ByRepo);
-        assert_eq!(sel.group_idx, 0);
-        assert_eq!(sel.agent_idx, 0);
-    }
-
-    #[test]
-    fn group_names_by_repo() {
+    fn scoped_agent_ids_filters_by_selected_repo() {
         let agents = vec![
             AgentInfo {
                 repo_path: Some("/home/user/project-a".into()),
-                branch_name: Some("main".into()),
                 ..make_agent("a1", "default")
             },
             AgentInfo {
                 repo_path: Some("/home/user/project-b".into()),
-                branch_name: Some("dev".into()),
                 ..make_agent("b1", "default")
             },
             AgentInfo {
                 repo_path: None,
-                branch_name: None,
                 ..make_agent("c1", "default")
             },
         ];
-        let names = group_names(&agents, AgentViewMode::ByRepo);
-        assert_eq!(
-            names,
-            vec![
-                "/home/user/project-a",
-                "/home/user/project-b",
-                NO_REPOSITORY
-            ]
-        );
+        let display_repos = vec![
+            RepoInfo {
+                path: "/home/user/project-a".into(),
+                name: "project-a".into(),
+                color: None,
+                editor: None,
+                local_branches: vec![],
+                remote_branches: vec![],
+            },
+            RepoInfo {
+                path: "/home/user/project-b".into(),
+                name: "project-b".into(),
+                color: None,
+                editor: None,
+                local_branches: vec![],
+                remote_branches: vec![],
+            },
+        ];
+        let mut selection = TreeSelection {
+            repo_idx: 0,
+            ..Default::default()
+        };
+        let (ids, _) = scoped_agent_ids(&agents, &display_repos, &selection);
+        assert_eq!(ids, vec!["a1".to_string()]);
+        selection.repo_idx = 1;
+        let (ids, _) = scoped_agent_ids(&agents, &display_repos, &selection);
+        assert_eq!(ids, vec!["b1".to_string()]);
     }
 
     // ── Collapse state tests ──────────────────────────────────────
