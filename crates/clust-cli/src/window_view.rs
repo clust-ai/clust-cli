@@ -9,7 +9,184 @@
 // Helpers land staged across several commits; suppress until callers exist.
 #![allow(dead_code)]
 
-use ratatui::layout::{Constraint, Layout, Rect};
+use std::collections::HashMap;
+
+use ratatui::layout::{Alignment, Constraint, Flex, Layout, Rect};
+use ratatui::style::Style;
+use ratatui::text::{Line, Span};
+use ratatui::widgets::Paragraph;
+use ratatui::Frame;
+
+use crate::overview::{render_agent_panel, OverviewState, PanelCommand};
+use crate::tasks::BatchAgentInfo;
+use crate::theme;
+use crate::ui::render_logo;
+
+/// Persistent state for the Window view across frames.
+#[derive(Default, Clone)]
+pub struct WindowGridState {
+    /// Index of the currently-selected cell within the scoped agent list.
+    pub selected_idx: usize,
+}
+
+impl WindowGridState {
+    /// Clamp `selected_idx` into the valid range for the current cell count.
+    pub fn clamp(&mut self, cell_count: usize) {
+        if cell_count == 0 {
+            self.selected_idx = 0;
+        } else if self.selected_idx >= cell_count {
+            self.selected_idx = cell_count - 1;
+        }
+    }
+}
+
+/// What to show when there are no agents to render in the grid.
+#[derive(Clone, Copy)]
+pub enum EmptyKind<'a> {
+    /// Show the centered logo (used for the "Add Repository" sentinel).
+    Logo,
+    /// Show a centered "no agents" message scoped to the given label.
+    NoAgentsFor(&'a str),
+    /// Show a centered "no detached agents" message.
+    NoDetached,
+}
+
+/// Render the Window view for the Repositories tab right panel.
+///
+/// `scoped_ids` is the ordered list of agent IDs that belong to the
+/// currently-selected repo on the left panel. Each ID must exist in
+/// `overview_state.panels`. Cells are laid out via [`window_layout`] in
+/// column-major fill order; the panel for each cell is looked up by ID,
+/// resized to the cell's interior, and rendered with [`render_agent_panel`].
+///
+/// Populates `click_map.window_cells` so the mouse handler can map
+/// click positions back to agent IDs.
+#[allow(clippy::too_many_arguments)]
+pub fn render(
+    frame: &mut Frame,
+    area: Rect,
+    grid: &mut WindowGridState,
+    overview_state: &mut OverviewState,
+    scoped_ids: &[String],
+    empty: EmptyKind<'_>,
+    focused: bool,
+    repo_colors: &HashMap<String, String>,
+    batch_map: &HashMap<String, BatchAgentInfo>,
+    click_map: &mut ClickMapWindow<'_>,
+) {
+    grid.clamp(scoped_ids.len());
+
+    if scoped_ids.is_empty() {
+        match empty {
+            EmptyKind::Logo => render_logo(frame, area),
+            EmptyKind::NoAgentsFor(label) => render_centered_message(
+                frame,
+                area,
+                &format!("No agents running for {label}"),
+            ),
+            EmptyKind::NoDetached => render_centered_message(frame, area, "No detached agents"),
+        }
+        // Focus indicator in the top-right corner.
+        render_focus_dot(frame, area, focused);
+        return;
+    }
+
+    let cells = window_layout(area, scoped_ids.len());
+
+    for (idx, (cell, id)) in cells.iter().zip(scoped_ids.iter()).enumerate() {
+        // Find the panel by id. If a sync hasn't caught up yet, skip the cell.
+        let panel_idx = match overview_state.panels.iter().position(|p| &p.id == id) {
+            Some(i) => i,
+            None => continue,
+        };
+        let panel = &mut overview_state.panels[panel_idx];
+
+        // Resize this panel's vterm to the cell interior (border + header eat
+        // 3 rows + 2 cols). Send a SIGWINCH first; only update local vterm if
+        // the send succeeds, mirroring `OverviewState::resize_panels_to`.
+        let inner_w = cell.width.saturating_sub(2);
+        let inner_h = cell.height.saturating_sub(3);
+        let target_cols = inner_w.max(1);
+        let target_rows = inner_h.max(1);
+        if (panel.vterm.cols() != target_cols as usize
+            || panel.vterm.rows() != target_rows as usize)
+            && panel
+                .command_tx
+                .try_send(PanelCommand::Resize {
+                    cols: target_cols,
+                    rows: target_rows,
+                })
+                .is_ok()
+        {
+            panel
+                .vterm
+                .resize(target_cols as usize, target_rows as usize);
+        }
+
+        let is_focused = focused && idx == grid.selected_idx;
+        let panel_color = panel
+            .repo_path
+            .as_ref()
+            .and_then(|rp| repo_colors.get(rp.as_str()))
+            .map(|cn| theme::repo_color(cn));
+        let batch_info = batch_map.get(&panel.id);
+
+        render_agent_panel(
+            frame,
+            *cell,
+            panel,
+            is_focused,
+            false,
+            panel_color,
+            batch_info,
+        );
+
+        click_map.window_cells.push((*cell, id.clone()));
+    }
+
+    render_focus_dot(frame, area, focused);
+}
+
+/// Tiny click-map view used by [`render`] so the module doesn't depend on
+/// every field of the parent crate's `ClickMap`.
+pub struct ClickMapWindow<'a> {
+    pub window_cells: &'a mut Vec<(Rect, String)>,
+}
+
+fn render_focus_dot(frame: &mut Frame, area: Rect, focused: bool) {
+    let color = if focused {
+        theme::R_ACCENT_BRIGHT
+    } else {
+        theme::R_TEXT_TERTIARY
+    };
+    let indicator = Paragraph::new(Span::styled(
+        "●",
+        Style::default().fg(color).bg(theme::R_BG_BASE),
+    ))
+    .alignment(Alignment::Right);
+    let strip = Rect {
+        x: area.x + 1,
+        y: area.y,
+        width: area.width.saturating_sub(2),
+        height: 1,
+    };
+    frame.render_widget(indicator, strip);
+}
+
+fn render_centered_message(frame: &mut Frame, area: Rect, msg: &str) {
+    let line = Line::from(Span::styled(
+        msg.to_string(),
+        Style::default().fg(theme::R_TEXT_TERTIARY).bg(theme::R_BG_BASE),
+    ));
+    let [vert] = Layout::vertical([Constraint::Length(1)])
+        .flex(Flex::Center)
+        .areas(area);
+    let [horiz] = Layout::horizontal([Constraint::Length(msg.chars().count() as u16)])
+        .flex(Flex::Center)
+        .areas(vert);
+    frame.render_widget(Paragraph::new(line), horiz);
+}
+
 
 /// Lay out `n` agent cells inside `rect`.
 ///

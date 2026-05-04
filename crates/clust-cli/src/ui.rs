@@ -43,7 +43,7 @@ use crate::{
     tasks::{self, TasksFocus, TasksState},
     terminal_emulator, theme,
     timer_modal::{TimerModal, TimerResult},
-    version,
+    version, window_view,
 };
 
 /// Maximum interval between two Esc presses to count as a "double-tap".
@@ -222,10 +222,12 @@ const NO_REPOSITORY: &str = "No repository";
 // Agent view mode
 // ---------------------------------------------------------------------------
 
-/// Controls how agents are grouped in the right panel.
+/// Controls how the right panel renders agents.
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum AgentViewMode {
-    /// Group agents by their git repository path.
+    /// Recursive 2×2 live grid scoped to the selected repo (default).
+    Window,
+    /// Static "by repo" list (kept for one transition commit; deleted next).
     ByRepo,
 }
 
@@ -255,6 +257,7 @@ pub(crate) struct ClickMap {
     tree_inner_area: Rect,
     agent_cards: Vec<(Rect, usize, usize)>, // (area, group_idx, agent_idx)
     mode_label_area: Rect,
+    pub(crate) window_cells: Vec<(Rect, String)>, // (cell area, agent_id)
 
     // Overview tab
     pub(crate) overview_panels: Vec<(Rect, usize)>, // (area, global_panel_idx)
@@ -517,6 +520,85 @@ fn resolve_selected_agent<'a>(
         .into_iter()
         .filter(|a| agent_group_key(a, AgentViewMode::ByRepo) == *group_name)
         .nth(sel.agent_idx)
+}
+
+/// Compute the Repositories tab's right-panel `Rect` from the full content
+/// area. The split is hard-coded to 40 / divider / 60 — this duplicates the
+/// render-side `Layout::horizontal` so key handlers can derive the same Rect
+/// without crossing the render boundary.
+fn repositories_right_area(content_area: Rect) -> Rect {
+    let [_, _, right] = Layout::horizontal([
+        Constraint::Percentage(40),
+        Constraint::Length(1),
+        Constraint::Percentage(60),
+    ])
+    .areas(content_area);
+    right
+}
+
+/// Move the Window-view selection in `dir`. Re-derives the cell layout from
+/// the current scoped-agent set so that arrow input stays in sync with the
+/// rendered grid.
+fn window_nav(
+    last_content_area: Rect,
+    agents: &[AgentInfo],
+    display_repos: &[RepoInfo],
+    selection: &TreeSelection,
+    grid: &mut window_view::WindowGridState,
+    dir: window_view::Direction,
+) {
+    let (scoped, _) = scoped_agent_ids(agents, display_repos, selection);
+    if scoped.is_empty() {
+        return;
+    }
+    let right = repositories_right_area(last_content_area);
+    let cells = window_view::window_layout(right, scoped.len());
+    grid.selected_idx = window_view::neighbor(&cells, grid.selected_idx, dir);
+}
+
+/// Pick the agents that belong to the repo currently selected on the left
+/// panel. Returns a stable-ordered list of agent IDs (sorted by `started_at`
+/// then `id` for determinism) along with the empty-state to render if the
+/// list is empty.
+fn scoped_agent_ids<'a>(
+    agents: &[AgentInfo],
+    display_repos: &'a [RepoInfo],
+    selection: &TreeSelection,
+) -> (Vec<String>, window_view::EmptyKind<'a>) {
+    let repo = match display_repos.get(selection.repo_idx) {
+        Some(r) => r,
+        None => return (Vec::new(), window_view::EmptyKind::Logo),
+    };
+
+    if repo.path == ADD_REPO_SENTINEL {
+        return (Vec::new(), window_view::EmptyKind::Logo);
+    }
+
+    let mut matched: Vec<&AgentInfo> = if repo.path.is_empty() {
+        agents.iter().filter(|a| a.repo_path.is_none()).collect()
+    } else {
+        agents
+            .iter()
+            .filter(|a| a.repo_path.as_deref() == Some(repo.path.as_str()))
+            .collect()
+    };
+
+    matched.sort_by(|a, b| {
+        a.started_at
+            .cmp(&b.started_at)
+            .then(a.id.cmp(&b.id))
+    });
+
+    if matched.is_empty() {
+        let empty = if repo.path.is_empty() {
+            window_view::EmptyKind::NoDetached
+        } else {
+            window_view::EmptyKind::NoAgentsFor(repo.name.as_str())
+        };
+        return (Vec::new(), empty);
+    }
+
+    (matched.into_iter().map(|a| a.id.clone()).collect(), window_view::EmptyKind::Logo)
 }
 
 // ---------------------------------------------------------------------------
@@ -959,7 +1041,8 @@ pub fn run(hub_name: &str) -> io::Result<()> {
     let mut selection = TreeSelection::default();
     let mut focus = FocusPanel::Left;
     let mut agent_selection = AgentSelection::default();
-    let mut agent_view_mode = AgentViewMode::ByRepo;
+    let mut agent_view_mode = AgentViewMode::Window;
+    let mut window_grid = window_view::WindowGridState::default();
     let mut active_tab = ActiveTab::Repositories;
     let mut last_agent_fetch = Instant::now() - Duration::from_secs(10);
     let mut last_repo_fetch = Instant::now() - Duration::from_secs(10);
@@ -1361,11 +1444,17 @@ pub fn run(hub_name: &str) -> io::Result<()> {
         };
         selection.clamp(&display_repos);
 
-        // Sync overview agent connections when agents are refreshed
-        if agents_refreshed && active_tab == ActiveTab::Overview {
-            overview_state.sync_agents(&agents, last_content_area);
-            if let Some(id) = pending_overview_select.take() {
-                overview_state.select_agent_by_id(&id);
+        // Sync overview agent connections when agents are refreshed. The
+        // panel set (lifecycle) is synced regardless of tab so the
+        // Repositories-tab Window view can borrow live PTY panels by id.
+        // The overview-grid resize is still gated to the Overview tab.
+        if agents_refreshed {
+            overview_state.sync_agent_set(&agents);
+            if active_tab == ActiveTab::Overview {
+                overview_state.resize_panels_to(last_content_area);
+                if let Some(id) = pending_overview_select.take() {
+                    overview_state.select_agent_by_id(&id);
+                }
             }
         }
 
@@ -1454,16 +1543,43 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                             &mut click_map,
                         );
                         render_divider(frame, divider_area);
-                        render_right_panel(
-                            frame,
-                            right_area,
-                            &agents,
-                            &agent_selection,
-                            cur_focus == FocusPanel::Right,
-                            agent_view_mode,
-                            &mut click_map,
-                            &repo_colors,
-                        );
+                        match agent_view_mode {
+                            AgentViewMode::Window => {
+                                let (scoped_ids, empty) = scoped_agent_ids(
+                                    &agents,
+                                    &display_repos,
+                                    &selection,
+                                );
+                                let batch_map = tasks_state.batch_agent_map();
+                                let mut window_click = window_view::ClickMapWindow {
+                                    window_cells: &mut click_map.window_cells,
+                                };
+                                window_view::render(
+                                    frame,
+                                    right_area,
+                                    &mut window_grid,
+                                    &mut overview_state,
+                                    &scoped_ids,
+                                    empty,
+                                    cur_focus == FocusPanel::Right,
+                                    &repo_colors,
+                                    &batch_map,
+                                    &mut window_click,
+                                );
+                            }
+                            AgentViewMode::ByRepo => {
+                                render_right_panel(
+                                    frame,
+                                    right_area,
+                                    &agents,
+                                    &agent_selection,
+                                    cur_focus == FocusPanel::Right,
+                                    agent_view_mode,
+                                    &mut click_map,
+                                    &repo_colors,
+                                );
+                            }
+                        }
                     }
                     ActiveTab::Overview => {
                         let batch_map = tasks_state.batch_agent_map();
@@ -5163,11 +5279,31 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                                 }
                                             }
                                         } else if focus == FocusPanel::Right {
-                                            if let Some(agent) = resolve_selected_agent(
-                                                &agents,
-                                                &agent_selection,
-                                                agent_view_mode,
-                                            ) {
+                                            let target: Option<AgentInfo> = match agent_view_mode
+                                            {
+                                                AgentViewMode::Window => {
+                                                    let (scoped, _) = scoped_agent_ids(
+                                                        &agents,
+                                                        &display_repos,
+                                                        &selection,
+                                                    );
+                                                    scoped
+                                                        .get(window_grid.selected_idx)
+                                                        .and_then(|id| {
+                                                            agents
+                                                                .iter()
+                                                                .find(|a| &a.id == id)
+                                                                .cloned()
+                                                        })
+                                                }
+                                                AgentViewMode::ByRepo => resolve_selected_agent(
+                                                    &agents,
+                                                    &agent_selection,
+                                                    agent_view_mode,
+                                                )
+                                                .cloned(),
+                                            };
+                                            if let Some(agent) = target {
                                                 let agent_id = agent.id.clone();
                                                 let agent_binary = agent.agent_binary.clone();
                                                 let working_dir = agent.working_dir.clone();
@@ -5199,10 +5335,12 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                         }
                                     }
                                     KeyCode::Char('v') if focus == FocusPanel::Right => {
-                                        // Only ByRepo remains; the toggle is a no-op
-                                        // until the Window view lands and replaces it.
-                                        agent_view_mode = AgentViewMode::ByRepo;
+                                        agent_view_mode = match agent_view_mode {
+                                            AgentViewMode::Window => AgentViewMode::ByRepo,
+                                            AgentViewMode::ByRepo => AgentViewMode::Window,
+                                        };
                                         agent_selection = AgentSelection::default();
+                                        window_grid = window_view::WindowGridState::default();
                                     }
                                     KeyCode::Up
                                         if key.modifiers.contains(KeyModifiers::SHIFT)
@@ -5216,27 +5354,75 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                     {
                                         selection.jump_next_repo(&display_repos);
                                     }
-                                    KeyCode::Up => match focus {
-                                        FocusPanel::Left => selection.move_up(&display_repos),
-                                        FocusPanel::Right => {
+                                    KeyCode::Up => match (focus, agent_view_mode) {
+                                        (FocusPanel::Left, _) => {
+                                            selection.move_up(&display_repos)
+                                        }
+                                        (FocusPanel::Right, AgentViewMode::Window) => {
+                                            window_nav(
+                                                last_content_area,
+                                                &agents,
+                                                &display_repos,
+                                                &selection,
+                                                &mut window_grid,
+                                                window_view::Direction::Up,
+                                            );
+                                        }
+                                        (FocusPanel::Right, AgentViewMode::ByRepo) => {
                                             agent_selection.move_up(&agents, agent_view_mode)
                                         }
                                     },
-                                    KeyCode::Down => match focus {
-                                        FocusPanel::Left => selection.move_down(&display_repos),
-                                        FocusPanel::Right => {
+                                    KeyCode::Down => match (focus, agent_view_mode) {
+                                        (FocusPanel::Left, _) => {
+                                            selection.move_down(&display_repos)
+                                        }
+                                        (FocusPanel::Right, AgentViewMode::Window) => {
+                                            window_nav(
+                                                last_content_area,
+                                                &agents,
+                                                &display_repos,
+                                                &selection,
+                                                &mut window_grid,
+                                                window_view::Direction::Down,
+                                            );
+                                        }
+                                        (FocusPanel::Right, AgentViewMode::ByRepo) => {
                                             agent_selection.move_down(&agents, agent_view_mode)
                                         }
                                     },
-                                    KeyCode::Right => match focus {
-                                        FocusPanel::Left => selection.descend(&display_repos),
-                                        FocusPanel::Right => {
+                                    KeyCode::Right => match (focus, agent_view_mode) {
+                                        (FocusPanel::Left, _) => {
+                                            selection.descend(&display_repos)
+                                        }
+                                        (FocusPanel::Right, AgentViewMode::Window) => {
+                                            window_nav(
+                                                last_content_area,
+                                                &agents,
+                                                &display_repos,
+                                                &selection,
+                                                &mut window_grid,
+                                                window_view::Direction::Right,
+                                            );
+                                        }
+                                        (FocusPanel::Right, AgentViewMode::ByRepo) => {
                                             agent_selection.next_group(&agents, agent_view_mode)
                                         }
                                     },
-                                    KeyCode::Left => match focus {
-                                        FocusPanel::Left => selection.ascend(&display_repos),
-                                        FocusPanel::Right => {
+                                    KeyCode::Left => match (focus, agent_view_mode) {
+                                        (FocusPanel::Left, _) => {
+                                            selection.ascend(&display_repos)
+                                        }
+                                        (FocusPanel::Right, AgentViewMode::Window) => {
+                                            window_nav(
+                                                last_content_area,
+                                                &agents,
+                                                &display_repos,
+                                                &selection,
+                                                &mut window_grid,
+                                                window_view::Direction::Left,
+                                            );
+                                        }
+                                        (FocusPanel::Right, AgentViewMode::ByRepo) => {
                                             agent_selection.prev_group(&agents, agent_view_mode)
                                         }
                                     },
@@ -6820,10 +7006,31 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                 }
                                 // Mode label click (right panel) → toggle view mode
                                 else if click_map.mode_label_area.contains(pos) {
-                                    // Only ByRepo remains; the toggle is a no-op
-                                    // until the Window view lands and replaces it.
-                                    agent_view_mode = AgentViewMode::ByRepo;
+                                    agent_view_mode = match agent_view_mode {
+                                        AgentViewMode::Window => AgentViewMode::ByRepo,
+                                        AgentViewMode::ByRepo => AgentViewMode::Window,
+                                    };
                                     agent_selection = AgentSelection::default();
+                                    window_grid = window_view::WindowGridState::default();
+                                    focus = FocusPanel::Right;
+                                }
+                                // Window-view cell clicks (right panel) → select that cell
+                                else if let Some((_, agent_id)) = click_map
+                                    .window_cells
+                                    .iter()
+                                    .find(|(r, _)| r.contains(pos))
+                                {
+                                    let target_id = agent_id.clone();
+                                    let (scoped, _) = scoped_agent_ids(
+                                        &agents,
+                                        &display_repos,
+                                        &selection,
+                                    );
+                                    if let Some(idx) =
+                                        scoped.iter().position(|id| id == &target_id)
+                                    {
+                                        window_grid.selected_idx = idx;
+                                    }
                                     focus = FocusPanel::Right;
                                 }
                                 // Agent card clicks (right panel)
@@ -7789,7 +7996,7 @@ fn render_right_panel(
     }
 }
 
-fn render_logo(frame: &mut Frame, area: Rect) {
+pub(crate) fn render_logo(frame: &mut Frame, area: Rect) {
     let mut lines: Vec<Line> = Vec::new();
 
     lines.push(Line::from(""));
