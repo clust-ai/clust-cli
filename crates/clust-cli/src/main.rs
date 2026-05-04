@@ -11,7 +11,6 @@ mod format;
 mod hub_launcher;
 mod import_batch_modal;
 mod ipc;
-mod orchestrator_modal;
 mod output_filter;
 mod overview;
 mod repo_modal;

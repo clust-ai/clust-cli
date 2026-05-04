@@ -68,12 +68,6 @@ fn run_migrations(conn: &Connection) -> Result<(), String> {
     if current_version < 9 {
         migrate_v9(conn)?;
     }
-    if current_version < 10 {
-        migrate_v10(conn)?;
-    }
-    if current_version < 11 {
-        migrate_v11(conn)?;
-    }
 
     Ok(())
 }
@@ -212,62 +206,6 @@ fn migrate_v9(conn: &Connection) -> Result<(), String> {
     .map_err(|e| format!("migration v9 failed: {e}"))
 }
 
-/// Migration v10: add is_manager flag to queued_batch_tasks. Manager tasks are
-/// auto-injected by the orchestrator import flow and do not consume a
-/// `max_concurrent` slot.
-fn migrate_v10(conn: &Connection) -> Result<(), String> {
-    conn.execute_batch(
-        "ALTER TABLE queued_batch_tasks ADD COLUMN is_manager INTEGER NOT NULL DEFAULT 0;
-         INSERT INTO schema_version (version) VALUES (10);",
-    )
-    .map_err(|e| format!("migration v10 failed: {e}"))
-}
-
-/// Migration v11: add `orchestrator_id` and `orchestrator_batch_file` columns
-/// to `queued_batches`, and make `scheduled_at` nullable (idle/orchestrator
-/// batches don't have a scheduled time). Dropping NOT NULL requires table
-/// recreation in SQLite; foreign keys are off in this connection, so the
-/// `queued_batch_tasks` FK survives the drop+rename.
-fn migrate_v11(conn: &Connection) -> Result<(), String> {
-    conn.execute_batch(
-        "BEGIN;
-         CREATE TABLE queued_batches_new (
-             id                      TEXT PRIMARY KEY,
-             title                   TEXT NOT NULL,
-             repo_path               TEXT NOT NULL,
-             target_branch           TEXT NOT NULL,
-             max_concurrent          INTEGER,
-             prompt_prefix           TEXT,
-             prompt_suffix           TEXT,
-             plan_mode               INTEGER NOT NULL DEFAULT 0,
-             allow_bypass            INTEGER NOT NULL DEFAULT 0,
-             agent_binary            TEXT,
-             hub                     TEXT NOT NULL,
-             scheduled_at            TEXT,
-             status                  TEXT NOT NULL DEFAULT 'scheduled',
-             created_at              TEXT NOT NULL,
-             launch_mode             TEXT NOT NULL DEFAULT 'auto',
-             depends_on              TEXT NOT NULL DEFAULT '[]',
-             orchestrator_id         TEXT,
-             orchestrator_batch_file TEXT
-         );
-         INSERT INTO queued_batches_new (id, title, repo_path, target_branch,
-             max_concurrent, prompt_prefix, prompt_suffix, plan_mode, allow_bypass,
-             agent_binary, hub, scheduled_at, status, created_at, launch_mode,
-             depends_on, orchestrator_id, orchestrator_batch_file)
-         SELECT id, title, repo_path, target_branch,
-             max_concurrent, prompt_prefix, prompt_suffix, plan_mode, allow_bypass,
-             agent_binary, hub, scheduled_at, status, created_at, launch_mode,
-             depends_on, NULL, NULL
-         FROM queued_batches;
-         DROP TABLE queued_batches;
-         ALTER TABLE queued_batches_new RENAME TO queued_batches;
-         INSERT INTO schema_version (version) VALUES (11);
-         COMMIT;",
-    )
-    .map_err(|e| format!("migration v11 failed: {e}"))
-}
-
 // ---------------------------------------------------------------------------
 // Queued batch CRUD
 // ---------------------------------------------------------------------------
@@ -289,10 +227,6 @@ pub struct QueuedBatchRow {
     pub status: String,
     pub launch_mode: String,
     pub depends_on: String,
-    /// Orchestrator id that produced this batch (NULL for non-orchestrator batches).
-    pub orchestrator_id: Option<String>,
-    /// JSON filename inside the orchestrator inbox (e.g. "batch-001.json").
-    pub orchestrator_batch_file: Option<String>,
 }
 
 /// A row from the queued_batch_tasks table.
@@ -305,24 +239,19 @@ pub struct QueuedBatchTaskRow {
     pub use_prefix: bool,
     pub use_suffix: bool,
     pub plan_mode: bool,
-    pub is_manager: bool,
 }
-
-/// One task to insert: (branch_name, prompt, use_prefix, use_suffix, plan_mode, is_manager).
-pub type InsertTaskRow = (String, String, bool, bool, bool, bool);
 
 /// Insert a new queued batch and its tasks.
 pub fn insert_queued_batch(
     conn: &Connection,
     batch: &QueuedBatchRow,
-    tasks: &[InsertTaskRow],
+    tasks: &[(String, String, bool, bool, bool)],
 ) -> Result<(), String> {
     conn.execute(
         "INSERT INTO queued_batches (id, title, repo_path, target_branch, max_concurrent,
          prompt_prefix, prompt_suffix, plan_mode, allow_bypass, agent_binary, hub,
-         scheduled_at, status, created_at, launch_mode, depends_on,
-         orchestrator_id, orchestrator_batch_file)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)",
+         scheduled_at, status, created_at, launch_mode, depends_on)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
         rusqlite::params![
             batch.id,
             batch.title,
@@ -340,19 +269,15 @@ pub fn insert_queued_batch(
             chrono::Utc::now().to_rfc3339(),
             batch.launch_mode,
             batch.depends_on,
-            batch.orchestrator_id,
-            batch.orchestrator_batch_file,
         ],
     )
     .map_err(|e| format!("failed to insert queued batch: {e}"))?;
 
-    for (i, (branch_name, prompt, use_prefix, use_suffix, plan_mode, is_manager)) in
-        tasks.iter().enumerate()
-    {
+    for (i, (branch_name, prompt, use_prefix, use_suffix, plan_mode)) in tasks.iter().enumerate() {
         conn.execute(
-            "INSERT INTO queued_batch_tasks (batch_id, task_index, branch_name, prompt, status, use_prefix, use_suffix, plan_mode, is_manager)
-             VALUES (?1, ?2, ?3, ?4, 'idle', ?5, ?6, ?7, ?8)",
-            rusqlite::params![batch.id, i as i64, branch_name, prompt, *use_prefix as i32, *use_suffix as i32, *plan_mode as i32, *is_manager as i32],
+            "INSERT INTO queued_batch_tasks (batch_id, task_index, branch_name, prompt, status, use_prefix, use_suffix, plan_mode)
+             VALUES (?1, ?2, ?3, ?4, 'idle', ?5, ?6, ?7)",
+            rusqlite::params![batch.id, i as i64, branch_name, prompt, *use_prefix as i32, *use_suffix as i32, *plan_mode as i32],
         )
         .map_err(|e| format!("failed to insert queued batch task: {e}"))?;
     }
@@ -367,8 +292,7 @@ pub fn load_queued_batches(
         .prepare(
             "SELECT id, title, repo_path, target_branch, max_concurrent,
                     prompt_prefix, prompt_suffix, plan_mode, allow_bypass,
-                    agent_binary, hub, scheduled_at, status, launch_mode, depends_on,
-                    orchestrator_id, orchestrator_batch_file
+                    agent_binary, hub, scheduled_at, status, launch_mode, depends_on
              FROM queued_batches
              WHERE status IN ('idle', 'scheduled', 'running')
              ORDER BY rowid",
@@ -382,7 +306,9 @@ pub fn load_queued_batches(
                 title: row.get(1)?,
                 repo_path: row.get(2)?,
                 target_branch: row.get(3)?,
-                max_concurrent: row.get::<_, Option<i64>>(4)?.map(|v| v as usize),
+                max_concurrent: row
+                    .get::<_, Option<i64>>(4)?
+                    .map(|v| v as usize),
                 prompt_prefix: row.get(5)?,
                 prompt_suffix: row.get(6)?,
                 plan_mode: row.get::<_, i32>(7)? != 0,
@@ -391,14 +317,8 @@ pub fn load_queued_batches(
                 hub: row.get(10)?,
                 scheduled_at: row.get(11)?,
                 status: row.get(12)?,
-                launch_mode: row
-                    .get::<_, Option<String>>(13)?
-                    .unwrap_or_else(|| "auto".to_string()),
-                depends_on: row
-                    .get::<_, Option<String>>(14)?
-                    .unwrap_or_else(|| "[]".to_string()),
-                orchestrator_id: row.get(15)?,
-                orchestrator_batch_file: row.get(16)?,
+                launch_mode: row.get::<_, Option<String>>(13)?.unwrap_or_else(|| "auto".to_string()),
+                depends_on: row.get::<_, Option<String>>(14)?.unwrap_or_else(|| "[]".to_string()),
             })
         })
         .map_err(|e| format!("failed to query queued batches: {e}"))?
@@ -414,10 +334,13 @@ pub fn load_queued_batches(
 }
 
 /// Load tasks for a specific batch.
-fn load_batch_tasks(conn: &Connection, batch_id: &str) -> Result<Vec<QueuedBatchTaskRow>, String> {
+fn load_batch_tasks(
+    conn: &Connection,
+    batch_id: &str,
+) -> Result<Vec<QueuedBatchTaskRow>, String> {
     let mut stmt = conn
         .prepare(
-            "SELECT task_index, branch_name, prompt, status, agent_id, use_prefix, use_suffix, plan_mode, is_manager
+            "SELECT task_index, branch_name, prompt, status, agent_id, use_prefix, use_suffix, plan_mode
              FROM queued_batch_tasks
              WHERE batch_id = ?1
              ORDER BY task_index",
@@ -435,7 +358,6 @@ fn load_batch_tasks(conn: &Connection, batch_id: &str) -> Result<Vec<QueuedBatch
                 use_prefix: row.get::<_, i32>(5)? != 0,
                 use_suffix: row.get::<_, i32>(6)? != 0,
                 plan_mode: row.get::<_, i32>(7)? != 0,
-                is_manager: row.get::<_, i32>(8)? != 0,
             })
         })
         .map_err(|e| format!("failed to query tasks: {e}"))?
@@ -507,13 +429,7 @@ pub fn update_batch_config(
     conn.execute(
         "UPDATE queued_batches SET prompt_prefix = ?1, prompt_suffix = ?2,
          plan_mode = ?3, allow_bypass = ?4 WHERE id = ?5",
-        rusqlite::params![
-            prompt_prefix,
-            prompt_suffix,
-            plan_mode as i32,
-            allow_bypass as i32,
-            id
-        ],
+        rusqlite::params![prompt_prefix, prompt_suffix, plan_mode as i32, allow_bypass as i32, id],
     )
     .map_err(|e| format!("failed to update batch config: {e}"))?;
     Ok(())
@@ -544,7 +460,9 @@ pub fn remove_done_batch_tasks(conn: &Connection, batch_id: &str) -> Result<(), 
     .map_err(|e| format!("failed to remove done tasks: {e}"))?;
     // Re-index remaining tasks
     let mut stmt = conn
-        .prepare("SELECT id FROM queued_batch_tasks WHERE batch_id = ?1 ORDER BY task_index")
+        .prepare(
+            "SELECT id FROM queued_batch_tasks WHERE batch_id = ?1 ORDER BY task_index",
+        )
         .map_err(|e| format!("failed to prepare re-index query: {e}"))?;
     let ids: Vec<i64> = stmt
         .query_map([batch_id], |row| row.get(0))
@@ -564,72 +482,20 @@ pub fn remove_done_batch_tasks(conn: &Connection, batch_id: &str) -> Result<(), 
 /// Delete a queued batch and its tasks (cascade).
 pub fn delete_queued_batch(conn: &Connection, id: &str) -> Result<(), String> {
     // Delete tasks first (SQLite foreign key cascade may not be enabled)
-    conn.execute("DELETE FROM queued_batch_tasks WHERE batch_id = ?1", [id])
-        .map_err(|e| format!("failed to delete batch tasks: {e}"))?;
+    conn.execute(
+        "DELETE FROM queued_batch_tasks WHERE batch_id = ?1",
+        [id],
+    )
+    .map_err(|e| format!("failed to delete batch tasks: {e}"))?;
     conn.execute("DELETE FROM queued_batches WHERE id = ?1", [id])
         .map_err(|e| format!("failed to delete batch: {e}"))?;
     Ok(())
 }
 
-/// Titles + source filenames of batches already imported under the given
-/// orchestrator id. Used by the inbox watcher to dedup on re-import after a
-/// mid-import crash, and to keep the validator from flagging "title collides
-/// with existing hub batch" against the orchestrator's own earlier inserts.
-pub fn imported_batches_for_orch(
-    conn: &Connection,
-    orch_id: &str,
-) -> Result<ImportedBatches, String> {
-    let mut stmt = conn
-        .prepare(
-            "SELECT title, orchestrator_batch_file FROM queued_batches \
-             WHERE orchestrator_id = ?1",
-        )
-        .map_err(|e| format!("prepare imported_batches_for_orch: {e}"))?;
-    let mut titles = std::collections::HashSet::new();
-    let mut files = std::collections::HashSet::new();
-    let rows = stmt
-        .query_map([orch_id], |row| {
-            Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?))
-        })
-        .map_err(|e| format!("query imported_batches_for_orch: {e}"))?;
-    for r in rows.flatten() {
-        titles.insert(r.0);
-        if let Some(f) = r.1 {
-            files.insert(f);
-        }
-    }
-    Ok(ImportedBatches { titles, files })
-}
-
-/// Output of `imported_batches_for_orch`: existing titles + source filenames.
-#[derive(Default)]
-pub struct ImportedBatches {
-    pub titles: std::collections::HashSet<String>,
-    pub files: std::collections::HashSet<String>,
-}
-
-/// Look up the orchestrator-source pair for a batch: `(orchestrator_id, batch_file)`.
-/// Returns `Ok(None)` if the batch has no orchestrator origin or doesn't exist.
-pub fn get_batch_source(
-    conn: &Connection,
-    batch_id: &str,
-) -> Result<Option<(String, String)>, String> {
-    let row: rusqlite::Result<(Option<String>, Option<String>)> = conn.query_row(
-        "SELECT orchestrator_id, orchestrator_batch_file FROM queued_batches WHERE id = ?1",
-        [batch_id],
-        |row| Ok((row.get(0)?, row.get(1)?)),
-    );
-    match row {
-        Ok((Some(id), Some(file))) => Ok(Some((id, file))),
-        Ok(_) => Ok(None),
-        Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
-        Err(e) => Err(format!("failed to query batch source: {e}")),
-    }
-}
-
 /// Available colors for repository identification.
 pub const REPO_COLORS: &[&str] = &[
-    "red", "orange", "yellow", "lime", "green", "teal", "blue", "purple", "pink", "coral",
+    "red", "orange", "yellow", "lime", "green",
+    "teal", "blue", "purple", "pink", "coral",
 ];
 
 /// Register a repository path with a color. Silently ignores duplicates.
@@ -649,9 +515,7 @@ pub fn list_repos(conn: &Connection) -> Result<Vec<RepoRow>, String> {
         .prepare("SELECT path, name, color, editor FROM repos ORDER BY name")
         .map_err(|e| format!("failed to prepare repo query: {e}"))?;
     let rows = stmt
-        .query_map([], |row| {
-            Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
-        })
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)))
         .map_err(|e| format!("failed to query repos: {e}"))?;
     rows.collect::<Result<Vec<_>, _>>()
         .map_err(|e| format!("failed to collect repos: {e}"))
@@ -1058,134 +922,6 @@ mod tests {
             register_repo(&conn, &format!("/r{i}"), &format!("r{i}"), color).unwrap();
         }
         assert_eq!(next_repo_color(&conn), REPO_COLORS[0]);
-    }
-
-    #[test]
-    fn migrate_v11_adds_orchestrator_columns() {
-        let conn = Connection::open_in_memory().unwrap();
-        conn.execute_batch(
-            "CREATE TABLE IF NOT EXISTS schema_version (version INTEGER PRIMARY KEY);",
-        )
-        .unwrap();
-        // Apply v1..v10 first; v11 should be the only change after this point.
-        migrate_v1(&conn).unwrap();
-        migrate_v2(&conn).unwrap();
-        migrate_v3(&conn).unwrap();
-        migrate_v4(&conn).unwrap();
-        migrate_v5(&conn).unwrap();
-        migrate_v6(&conn).unwrap();
-        migrate_v7(&conn).unwrap();
-        migrate_v8(&conn).unwrap();
-        migrate_v9(&conn).unwrap();
-        migrate_v10(&conn).unwrap();
-        // The new columns should not exist yet.
-        assert!(conn
-            .query_row(
-                "SELECT orchestrator_id FROM queued_batches LIMIT 1",
-                [],
-                |r| r.get::<_, Option<String>>(0)
-            )
-            .is_err());
-        migrate_v11(&conn).unwrap();
-        // Inserting a row with both columns NULL must succeed.
-        conn.execute(
-            "INSERT INTO queued_batches (id, title, repo_path, target_branch, max_concurrent,
-             prompt_prefix, prompt_suffix, plan_mode, allow_bypass, agent_binary, hub,
-             scheduled_at, status, created_at, launch_mode, depends_on)
-             VALUES ('b1', 't', '/r', 'main', 1, NULL, NULL, 0, 0, NULL, 'clust',
-             NULL, 'idle', '2025-01-01T00:00:00Z', 'auto', '[]')",
-            [],
-        )
-        .unwrap();
-        let (orch_id, file): (Option<String>, Option<String>) = conn
-            .query_row(
-                "SELECT orchestrator_id, orchestrator_batch_file FROM queued_batches WHERE id = 'b1'",
-                [],
-                |r| Ok((r.get(0)?, r.get(1)?)),
-            )
-            .unwrap();
-        assert_eq!(orch_id, None);
-        assert_eq!(file, None);
-    }
-
-    #[test]
-    fn insert_and_get_batch_source() {
-        let conn = in_memory_db();
-        let row = QueuedBatchRow {
-            id: "b00abc".to_string(),
-            title: "Models".to_string(),
-            repo_path: "/r".to_string(),
-            target_branch: "main".to_string(),
-            max_concurrent: Some(2),
-            prompt_prefix: None,
-            prompt_suffix: None,
-            plan_mode: false,
-            allow_bypass: false,
-            agent_binary: None,
-            hub: "clust".to_string(),
-            scheduled_at: None,
-            status: "idle".to_string(),
-            launch_mode: "auto".to_string(),
-            depends_on: "[]".to_string(),
-            orchestrator_id: Some("oabcdef123456".to_string()),
-            orchestrator_batch_file: Some("batch-001.json".to_string()),
-        };
-        insert_queued_batch(&conn, &row, &[]).unwrap();
-        let pair = get_batch_source(&conn, "b00abc").unwrap().unwrap();
-        assert_eq!(pair.0, "oabcdef123456");
-        assert_eq!(pair.1, "batch-001.json");
-
-        // Non-orchestrator batch returns None.
-        let mut row2 = row;
-        row2.id = "b00def".to_string();
-        row2.title = "Plain".to_string();
-        row2.orchestrator_id = None;
-        row2.orchestrator_batch_file = None;
-        insert_queued_batch(&conn, &row2, &[]).unwrap();
-        assert!(get_batch_source(&conn, "b00def").unwrap().is_none());
-
-        // Unknown id is also None, not an error.
-        assert!(get_batch_source(&conn, "nope").unwrap().is_none());
-    }
-
-    #[test]
-    fn imported_batches_for_orch_returns_titles_and_files() {
-        let conn = in_memory_db();
-        let mk = |id: &str, title: &str, oid: Option<&str>, file: Option<&str>| QueuedBatchRow {
-            id: id.to_string(),
-            title: title.to_string(),
-            repo_path: "/r".to_string(),
-            target_branch: "main".to_string(),
-            max_concurrent: None,
-            prompt_prefix: None,
-            prompt_suffix: None,
-            plan_mode: false,
-            allow_bypass: false,
-            agent_binary: None,
-            hub: "clust".to_string(),
-            scheduled_at: None,
-            status: "idle".to_string(),
-            launch_mode: "auto".to_string(),
-            depends_on: "[]".to_string(),
-            orchestrator_id: oid.map(str::to_string),
-            orchestrator_batch_file: file.map(str::to_string),
-        };
-        insert_queued_batch(&conn, &mk("b1", "A", Some("ox"), Some("a.json")), &[]).unwrap();
-        insert_queued_batch(&conn, &mk("b2", "B", Some("ox"), Some("b.json")), &[]).unwrap();
-        insert_queued_batch(&conn, &mk("b3", "C", Some("oy"), Some("a.json")), &[]).unwrap();
-        insert_queued_batch(&conn, &mk("b4", "D", None, None), &[]).unwrap();
-
-        let result = imported_batches_for_orch(&conn, "ox").unwrap();
-        assert_eq!(result.files.len(), 2);
-        assert!(result.files.contains("a.json"));
-        assert!(result.files.contains("b.json"));
-        assert!(result.titles.contains("A"));
-        assert!(result.titles.contains("B"));
-        assert!(!result.titles.contains("C"));
-
-        let other = imported_batches_for_orch(&conn, "nope").unwrap();
-        assert!(other.titles.is_empty());
-        assert!(other.files.is_empty());
     }
 
     #[test]
