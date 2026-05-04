@@ -24,7 +24,7 @@ use ratatui::{
     Frame, Terminal,
 };
 
-use clust_ipc::{AgentInfo, CliMessage, HubMessage, RepoInfo, DEFAULT_HUB};
+use clust_ipc::{AgentInfo, CliMessage, HubMessage, RepoInfo};
 
 use crate::{
     add_task_modal::{AddTaskModal, AddTaskResult},
@@ -225,9 +225,7 @@ const NO_REPOSITORY: &str = "No repository";
 /// Controls how agents are grouped in the right panel.
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum AgentViewMode {
-    /// Group agents by their hub name.
-    ByHub,
-    /// Group agents by their git repository path (default).
+    /// Group agents by their git repository path.
     ByRepo,
 }
 
@@ -397,15 +395,13 @@ enum ActiveMenu {
 // ---------------------------------------------------------------------------
 
 /// Returns sorted, deduplicated group names from an agent list based on view mode.
-fn group_names(agents: &[AgentInfo], mode: AgentViewMode) -> Vec<String> {
+fn group_names(agents: &[AgentInfo], _mode: AgentViewMode) -> Vec<String> {
     let mut names: Vec<String> = agents
         .iter()
-        .map(|a| match mode {
-            AgentViewMode::ByHub => a.hub.clone(),
-            AgentViewMode::ByRepo => a
-                .repo_path
+        .map(|a| {
+            a.repo_path
                 .clone()
-                .unwrap_or_else(|| NO_REPOSITORY.to_string()),
+                .unwrap_or_else(|| NO_REPOSITORY.to_string())
         })
         .collect();
     names.sort();
@@ -414,14 +410,11 @@ fn group_names(agents: &[AgentInfo], mode: AgentViewMode) -> Vec<String> {
 }
 
 /// Returns the group key for an agent based on view mode.
-fn agent_group_key(agent: &AgentInfo, mode: AgentViewMode) -> String {
-    match mode {
-        AgentViewMode::ByHub => agent.hub.clone(),
-        AgentViewMode::ByRepo => agent
-            .repo_path
-            .clone()
-            .unwrap_or_else(|| NO_REPOSITORY.to_string()),
-    }
+fn agent_group_key(agent: &AgentInfo, _mode: AgentViewMode) -> String {
+    agent
+        .repo_path
+        .clone()
+        .unwrap_or_else(|| NO_REPOSITORY.to_string())
 }
 
 /// Tracks the user's cursor position within the agent panel (group + agent).
@@ -511,30 +504,19 @@ fn resolve_selected_agent<'a>(
     let names = group_names(agents, mode);
     let group_name = names.get(sel.group_idx)?;
 
-    match mode {
-        AgentViewMode::ByHub => {
-            let mut sorted: Vec<&AgentInfo> = agents.iter().collect();
-            sorted.sort_by(|a, b| a.hub.cmp(&b.hub).then(a.started_at.cmp(&b.started_at)));
-            sorted
-                .into_iter()
-                .filter(|a| a.hub == *group_name)
-                .nth(sel.agent_idx)
-        }
-        AgentViewMode::ByRepo => {
-            let mut sorted: Vec<&AgentInfo> = agents.iter().collect();
-            sorted.sort_by(|a, b| {
-                let ak = agent_group_key(a, AgentViewMode::ByRepo);
-                let bk = agent_group_key(b, AgentViewMode::ByRepo);
-                ak.cmp(&bk)
-                    .then(a.branch_name.cmp(&b.branch_name))
-                    .then(a.started_at.cmp(&b.started_at))
-            });
-            sorted
-                .into_iter()
-                .filter(|a| agent_group_key(a, AgentViewMode::ByRepo) == *group_name)
-                .nth(sel.agent_idx)
-        }
-    }
+    let _ = mode;
+    let mut sorted: Vec<&AgentInfo> = agents.iter().collect();
+    sorted.sort_by(|a, b| {
+        let ak = agent_group_key(a, AgentViewMode::ByRepo);
+        let bk = agent_group_key(b, AgentViewMode::ByRepo);
+        ak.cmp(&bk)
+            .then(a.branch_name.cmp(&b.branch_name))
+            .then(a.started_at.cmp(&b.started_at))
+    });
+    sorted
+        .into_iter()
+        .filter(|a| agent_group_key(a, AgentViewMode::ByRepo) == *group_name)
+        .nth(sel.agent_idx)
 }
 
 // ---------------------------------------------------------------------------
@@ -5217,10 +5199,9 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                         }
                                     }
                                     KeyCode::Char('v') if focus == FocusPanel::Right => {
-                                        agent_view_mode = match agent_view_mode {
-                                            AgentViewMode::ByHub => AgentViewMode::ByRepo,
-                                            AgentViewMode::ByRepo => AgentViewMode::ByHub,
-                                        };
+                                        // Only ByRepo remains; the toggle is a no-op
+                                        // until the Window view lands and replaces it.
+                                        agent_view_mode = AgentViewMode::ByRepo;
                                         agent_selection = AgentSelection::default();
                                     }
                                     KeyCode::Up
@@ -6839,10 +6820,9 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                 }
                                 // Mode label click (right panel) → toggle view mode
                                 else if click_map.mode_label_area.contains(pos) {
-                                    agent_view_mode = match agent_view_mode {
-                                        AgentViewMode::ByHub => AgentViewMode::ByRepo,
-                                        AgentViewMode::ByRepo => AgentViewMode::ByHub,
-                                    };
+                                    // Only ByRepo remains; the toggle is a no-op
+                                    // until the Window view lands and replaces it.
+                                    agent_view_mode = AgentViewMode::ByRepo;
                                     agent_selection = AgentSelection::default();
                                     focus = FocusPanel::Right;
                                 }
@@ -7873,13 +7853,9 @@ fn render_agent_list(
     frame.render_widget(block, area);
 
     // Mode label + hint
-    let mode_label = match mode {
-        AgentViewMode::ByHub => "by hub",
-        AgentViewMode::ByRepo => "by repo",
-    };
+    let _ = mode;
     let mode_line = Paragraph::new(Line::from(vec![
-        Span::styled(mode_label, Style::default().fg(theme::R_TEXT_TERTIARY)),
-        Span::styled("  v to switch", Style::default().fg(theme::R_TEXT_TERTIARY)),
+        Span::styled("by repo", Style::default().fg(theme::R_TEXT_TERTIARY)),
     ]));
 
     // Focus indicator in top-right corner (overlaid on mode label line)
@@ -7891,120 +7867,17 @@ fn render_agent_list(
     let indicator = Paragraph::new(Span::styled("●", Style::default().fg(indicator_color)))
         .alignment(Alignment::Right);
 
-    match mode {
-        AgentViewMode::ByHub => render_agent_list_by_hub(
-            frame,
-            inner,
-            agents,
-            agent_sel,
-            focused,
-            &mode_line,
-            &indicator,
-            click_map,
-            repo_colors,
-        ),
-        AgentViewMode::ByRepo => render_agent_list_by_repo(
-            frame,
-            inner,
-            agents,
-            agent_sel,
-            focused,
-            &mode_line,
-            &indicator,
-            click_map,
-            repo_colors,
-        ),
-    }
-}
-
-#[allow(clippy::too_many_arguments)]
-fn render_agent_list_by_hub(
-    frame: &mut Frame,
-    inner: Rect,
-    agents: &[AgentInfo],
-    agent_sel: &AgentSelection,
-    focused: bool,
-    mode_line: &Paragraph<'_>,
-    indicator: &Paragraph<'_>,
-    click_map: &mut ClickMap,
-    _repo_colors: &HashMap<String, String>,
-) {
-    let mut sorted: Vec<&AgentInfo> = agents.iter().collect();
-    sorted.sort_by(|a, b| a.hub.cmp(&b.hub).then(a.started_at.cmp(&b.started_at)));
-
-    let mut pnames: Vec<&str> = sorted.iter().map(|a| a.hub.as_str()).collect();
-    pnames.dedup();
-
-    let hide_headers = pnames.len() == 1 && pnames[0] == DEFAULT_HUB;
-
-    // Build layout: mode label + spacer + hub headers + agent cards + gaps
-    let mut constraints: Vec<Constraint> = vec![
-        Constraint::Length(1), // mode label
-        Constraint::Length(1), // spacer
-    ];
-    for (pidx, hub_name) in pnames.iter().enumerate() {
-        if !hide_headers {
-            if pidx > 0 {
-                constraints.push(Constraint::Length(1)); // gap before hub header
-            }
-            constraints.push(Constraint::Length(1)); // hub header
-            constraints.push(Constraint::Length(1)); // spacer after header
-        }
-        let count = sorted.iter().filter(|a| a.hub == *hub_name).count();
-        for i in 0..count {
-            constraints.push(Constraint::Length(4)); // agent card
-            if i < count - 1 {
-                constraints.push(Constraint::Length(1)); // gap between cards
-            }
-        }
-    }
-    constraints.push(Constraint::Min(0));
-
-    let areas = Layout::vertical(constraints).split(inner);
-
-    frame.render_widget(mode_line.clone(), areas[0]);
-    click_map.mode_label_area = areas[0];
-    frame.render_widget(
-        indicator.clone(),
-        Rect {
-            x: inner.x,
-            y: inner.y,
-            width: inner.width,
-            height: 1,
-        },
+    render_agent_list_by_repo(
+        frame,
+        inner,
+        agents,
+        agent_sel,
+        focused,
+        &mode_line,
+        &indicator,
+        click_map,
+        repo_colors,
     );
-
-    let mut area_idx = 2;
-    for (pidx, hub_name) in pnames.iter().enumerate() {
-        if !hide_headers {
-            if pidx > 0 {
-                area_idx += 1; // skip gap before hub header
-            }
-            let hub_header = Paragraph::new(Line::from(vec![Span::styled(
-                format!(" {hub_name}"),
-                Style::default().fg(theme::R_ACCENT),
-            )]));
-            frame.render_widget(hub_header, areas[area_idx]);
-            area_idx += 1;
-            area_idx += 1; // skip spacer after header
-        }
-
-        let agents_in_hub: Vec<(usize, &&AgentInfo)> = sorted
-            .iter()
-            .filter(|a| a.hub == *hub_name)
-            .enumerate()
-            .collect();
-        let agent_count = agents_in_hub.len();
-        for (aidx, agent) in agents_in_hub {
-            let is_selected = focused && pidx == agent_sel.group_idx && aidx == agent_sel.agent_idx;
-            click_map.agent_cards.push((areas[area_idx], pidx, aidx));
-            render_agent_card(frame, areas[area_idx], agent, is_selected, false);
-            area_idx += 1;
-            if aidx < agent_count - 1 {
-                area_idx += 1; // skip gap between cards
-            }
-        }
-    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -10101,14 +9974,6 @@ mod tests {
         }
     }
 
-    fn sample_agents() -> Vec<AgentInfo> {
-        vec![
-            make_agent("aaa111", "alpha"),
-            make_agent("aaa222", "alpha"),
-            make_agent("bbb111", "beta"),
-        ]
-    }
-
     #[test]
     fn agent_selection_default_is_first() {
         let sel = AgentSelection::default();
@@ -10122,88 +9987,9 @@ mod tests {
             group_idx: 5,
             agent_idx: 3,
         };
-        sel.clamp(&[], AgentViewMode::ByHub);
+        sel.clamp(&[], AgentViewMode::ByRepo);
         assert_eq!(sel.group_idx, 0);
         assert_eq!(sel.agent_idx, 0);
-    }
-
-    #[test]
-    fn agent_selection_clamp_shrinks() {
-        let agents = sample_agents();
-        let mut sel = AgentSelection {
-            group_idx: 10,
-            agent_idx: 10,
-        };
-        sel.clamp(&agents, AgentViewMode::ByHub);
-        assert_eq!(sel.group_idx, 1); // 2 hubs: alpha, beta
-        assert_eq!(sel.agent_idx, 0); // beta has 1 agent
-    }
-
-    #[test]
-    fn agent_selection_move_down_within_hub() {
-        let agents = sample_agents();
-        let mut sel = AgentSelection::default(); // hub 0 (alpha), agent 0
-        sel.move_down(&agents, AgentViewMode::ByHub);
-        assert_eq!(sel.agent_idx, 1); // alpha has 2 agents
-        sel.move_down(&agents, AgentViewMode::ByHub);
-        assert_eq!(sel.agent_idx, 1); // saturates
-    }
-
-    #[test]
-    fn agent_selection_move_up_within_hub() {
-        let agents = sample_agents();
-        let mut sel = AgentSelection {
-            group_idx: 0,
-            agent_idx: 1,
-        };
-        sel.move_up(&agents, AgentViewMode::ByHub);
-        assert_eq!(sel.agent_idx, 0);
-        sel.move_up(&agents, AgentViewMode::ByHub);
-        assert_eq!(sel.agent_idx, 0); // saturates
-    }
-
-    #[test]
-    fn agent_selection_next_group() {
-        let agents = sample_agents();
-        let mut sel = AgentSelection::default();
-        sel.next_group(&agents, AgentViewMode::ByHub);
-        assert_eq!(sel.group_idx, 1);
-        assert_eq!(sel.agent_idx, 0); // reset on group switch
-        sel.next_group(&agents, AgentViewMode::ByHub);
-        assert_eq!(sel.group_idx, 1); // saturates
-    }
-
-    #[test]
-    fn agent_selection_prev_group() {
-        let agents = sample_agents();
-        let mut sel = AgentSelection {
-            group_idx: 1,
-            agent_idx: 0,
-        };
-        sel.prev_group(&agents, AgentViewMode::ByHub);
-        assert_eq!(sel.group_idx, 0);
-        assert_eq!(sel.agent_idx, 0);
-        sel.prev_group(&agents, AgentViewMode::ByHub);
-        assert_eq!(sel.group_idx, 0); // saturates
-    }
-
-    #[test]
-    fn agent_selection_next_group_resets_agent_idx() {
-        let agents = sample_agents();
-        let mut sel = AgentSelection {
-            group_idx: 0,
-            agent_idx: 1,
-        };
-        sel.next_group(&agents, AgentViewMode::ByHub);
-        assert_eq!(sel.group_idx, 1);
-        assert_eq!(sel.agent_idx, 0);
-    }
-
-    #[test]
-    fn group_names_by_hub_sorted_deduped() {
-        let agents = sample_agents();
-        let names = group_names(&agents, AgentViewMode::ByHub);
-        assert_eq!(names, vec!["alpha", "beta"]);
     }
 
     #[test]
