@@ -114,6 +114,7 @@ CLI -> Hub:
   GetDefault
   RegisterRepo { path: String }
   UnregisterRepo { path: String }
+  DeleteRepo { path: String }
   StopRepoAgents { path: String }
   SetRepoColor { path: String, color: String }
   SetRepoEditor { path: String, editor: String }
@@ -169,6 +170,7 @@ Hub -> CLI:
   Error { message: String }
   RepoRegistered { path: String, name: String }
   RepoUnregistered { path: String, name: String, stopped_agents: usize }
+  RepoDeleted { path: String, name: String, stopped_agents: usize }
   RepoAgentsStopped { path: String, stopped_count: usize }
   RepoColorSet { path: String, color: String }
   RepoEditorSet { path: String, editor: String }
