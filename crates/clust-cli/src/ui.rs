@@ -313,6 +313,14 @@ enum ConfirmedAction {
     PurgeRepo {
         repo_path: String,
     },
+    /// Stop tracking the repo in clust; the folder on disk is left untouched.
+    RemoveRepository {
+        repo_path: String,
+    },
+    /// Stop tracking the repo AND delete the folder from disk.
+    DeleteRepository {
+        repo_path: String,
+    },
     StartAgentDetach {
         repo_path: String,
         branch_name: String,
@@ -1827,20 +1835,12 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                                 }
                                             }
                                             4 => {
-                                                // "Unregister"
-                                                unregister_repo_ipc(&repo_path);
-                                                last_repo_fetch =
-                                                    Instant::now() - Duration::from_secs(10);
-                                                last_agent_fetch =
-                                                    Instant::now() - Duration::from_secs(10);
-                                            }
-                                            5 => {
                                                 // "Clean Stale Refs"
                                                 clean_stale_refs_ipc(&repo_path);
                                                 last_repo_fetch =
                                                     Instant::now() - Duration::from_secs(10);
                                             }
-                                            6 => {
+                                            5 => {
                                                 // "Detach"
                                                 let tx = status_tx.clone();
                                                 let rp = repo_path.clone();
@@ -1915,7 +1915,7 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                                 last_repo_fetch =
                                                     Instant::now() - Duration::from_secs(10);
                                             }
-                                            7 => {
+                                            6 => {
                                                 // "Purge" → open confirmation dialog
                                                 active_menu = Some(ActiveMenu::ConfirmAction {
                                                     action: ConfirmedAction::PurgeRepo {
@@ -1930,6 +1930,42 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                                     )
                                                     .with_description(
                                                         "This will stop all agents, delete all\nworktrees, and delete all local branches.".to_string(),
+                                                    ),
+                                                });
+                                            }
+                                            7 => {
+                                                // "Remove Repository" → open confirmation dialog
+                                                active_menu = Some(ActiveMenu::ConfirmAction {
+                                                    action: ConfirmedAction::RemoveRepository {
+                                                        repo_path,
+                                                    },
+                                                    menu: ContextMenu::new(
+                                                        "Remove Repository",
+                                                        vec![
+                                                            "Confirm".to_string(),
+                                                            "Cancel".to_string(),
+                                                        ],
+                                                    )
+                                                    .with_description(
+                                                        "Stop tracking this repository in clust.\nThe folder on disk is left untouched.".to_string(),
+                                                    ),
+                                                });
+                                            }
+                                            8 => {
+                                                // "Delete Repository" → open confirmation dialog
+                                                active_menu = Some(ActiveMenu::ConfirmAction {
+                                                    action: ConfirmedAction::DeleteRepository {
+                                                        repo_path,
+                                                    },
+                                                    menu: ContextMenu::new(
+                                                        "Delete Repository",
+                                                        vec![
+                                                            "Confirm".to_string(),
+                                                            "Cancel".to_string(),
+                                                        ],
+                                                    )
+                                                    .with_description(
+                                                        "Stop tracking this repository AND permanently\ndelete the folder from disk. This cannot be undone.".to_string(),
                                                     ),
                                                 });
                                             }
@@ -2686,6 +2722,24 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                                 ConfirmedAction::PurgeRepo { repo_path } => {
                                                     purge_progress =
                                                         Some(start_purge_async(&repo_path));
+                                                }
+                                                ConfirmedAction::RemoveRepository {
+                                                    repo_path,
+                                                } => {
+                                                    unregister_repo_ipc(&repo_path);
+                                                    last_repo_fetch =
+                                                        Instant::now() - Duration::from_secs(10);
+                                                    last_agent_fetch =
+                                                        Instant::now() - Duration::from_secs(10);
+                                                }
+                                                ConfirmedAction::DeleteRepository {
+                                                    repo_path,
+                                                } => {
+                                                    delete_repo_ipc(&repo_path, status_tx.clone());
+                                                    last_repo_fetch =
+                                                        Instant::now() - Duration::from_secs(10);
+                                                    last_agent_fetch =
+                                                        Instant::now() - Duration::from_secs(10);
                                                 }
                                                 ConfirmedAction::StartAgentDetach {
                                                     repo_path,
@@ -4947,12 +5001,14 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                                                                 .to_string(),
                                                                             "Stop All Agents"
                                                                                 .to_string(),
-                                                                            "Unregister"
-                                                                                .to_string(),
                                                                             "Clean Stale Refs"
                                                                                 .to_string(),
                                                                             "Detach".to_string(),
                                                                             "Purge".to_string(),
+                                                                            "Remove Repository"
+                                                                                .to_string(),
+                                                                            "Delete Repository"
+                                                                                .to_string(),
                                                                         ],
                                                                     ),
                                                                 });
@@ -6322,6 +6378,24 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                                 ConfirmedAction::PurgeRepo { repo_path } => {
                                                     purge_progress =
                                                         Some(start_purge_async(&repo_path));
+                                                }
+                                                ConfirmedAction::RemoveRepository {
+                                                    repo_path,
+                                                } => {
+                                                    unregister_repo_ipc(&repo_path);
+                                                    last_repo_fetch =
+                                                        Instant::now() - Duration::from_secs(10);
+                                                    last_agent_fetch =
+                                                        Instant::now() - Duration::from_secs(10);
+                                                }
+                                                ConfirmedAction::DeleteRepository {
+                                                    repo_path,
+                                                } => {
+                                                    delete_repo_ipc(&repo_path, status_tx.clone());
+                                                    last_repo_fetch =
+                                                        Instant::now() - Duration::from_secs(10);
+                                                    last_agent_fetch =
+                                                        Instant::now() - Duration::from_secs(10);
                                                 }
                                                 ConfirmedAction::StartAgentDetach {
                                                     repo_path,
@@ -8736,6 +8810,78 @@ fn unregister_repo_ipc(path: &str) {
         };
         let _ = clust_ipc::send_message(&mut stream, &CliMessage::UnregisterRepo { path }).await;
         let _ = clust_ipc::recv_message::<HubMessage>(&mut stream).await;
+    });
+}
+
+/// Ask the hub to delete the repository folder from disk and unregister it.
+/// Surfaces the hub's success or error message via the status bar so the
+/// user sees why a deletion was refused (e.g. the safety check rejected it).
+fn delete_repo_ipc(path: &str, status_tx: tokio::sync::mpsc::Sender<StatusMessage>) {
+    let path = path.to_string();
+    tokio::spawn(async move {
+        let mut stream = match ipc::try_connect().await {
+            Ok(s) => s,
+            Err(e) => {
+                let _ = status_tx
+                    .send(StatusMessage {
+                        text: format!("Delete failed: hub connect error: {e}"),
+                        level: StatusLevel::Error,
+                        created: Instant::now(),
+                    })
+                    .await;
+                return;
+            }
+        };
+        if let Err(e) =
+            clust_ipc::send_message(&mut stream, &CliMessage::DeleteRepo { path }).await
+        {
+            let _ = status_tx
+                .send(StatusMessage {
+                    text: format!("Delete failed: send error: {e}"),
+                    level: StatusLevel::Error,
+                    created: Instant::now(),
+                })
+                .await;
+            return;
+        }
+        match clust_ipc::recv_message::<HubMessage>(&mut stream).await {
+            Ok(HubMessage::RepoDeleted { name, .. }) => {
+                let _ = status_tx
+                    .send(StatusMessage {
+                        text: format!("Repository deleted: {name}"),
+                        level: StatusLevel::Success,
+                        created: Instant::now(),
+                    })
+                    .await;
+            }
+            Ok(HubMessage::Error { message }) => {
+                let _ = status_tx
+                    .send(StatusMessage {
+                        text: format!("Delete failed: {message}"),
+                        level: StatusLevel::Error,
+                        created: Instant::now(),
+                    })
+                    .await;
+            }
+            Ok(_) => {
+                let _ = status_tx
+                    .send(StatusMessage {
+                        text: "Delete failed: unexpected hub response".to_string(),
+                        level: StatusLevel::Error,
+                        created: Instant::now(),
+                    })
+                    .await;
+            }
+            Err(e) => {
+                let _ = status_tx
+                    .send(StatusMessage {
+                        text: format!("Delete failed: recv error: {e}"),
+                        level: StatusLevel::Error,
+                        created: Instant::now(),
+                    })
+                    .await;
+            }
+        }
     });
 }
 

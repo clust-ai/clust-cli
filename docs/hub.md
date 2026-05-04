@@ -364,6 +364,20 @@ When the hub receives a `PurgeRepo` message:
 
 Each phase sends a `PurgeProgress` IPC message to the client before execution, allowing the TUI to display real-time progress. The hub awaits agent stops before proceeding to worktree removal to prevent race conditions.
 
+### Delete Repository
+
+When the hub receives a `DeleteRepo` message:
+
+1. Detect the git root from the provided path and verify the repository is registered.
+2. Run a safety check (`check_safe_to_delete`) that canonicalises the target and refuses to proceed if the path is the filesystem root, the user's `$HOME`, the clust state directory, or any ancestor of either. Failures are returned as `Error { message }`.
+3. Collect the IDs of all agents associated with the repository.
+4. Spawn a stop task per agent (so each can drain outside the state lock).
+5. Recursively delete the repository directory with `std::fs::remove_dir_all`. If this fails, return `Error { message }` and leave the DB entry intact.
+6. Unregister the repo from the SQLite database. If this fails, the folder is already gone, so return `Error { message: "Folder deleted but failed to unregister: ..." }`.
+7. Return `RepoDeleted { path, name, stopped_agents }`.
+
+This operation is exposed as the "Delete Repository" entry in the TUI repo context menu, gated behind a confirmation dialog. The TUI shows the success or refusal message in the status bar.
+
 ## Batch Engine
 
 The hub includes a batch engine (`batch.rs`) that manages batch persistence and scheduled execution. Batches in all non-completed states (idle, scheduled, running) are persisted in SQLite and survive hub restarts. The CLI registers batches with the hub immediately upon creation, and all subsequent mutations (adding tasks, changing config, toggling status) are synced to the hub in real time.
