@@ -1408,7 +1408,7 @@ fn render_options_bar(
     frame.render_widget(Paragraph::new(Line::from(spans)), area);
 }
 
-fn render_agent_panel(
+pub(crate) fn render_agent_panel(
     frame: &mut Frame,
     area: Rect,
     panel: &mut AgentPanel,
