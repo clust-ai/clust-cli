@@ -25,6 +25,7 @@ mod theme;
 mod timer_modal;
 mod ui;
 mod version;
+mod window_view;
 mod worktree;
 
 use clap::Parser;
