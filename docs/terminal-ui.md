@@ -98,11 +98,11 @@ The active tab is highlighted with the accent color. A `Tab/Shift+Tab` hint is s
 
 #### Content Panels (Repositories tab)
 
-- **Left panel (30%):** Repository tracker with `(2,2,1,0)` padding. Shows a "Repositories" title on the first row with the focus indicator (`●`) right-aligned on the same line, followed by a 1-row spacer, then the tree content below. Shows a tree view of registered git repositories with their local and remote branches. Repository header lines use reverse-video styling (repo color background, dark text, bold) for visual prominence; when selected, the header uses the standard hover background with colored text instead. An empty line separates each repository group in the tree for visual clarity. Repository names are preceded by a colored `●` dot matching the repo's assigned color (from the 10-color repo palette: red, orange, yellow, lime, green, teal, blue, purple, pink, coral). Tree connectors use `├──` / `└──` for clear hierarchy. Branch names are rendered Bold. Remote branches are collapsed by default. Branches with active agents display a green `●` indicator with count; branches checked out in worktrees display a `⎇` indicator. The current HEAD branch is highlighted using the repo's assigned color. Displays "No repositories found" when no repos are registered. Uses background colors for visual separation (no borders). The focused panel shows a bright accent dot; the unfocused panel shows a dim dot. Agents not associated with any git repository are grouped under a synthetic "No Repository" entry at the bottom of the tree. This entry has no local/remote category level -- agents are listed directly under the repo node with their binary name and working directory. Navigation skips the category level for this group. An "Add Repository" entry with a `+` icon is always appended at the bottom of the tree. Selecting it and pressing Enter (or clicking it) opens the add-repository modal (`RepoModal`).
+- **Left panel (25%):** Repository tracker with `(2,2,1,0)` padding. Shows a "Repositories" title on the first row with an accent indicator (`●`) right-aligned on the same line, followed by a 1-row spacer, then the tree content below. Shows a tree view of registered git repositories with their local and remote branches. Repository header lines use reverse-video styling (repo color background, dark text, bold) for visual prominence; when selected, the header uses the standard hover background with colored text instead. An empty line separates each repository group in the tree for visual clarity. Repository names are preceded by a colored `●` dot matching the repo's assigned color (from the 10-color repo palette: red, orange, yellow, lime, green, teal, blue, purple, pink, coral). Tree connectors use `├──` / `└──` for clear hierarchy. Branch names are rendered Bold. Remote branches are collapsed by default. Branches with active agents display a green `●` indicator with count; branches checked out in worktrees display a `⎇` indicator. The current HEAD branch is highlighted using the repo's assigned color. Displays "No repositories found" when no repos are registered. Uses background colors for visual separation (no borders). Agents not associated with any git repository are grouped under a synthetic "No Repository" entry at the bottom of the tree. This entry has no local/remote category level -- agents are listed directly under the repo node with their binary name and working directory. Navigation skips the category level for this group. An "Add Repository" entry with a `+` icon is always appended at the bottom of the tree. Selecting it and pressing Enter (or clicking it) opens the add-repository modal (`RepoModal`). The selector lives only in this panel — there is no way to focus the right panel.
 - **Vertical divider (1 col):** A single-column divider between the two panels.
-- **Right panel (70%):** Window view -- a recursive 2x2 grid of live agent terminals scoped to the repository currently selected in the left panel. The grid is filtered by repo only (regardless of whether the cursor is on the repo, a category, or a branch). Cells are filled in column-major order (top-left, bottom-left, top-right, bottom-right) and each quadrant is recursively subdivided once it holds more than one agent (so 5 agents become a 2-cell sub-grid in TL plus three quarter cells; 8 agents tile as four 2-cell sub-grids; etc.). Agents are sorted by `started_at` then `id` so newly-started agents append at the end. Each cell renders the same `AgentPanel` widget used by the Overview tab via `render_agent_panel()`, sharing `overview_state.panels` so each agent keeps a single IPC connection across both Repositories and Overview tabs. Per-cell vterm resize happens each frame (sends a `PanelCommand::Resize` SIGWINCH then resizes the local vterm if the channel send succeeds). The grid shows the focus indicator (`●`) right-aligned on the first row (bright accent when the right panel is focused, dim tertiary otherwise). When no agents are running for the selected repo, a centered "No agents running for <repo-name>" message is shown (or "No detached agents" for the synthetic "No Repository" entry). When the "Add Repository" sentinel is selected on the left panel, the CLUST logo is rendered instead.
+- **Right panel (75%):** Window view -- a recursive 2x2 grid of live agent terminals scoped to the repository currently selected in the left panel. The panel is view-only and reflects the left selection; to interact with an agent (type into it), switch to the Overview tab via `Tab`. The grid is filtered by repo only (regardless of whether the cursor is on the repo, a category, or a branch). Cells are filled in column-major order (top-left, bottom-left, top-right, bottom-right) and each quadrant is recursively subdivided once it holds more than one agent (so 5 agents become a 2-cell sub-grid in TL plus three quarter cells; 8 agents tile as four 2-cell sub-grids; etc.). Agents are sorted by `started_at` then `id` so newly-started agents append at the end. Each cell renders the same `AgentPanel` widget used by the Overview tab via `render_agent_panel()`, sharing `overview_state.panels` so each agent keeps a single IPC connection across both Repositories and Overview tabs. Per-cell vterm resize happens each frame (sends a `PanelCommand::Resize` SIGWINCH then resizes the local vterm if the channel send succeeds). When no agents are running for the selected repo, a centered "No agents running for <repo-name>" message is shown (or "No detached agents" for the synthetic "No Repository" entry). When the "Add Repository" sentinel is selected on the left panel, the CLUST logo is rendered instead.
 
-Window-view layout, navigation, and click handling live in `crates/clust-cli/src/window_view.rs`: `window_layout(rect, n)` returns the cell rects in column-major order, `neighbor(cells, current, dir)` does spatial arrow-key navigation (favors cells in the same row/column via a 2x perpendicular-axis penalty, never wraps), and `render()` draws the cells using `render_agent_panel()`. Selected-cell state is held in `WindowGridState::selected_idx`, clamped to the scoped agent count each frame.
+Window-view layout lives in `crates/clust-cli/src/window_view.rs`: `window_layout(rect, n)` returns the cell rects in column-major order and `render()` draws the cells using `render_agent_panel()`. The panel has no selection state and no keyboard focus.
 
 Repositories are registered via `clust repo -a` or auto-registered when an agent is launched inside a git repo. Branch data is fetched from the local git state every 2 seconds (no network calls or authentication required). Each repo is assigned a color from the repo palette on registration; colors cycle through `red`, `orange`, `yellow`, `lime`, `green`, `teal`, `blue`, `purple`, `pink`, `coral`. In the left panel, repository names use reverse-video styling (repo color background with dark text, bold) for visual prominence. Branches checked out as HEAD use the repo's assigned color instead of the default accent blue.
 
@@ -311,19 +311,20 @@ On startup, `clust ui` automatically connects to the hub daemon, starting it if 
 
 **Repositories tab:**
 
+The selector lives only in the left panel. The right window-view panel is view-only — it has no keyboard focus and no per-cell selection. To interact with an agent (type into it), switch to the Overview tab via `Tab`.
+
 | Shortcut | Action |
 |----------|--------|
-| `↑` / `↓` | Left panel: move selection in visual order (flat navigation across repos, categories, and branches). Right panel: spatial cell navigation in the window-view grid. |
-| `Shift+↑` / `Shift+↓` | Left panel: jump to previous/next repository header (skips categories and branches). |
-| `→` | Left panel: descend into selected item. Right panel: spatial cell navigation (move to neighbor cell on the right). |
-| `←` | Left panel: ascend to parent level. Right panel: spatial cell navigation (move to neighbor cell on the left). |
-| `Enter` | Left panel: on repo opens repo context menu; on local branch opens local branch context menu; on remote branch opens remote branch context menu. Right panel: enter focus mode for the selected window-view cell's agent (via `focus_mode_state.open_agent`). |
-| `Space` | Left panel: toggle collapse/expand on repo or category level |
-| `Shift+←` / `Shift+→` | Switch focus between left and right panels |
+| `↑` / `↓` | Move selection in visual order (flat navigation across repos, categories, and branches). |
+| `Shift+↑` / `Shift+↓` | Jump to previous/next repository header (skips categories and branches). |
+| `→` | Descend into selected item. |
+| `←` | Ascend to parent level. |
+| `Enter` | On repo opens repo context menu; on local branch opens local branch context menu; on remote branch opens remote branch context menu. |
+| `Space` | Toggle collapse/expand on repo or category level. |
 | `Esc` | Dismiss context menu (when open) |
 | `1`-`9`, `0` | Select context menu item by number (when context menu is open) |
 
-**Inline key hints:** When an item is selected in the tree, a dim `Enter` hint is displayed inline next to the item name to indicate that pressing Enter will perform an action. This appears on: selected repository lines (for repos with a path), selected branch lines, and selected "No Repository" agent entries. The hint uses `R_TEXT_TERTIARY` color for subtlety. The window-view right panel does not use this inline hint -- its `Enter` action is documented in the Repositories tab keyboard shortcuts table above.
+**Inline key hints:** When an item is selected in the tree, a dim `Enter` hint is displayed inline next to the item name to indicate that pressing Enter will perform an action. This appears on: selected repository lines (for repos with a path), selected branch lines, and selected "No Repository" agent entries. The hint uses `R_TEXT_TERTIARY` color for subtlety.
 
 **Context Menus:**
 
@@ -464,7 +465,6 @@ The focus view has a concept of which side (left or right) has keyboard focus. T
 **Entry points:**
 
 - **From Overview tab:** While in terminal focus, press `Shift+↓` to open the focused agent in focus mode. The `in_focus_mode` flag is set to `true`.
-- **From Repositories tab:** While the right panel is focused, press `Enter` on a selected agent to open it in focus mode. The `in_focus_mode` flag is set to `true`.
 - **From Batches tab:** While a batch card is focused and the focused task is Active with an `agent_id`, press `Shift+↓` to open the task's agent in focus mode. The `in_focus_mode` flag is set to `true` and `batch_origin` is set on `FocusModeState` with the batch title, batch index, and task index.
 
 The agent's `working_dir`, `repo_path`, and `branch_name` are passed to `open_agent()` to determine the git repository for the diff viewer and to display repo/branch identity in the back-bar and status bar.
@@ -552,7 +552,7 @@ The agent's `working_dir`, `repo_path`, and `branch_name` are passed to `open_ag
 The `?` key toggles a keyboard shortcut overlay rendered as a centered modal (44 columns wide) anchored to the bottom of the content area. The modal is organized into sections with bold secondary-colored headers and context-aware visibility:
 
 - **Global section (always shown):** `q / Esc×2`, `Q`, `Ctrl+C`, `Tab`, `Shift+Tab`, `?`, `F2`, `Alt+M`, `Alt+E`, `Alt+D`, `Alt+F`, `Alt+N`, `Alt+V`, `Alt+B`, `Alt+P`, `Alt+T`, `Alt+I`, `Cmd+1`, `Cmd+2`.
-- **Repositories section (shown when Repositories tab is active):** `↑/↓` navigate (left panel) / move between window-view cells (right panel), `Shift+↑/↓` jump repos (left panel), `←/→` navigate tree (left panel) / move between window-view cells (right panel), `Shift+←/→` switch panel, `Enter` open menu (left panel) / open focus mode for selected agent (right panel), `Space` collapse/expand (left panel).
+- **Repositories section (shown when Repositories tab is active):** `↑/↓` navigate items, `←/→` navigate tree, `Shift+↑/↓` jump prev/next repo, `Enter` open menu, `Space` collapse/expand.
 - **Overview section (shown when Overview tab is active):** `Shift+←/→` scroll panels, `Shift+↓` enter terminal, plus an "In terminal:" sub-context label followed by `Shift+↑` back to options bar, `Shift+↓` enter focus mode, `Shift+←/→` switch agent, `PgUp/PgDn` scroll terminal.
 - **Batches section (shown when Batches tab is active):** `Shift+←/→` switch batch (with auto-scroll), `←/→` scroll viewport, `↑/↓` navigate tasks within a batch, `Shift+↓` open active task in focus mode, `Space` toggle batch status (or cancel queued), `Alt+S` start selected task (manual), `Enter` add task to batch, `p` edit prompt prefix, `s` edit prompt suffix, `c` copy batch JSON to clipboard, `Alt+P` toggle plan mode, `Alt+A` toggle task prefix, `Alt+S` toggle task suffix / start, `Del/Backspace` open batch cleanup modal.
 - **Focus Mode section (shown when in focus mode):** `Shift+↑` exit, `Shift+←/→` switch panel, `Shift+PgUp/PgDn` scroll terminal, plus a "Left panel:" sub-context label followed by `Tab` cycle tabs, `Shift+Tab` prev tab (used in Terminal tab since Tab is forwarded to the shell), `↑/↓` move cursor, `v` toggle selection, `Enter` send selection, `Esc` cancel selection.
@@ -925,9 +925,7 @@ A `ClickMap` struct is populated during each render pass and consumed during mou
 
 `ClickMap` fields:
 - `tabs` -- tab bar regions mapped to `ActiveTab` values
-- `left_panel_area` / `right_panel_area` -- full panel areas for Repositories tab focus switching
 - `tree_items` / `tree_inner_area` -- repo tree line targets mapped via `TreeClickTarget` enum (Repo, Category, Branch)
-- `window_cells` -- Repositories tab right-panel window-view cell regions mapped to agent IDs (click to select that cell and focus the right panel)
 - `overview_panels` -- Overview tab panel regions mapped to global panel indices
 - `overview_repo_buttons` -- Overview tab repo group block regions mapped to repo path strings (click to toggle collapse/expand)
 - `overview_agent_indicators` -- Overview tab agent indicator regions within repo group blocks mapped to global panel indices (click to focus agent)
@@ -952,11 +950,8 @@ A `ClickMap` struct is populated during each render pass and consumed during mou
 | Tree item (repo) | Select the repo; click again when already selected to toggle collapse |
 | Tree item (category) | Select the category; click again when already selected to toggle collapse |
 | Tree item (branch) | Select the branch |
-| Window-view cell | Select that cell (sets `window_grid.selected_idx` to the clicked agent's index in the scoped agent list) and focus the right panel |
-| Left panel (anywhere) | Switch keyboard focus to left panel |
-| Right panel (anywhere) | Switch keyboard focus to right panel |
 
-Clicking anywhere in the tree area (including empty space) sets keyboard focus to the left panel. Clicking a window-view cell sets focus to the right panel.
+The right panel is view-only — clicks in it have no effect. To interact with an agent, switch to the Overview tab via `Tab`.
 
 **Overview tab:**
 

@@ -8,7 +8,7 @@
 
 use std::collections::HashMap;
 
-use ratatui::layout::{Alignment, Constraint, Flex, Layout, Rect};
+use ratatui::layout::{Constraint, Flex, Layout, Rect};
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
@@ -18,24 +18,6 @@ use crate::overview::{render_agent_panel, OverviewState, PanelCommand};
 use crate::tasks::BatchAgentInfo;
 use crate::theme;
 use crate::ui::render_logo;
-
-/// Persistent state for the Window view across frames.
-#[derive(Default, Clone)]
-pub struct WindowGridState {
-    /// Index of the currently-selected cell within the scoped agent list.
-    pub selected_idx: usize,
-}
-
-impl WindowGridState {
-    /// Clamp `selected_idx` into the valid range for the current cell count.
-    pub fn clamp(&mut self, cell_count: usize) {
-        if cell_count == 0 {
-            self.selected_idx = 0;
-        } else if self.selected_idx >= cell_count {
-            self.selected_idx = cell_count - 1;
-        }
-    }
-}
 
 /// What to show when there are no agents to render in the grid.
 #[derive(Clone, Copy)]
@@ -56,23 +38,17 @@ pub enum EmptyKind<'a> {
 /// column-major fill order; the panel for each cell is looked up by ID,
 /// resized to the cell's interior, and rendered with [`render_agent_panel`].
 ///
-/// Populates `click_map.window_cells` so the mouse handler can map
-/// click positions back to agent IDs.
-#[allow(clippy::too_many_arguments)]
+/// The right panel is view-only — it has no focus and no per-cell selection.
+/// To interact with an agent, switch to the Overview tab.
 pub fn render(
     frame: &mut Frame,
     area: Rect,
-    grid: &mut WindowGridState,
     overview_state: &mut OverviewState,
     scoped_ids: &[String],
     empty: EmptyKind<'_>,
-    focused: bool,
     repo_colors: &HashMap<String, String>,
     batch_map: &HashMap<String, BatchAgentInfo>,
-    click_map: &mut ClickMapWindow<'_>,
 ) {
-    grid.clamp(scoped_ids.len());
-
     if scoped_ids.is_empty() {
         match empty {
             EmptyKind::Logo => render_logo(frame, area),
@@ -83,14 +59,12 @@ pub fn render(
             ),
             EmptyKind::NoDetached => render_centered_message(frame, area, "No detached agents"),
         }
-        // Focus indicator in the top-right corner.
-        render_focus_dot(frame, area, focused);
         return;
     }
 
     let cells = window_layout(area, scoped_ids.len());
 
-    for (idx, (cell, id)) in cells.iter().zip(scoped_ids.iter()).enumerate() {
+    for (cell, id) in cells.iter().zip(scoped_ids.iter()) {
         // Find the panel by id. If a sync hasn't caught up yet, skip the cell.
         let panel_idx = match overview_state.panels.iter().position(|p| &p.id == id) {
             Some(i) => i,
@@ -120,7 +94,6 @@ pub fn render(
                 .resize(target_cols as usize, target_rows as usize);
         }
 
-        let is_focused = focused && idx == grid.selected_idx;
         let panel_color = panel
             .repo_path
             .as_ref()
@@ -128,46 +101,8 @@ pub fn render(
             .map(|cn| theme::repo_color(cn));
         let batch_info = batch_map.get(&panel.id);
 
-        render_agent_panel(
-            frame,
-            *cell,
-            panel,
-            is_focused,
-            false,
-            panel_color,
-            batch_info,
-        );
-
-        click_map.window_cells.push((*cell, id.clone()));
+        render_agent_panel(frame, *cell, panel, false, false, panel_color, batch_info);
     }
-
-    render_focus_dot(frame, area, focused);
-}
-
-/// Tiny click-map view used by [`render`] so the module doesn't depend on
-/// every field of the parent crate's `ClickMap`.
-pub struct ClickMapWindow<'a> {
-    pub window_cells: &'a mut Vec<(Rect, String)>,
-}
-
-fn render_focus_dot(frame: &mut Frame, area: Rect, focused: bool) {
-    let color = if focused {
-        theme::R_ACCENT_BRIGHT
-    } else {
-        theme::R_TEXT_TERTIARY
-    };
-    let indicator = Paragraph::new(Span::styled(
-        "●",
-        Style::default().fg(color).bg(theme::R_BG_BASE),
-    ))
-    .alignment(Alignment::Right);
-    let strip = Rect {
-        x: area.x + 1,
-        y: area.y,
-        width: area.width.saturating_sub(2),
-        height: 1,
-    };
-    frame.render_widget(indicator, strip);
 }
 
 fn render_centered_message(frame: &mut Frame, area: Rect, msg: &str) {
@@ -245,63 +180,6 @@ fn distribute(total: usize, slots: usize) -> Vec<usize> {
     (0..slots)
         .map(|i| if i < extra { base + 1 } else { base })
         .collect()
-}
-
-/// Direction for spatial neighbor lookup.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Direction {
-    Up,
-    Down,
-    Left,
-    Right,
-}
-
-/// Return the index of the cell to navigate to from `current` when the user
-/// presses an arrow key in direction `dir`. If no candidate exists in that
-/// direction, return `current` (no-op — wrap-around is jarring in a recursive
-/// grid).
-///
-/// Scoring favors cells whose center lies in the requested half-plane and
-/// minimizes Manhattan distance with a 2× penalty on the perpendicular axis,
-/// so that "Right" prefers a cell in the same row over one diagonally placed.
-pub fn neighbor(cells: &[Rect], current: usize, dir: Direction) -> usize {
-    if cells.is_empty() || current >= cells.len() {
-        return current;
-    }
-    let cur = center(cells[current]);
-    let mut best: Option<(usize, i64)> = None;
-    for (idx, cell) in cells.iter().enumerate() {
-        if idx == current {
-            continue;
-        }
-        let c = center(*cell);
-        let in_half_plane = match dir {
-            Direction::Up => c.1 < cur.1,
-            Direction::Down => c.1 > cur.1,
-            Direction::Left => c.0 < cur.0,
-            Direction::Right => c.0 > cur.0,
-        };
-        if !in_half_plane {
-            continue;
-        }
-        let dx = (c.0 - cur.0).abs();
-        let dy = (c.1 - cur.1).abs();
-        let score = match dir {
-            Direction::Up | Direction::Down => dy + 2 * dx,
-            Direction::Left | Direction::Right => dx + 2 * dy,
-        };
-        if best.is_none_or(|(_, s)| score < s) {
-            best = Some((idx, score));
-        }
-    }
-    best.map_or(current, |(idx, _)| idx)
-}
-
-fn center(r: Rect) -> (i64, i64) {
-    (
-        i64::from(r.x) + i64::from(r.width) / 2,
-        i64::from(r.y) + i64::from(r.height) / 2,
-    )
 }
 
 #[cfg(test)]
@@ -438,76 +316,5 @@ mod tests {
             let cells = window_layout(rect(), n);
             assert_eq!(cells.len(), n, "n={n}");
         }
-    }
-
-    // -------- neighbor() tests --------
-
-    #[test]
-    fn neighbor_in_2x2_grid() {
-        // 2x2 grid: cells[0]=TL, cells[1]=BL, cells[2]=TR, cells[3]=BR
-        let cells = window_layout(rect(), 4);
-        // From TL: Right → TR, Down → BL, Up/Left → no move
-        assert_eq!(neighbor(&cells, 0, Direction::Right), 2);
-        assert_eq!(neighbor(&cells, 0, Direction::Down), 1);
-        assert_eq!(neighbor(&cells, 0, Direction::Up), 0);
-        assert_eq!(neighbor(&cells, 0, Direction::Left), 0);
-        // From BR: Up → TR, Left → BL
-        assert_eq!(neighbor(&cells, 3, Direction::Up), 2);
-        assert_eq!(neighbor(&cells, 3, Direction::Left), 1);
-        // From TR: Left → TL, Down → BR
-        assert_eq!(neighbor(&cells, 2, Direction::Left), 0);
-        assert_eq!(neighbor(&cells, 2, Direction::Down), 3);
-    }
-
-    #[test]
-    fn neighbor_prefers_same_row_or_column() {
-        // 5-cell layout: TL/BL inside TL-quadrant, then BL/TR/BR full
-        // cells[0], [1] inside top-left quadrant (small)
-        // cells[2] = bottom-left full, cells[3] = top-right full,
-        // cells[4] = bottom-right full
-        let cells = window_layout(rect(), 5);
-        // From cells[3] (TR full), Down should pick BR (cells[4]),
-        // not the smaller top-left subdivisions.
-        assert_eq!(neighbor(&cells, 3, Direction::Down), 4);
-        // From cells[4] (BR full), Up → TR.
-        assert_eq!(neighbor(&cells, 4, Direction::Up), 3);
-    }
-
-    #[test]
-    fn neighbor_no_movement_returns_current() {
-        let cells = window_layout(rect(), 1);
-        assert_eq!(neighbor(&cells, 0, Direction::Right), 0);
-        assert_eq!(neighbor(&cells, 0, Direction::Up), 0);
-    }
-
-    #[test]
-    fn neighbor_empty_cells_returns_current() {
-        let cells: Vec<Rect> = Vec::new();
-        assert_eq!(neighbor(&cells, 0, Direction::Right), 0);
-    }
-
-    #[test]
-    fn neighbor_out_of_bounds_index_returns_current() {
-        let cells = window_layout(rect(), 2);
-        assert_eq!(neighbor(&cells, 99, Direction::Right), 99);
-    }
-
-    #[test]
-    fn neighbor_in_three_cell_layout() {
-        // n=3: cells[0]=TL (top-left quarter), cells[1]=BL (bottom-left
-        // quarter), cells[2]=full right column.
-        let cells = window_layout(rect(), 3);
-        // From TL: Right → right column.
-        assert_eq!(neighbor(&cells, 0, Direction::Right), 2);
-        // From BL: Right → right column.
-        assert_eq!(neighbor(&cells, 1, Direction::Right), 2);
-        // From right column: Left lands on the left column. Both TL and BL
-        // are equidistant from the right column's vertical midpoint, so
-        // first-match wins (TL = idx 0).
-        assert_eq!(neighbor(&cells, 2, Direction::Left), 0);
-        // From TL: Down → BL.
-        assert_eq!(neighbor(&cells, 0, Direction::Down), 1);
-        // From BL: Up → TL.
-        assert_eq!(neighbor(&cells, 1, Direction::Up), 0);
     }
 }
