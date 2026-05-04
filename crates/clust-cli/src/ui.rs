@@ -173,13 +173,6 @@ enum TreeLevel {
     Branch,   // Level 2: selecting a branch within a category
 }
 
-/// Which panel currently has keyboard focus.
-#[derive(Clone, Copy, Debug, PartialEq)]
-enum FocusPanel {
-    Left,
-    Right,
-}
-
 /// Active tab in the top-level tab bar.
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum ActiveTab {
@@ -234,11 +227,8 @@ pub(crate) struct ClickMap {
     tabs: Vec<(Rect, ActiveTab)>,
 
     // Repositories tab
-    left_panel_area: Rect,
-    right_panel_area: Rect,
     tree_items: Vec<TreeClickTarget>,
     tree_inner_area: Rect,
-    pub(crate) window_cells: Vec<(Rect, String)>, // (cell area, agent_id)
 
     // Overview tab
     pub(crate) overview_panels: Vec<(Rect, usize)>, // (area, global_panel_idx)
@@ -372,40 +362,6 @@ enum ActiveMenu {
         agent_ids: Vec<String>,
         menu: ContextMenu,
     },
-}
-
-/// Compute the Repositories tab's right-panel `Rect` from the full content
-/// area. The split is hard-coded to 30 / divider / 70 — this duplicates the
-/// render-side `Layout::horizontal` so key handlers can derive the same Rect
-/// without crossing the render boundary.
-fn repositories_right_area(content_area: Rect) -> Rect {
-    let [_, _, right] = Layout::horizontal([
-        Constraint::Percentage(30),
-        Constraint::Length(1),
-        Constraint::Percentage(70),
-    ])
-    .areas(content_area);
-    right
-}
-
-/// Move the Window-view selection in `dir`. Re-derives the cell layout from
-/// the current scoped-agent set so that arrow input stays in sync with the
-/// rendered grid.
-fn window_nav(
-    last_content_area: Rect,
-    agents: &[AgentInfo],
-    display_repos: &[RepoInfo],
-    selection: &TreeSelection,
-    grid: &mut window_view::WindowGridState,
-    dir: window_view::Direction,
-) {
-    let (scoped, _) = scoped_agent_ids(agents, display_repos, selection);
-    if scoped.is_empty() {
-        return;
-    }
-    let right = repositories_right_area(last_content_area);
-    let cells = window_view::window_layout(right, scoped.len());
-    grid.selected_idx = window_view::neighbor(&cells, grid.selected_idx, dir);
 }
 
 /// Pick the agents that belong to the repo currently selected on the left
@@ -891,8 +847,6 @@ pub fn run(hub_name: &str) -> io::Result<()> {
     let mut agents: Vec<AgentInfo> = Vec::new();
     let mut repos: Vec<RepoInfo> = Vec::new();
     let mut selection = TreeSelection::default();
-    let mut focus = FocusPanel::Left;
-    let mut window_grid = window_view::WindowGridState::default();
     let mut active_tab = ActiveTab::Repositories;
     let mut last_agent_fetch = Instant::now() - Duration::from_secs(10);
     let mut last_repo_fetch = Instant::now() - Duration::from_secs(10);
@@ -1307,7 +1261,6 @@ pub fn run(hub_name: &str) -> io::Result<()> {
 
         let hub_status = hub_running;
         let notice = update_notice.lock().unwrap().clone();
-        let cur_focus = focus;
         let cur_tab = active_tab;
         let cur_focus_mode = in_focus_mode;
         let overview_focus = overview_state.focus;
@@ -1369,23 +1322,20 @@ pub fn run(hub_name: &str) -> io::Result<()> {
 
                 match cur_tab {
                     ActiveTab::Repositories => {
-                        // Content: left (30%) + divider (1 col) + right (70%)
+                        // Content: left (25%) + divider (1 col) + right (75%)
                         let [left_area, divider_area, right_area] = Layout::horizontal([
-                            Constraint::Percentage(30),
+                            Constraint::Percentage(25),
                             Constraint::Length(1),
-                            Constraint::Percentage(70),
+                            Constraint::Percentage(75),
                         ])
                         .areas(content_area);
-
-                        click_map.left_panel_area = left_area;
-                        click_map.right_panel_area = right_area;
 
                         render_left_panel(
                             frame,
                             left_area,
                             &display_repos,
                             &selection,
-                            cur_focus == FocusPanel::Left,
+                            true,
                             &mut click_map,
                         );
                         render_divider(frame, divider_area);
@@ -1395,20 +1345,14 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                             &selection,
                         );
                         let batch_map = tasks_state.batch_agent_map();
-                        let mut window_click = window_view::ClickMapWindow {
-                            window_cells: &mut click_map.window_cells,
-                        };
                         window_view::render(
                             frame,
                             right_area,
-                            &mut window_grid,
                             &mut overview_state,
                             &scoped_ids,
                             empty,
-                            cur_focus == FocusPanel::Right,
                             &repo_colors,
                             &batch_map,
-                            &mut window_click,
                         );
                     }
                     ActiveTab::Overview => {
@@ -4771,324 +4715,205 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                             // Repositories tab navigation
                             _ if active_tab == ActiveTab::Repositories => {
                                 match key.code {
-                                    KeyCode::Left
-                                        if key.modifiers.contains(KeyModifiers::SHIFT) =>
-                                    {
-                                        focus = FocusPanel::Left;
-                                    }
-                                    KeyCode::Right
-                                        if key.modifiers.contains(KeyModifiers::SHIFT) =>
-                                    {
-                                        focus = FocusPanel::Right;
-                                    }
-                                    KeyCode::Enter => {
-                                        if focus == FocusPanel::Left {
-                                            match selection.level {
-                                                TreeLevel::Repo => {
-                                                    if let Some(repo) =
-                                                        display_repos.get(selection.repo_idx)
-                                                    {
-                                                        if repo.path == ADD_REPO_SENTINEL {
-                                                            // Open the repo create/clone modal
-                                                            repo_modal = Some(RepoModal::new());
-                                                            show_help = false;
-                                                        } else if !repo.path.is_empty() {
-                                                            active_menu =
-                                                                Some(ActiveMenu::RepoActions {
-                                                                    repo_path: repo.path.clone(),
-                                                                    menu: ContextMenu::new(
-                                                                        &repo.name,
-                                                                        vec![
-                                                                            "Change Color"
-                                                                                .to_string(),
-                                                                            "Open in File System"
-                                                                                .to_string(),
-                                                                            "Open in Terminal"
-                                                                                .to_string(),
-                                                                            "Stop All Agents"
-                                                                                .to_string(),
-                                                                            "Clean Stale Refs"
-                                                                                .to_string(),
-                                                                            "Detach".to_string(),
-                                                                            "Purge".to_string(),
-                                                                            "Remove Repository"
-                                                                                .to_string(),
-                                                                            "Delete Repository"
-                                                                                .to_string(),
-                                                                        ],
-                                                                    ),
-                                                                });
-                                                        }
-                                                    }
+                                    KeyCode::Enter => match selection.level {
+                                        TreeLevel::Repo => {
+                                            if let Some(repo) =
+                                                display_repos.get(selection.repo_idx)
+                                            {
+                                                if repo.path == ADD_REPO_SENTINEL {
+                                                    // Open the repo create/clone modal
+                                                    repo_modal = Some(RepoModal::new());
+                                                    show_help = false;
+                                                } else if !repo.path.is_empty() {
+                                                    active_menu =
+                                                        Some(ActiveMenu::RepoActions {
+                                                            repo_path: repo.path.clone(),
+                                                            menu: ContextMenu::new(
+                                                                &repo.name,
+                                                                vec![
+                                                                    "Change Color".to_string(),
+                                                                    "Open in File System"
+                                                                        .to_string(),
+                                                                    "Open in Terminal"
+                                                                        .to_string(),
+                                                                    "Stop All Agents"
+                                                                        .to_string(),
+                                                                    "Clean Stale Refs"
+                                                                        .to_string(),
+                                                                    "Detach".to_string(),
+                                                                    "Purge".to_string(),
+                                                                    "Remove Repository"
+                                                                        .to_string(),
+                                                                    "Delete Repository"
+                                                                        .to_string(),
+                                                                ],
+                                                            ),
+                                                        });
                                                 }
-                                                TreeLevel::Category => {
-                                                    // No action on Enter for categories (use Space)
-                                                }
-                                                TreeLevel::Branch => {
-                                                    // Open context menu for branches
-                                                    if let Some(repo) =
-                                                        display_repos.get(selection.repo_idx)
-                                                    {
-                                                        if repo.path.is_empty() {
-                                                            // Skip "No Repository"
-                                                        } else if selection.category_idx == 0 {
-                                                            // Local branch context menu
-                                                            if let Some(branch) = repo
-                                                                .local_branches
-                                                                .get(selection.branch_idx)
-                                                            {
-                                                                let matching: Vec<AgentInfo> =
-                                                                    agents
-                                                                        .iter()
-                                                                        .filter(|a| {
-                                                                            a.repo_path.as_deref()
-                                                                                == Some(&*repo.path)
-                                                                                && a.branch_name
-                                                                                    .as_deref()
-                                                                                    == Some(
-                                                                                        &*branch
-                                                                                            .name,
-                                                                                    )
-                                                                        })
-                                                                        .cloned()
-                                                                        .collect();
-                                                                let mut labels = Vec::new();
-                                                                let mut actions = Vec::new();
-                                                                if branch.active_agent_count > 0 {
-                                                                    labels.push(
-                                                                        "Open Agent".to_string(),
-                                                                    );
-                                                                    actions.push(
-                                                                        BranchAction::OpenAgent,
-                                                                    );
-                                                                }
-                                                                labels.push(
-                                                                    "Start Agent (worktree)"
-                                                                        .to_string(),
-                                                                );
-                                                                actions
-                                                                    .push(BranchAction::StartAgent);
-                                                                if branch.is_head {
-                                                                    labels.push(
-                                                                        "Start Agent (in place)"
-                                                                            .to_string(),
-                                                                    );
-                                                                    actions.push(BranchAction::StartAgentInPlace);
-                                                                    labels
-                                                                        .push("Detach".to_string());
-                                                                    actions.push(
-                                                                        BranchAction::DetachHead,
-                                                                    );
-                                                                }
-                                                                if !branch.is_head
-                                                                    && !branch.is_worktree
-                                                                {
-                                                                    labels.push(
-                                                                        "Checkout".to_string(),
-                                                                    );
-                                                                    actions.push(
-                                                                        BranchAction::CheckoutLocal,
-                                                                    );
-                                                                }
-                                                                labels.push(
-                                                                    "Base Worktree Off".to_string(),
-                                                                );
-                                                                actions.push(
-                                                                    BranchAction::BaseWorktreeOff,
-                                                                );
-                                                                labels.push("Pull".to_string());
-                                                                actions.push(BranchAction::Pull);
-                                                                if branch.active_agent_count > 0 {
-                                                                    labels.push(
-                                                                        "Stop Agents".to_string(),
-                                                                    );
-                                                                    actions.push(
-                                                                        BranchAction::StopAgents,
-                                                                    );
-                                                                }
-                                                                if branch.is_worktree {
-                                                                    labels.push(
-                                                                        "Remove Worktree"
-                                                                            .to_string(),
-                                                                    );
-                                                                    actions.push(BranchAction::RemoveWorktree);
-                                                                }
-                                                                labels.push(
-                                                                    "Delete Branch".to_string(),
-                                                                );
-                                                                actions.push(
-                                                                    BranchAction::DeleteBranch,
-                                                                );
-                                                                active_menu = Some(
-                                                                    ActiveMenu::BranchActions {
-                                                                        repo_path: repo
-                                                                            .path
-                                                                            .clone(),
-                                                                        branch_name: branch
-                                                                            .name
-                                                                            .clone(),
-                                                                        is_head: branch.is_head,
-                                                                        agents: matching,
-                                                                        actions,
-                                                                        menu: ContextMenu::new(
-                                                                            &branch.name,
-                                                                            labels,
-                                                                        ),
-                                                                    },
-                                                                );
-                                                            }
-                                                        } else if selection.category_idx == 1 {
-                                                            // Remote branch context menu
-                                                            if let Some(branch) = repo
-                                                                .remote_branches
-                                                                .get(selection.branch_idx)
-                                                            {
-                                                                let mut labels = Vec::new();
-                                                                let mut actions = Vec::new();
-                                                                labels.push(
-                                                                    "Checkout & Track Locally"
-                                                                        .to_string(),
-                                                                );
-                                                                actions.push(
-                                                                    BranchAction::CheckoutRemote,
-                                                                );
-                                                                labels.push(
-                                                                    "Start Agent (checkout)"
-                                                                        .to_string(),
-                                                                );
-                                                                actions.push(
-                                                                    BranchAction::RemoteStartAgent,
-                                                                );
-                                                                labels.push(
-                                                                    "Create Worktree".to_string(),
-                                                                );
-                                                                actions.push(BranchAction::RemoteCreateWorktree);
-                                                                labels.push(
-                                                                    "Delete Remote Branch"
-                                                                        .to_string(),
-                                                                );
-                                                                actions.push(BranchAction::DeleteRemoteBranch);
-                                                                active_menu = Some(
-                                                                    ActiveMenu::BranchActions {
-                                                                        repo_path: repo
-                                                                            .path
-                                                                            .clone(),
-                                                                        branch_name: branch
-                                                                            .name
-                                                                            .clone(),
-                                                                        is_head: false,
-                                                                        agents: vec![],
-                                                                        actions,
-                                                                        menu: ContextMenu::new(
-                                                                            &branch.name,
-                                                                            labels,
-                                                                        ),
-                                                                    },
-                                                                );
-                                                            }
-                                                        }
-                                                    }
-                                                }
-                                            }
-                                        } else if focus == FocusPanel::Right {
-                                            let (scoped, _) = scoped_agent_ids(
-                                                &agents,
-                                                &display_repos,
-                                                &selection,
-                                            );
-                                            let target: Option<AgentInfo> = scoped
-                                                .get(window_grid.selected_idx)
-                                                .and_then(|id| {
-                                                    agents.iter().find(|a| &a.id == id).cloned()
-                                                });
-                                            if let Some(agent) = target {
-                                                let agent_id = agent.id.clone();
-                                                let agent_binary = agent.agent_binary.clone();
-                                                let working_dir = agent.working_dir.clone();
-                                                let agent_repo_path = agent.repo_path.clone();
-                                                let agent_branch = agent.branch_name.clone();
-                                                let agent_is_wt = agent.is_worktree;
-                                                let fm_cols = (last_content_area.width * 40 / 100)
-                                                    .saturating_sub(2)
-                                                    .max(1);
-                                                let fm_rows = last_content_area
-                                                    .height
-                                                    .saturating_sub(3)
-                                                    .max(1);
-                                                let existing_terminals =
-                                                    overview_state.take_agent_terminals(&agent_id);
-                                                focus_mode_state.open_agent(
-                                                    &agent_id,
-                                                    &agent_binary,
-                                                    fm_cols,
-                                                    fm_rows,
-                                                    &working_dir,
-                                                    agent_repo_path.as_deref(),
-                                                    agent_branch.as_deref(),
-                                                    agent_is_wt,
-                                                    existing_terminals,
-                                                );
-                                                in_focus_mode = true;
                                             }
                                         }
-                                    }
+                                        TreeLevel::Category => {
+                                            // No action on Enter for categories (use Space)
+                                        }
+                                        TreeLevel::Branch => {
+                                            // Open context menu for branches
+                                            if let Some(repo) =
+                                                display_repos.get(selection.repo_idx)
+                                            {
+                                                if repo.path.is_empty() {
+                                                    // Skip "No Repository"
+                                                } else if selection.category_idx == 0 {
+                                                    // Local branch context menu
+                                                    if let Some(branch) = repo
+                                                        .local_branches
+                                                        .get(selection.branch_idx)
+                                                    {
+                                                        let matching: Vec<AgentInfo> = agents
+                                                            .iter()
+                                                            .filter(|a| {
+                                                                a.repo_path.as_deref()
+                                                                    == Some(&*repo.path)
+                                                                    && a.branch_name.as_deref()
+                                                                        == Some(&*branch.name)
+                                                            })
+                                                            .cloned()
+                                                            .collect();
+                                                        let mut labels = Vec::new();
+                                                        let mut actions = Vec::new();
+                                                        if branch.active_agent_count > 0 {
+                                                            labels
+                                                                .push("Open Agent".to_string());
+                                                            actions
+                                                                .push(BranchAction::OpenAgent);
+                                                        }
+                                                        labels.push(
+                                                            "Start Agent (worktree)"
+                                                                .to_string(),
+                                                        );
+                                                        actions.push(BranchAction::StartAgent);
+                                                        if branch.is_head {
+                                                            labels.push(
+                                                                "Start Agent (in place)"
+                                                                    .to_string(),
+                                                            );
+                                                            actions.push(
+                                                                BranchAction::StartAgentInPlace,
+                                                            );
+                                                            labels.push("Detach".to_string());
+                                                            actions
+                                                                .push(BranchAction::DetachHead);
+                                                        }
+                                                        if !branch.is_head && !branch.is_worktree
+                                                        {
+                                                            labels.push("Checkout".to_string());
+                                                            actions.push(
+                                                                BranchAction::CheckoutLocal,
+                                                            );
+                                                        }
+                                                        labels.push(
+                                                            "Base Worktree Off".to_string(),
+                                                        );
+                                                        actions
+                                                            .push(BranchAction::BaseWorktreeOff);
+                                                        labels.push("Pull".to_string());
+                                                        actions.push(BranchAction::Pull);
+                                                        if branch.active_agent_count > 0 {
+                                                            labels
+                                                                .push("Stop Agents".to_string());
+                                                            actions
+                                                                .push(BranchAction::StopAgents);
+                                                        }
+                                                        if branch.is_worktree {
+                                                            labels.push(
+                                                                "Remove Worktree".to_string(),
+                                                            );
+                                                            actions.push(
+                                                                BranchAction::RemoveWorktree,
+                                                            );
+                                                        }
+                                                        labels
+                                                            .push("Delete Branch".to_string());
+                                                        actions
+                                                            .push(BranchAction::DeleteBranch);
+                                                        active_menu = Some(
+                                                            ActiveMenu::BranchActions {
+                                                                repo_path: repo.path.clone(),
+                                                                branch_name: branch.name.clone(),
+                                                                is_head: branch.is_head,
+                                                                agents: matching,
+                                                                actions,
+                                                                menu: ContextMenu::new(
+                                                                    &branch.name,
+                                                                    labels,
+                                                                ),
+                                                            },
+                                                        );
+                                                    }
+                                                } else if selection.category_idx == 1 {
+                                                    // Remote branch context menu
+                                                    if let Some(branch) = repo
+                                                        .remote_branches
+                                                        .get(selection.branch_idx)
+                                                    {
+                                                        let mut labels = Vec::new();
+                                                        let mut actions = Vec::new();
+                                                        labels.push(
+                                                            "Checkout & Track Locally"
+                                                                .to_string(),
+                                                        );
+                                                        actions
+                                                            .push(BranchAction::CheckoutRemote);
+                                                        labels.push(
+                                                            "Start Agent (checkout)".to_string(),
+                                                        );
+                                                        actions.push(
+                                                            BranchAction::RemoteStartAgent,
+                                                        );
+                                                        labels.push(
+                                                            "Create Worktree".to_string(),
+                                                        );
+                                                        actions.push(
+                                                            BranchAction::RemoteCreateWorktree,
+                                                        );
+                                                        labels.push(
+                                                            "Delete Remote Branch".to_string(),
+                                                        );
+                                                        actions.push(
+                                                            BranchAction::DeleteRemoteBranch,
+                                                        );
+                                                        active_menu = Some(
+                                                            ActiveMenu::BranchActions {
+                                                                repo_path: repo.path.clone(),
+                                                                branch_name: branch.name.clone(),
+                                                                is_head: false,
+                                                                agents: vec![],
+                                                                actions,
+                                                                menu: ContextMenu::new(
+                                                                    &branch.name,
+                                                                    labels,
+                                                                ),
+                                                            },
+                                                        );
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    },
                                     KeyCode::Up
-                                        if key.modifiers.contains(KeyModifiers::SHIFT)
-                                            && focus == FocusPanel::Left =>
+                                        if key.modifiers.contains(KeyModifiers::SHIFT) =>
                                     {
                                         selection.jump_prev_repo(&display_repos);
                                     }
                                     KeyCode::Down
-                                        if key.modifiers.contains(KeyModifiers::SHIFT)
-                                            && focus == FocusPanel::Left =>
+                                        if key.modifiers.contains(KeyModifiers::SHIFT) =>
                                     {
                                         selection.jump_next_repo(&display_repos);
                                     }
-                                    KeyCode::Up => match focus {
-                                        FocusPanel::Left => selection.move_up(&display_repos),
-                                        FocusPanel::Right => window_nav(
-                                            last_content_area,
-                                            &agents,
-                                            &display_repos,
-                                            &selection,
-                                            &mut window_grid,
-                                            window_view::Direction::Up,
-                                        ),
-                                    },
-                                    KeyCode::Down => match focus {
-                                        FocusPanel::Left => selection.move_down(&display_repos),
-                                        FocusPanel::Right => window_nav(
-                                            last_content_area,
-                                            &agents,
-                                            &display_repos,
-                                            &selection,
-                                            &mut window_grid,
-                                            window_view::Direction::Down,
-                                        ),
-                                    },
-                                    KeyCode::Right => match focus {
-                                        FocusPanel::Left => selection.descend(&display_repos),
-                                        FocusPanel::Right => window_nav(
-                                            last_content_area,
-                                            &agents,
-                                            &display_repos,
-                                            &selection,
-                                            &mut window_grid,
-                                            window_view::Direction::Right,
-                                        ),
-                                    },
-                                    KeyCode::Left => match focus {
-                                        FocusPanel::Left => selection.ascend(&display_repos),
-                                        FocusPanel::Right => window_nav(
-                                            last_content_area,
-                                            &agents,
-                                            &display_repos,
-                                            &selection,
-                                            &mut window_grid,
-                                            window_view::Direction::Left,
-                                        ),
-                                    },
-                                    KeyCode::Char(' ') if focus == FocusPanel::Left => {
+                                    KeyCode::Up => selection.move_up(&display_repos),
+                                    KeyCode::Down => selection.move_down(&display_repos),
+                                    KeyCode::Right => selection.descend(&display_repos),
+                                    KeyCode::Left => selection.ascend(&display_repos),
+                                    KeyCode::Char(' ') => {
                                         selection.toggle_collapse();
                                     }
                                     _ => {}
@@ -6662,32 +6487,6 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                             }
                                         }
                                     }
-                                    focus = FocusPanel::Left;
-                                }
-                                // Window-view cell clicks (right panel) → select that cell
-                                else if let Some((_, agent_id)) = click_map
-                                    .window_cells
-                                    .iter()
-                                    .find(|(r, _)| r.contains(pos))
-                                {
-                                    let target_id = agent_id.clone();
-                                    let (scoped, _) = scoped_agent_ids(
-                                        &agents,
-                                        &display_repos,
-                                        &selection,
-                                    );
-                                    if let Some(idx) =
-                                        scoped.iter().position(|id| id == &target_id)
-                                    {
-                                        window_grid.selected_idx = idx;
-                                    }
-                                    focus = FocusPanel::Right;
-                                }
-                                // Panel focus switching (click anywhere in a panel)
-                                else if click_map.left_panel_area.contains(pos) {
-                                    focus = FocusPanel::Left;
-                                } else if click_map.right_panel_area.contains(pos) {
-                                    focus = FocusPanel::Right;
                                 }
                             }
                             ActiveTab::Overview => {
@@ -7939,13 +7738,8 @@ fn render_help_overlay(frame: &mut Frame, area: Rect, active_tab: ActiveTab, in_
         lines.push(binding_line("\u{2191} / \u{2193}", "Navigate items"));
         lines.push(binding_line("\u{2190} / \u{2192}", "Navigate tree"));
         lines.push(binding_line("Shift+\u{2191}/\u{2193}", "Jump prev / next repo"));
-        lines.push(binding_line("Shift+\u{2190}/\u{2192}", "Switch panel"));
-        lines.push(binding_line("Enter", "Open menu / focus agent"));
+        lines.push(binding_line("Enter", "Open menu"));
         lines.push(binding_line("Space", "Collapse / expand"));
-        lines.push(Line::from(""));
-        lines.push(header_line("Repositories — right grid"));
-        lines.push(binding_line("\u{2190} / \u{2192} / \u{2191} / \u{2193}", "Navigate cells"));
-        lines.push(binding_line("Enter", "Open agent in focus mode"));
     }
 
     // -- Overview --
