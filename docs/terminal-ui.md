@@ -891,16 +891,25 @@ GUI editors (Generic, JetBrains) are opened directly via their binary. Terminal 
 |---------|--------|
 | Focus mode | Agent's working directory |
 | Repositories tab (repo selected) | Repository root path |
-| Repositories tab (branch selected) | Worktree directory (if worktree), otherwise repo root |
+| Repositories tab (HEAD branch selected) | Repository root path |
+| Repositories tab (worktree branch selected) | Worktree directory |
+| Repositories tab (non-worktree local branch selected) | Worktree is created on-demand for the branch, then opened |
 | Overview tab (terminal focused) | Agent's working directory |
 | Batches tab | No target (editor shortcut is a no-op) |
 
+**Discoverability:** Every surface where the shortcut is meaningful exposes it visibly:
+
+- The bottom status bar lists `Opt+V open editor` (Repositories, Overview/terminal-focused, Focus mode).
+- A selected repo/branch row in the Repositories tree shows an inline `Opt+V open` pill next to `Enter`.
+- The branch context menu (Enter on a local branch) includes either **Open in editor** (HEAD or worktree branch) or **Create worktree and open in editor** (non-worktree branch). Picking that entry has the same effect as the keybind.
+
 **Flow:**
 
-1. If the repository has a saved editor preference (per-repo `editor` column or global `default_editor`), the editor opens immediately without showing any modal.
-2. If multiple editors are detected, an **editor picker modal** is shown listing all detected editors by name. The user selects one.
-3. If only one editor is detected, it opens immediately.
-4. After opening (when the target is inside a repository), an **editor remember modal** asks "Remember this editor?" with three options:
+1. If the selected branch has no worktree (and is not HEAD), a worktree is created on-demand via `AddWorktree { checkout_existing: true }` before opening.
+2. If the repository has a saved editor preference (per-repo `editor` column or global `default_editor`), the editor opens immediately without showing any modal.
+3. If multiple editors are detected, an **editor picker modal** is shown listing all detected editors by name. The user selects one.
+4. If only one editor is detected, it opens immediately.
+5. After opening (when the target is inside a repository), an **editor remember modal** asks "Remember this editor?" with three options:
    - "Just this time" -- no preference saved
    - "For this repository" -- saves the editor in the `repos.editor` column via `SetRepoEditor` IPC
    - "For all repositories" -- saves the editor as the global default via `SetDefaultEditor` IPC

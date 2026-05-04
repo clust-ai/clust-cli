@@ -269,6 +269,9 @@ enum BranchAction {
     Pull,
     StopAgents,
     OpenAgent,
+    /// Open the branch's worktree (or repo root for HEAD) in the user's editor.
+    /// If the branch has no worktree yet, one is created first.
+    OpenInEditor,
     RemoveWorktree,
     DeleteBranch,
     RemoteStartAgent,
@@ -2203,6 +2206,19 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                                             });
                                                     }
                                                 }
+                                                BranchAction::OpenInEditor => {
+                                                    if open_branch_in_editor(
+                                                        &repo_path,
+                                                        &branch_name,
+                                                        &repos,
+                                                        &mut active_menu,
+                                                        &editors_cache,
+                                                        &mut status_message,
+                                                    ) {
+                                                        last_repo_fetch = Instant::now()
+                                                            - Duration::from_secs(10);
+                                                    }
+                                                }
                                                 BranchAction::RemoveWorktree => {
                                                     remove_worktree_ipc(
                                                         &repo_path,
@@ -3701,24 +3717,58 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                     } else if key.code == KeyCode::Char('v')
                         && key.modifiers.contains(KeyModifiers::ALT)
                     {
-                        // Global shortcut: Alt+V opens in editor
-                        let (target, rp) = resolve_editor_target(
-                            in_focus_mode,
-                            &focus_mode_state,
-                            active_tab,
-                            &overview_state,
-                            &display_repos,
-                            &selection,
-                            &agents,
-                        );
-                        if let Some(target_path) = target {
-                            trigger_open_in_editor(
-                                &target_path,
-                                rp.as_deref(),
-                                &repos,
-                                &mut active_menu,
-                                &editors_cache,
+                        // Global shortcut: Alt+V opens in editor. On the
+                        // Repositories tab when a local branch is selected,
+                        // route through open_branch_in_editor so a worktree
+                        // is created on-demand for non-worktree branches.
+                        let mut handled = false;
+                        if !in_focus_mode
+                            && active_tab == ActiveTab::Repositories
+                            && selection.level == TreeLevel::Branch
+                            && selection.category_idx == 0
+                        {
+                            if let Some(repo) = display_repos.get(selection.repo_idx) {
+                                if !repo.path.is_empty() {
+                                    if let Some(branch) =
+                                        repo.local_branches.get(selection.branch_idx)
+                                    {
+                                        let rp = repo.path.clone();
+                                        let bn = branch.name.clone();
+                                        if open_branch_in_editor(
+                                            &rp,
+                                            &bn,
+                                            &repos,
+                                            &mut active_menu,
+                                            &editors_cache,
+                                            &mut status_message,
+                                        ) {
+                                            last_repo_fetch =
+                                                Instant::now() - Duration::from_secs(10);
+                                        }
+                                        handled = true;
+                                    }
+                                }
+                            }
+                        }
+                        if !handled {
+                            let (target, rp) = resolve_editor_target(
+                                in_focus_mode,
+                                &focus_mode_state,
+                                active_tab,
+                                &overview_state,
+                                &display_repos,
+                                &selection,
+                                &agents,
                             );
+                            if let Some(target_path) = target {
+                                trigger_open_in_editor(
+                                    &target_path,
+                                    rp.as_deref(),
+                                    &repos,
+                                    &mut active_menu,
+                                    &editors_cache,
+                                );
+                            }
                         }
                     } else if key.code == KeyCode::Char('b')
                         && key.modifiers.contains(KeyModifiers::ALT)
@@ -4787,6 +4837,11 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                                                 .push(BranchAction::OpenAgent);
                                                         }
                                                         labels.push(
+                                                            open_in_editor_label(branch),
+                                                        );
+                                                        actions
+                                                            .push(BranchAction::OpenInEditor);
+                                                        labels.push(
                                                             "Start Agent (worktree)"
                                                                 .to_string(),
                                                         );
@@ -5636,6 +5691,19 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                                                 ),
                                                                 agents: branch_agents,
                                                             });
+                                                    }
+                                                }
+                                                BranchAction::OpenInEditor => {
+                                                    if open_branch_in_editor(
+                                                        &repo_path,
+                                                        &branch_name,
+                                                        &repos,
+                                                        &mut active_menu,
+                                                        &editors_cache,
+                                                        &mut status_message,
+                                                    ) {
+                                                        last_repo_fetch = Instant::now()
+                                                            - Duration::from_secs(10);
                                                     }
                                                 }
                                                 BranchAction::RemoveWorktree => {
@@ -7128,6 +7196,12 @@ fn build_repo_tree_lines(
                     .fg(theme::R_TEXT_TERTIARY)
                     .bg(theme::R_BG_HOVER),
             ));
+            spans.push(Span::styled(
+                format!("  {} open", editor_key_label()),
+                Style::default()
+                    .fg(theme::R_TEXT_TERTIARY)
+                    .bg(theme::R_BG_HOVER),
+            ));
         }
         lines.push(pad_line(spans, width, line_bg));
         targets.push(TreeClickTarget::Repo(repo_idx));
@@ -7182,6 +7256,10 @@ fn build_repo_tree_lines(
                         hint_style = hint_style.bg(bg_color);
                     }
                     spans.push(Span::styled("  Enter", hint_style));
+                    spans.push(Span::styled(
+                        format!("  {} open", editor_key_label()),
+                        hint_style,
+                    ));
                 }
                 lines.push(pad_line(spans, width, bg));
                 targets.push(TreeClickTarget::Branch(repo_idx, 0, i));
@@ -7365,9 +7443,34 @@ fn format_branch_line(
             hint_style = hint_style.bg(bg_color);
         }
         spans.push(Span::styled("  Enter", hint_style));
+        spans.push(Span::styled(
+            format!("  {} open", editor_key_label()),
+            hint_style,
+        ));
     }
 
     pad_line(spans, width, bg)
+}
+
+/// Modifier key label for the "open in editor" shortcut, matching the host OS
+/// convention (Opt on macOS, Alt elsewhere).
+fn editor_key_label() -> &'static str {
+    if cfg!(target_os = "macos") {
+        "Opt+V"
+    } else {
+        "Alt+V"
+    }
+}
+
+/// Context menu label for the "open in editor" branch action. HEAD branches
+/// open the repo root, worktree branches open the worktree directly, and
+/// non-worktree branches get a worktree created on-demand.
+fn open_in_editor_label(branch: &clust_ipc::BranchInfo) -> String {
+    if branch.is_head || branch.is_worktree {
+        "Open in editor".to_string()
+    } else {
+        "Create worktree and open in editor".to_string()
+    }
 }
 
 /// Pad a line's spans to fill `width`, applying background color to the padding.
@@ -7615,17 +7718,16 @@ fn render_status_bar(
                     "Ctrl+\\ stop typing  Shift+\u{2191} exit".to_string()
                 }
                 FocusModeHint::TerminalNavigate => {
-                    "Ctrl+\\ or Enter type  ] / [ next/prev  n new  x close  Shift+\u{2191} exit"
-                        .to_string()
+                    format!("Ctrl+\\ or Enter type  ] / [ next/prev  n new  x close  {mod_key}+V open editor  Shift+\u{2191} exit")
                 }
                 FocusModeHint::Other => {
-                    format!("Shift+\u{2190}/\u{2192} switch panel  Shift+\u{2191} exit  {mod_key}+R new agent")
+                    format!("Shift+\u{2190}/\u{2192} switch panel  {mod_key}+V open editor  {mod_key}+R new agent  Shift+\u{2191} exit")
                 }
             }
         } else if active_tab == ActiveTab::Overview {
             match overview_focus {
                 OverviewFocus::Terminal(_) => {
-                    format!("Shift+\u{2191} options  Shift+\u{2193} focus  Shift+\u{2190}/\u{2192} switch agent  {mod_key}+R new agent")
+                    format!("Shift+\u{2191} options  Shift+\u{2193} focus  Shift+\u{2190}/\u{2192} switch agent  {mod_key}+V open editor  {mod_key}+R new agent")
                 }
                 OverviewFocus::OptionsBar => {
                     format!("Shift+\u{2193} enter terminal  Shift+\u{2190}/\u{2192} scroll  {mod_key}+R new agent  q quit  ? keys")
@@ -7634,7 +7736,7 @@ fn render_status_bar(
         } else if active_tab == ActiveTab::Tasks {
             format!("{mod_key}+T new batch  {mod_key}+I import  \u{2190}/\u{2192} navigate  Space toggle  Enter add task  c copy JSON  p prefix  s suffix  Del remove  q quit  ? keys")
         } else {
-            format!("{mod_key}+N new repo  {mod_key}+R new agent  q quit  Q stop+quit  ? keys")
+            format!("{mod_key}+N new repo  {mod_key}+R new agent  {mod_key}+V open editor  q quit  Q stop+quit  ? keys")
         };
 
         left_spans.extend([
@@ -7725,7 +7827,10 @@ fn render_help_overlay(frame: &mut Frame, area: Rect, active_tab: ActiveTab, in_
     lines.push(binding_line("Alt+D", "New directory agent"));
     lines.push(binding_line("Alt+F", "Search agents"));
     lines.push(binding_line("Alt+N", "Add repository"));
-    lines.push(binding_line("Alt+V", "Open in editor"));
+    lines.push(binding_line(
+        editor_key_label(),
+        "Open in editor (creates worktree if missing)",
+    ));
     lines.push(binding_line("Alt+B", "Toggle bypass permissions"));
     lines.push(binding_line("Alt+P", "Toggle plan mode (in modals)"));
     lines.push(binding_line("Alt+T", "Create batch"));
@@ -8188,6 +8293,32 @@ fn add_worktree_ipc(repo_path: &str, branch_name: &str, base_branch: &str) {
         .await;
         let _ = clust_ipc::recv_message::<HubMessage>(&mut stream).await;
     });
+}
+
+/// Create a worktree for an existing local branch and return its path on success.
+/// Used by the "Create worktree and open in editor" flow.
+fn checkout_worktree_ipc(repo_path: &str, branch_name: &str) -> Option<String> {
+    let working_dir = repo_path.to_string();
+    let branch_name = branch_name.to_string();
+    block_on_async(async {
+        let mut stream = ipc::try_connect().await.ok()?;
+        clust_ipc::send_message(
+            &mut stream,
+            &CliMessage::AddWorktree {
+                working_dir: Some(working_dir),
+                repo_name: None,
+                branch_name,
+                base_branch: None,
+                checkout_existing: true,
+            },
+        )
+        .await
+        .ok()?;
+        match clust_ipc::recv_message::<HubMessage>(&mut stream).await.ok()? {
+            HubMessage::WorktreeAdded { path, .. } => Some(path),
+            _ => None,
+        }
+    })
 }
 
 fn start_purge_async(repo_path: &str) -> PurgeProgress {
@@ -8675,6 +8806,46 @@ fn resolve_editor_target(
 fn worktree_dir(repo_path: &str, branch_name: &str) -> String {
     let serialized = branch_name.replace('/', "__");
     format!("{repo_path}/.clust/worktrees/{serialized}")
+}
+
+/// Open the worktree (or repo root for HEAD) for `branch_name` in the user's
+/// editor, creating the worktree first if it does not yet exist. Returns
+/// `true` if a worktree was created (so the caller can refresh repo state).
+fn open_branch_in_editor(
+    repo_path: &str,
+    branch_name: &str,
+    repos: &[RepoInfo],
+    active_menu: &mut Option<ActiveMenu>,
+    editors_cache: &[crate::editor::DetectedEditor],
+    status_message: &mut Option<StatusMessage>,
+) -> bool {
+    let branch = repos
+        .iter()
+        .find(|r| r.path == repo_path)
+        .and_then(|r| r.local_branches.iter().find(|b| b.name == branch_name))
+        .cloned();
+    let mut created = false;
+    let target = match branch {
+        Some(b) if b.is_head => repo_path.to_string(),
+        Some(b) if b.is_worktree => worktree_dir(repo_path, branch_name),
+        Some(_) => match checkout_worktree_ipc(repo_path, branch_name) {
+            Some(path) => {
+                created = true;
+                path
+            }
+            None => {
+                *status_message = Some(StatusMessage {
+                    text: format!("Failed to create worktree for {branch_name}"),
+                    level: StatusLevel::Error,
+                    created: Instant::now(),
+                });
+                return false;
+            }
+        },
+        None => repo_path.to_string(),
+    };
+    trigger_open_in_editor(&target, Some(repo_path), repos, active_menu, editors_cache);
+    created
 }
 
 /// Trigger the "open in editor" flow: either open directly if a preference is saved,
