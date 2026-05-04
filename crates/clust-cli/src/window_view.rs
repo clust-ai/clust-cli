@@ -73,6 +73,63 @@ fn distribute(total: usize, slots: usize) -> Vec<usize> {
         .collect()
 }
 
+/// Direction for spatial neighbor lookup.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Direction {
+    Up,
+    Down,
+    Left,
+    Right,
+}
+
+/// Return the index of the cell to navigate to from `current` when the user
+/// presses an arrow key in direction `dir`. If no candidate exists in that
+/// direction, return `current` (no-op — wrap-around is jarring in a recursive
+/// grid).
+///
+/// Scoring favors cells whose center lies in the requested half-plane and
+/// minimizes Manhattan distance with a 2× penalty on the perpendicular axis,
+/// so that "Right" prefers a cell in the same row over one diagonally placed.
+pub fn neighbor(cells: &[Rect], current: usize, dir: Direction) -> usize {
+    if cells.is_empty() || current >= cells.len() {
+        return current;
+    }
+    let cur = center(cells[current]);
+    let mut best: Option<(usize, i64)> = None;
+    for (idx, cell) in cells.iter().enumerate() {
+        if idx == current {
+            continue;
+        }
+        let c = center(*cell);
+        let in_half_plane = match dir {
+            Direction::Up => c.1 < cur.1,
+            Direction::Down => c.1 > cur.1,
+            Direction::Left => c.0 < cur.0,
+            Direction::Right => c.0 > cur.0,
+        };
+        if !in_half_plane {
+            continue;
+        }
+        let dx = (c.0 - cur.0).abs();
+        let dy = (c.1 - cur.1).abs();
+        let score = match dir {
+            Direction::Up | Direction::Down => dy + 2 * dx,
+            Direction::Left | Direction::Right => dx + 2 * dy,
+        };
+        if best.map_or(true, |(_, s)| score < s) {
+            best = Some((idx, score));
+        }
+    }
+    best.map_or(current, |(idx, _)| idx)
+}
+
+fn center(r: Rect) -> (i64, i64) {
+    (
+        i64::from(r.x) + i64::from(r.width) / 2,
+        i64::from(r.y) + i64::from(r.height) / 2,
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -207,5 +264,76 @@ mod tests {
             let cells = window_layout(rect(), n);
             assert_eq!(cells.len(), n, "n={n}");
         }
+    }
+
+    // -------- neighbor() tests --------
+
+    #[test]
+    fn neighbor_in_2x2_grid() {
+        // 2x2 grid: cells[0]=TL, cells[1]=BL, cells[2]=TR, cells[3]=BR
+        let cells = window_layout(rect(), 4);
+        // From TL: Right → TR, Down → BL, Up/Left → no move
+        assert_eq!(neighbor(&cells, 0, Direction::Right), 2);
+        assert_eq!(neighbor(&cells, 0, Direction::Down), 1);
+        assert_eq!(neighbor(&cells, 0, Direction::Up), 0);
+        assert_eq!(neighbor(&cells, 0, Direction::Left), 0);
+        // From BR: Up → TR, Left → BL
+        assert_eq!(neighbor(&cells, 3, Direction::Up), 2);
+        assert_eq!(neighbor(&cells, 3, Direction::Left), 1);
+        // From TR: Left → TL, Down → BR
+        assert_eq!(neighbor(&cells, 2, Direction::Left), 0);
+        assert_eq!(neighbor(&cells, 2, Direction::Down), 3);
+    }
+
+    #[test]
+    fn neighbor_prefers_same_row_or_column() {
+        // 5-cell layout: TL/BL inside TL-quadrant, then BL/TR/BR full
+        // cells[0], [1] inside top-left quadrant (small)
+        // cells[2] = bottom-left full, cells[3] = top-right full,
+        // cells[4] = bottom-right full
+        let cells = window_layout(rect(), 5);
+        // From cells[3] (TR full), Down should pick BR (cells[4]),
+        // not the smaller top-left subdivisions.
+        assert_eq!(neighbor(&cells, 3, Direction::Down), 4);
+        // From cells[4] (BR full), Up → TR.
+        assert_eq!(neighbor(&cells, 4, Direction::Up), 3);
+    }
+
+    #[test]
+    fn neighbor_no_movement_returns_current() {
+        let cells = window_layout(rect(), 1);
+        assert_eq!(neighbor(&cells, 0, Direction::Right), 0);
+        assert_eq!(neighbor(&cells, 0, Direction::Up), 0);
+    }
+
+    #[test]
+    fn neighbor_empty_cells_returns_current() {
+        let cells: Vec<Rect> = Vec::new();
+        assert_eq!(neighbor(&cells, 0, Direction::Right), 0);
+    }
+
+    #[test]
+    fn neighbor_out_of_bounds_index_returns_current() {
+        let cells = window_layout(rect(), 2);
+        assert_eq!(neighbor(&cells, 99, Direction::Right), 99);
+    }
+
+    #[test]
+    fn neighbor_in_three_cell_layout() {
+        // n=3: cells[0]=TL (top-left quarter), cells[1]=BL (bottom-left
+        // quarter), cells[2]=full right column.
+        let cells = window_layout(rect(), 3);
+        // From TL: Right → right column.
+        assert_eq!(neighbor(&cells, 0, Direction::Right), 2);
+        // From BL: Right → right column.
+        assert_eq!(neighbor(&cells, 1, Direction::Right), 2);
+        // From right column: Left lands on the left column. Both TL and BL
+        // are equidistant from the right column's vertical midpoint, so
+        // first-match wins (TL = idx 0).
+        assert_eq!(neighbor(&cells, 2, Direction::Left), 0);
+        // From TL: Down → BL.
+        assert_eq!(neighbor(&cells, 0, Direction::Down), 1);
+        // From BL: Up → TL.
+        assert_eq!(neighbor(&cells, 1, Direction::Up), 0);
     }
 }
