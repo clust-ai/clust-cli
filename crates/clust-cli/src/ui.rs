@@ -2723,18 +2723,14 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                                     purge_progress =
                                                         Some(start_purge_async(&repo_path));
                                                 }
-                                                ConfirmedAction::RemoveRepository {
-                                                    repo_path,
-                                                } => {
+                                                ConfirmedAction::RemoveRepository { repo_path } => {
                                                     unregister_repo_ipc(&repo_path);
                                                     last_repo_fetch =
                                                         Instant::now() - Duration::from_secs(10);
                                                     last_agent_fetch =
                                                         Instant::now() - Duration::from_secs(10);
                                                 }
-                                                ConfirmedAction::DeleteRepository {
-                                                    repo_path,
-                                                } => {
+                                                ConfirmedAction::DeleteRepository { repo_path } => {
                                                     delete_repo_ipc(&repo_path, status_tx.clone());
                                                     last_repo_fetch =
                                                         Instant::now() - Duration::from_secs(10);
@@ -6379,18 +6375,14 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                                     purge_progress =
                                                         Some(start_purge_async(&repo_path));
                                                 }
-                                                ConfirmedAction::RemoveRepository {
-                                                    repo_path,
-                                                } => {
+                                                ConfirmedAction::RemoveRepository { repo_path } => {
                                                     unregister_repo_ipc(&repo_path);
                                                     last_repo_fetch =
                                                         Instant::now() - Duration::from_secs(10);
                                                     last_agent_fetch =
                                                         Instant::now() - Duration::from_secs(10);
                                                 }
-                                                ConfirmedAction::DeleteRepository {
-                                                    repo_path,
-                                                } => {
+                                                ConfirmedAction::DeleteRepository { repo_path } => {
                                                     delete_repo_ipc(&repo_path, status_tx.clone());
                                                     last_repo_fetch =
                                                         Instant::now() - Duration::from_secs(10);
@@ -8832,8 +8824,7 @@ fn delete_repo_ipc(path: &str, status_tx: tokio::sync::mpsc::Sender<StatusMessag
                 return;
             }
         };
-        if let Err(e) =
-            clust_ipc::send_message(&mut stream, &CliMessage::DeleteRepo { path }).await
+        if let Err(e) = clust_ipc::send_message(&mut stream, &CliMessage::DeleteRepo { path }).await
         {
             let _ = status_tx
                 .send(StatusMessage {

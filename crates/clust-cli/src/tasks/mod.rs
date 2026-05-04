@@ -44,7 +44,10 @@ pub enum BatchStatus {
     Active,
     /// Queued for scheduled execution. Contains the RFC 3339 `scheduled_at` timestamp
     /// and the hub-side batch ID.
-    Queued { scheduled_at: String, batch_id: String },
+    Queued {
+        scheduled_at: String,
+        batch_id: String,
+    },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -193,9 +196,7 @@ pub fn copy_to_clipboard(text: &str) -> Result<(), String> {
                 .write_all(text.as_bytes())
                 .map_err(|e| format!("Failed to write to pbcopy: {e}"))?;
         }
-        child
-            .wait()
-            .map_err(|e| format!("pbcopy failed: {e}"))?;
+        child.wait().map_err(|e| format!("pbcopy failed: {e}"))?;
         Ok(())
     }
     #[cfg(not(target_os = "macos"))]
@@ -225,9 +226,7 @@ pub fn copy_to_clipboard(text: &str) -> Result<(), String> {
                 .write_all(text.as_bytes())
                 .map_err(|e| format!("Failed to write to {tool}: {e}"))?;
         }
-        child
-            .wait()
-            .map_err(|e| format!("{tool} failed: {e}"))?;
+        child.wait().map_err(|e| format!("{tool} failed: {e}"))?;
         Ok(())
     }
 }
@@ -322,7 +321,15 @@ impl TasksState {
         idx
     }
 
-    pub fn add_task(&mut self, batch_idx: usize, branch_name: String, prompt: String, use_prefix: bool, use_suffix: bool, plan_mode: bool) {
+    pub fn add_task(
+        &mut self,
+        batch_idx: usize,
+        branch_name: String,
+        prompt: String,
+        use_prefix: bool,
+        use_suffix: bool,
+        plan_mode: bool,
+    ) {
         if let Some(batch) = self.batches.get_mut(batch_idx) {
             batch.tasks.push(TaskEntry {
                 branch_name,
@@ -349,7 +356,11 @@ impl TasksState {
     }
 
     /// Start a single task by index within a manual-mode batch.
-    pub fn start_single_task(&mut self, batch_idx: usize, task_idx: usize) -> Option<BatchStartInfo> {
+    pub fn start_single_task(
+        &mut self,
+        batch_idx: usize,
+        task_idx: usize,
+    ) -> Option<BatchStartInfo> {
         let batch = self.batches.get(batch_idx)?;
         if batch.launch_mode != LaunchMode::Manual {
             return None;
@@ -460,10 +471,16 @@ impl TasksState {
     /// a `BatchStartInfo` describing the next task(s) to start.
     pub fn mark_agent_done(&mut self, agent_id: &str) -> Option<BatchStartInfo> {
         let batch = self.batches.iter_mut().find(|b| {
-            b.tasks.iter().any(|t| t.agent_id.as_deref() == Some(agent_id))
+            b.tasks
+                .iter()
+                .any(|t| t.agent_id.as_deref() == Some(agent_id))
         })?;
 
-        if let Some(task) = batch.tasks.iter_mut().find(|t| t.agent_id.as_deref() == Some(agent_id)) {
+        if let Some(task) = batch
+            .tasks
+            .iter_mut()
+            .find(|t| t.agent_id.as_deref() == Some(agent_id))
+        {
             task.status = TaskStatus::Done;
         }
 
@@ -471,7 +488,11 @@ impl TasksState {
             return None;
         }
 
-        let active_count = batch.tasks.iter().filter(|t| t.status == TaskStatus::Active).count();
+        let active_count = batch
+            .tasks
+            .iter()
+            .filter(|t| t.status == TaskStatus::Active)
+            .count();
         let max = batch.max_concurrent.unwrap_or(usize::MAX);
         let slots = max.saturating_sub(active_count);
         let tasks_to_start: Vec<_> = batch
@@ -512,7 +533,9 @@ impl TasksState {
     /// Find the index of a batch by its hub-assigned ID.
     #[allow(dead_code)]
     pub fn batch_idx_by_hub_id(&self, hub_id: &str) -> Option<usize> {
-        self.batches.iter().position(|b| b.hub_batch_id.as_deref() == Some(hub_id))
+        self.batches
+            .iter()
+            .position(|b| b.hub_batch_id.as_deref() == Some(hub_id))
     }
 
     /// Load batches from hub info, replacing current state.
@@ -598,9 +621,11 @@ impl TasksState {
     /// Sync task statuses and agent_ids from hub data for all batches.
     pub fn sync_from_hub(&mut self, hub_batches: &[clust_ipc::QueuedBatchInfo]) {
         for hub_info in hub_batches {
-            let batch = match self.batches.iter_mut().find(|b| {
-                b.hub_batch_id.as_deref() == Some(&hub_info.batch_id)
-            }) {
+            let batch = match self
+                .batches
+                .iter_mut()
+                .find(|b| b.hub_batch_id.as_deref() == Some(&hub_info.batch_id))
+            {
                 Some(b) => b,
                 None => continue,
             };
@@ -786,11 +811,8 @@ pub fn render_tasks(
     terminal_previews: &TerminalPreviewMap,
 ) {
     // Split into options bar (1 row) + cards area
-    let [options_area, cards_area] = Layout::vertical([
-        Constraint::Length(1),
-        Constraint::Min(0),
-    ])
-    .areas(area);
+    let [options_area, cards_area] =
+        Layout::vertical([Constraint::Length(1), Constraint::Min(0)]).areas(area);
 
     render_options_bar(frame, options_area, state);
 
@@ -828,17 +850,34 @@ pub fn render_tasks(
             .map(|c| theme::repo_color(c));
 
         let ft = if is_focused { state.focused_task } else { None };
-        let scroll = if is_focused { &mut state.task_scroll_offset } else { &mut 0 };
+        let scroll = if is_focused {
+            &mut state.task_scroll_offset
+        } else {
+            &mut 0
+        };
         // Resolve dependency hub IDs to titles
         let dep_titles: Vec<&str> = batch
             .depends_on
             .iter()
             .filter_map(|dep_id| {
-                state.batches.iter().find(|b| b.hub_batch_id.as_deref() == Some(dep_id))
+                state
+                    .batches
+                    .iter()
+                    .find(|b| b.hub_batch_id.as_deref() == Some(dep_id))
                     .map(|b| b.title.as_str())
             })
             .collect();
-        render_batch_card(frame, card_areas[i], batch, is_focused, repo_color, ft, terminal_previews, scroll, &dep_titles);
+        render_batch_card(
+            frame,
+            card_areas[i],
+            batch,
+            is_focused,
+            repo_color,
+            ft,
+            terminal_previews,
+            scroll,
+            &dep_titles,
+        );
 
         click_map.tasks_batch_cards.push((card_areas[i], batch_idx));
     }
@@ -854,7 +893,11 @@ fn render_options_bar(frame: &mut Frame, area: Rect, state: &TasksState) {
         format!("{} batches", count)
     };
 
-    let mod_key = if cfg!(target_os = "macos") { "Opt" } else { "Alt" };
+    let mod_key = if cfg!(target_os = "macos") {
+        "Opt"
+    } else {
+        "Alt"
+    };
 
     let line = Line::from(vec![
         Span::styled(" ", Style::default().bg(theme::R_BG_RAISED)),
@@ -887,7 +930,11 @@ fn render_options_bar(frame: &mut Frame, area: Rect, state: &TasksState) {
 }
 
 fn render_empty_state(frame: &mut Frame, area: Rect) {
-    let mod_key = if cfg!(target_os = "macos") { "Opt" } else { "Alt" };
+    let mod_key = if cfg!(target_os = "macos") {
+        "Opt"
+    } else {
+        "Alt"
+    };
     frame.render_widget(
         Paragraph::new(Line::from(Span::styled(
             format!("No batches defined \u{2014} press {mod_key}+T to create one"),
@@ -983,9 +1030,7 @@ fn render_batch_card(
         Span::styled("Manual", Style::default().fg(theme::R_INFO))
     } else {
         match &batch.status {
-            BatchStatus::Idle => {
-                Span::styled("Idle", Style::default().fg(theme::R_TEXT_DISABLED))
-            }
+            BatchStatus::Idle => Span::styled("Idle", Style::default().fg(theme::R_TEXT_DISABLED)),
             BatchStatus::Active => Span::styled(
                 "Active",
                 Style::default()
@@ -1038,7 +1083,9 @@ fn render_batch_card(
             Span::styled("Prefix    ", label_style),
             Span::styled(
                 batch.prompt_prefix.as_deref().unwrap_or("(none)"),
-                if batch.prompt_prefix.is_some() { value_style } else {
+                if batch.prompt_prefix.is_some() {
+                    value_style
+                } else {
                     Style::default().fg(theme::R_TEXT_DISABLED)
                 },
             ),
@@ -1048,7 +1095,9 @@ fn render_batch_card(
             Span::styled("Suffix    ", label_style),
             Span::styled(
                 batch.prompt_suffix.as_deref().unwrap_or("(none)"),
-                if batch.prompt_suffix.is_some() { value_style } else {
+                if batch.prompt_suffix.is_some() {
+                    value_style
+                } else {
                     Style::default().fg(theme::R_TEXT_DISABLED)
                 },
             ),
@@ -1091,26 +1140,27 @@ fn render_batch_card(
             if dep_titles.is_empty() {
                 Span::styled("(none)", Style::default().fg(theme::R_TEXT_DISABLED))
             } else {
-                Span::styled(
-                    dep_titles.join(", "),
-                    Style::default().fg(theme::R_INFO),
-                )
+                Span::styled(dep_titles.join(", "), Style::default().fg(theme::R_INFO))
             },
         ]),
     ];
 
     // Split inner area: metadata on top, task boxes below
     let metadata_height = metadata_lines.len() as u16 + 1; // +1 for blank separator
-    let [metadata_area, tasks_area] = Layout::vertical([
-        Constraint::Length(metadata_height),
-        Constraint::Min(0),
-    ])
-    .areas(inner);
+    let [metadata_area, tasks_area] =
+        Layout::vertical([Constraint::Length(metadata_height), Constraint::Min(0)]).areas(inner);
 
     frame.render_widget(Paragraph::new(metadata_lines), metadata_area);
 
     if !batch.tasks.is_empty() {
-        render_task_boxes(frame, tasks_area, batch, focused_task, terminal_previews, task_scroll_offset);
+        render_task_boxes(
+            frame,
+            tasks_area,
+            batch,
+            focused_task,
+            terminal_previews,
+            task_scroll_offset,
+        );
     }
 }
 
@@ -1171,8 +1221,14 @@ fn wrap_prompt_text(prompt: &str, width: usize) -> Vec<String> {
     // Check if we consumed everything
     if exhausted {
         // Verify no remaining lines
-        let total_chars: usize = prompt.lines().map(|l| l.chars().count().max(1)).sum::<usize>();
-        let rendered_chars: usize = result.iter().map(|l| l.chars().count().max(1)).sum::<usize>();
+        let total_chars: usize = prompt
+            .lines()
+            .map(|l| l.chars().count().max(1))
+            .sum::<usize>();
+        let rendered_chars: usize = result
+            .iter()
+            .map(|l| l.chars().count().max(1))
+            .sum::<usize>();
         if rendered_chars < total_chars {
             exhausted = false;
         }
@@ -1323,7 +1379,16 @@ fn render_task_boxes(
     for (vi, &idx) in visible_slice.iter().enumerate() {
         let task = &batch.tasks[idx];
         let is_focused = focused_task == Some(idx);
-        render_single_task_box(frame, box_areas[vi], task, idx, is_focused, has_prefix, has_suffix, terminal_previews);
+        render_single_task_box(
+            frame,
+            box_areas[vi],
+            task,
+            idx,
+            is_focused,
+            has_prefix,
+            has_suffix,
+            terminal_previews,
+        );
     }
 
     // Scroll indicators
@@ -1348,7 +1413,12 @@ fn render_task_boxes(
         let y = area.y + area.height.saturating_sub(1);
         frame.render_widget(
             Paragraph::new(Line::from(indicator)).alignment(Alignment::Center),
-            Rect { x: area.x, y, width: area.width, height: 1 },
+            Rect {
+                x: area.x,
+                y,
+                width: area.width,
+                height: 1,
+            },
         );
     }
 }
@@ -1400,13 +1470,7 @@ fn render_single_task_box(
         "\u{2500}".repeat(area.width as usize),
         Style::default().fg(sep_color),
     ));
-    frame.render_widget(
-        Paragraph::new(separator),
-        Rect {
-            height: 1,
-            ..area
-        },
-    );
+    frame.render_widget(Paragraph::new(separator), Rect { height: 1, ..area });
 
     let content_area = Rect {
         x: area.x + 1,
@@ -1478,7 +1542,11 @@ fn render_single_task_box(
 
     // Status bar: plan mode + prefix/suffix applied indicators
     {
-        let mod_key = if cfg!(target_os = "macos") { "Opt" } else { "Alt" };
+        let mod_key = if cfg!(target_os = "macos") {
+            "Opt"
+        } else {
+            "Alt"
+        };
         let mut status_spans: Vec<Span> = Vec::new();
 
         if task.plan_mode {

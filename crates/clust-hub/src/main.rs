@@ -142,10 +142,7 @@ fn shutdown_gui(
     std::process::exit(0);
 }
 
-async fn handle_signals(
-    shutdown_signal: Arc<dyn ShutdownSignal>,
-    state: SharedHubState,
-) {
+async fn handle_signals(shutdown_signal: Arc<dyn ShutdownSignal>, state: SharedHubState) {
     use tokio::signal::unix::{signal, SignalKind};
 
     let mut sigterm = signal(SignalKind::terminate()).expect("failed to register SIGTERM handler");

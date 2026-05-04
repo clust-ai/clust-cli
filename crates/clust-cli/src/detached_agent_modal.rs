@@ -89,10 +89,7 @@ impl DetachedAgentModal {
         self.dir_entries.clear();
         if let Ok(read) = std::fs::read_dir(&self.base_path) {
             for entry in read.flatten() {
-                let ok = entry
-                    .file_type()
-                    .map(|ft| ft.is_dir())
-                    .unwrap_or(false);
+                let ok = entry.file_type().map(|ft| ft.is_dir()).unwrap_or(false);
                 if !ok {
                     continue;
                 }
@@ -212,8 +209,11 @@ impl DetachedAgentModal {
             }
             KeyCode::Right => {
                 if self.cursor_pos < self.input.len() {
-                    self.cursor_pos +=
-                        self.input[self.cursor_pos..].chars().next().unwrap().len_utf8();
+                    self.cursor_pos += self.input[self.cursor_pos..]
+                        .chars()
+                        .next()
+                        .unwrap()
+                        .len_utf8();
                 }
                 DetachedModalResult::Pending
             }
@@ -251,11 +251,7 @@ impl DetachedAgentModal {
                 }
                 // Confirm current base_path as working directory
                 let wd = self.base_path.trim_end_matches('/').to_string();
-                self.working_dir = if wd.is_empty() {
-                    "/".to_string()
-                } else {
-                    wd
-                };
+                self.working_dir = if wd.is_empty() { "/".to_string() } else { wd };
                 self.step = DetachedModalStep::EnterPrompt;
                 self.reset_input();
                 DetachedModalResult::Pending
@@ -347,32 +343,33 @@ impl DetachedAgentModal {
         frame.render_widget(block, modal_area);
 
         let is_prompt_step = self.step == DetachedModalStep::EnterPrompt;
-        let [hint_area, path_area, input_area, _gap, list_area, _spacer, status_area] = Layout::vertical([
-            Constraint::Length(1),
-            if is_prompt_step {
-                Constraint::Length(0)
-            } else {
-                Constraint::Length(1)
-            },
-            if is_prompt_step {
-                Constraint::Min(3)
-            } else {
-                Constraint::Length(1)
-            },
-            if is_prompt_step {
-                Constraint::Length(0)
-            } else {
-                Constraint::Length(1)
-            },
-            if is_prompt_step {
-                Constraint::Length(0)
-            } else {
-                Constraint::Min(0)
-            },
-            Constraint::Length(0),
-            Constraint::Length(1),
-        ])
-        .areas(inner);
+        let [hint_area, path_area, input_area, _gap, list_area, _spacer, status_area] =
+            Layout::vertical([
+                Constraint::Length(1),
+                if is_prompt_step {
+                    Constraint::Length(0)
+                } else {
+                    Constraint::Length(1)
+                },
+                if is_prompt_step {
+                    Constraint::Min(3)
+                } else {
+                    Constraint::Length(1)
+                },
+                if is_prompt_step {
+                    Constraint::Length(0)
+                } else {
+                    Constraint::Length(1)
+                },
+                if is_prompt_step {
+                    Constraint::Length(0)
+                } else {
+                    Constraint::Min(0)
+                },
+                Constraint::Length(0),
+                Constraint::Length(1),
+            ])
+            .areas(inner);
 
         // Step hint
         frame.render_widget(
@@ -407,7 +404,11 @@ impl DetachedAgentModal {
     }
 
     fn render_status_bar(&self, frame: &mut Frame, area: Rect) {
-        let mod_key = if cfg!(target_os = "macos") { "Opt" } else { "Alt" };
+        let mod_key = if cfg!(target_os = "macos") {
+            "Opt"
+        } else {
+            "Alt"
+        };
         let mut spans: Vec<Span> = Vec::new();
 
         if self.plan_mode {
@@ -435,7 +436,11 @@ impl DetachedAgentModal {
     fn render_input(&self, frame: &mut Frame, area: Rect) {
         let before_cursor = &self.input[..self.cursor_pos];
         let (cursor_char, after_cursor) = if self.cursor_pos < self.input.len() {
-            let ch_len = self.input[self.cursor_pos..].chars().next().unwrap().len_utf8();
+            let ch_len = self.input[self.cursor_pos..]
+                .chars()
+                .next()
+                .unwrap()
+                .len_utf8();
             (
                 &self.input[self.cursor_pos..self.cursor_pos + ch_len],
                 &self.input[self.cursor_pos + ch_len..],

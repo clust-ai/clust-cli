@@ -4,13 +4,22 @@
 
 ```
 ~/.clust/
-├── bin/            # Installed binaries (clust, clust-hub)
-├── clust.db        # SQLite database (config, defaults)
-├── clust.sock      # Unix domain socket (IPC, runtime only)
-└── logs/           # Optional: daemon logs (future)
+├── bin/                      # Installed binaries (clust, clust-hub)
+├── clust.db                  # SQLite database (config, defaults)
+├── clust.sock                # Unix domain socket (IPC, runtime only)
+├── inbox/                    # Orchestrator output staging area
+│   ├── <orch_id>/            # One dir per live orchestrator
+│   │   ├── orch.json         # Sidecar: orch metadata for restart-safe import
+│   │   ├── manifest.json     # Written by orchestrator when batches are ready
+│   │   ├── manifest.processing  # Atomic-rename marker held during import
+│   │   ├── batch-*.json      # Per-batch JSON files referenced by manifest
+│   │   └── error.log         # Validation/import errors, if any
+│   └── .processed/           # Archived inboxes (kept until batches are deleted)
+│       └── <orch_id>/
+└── logs/                     # Optional: daemon logs (future)
 ```
 
-The `~/.clust/` directory is created on first run if it doesn't exist.
+The `~/.clust/` directory is created on first run if it doesn't exist. The `inbox/` subtree only exists when the orchestrator agent is in use (see `docs/hub.md` "Orchestrator Inbox" for the full lifecycle).
 
 ## SQLite Database
 
@@ -59,36 +68,40 @@ Migration v3 adds the `color` column and backfills existing repos with cycling c
 
 Migration v4 adds the `editor` column for per-repository editor preferences. When set, the TUI skips the editor picker modal and opens the repository directly in the saved editor.
 
-#### `queued_batches` *(migration v5, extended in v6, v7, v8)*
+#### `queued_batches` *(migration v5, extended in v6, v7, v8, v11)*
 
 Batches persisted by the hub daemon. Includes idle batches (registered from the CLI Tasks tab), scheduled batches (with a timer), and running batches. Persisted so batches survive hub restarts.
 
 ```sql
 CREATE TABLE queued_batches (
-    id              TEXT PRIMARY KEY,
-    title           TEXT NOT NULL,
-    repo_path       TEXT NOT NULL,
-    target_branch   TEXT NOT NULL,
-    max_concurrent  INTEGER,
-    prompt_prefix   TEXT,
-    prompt_suffix   TEXT,
-    plan_mode       INTEGER NOT NULL DEFAULT 0,
-    allow_bypass    INTEGER NOT NULL DEFAULT 0,
-    agent_binary    TEXT,
-    hub             TEXT NOT NULL,
-    scheduled_at    TEXT,                -- RFC 3339 timestamp; NULL for idle batches
-    status          TEXT NOT NULL DEFAULT 'scheduled',  -- idle, scheduled, running, completed
-    created_at      TEXT NOT NULL,       -- RFC 3339 timestamp
-    launch_mode     TEXT NOT NULL DEFAULT 'auto',  -- auto or manual; added in migration v7
-    depends_on      TEXT NOT NULL DEFAULT '[]'    -- JSON array of hub batch IDs; added in migration v8
+    id                      TEXT PRIMARY KEY,
+    title                   TEXT NOT NULL,
+    repo_path               TEXT NOT NULL,
+    target_branch           TEXT NOT NULL,
+    max_concurrent          INTEGER,
+    prompt_prefix           TEXT,
+    prompt_suffix           TEXT,
+    plan_mode               INTEGER NOT NULL DEFAULT 0,
+    allow_bypass            INTEGER NOT NULL DEFAULT 0,
+    agent_binary            TEXT,
+    hub                     TEXT NOT NULL,
+    scheduled_at            TEXT,                -- RFC 3339 timestamp; NULL for idle and orchestrator-imported batches
+    status                  TEXT NOT NULL DEFAULT 'scheduled',  -- idle, scheduled, running, completed
+    created_at              TEXT NOT NULL,       -- RFC 3339 timestamp
+    launch_mode             TEXT NOT NULL DEFAULT 'auto',  -- auto or manual; added in migration v7
+    depends_on              TEXT NOT NULL DEFAULT '[]',   -- JSON array of hub batch IDs; added in migration v8
+    orchestrator_id         TEXT,                -- orchestrator that produced this batch; NULL for non-orchestrator batches; added in migration v11
+    orchestrator_batch_file TEXT                 -- filename of the batch JSON inside the orchestrator inbox; added in migration v11
 );
 ```
 
-Migration v7 adds the `launch_mode` column (with default `'auto'`) and makes `scheduled_at` effectively nullable for idle batches that have no scheduled start time.
+Migration v7 adds the `launch_mode` column (with default `'auto'`) and previously was *intended* to make `scheduled_at` nullable for idle batches; the actual `NOT NULL` constraint was not removed until migration v11.
 
 Migration v8 adds the `depends_on` column which stores a JSON array of hub batch IDs that this batch depends on. When all dependency batches complete (or are no longer present), the hub's batch timer auto-starts the dependent batch by transitioning it from Idle to Running.
 
-#### `queued_batch_tasks` *(migration v5, extended in v6)*
+Migration v11 adds `orchestrator_id` and `orchestrator_batch_file` (used to clean up the archived JSON file under `~/.clust/inbox/.processed/<orch_id>/` when the batch is later deleted from the UI) and finally drops the long-standing `NOT NULL` constraint on `scheduled_at` by recreating the table. SQLite foreign keys are disabled on the connection, so the `queued_batch_tasks(batch_id)` FK survives the drop+rename.
+
+#### `queued_batch_tasks` *(migration v5, extended in v6, v9, v10)*
 
 Individual tasks within a queued batch. Each task maps to an agent that will be spawned in a worktree.
 
@@ -103,13 +116,16 @@ CREATE TABLE queued_batch_tasks (
     agent_id    TEXT,                           -- set when the task's agent is started
     use_prefix  INTEGER NOT NULL DEFAULT 1,    -- per-task prefix toggle (1 = apply, 0 = skip); added in migration v6
     use_suffix  INTEGER NOT NULL DEFAULT 1,    -- per-task suffix toggle (1 = apply, 0 = skip); added in migration v6
-    plan_mode   INTEGER NOT NULL DEFAULT 0     -- per-task plan mode override (1 = plan, 0 = inherit batch default); added in migration v9
+    plan_mode   INTEGER NOT NULL DEFAULT 0,    -- per-task plan mode override (1 = plan, 0 = inherit batch default); added in migration v9
+    is_manager  INTEGER NOT NULL DEFAULT 0     -- 1 for the auto-injected merge-manager task in orchestrator-imported batches; added in migration v10
 );
 ```
 
 Migration v6 adds `use_prefix` and `use_suffix` columns for per-task control over whether the batch's prompt prefix and suffix are applied when building the full prompt. Both default to 1 (true) for backward compatibility.
 
 Migration v9 adds the `plan_mode` column for per-task plan mode control. When set to 1, the task's agent is started in plan mode regardless of the batch-level plan_mode setting. Defaults to 0 (inherit batch default) for backward compatibility.
+
+Migration v10 adds the `is_manager` flag to mark the auto-injected merge-manager task in orchestrator-imported batches. Manager tasks are not counted toward the batch's `max_concurrent` slot.
 
 #### `agent_history` *(deferred — future migration)*
 
@@ -150,6 +166,9 @@ On startup, the hub checks `schema_version` and applies any pending migrations s
 | Per-repo editor preference | SQLite `repos` table (`editor` column) | Persistent (survives restarts) |
 | Agent session history | SQLite `agent_history` table | Persistent *(not yet implemented)* |
 | Queued batches | SQLite `queued_batches` + `queued_batch_tasks` tables | Persistent (survives restarts, loaded on startup) |
+| Orchestrator inbox sidecar | `~/.clust/inbox/<orch_id>/orch.json` | Persistent until inbox archived (filesystem source of truth for restart-safe import) |
+| Orchestrator manifest + batch JSON | `~/.clust/inbox/<orch_id>/{manifest.json, batch-*.json}` | Lives in active inbox; archived to `.processed/<orch_id>/` after import |
+| Archived orchestrator JSON | `~/.clust/inbox/.processed/<orch_id>/` | Removed when the corresponding batch is deleted via the UI |
 | Running agent state | Hub in-memory | Ephemeral (dies with hub) |
 | Repository branch/worktree data | Fetched from git on demand | Ephemeral (never persisted) |
 | IPC socket | `~/.clust/clust.sock` | Runtime only |

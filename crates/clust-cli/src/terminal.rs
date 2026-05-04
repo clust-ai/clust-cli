@@ -3,7 +3,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use crossterm::{
-    terminal::{self, disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
+    terminal::{
+        self, disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
+    },
     ExecutableCommand,
 };
 use tokio::io::AsyncReadExt;
@@ -13,8 +15,8 @@ use tokio::sync::mpsc;
 use clust_ipc::{CliMessage, HubMessage};
 
 use crate::output_filter::{EscapeSequenceAssembler, FilterChain};
-use crate::terminal_emulator::TerminalEmulator;
 use crate::scroll_break::{ScrollBreak, ScrollMode};
+use crate::terminal_emulator::TerminalEmulator;
 use crate::theme;
 use crate::version;
 
@@ -165,13 +167,11 @@ impl AttachedSession {
             offset: 0,
             anchored_total: 0,
         }));
-        let scrollback = Arc::new(Mutex::new(
-            TerminalEmulator::with_scrollback_capacity(
-                cols as usize,
-                (rows - 1) as usize,
-                5000,
-            ),
-        ));
+        let scrollback = Arc::new(Mutex::new(TerminalEmulator::with_scrollback_capacity(
+            cols as usize,
+            (rows - 1) as usize,
+            5000,
+        )));
         let (scroll_cmd_tx, mut scroll_cmd_rx) = mpsc::channel::<ScrollCommand>(16);
         let mouse_tracking = Arc::new(AtomicBool::new(true));
 
@@ -323,12 +323,12 @@ impl AttachedSession {
         let branch_name_for_input = branch_name.clone();
         let input_task = tokio::spawn(async move {
             let mut stdin = tokio::io::stdin();
-            let mut sigwinch = match tokio::signal::unix::signal(
-                tokio::signal::unix::SignalKind::window_change(),
-            ) {
-                Ok(s) => s,
-                Err(_) => return SessionEnd::ConnectionLost,
-            };
+            let mut sigwinch =
+                match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::window_change())
+                {
+                    Ok(s) => s,
+                    Err(_) => return SessionEnd::ConnectionLost,
+                };
 
             let mut buf = [0u8; 4096];
             let mut scroll_break = ScrollBreak::new(ScrollMode::Intercept);
@@ -793,7 +793,15 @@ fn draw_status_bar(
 ) {
     let mut stdout = io::stdout().lock();
     let _ = write!(stdout, "\x1b7");
-    write_status_bar_content(&mut stdout, agent_id, agent_binary, repo_path, branch_name, total_rows, mouse_tracking);
+    write_status_bar_content(
+        &mut stdout,
+        agent_id,
+        agent_binary,
+        repo_path,
+        branch_name,
+        total_rows,
+        mouse_tracking,
+    );
     let _ = write!(stdout, "\x1b8");
     let _ = stdout.flush();
 }
@@ -853,10 +861,7 @@ fn render_scrollback(
 /// Render the live screen from the shadow VT when exiting scrollback mode.
 /// Instead of clearing the viewport (which causes a blank flash), we paint
 /// the current agent screen so the transition is seamless.
-fn exit_scrollback_mode(
-    scrollback: &Arc<Mutex<TerminalEmulator>>,
-    viewport_rows: u16,
-) {
+fn exit_scrollback_mode(scrollback: &Arc<Mutex<TerminalEmulator>>, viewport_rows: u16) {
     let mut vt = scrollback.lock().unwrap();
     let lines = vt.to_ansi_lines_scrolled(0);
     drop(vt);

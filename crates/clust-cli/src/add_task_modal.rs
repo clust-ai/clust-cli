@@ -54,7 +54,13 @@ pub struct AddTaskModal {
 }
 
 impl AddTaskModal {
-    pub fn new(batch_idx: usize, batch_title: String, has_prefix: bool, has_suffix: bool, batch_plan_mode: bool) -> Self {
+    pub fn new(
+        batch_idx: usize,
+        batch_title: String,
+        has_prefix: bool,
+        has_suffix: bool,
+        batch_plan_mode: bool,
+    ) -> Self {
         Self {
             step: AddTaskStep::EnterBranch,
             input: String::new(),
@@ -111,8 +117,11 @@ impl AddTaskModal {
             }
             KeyCode::Right => {
                 if self.cursor_pos < self.input.len() {
-                    self.cursor_pos +=
-                        self.input[self.cursor_pos..].chars().next().unwrap().len_utf8();
+                    self.cursor_pos += self.input[self.cursor_pos..]
+                        .chars()
+                        .next()
+                        .unwrap()
+                        .len_utf8();
                 }
                 AddTaskResult::Pending
             }
@@ -262,10 +271,7 @@ impl AddTaskModal {
                 frame.render_widget(
                     Paragraph::new(Line::from(vec![
                         Span::styled("Branch: ", Style::default().fg(theme::R_TEXT_TERTIARY)),
-                        Span::styled(
-                            &self.branch_name,
-                            Style::default().fg(theme::R_ACCENT),
-                        ),
+                        Span::styled(&self.branch_name, Style::default().fg(theme::R_ACCENT)),
                     ])),
                     info_area,
                 );
@@ -277,7 +283,11 @@ impl AddTaskModal {
     }
 
     fn render_status_bar(&self, frame: &mut Frame, area: Rect) {
-        let mod_key = if cfg!(target_os = "macos") { "Opt" } else { "Alt" };
+        let mod_key = if cfg!(target_os = "macos") {
+            "Opt"
+        } else {
+            "Alt"
+        };
         let mut spans: Vec<Span> = Vec::new();
 
         if self.plan_mode {
@@ -341,7 +351,11 @@ impl AddTaskModal {
     fn render_input(&self, frame: &mut Frame, area: Rect) {
         let before_cursor = &self.input[..self.cursor_pos];
         let (cursor_char, after_cursor) = if self.cursor_pos < self.input.len() {
-            let ch_len = self.input[self.cursor_pos..].chars().next().unwrap().len_utf8();
+            let ch_len = self.input[self.cursor_pos..]
+                .chars()
+                .next()
+                .unwrap()
+                .len_utf8();
             (
                 &self.input[self.cursor_pos..self.cursor_pos + ch_len],
                 &self.input[self.cursor_pos + ch_len..],
@@ -391,15 +405,21 @@ impl AddTaskModal {
 
     fn step_title(&self) -> String {
         match self.step {
-            AddTaskStep::EnterBranch => format!("Step 1/2 \u{2014} Branch name ({})", self.batch_title),
-            AddTaskStep::EnterPrompt => format!("Step 2/2 \u{2014} Task prompt ({})", self.batch_title),
+            AddTaskStep::EnterBranch => {
+                format!("Step 1/2 \u{2014} Branch name ({})", self.batch_title)
+            }
+            AddTaskStep::EnterPrompt => {
+                format!("Step 2/2 \u{2014} Task prompt ({})", self.batch_title)
+            }
         }
     }
 
     fn step_hint(&self) -> &'static str {
         match self.step {
             AddTaskStep::EnterBranch => "Enter branch name, Enter to continue, Esc to cancel",
-            AddTaskStep::EnterPrompt => "Enter prompt for the agent, Enter to add task, Esc to go back",
+            AddTaskStep::EnterPrompt => {
+                "Enter prompt for the agent, Enter to add task, Esc to go back"
+            }
         }
     }
 }

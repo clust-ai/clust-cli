@@ -105,10 +105,7 @@ impl RepoModal {
         self.dir_entries.clear();
         if let Ok(read) = std::fs::read_dir(&self.base_path) {
             for entry in read.flatten() {
-                let ok = entry
-                    .file_type()
-                    .map(|ft| ft.is_dir())
-                    .unwrap_or(false);
+                let ok = entry.file_type().map(|ft| ft.is_dir()).unwrap_or(false);
                 if !ok {
                     continue;
                 }
@@ -225,8 +222,11 @@ impl RepoModal {
             }
             KeyCode::Right => {
                 if self.cursor_pos < self.input.len() {
-                    self.cursor_pos +=
-                        self.input[self.cursor_pos..].chars().next().unwrap().len_utf8();
+                    self.cursor_pos += self.input[self.cursor_pos..]
+                        .chars()
+                        .next()
+                        .unwrap()
+                        .len_utf8();
                 }
                 RepoModalResult::Pending
             }
@@ -313,11 +313,7 @@ impl RepoModal {
                 }
                 // Confirm current base_path as parent directory
                 let pd = self.base_path.trim_end_matches('/').to_string();
-                self.parent_dir = if pd.is_empty() {
-                    "/".to_string()
-                } else {
-                    pd
-                };
+                self.parent_dir = if pd.is_empty() { "/".to_string() } else { pd };
                 self.reset_input();
                 match self.action {
                     RepoAction::Clone => self.step = Step::EnterUrl,
@@ -537,7 +533,11 @@ impl RepoModal {
     fn render_input(&self, frame: &mut Frame, area: Rect) {
         let before_cursor = &self.input[..self.cursor_pos];
         let (cursor_char, after_cursor) = if self.cursor_pos < self.input.len() {
-            let ch_len = self.input[self.cursor_pos..].chars().next().unwrap().len_utf8();
+            let ch_len = self.input[self.cursor_pos..]
+                .chars()
+                .next()
+                .unwrap()
+                .len_utf8();
             (
                 &self.input[self.cursor_pos..self.cursor_pos + ch_len],
                 &self.input[self.cursor_pos + ch_len..],
@@ -640,7 +640,9 @@ impl RepoModal {
     fn step_title(&self) -> &'static str {
         match (self.step, self.action) {
             (Step::ChooseAction, _) => "Add Repository",
-            (Step::SelectDirectory, RepoAction::Create) => "Create \u{2014} Select parent directory",
+            (Step::SelectDirectory, RepoAction::Create) => {
+                "Create \u{2014} Select parent directory"
+            }
             (Step::SelectDirectory, RepoAction::Clone) => "Clone \u{2014} Select destination",
             (Step::EnterUrl, _) => "Clone \u{2014} Repository URL",
             (Step::EnterName, RepoAction::Create) => "Create \u{2014} Repository name",

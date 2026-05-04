@@ -112,7 +112,9 @@ impl CreateBatchModal {
                         self.step = BatchModalStep::SelectBranch;
                         self.selected_branch = None;
                     }
-                    BatchModalStep::SelectLaunchMode | BatchModalStep::SetConcurrency => unreachable!(),
+                    BatchModalStep::SelectLaunchMode | BatchModalStep::SetConcurrency => {
+                        unreachable!()
+                    }
                 }
                 self.reset_input();
                 BatchModalResult::Pending
@@ -155,8 +157,11 @@ impl CreateBatchModal {
             }
             KeyCode::Right => {
                 if self.cursor_pos < self.input.len() {
-                    self.cursor_pos +=
-                        self.input[self.cursor_pos..].chars().next().unwrap().len_utf8();
+                    self.cursor_pos += self.input[self.cursor_pos..]
+                        .chars()
+                        .next()
+                        .unwrap()
+                        .len_utf8();
                 }
                 BatchModalResult::Pending
             }
@@ -197,26 +202,24 @@ impl CreateBatchModal {
                 };
                 BatchModalResult::Pending
             }
-            KeyCode::Enter => {
-                match self.launch_mode {
-                    LaunchMode::Auto => {
-                        self.step = BatchModalStep::SetConcurrency;
-                        self.reset_input();
-                        BatchModalResult::Pending
-                    }
-                    LaunchMode::Manual => {
-                        let repo = self.selected_repo.as_ref().unwrap();
-                        BatchModalResult::Completed(BatchModalOutput {
-                            repo_path: repo.path.clone(),
-                            repo_name: repo.name.clone(),
-                            branch_name: self.selected_branch.clone().unwrap(),
-                            title: self.batch_title.clone(),
-                            max_concurrent: None,
-                            launch_mode: LaunchMode::Manual,
-                        })
-                    }
+            KeyCode::Enter => match self.launch_mode {
+                LaunchMode::Auto => {
+                    self.step = BatchModalStep::SetConcurrency;
+                    self.reset_input();
+                    BatchModalResult::Pending
                 }
-            }
+                LaunchMode::Manual => {
+                    let repo = self.selected_repo.as_ref().unwrap();
+                    BatchModalResult::Completed(BatchModalOutput {
+                        repo_path: repo.path.clone(),
+                        repo_name: repo.name.clone(),
+                        branch_name: self.selected_branch.clone().unwrap(),
+                        title: self.batch_title.clone(),
+                        max_concurrent: None,
+                        launch_mode: LaunchMode::Manual,
+                    })
+                }
+            },
             _ => BatchModalResult::Pending,
         }
     }
@@ -458,7 +461,11 @@ impl CreateBatchModal {
         let [hint_area, input_area, _gap, list_area] = Layout::vertical([
             Constraint::Length(1),
             Constraint::Length(1),
-            if show_list { Constraint::Length(1) } else { Constraint::Length(0) },
+            if show_list {
+                Constraint::Length(1)
+            } else {
+                Constraint::Length(0)
+            },
             Constraint::Min(0),
         ])
         .areas(inner);
@@ -494,7 +501,11 @@ impl CreateBatchModal {
     fn render_input(&self, frame: &mut Frame, area: Rect) {
         let before_cursor = &self.input[..self.cursor_pos];
         let (cursor_char, after_cursor) = if self.cursor_pos < self.input.len() {
-            let ch_len = self.input[self.cursor_pos..].chars().next().unwrap().len_utf8();
+            let ch_len = self.input[self.cursor_pos..]
+                .chars()
+                .next()
+                .unwrap()
+                .len_utf8();
             (
                 &self.input[self.cursor_pos..self.cursor_pos + ch_len],
                 &self.input[self.cursor_pos + ch_len..],
@@ -566,8 +577,7 @@ impl CreateBatchModal {
         ]);
 
         frame.render_widget(
-            Paragraph::new(line)
-                .style(Style::default().bg(theme::R_BG_INPUT)),
+            Paragraph::new(line).style(Style::default().bg(theme::R_BG_INPUT)),
             area,
         );
     }
@@ -604,10 +614,7 @@ impl CreateBatchModal {
                 let is_selected = vis_idx + scroll == self.selected_idx;
                 let mut suffix_spans = Vec::new();
                 if branch.is_head {
-                    suffix_spans.push(Span::styled(
-                        " HEAD",
-                        Style::default().fg(theme::R_SUCCESS),
-                    ));
+                    suffix_spans.push(Span::styled(" HEAD", Style::default().fg(theme::R_SUCCESS)));
                 }
                 if branch.is_worktree {
                     suffix_spans.push(Span::styled(
@@ -620,7 +627,11 @@ impl CreateBatchModal {
                         format!(
                             " ({} agent{})",
                             branch.active_agent_count,
-                            if branch.active_agent_count == 1 { "" } else { "s" }
+                            if branch.active_agent_count == 1 {
+                                ""
+                            } else {
+                                "s"
+                            }
                         ),
                         Style::default().fg(theme::R_WARNING),
                     ));
@@ -645,10 +656,17 @@ impl CreateBatchModal {
     }
 
     fn render_launch_mode_list(&self, frame: &mut Frame, area: Rect) {
-        let mod_key = if cfg!(target_os = "macos") { "Opt" } else { "Alt" };
+        let mod_key = if cfg!(target_os = "macos") {
+            "Opt"
+        } else {
+            "Alt"
+        };
         let options = [
             ("Auto", "Set max concurrency, agents auto-start"),
-            ("Manual", &format!("Start individual tasks with {mod_key}+S")),
+            (
+                "Manual",
+                &format!("Start individual tasks with {mod_key}+S"),
+            ),
         ];
         let lines: Vec<Line> = options
             .iter()
@@ -684,7 +702,12 @@ impl CreateBatchModal {
     // Helpers
     // -----------------------------------------------------------------------
 
-    fn render_list_item<'a>(&self, name: &'a str, detail: Option<&'a str>, selected: bool) -> Line<'a> {
+    fn render_list_item<'a>(
+        &self,
+        name: &'a str,
+        detail: Option<&'a str>,
+        selected: bool,
+    ) -> Line<'a> {
         let mut all = self.list_item_spans(name, selected);
         if let Some(d) = detail {
             all.push(Span::styled("  ", Style::default()));
@@ -746,7 +769,9 @@ impl CreateBatchModal {
             BatchModalStep::SelectBranch => format!("Step 2/{total} \u{2014} Select branch"),
             BatchModalStep::EnterTitle => format!("Step 3/{total} \u{2014} Batch name"),
             BatchModalStep::SelectLaunchMode => format!("Step 4/{total} \u{2014} Launch mode"),
-            BatchModalStep::SetConcurrency => format!("Step 5/{total} \u{2014} Max concurrent agents"),
+            BatchModalStep::SetConcurrency => {
+                format!("Step 5/{total} \u{2014} Max concurrent agents")
+            }
         }
     }
 
@@ -755,8 +780,12 @@ impl CreateBatchModal {
             BatchModalStep::SelectRepo => "Type to filter, Enter to select, Esc to cancel",
             BatchModalStep::SelectBranch => "Type to filter, Enter to select, Esc to go back",
             BatchModalStep::EnterTitle => "Name this batch (Enter for auto-name), Esc to go back",
-            BatchModalStep::SelectLaunchMode => "\u{2191}/\u{2193} select mode, Enter to confirm, Esc to go back",
-            BatchModalStep::SetConcurrency => "Set max concurrent agents, Enter to confirm, Esc to go back",
+            BatchModalStep::SelectLaunchMode => {
+                "\u{2191}/\u{2193} select mode, Enter to confirm, Esc to go back"
+            }
+            BatchModalStep::SetConcurrency => {
+                "Set max concurrent agents, Enter to confirm, Esc to go back"
+            }
         }
     }
 }

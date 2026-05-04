@@ -654,7 +654,10 @@ mod tests {
         let cli = Cli::try_parse_from(["clust", "worktree", "ls"]).unwrap();
         assert!(matches!(
             cli.command,
-            Some(Commands::Wt(WtArgs { command: WtCommands::Ls, .. }))
+            Some(Commands::Wt(WtArgs {
+                command: WtCommands::Ls,
+                ..
+            }))
         ));
     }
 
@@ -675,7 +678,13 @@ mod tests {
         let cli = Cli::try_parse_from(["clust", "wt", "add", "my-feature"]).unwrap();
         match cli.command {
             Some(Commands::Wt(WtArgs {
-                command: WtCommands::Add(WtAddArgs { name, base_branch, checkout, prompt }),
+                command:
+                    WtCommands::Add(WtAddArgs {
+                        name,
+                        base_branch,
+                        checkout,
+                        prompt,
+                    }),
                 ..
             })) => {
                 assert_eq!(name, "my-feature");
@@ -692,7 +701,10 @@ mod tests {
         let cli = Cli::try_parse_from(["clust", "wt", "add", "feat", "-b", "main"]).unwrap();
         match cli.command {
             Some(Commands::Wt(WtArgs {
-                command: WtCommands::Add(WtAddArgs { name, base_branch, .. }),
+                command:
+                    WtCommands::Add(WtAddArgs {
+                        name, base_branch, ..
+                    }),
                 ..
             })) => {
                 assert_eq!(name, "feat");
@@ -732,8 +744,7 @@ mod tests {
 
     #[test]
     fn parse_wt_add_with_prompt_value() {
-        let cli =
-            Cli::try_parse_from(["clust", "wt", "add", "feat", "-p", "fix the bug"]).unwrap();
+        let cli = Cli::try_parse_from(["clust", "wt", "add", "feat", "-p", "fix the bug"]).unwrap();
         match cli.command {
             Some(Commands::Wt(WtArgs {
                 command: WtCommands::Add(WtAddArgs { prompt, .. }),
@@ -750,7 +761,12 @@ mod tests {
         let cli = Cli::try_parse_from(["clust", "wt", "rm"]).unwrap();
         match cli.command {
             Some(Commands::Wt(WtArgs {
-                command: WtCommands::Rm(WtRmArgs { delete_local, branch, force }),
+                command:
+                    WtCommands::Rm(WtRmArgs {
+                        delete_local,
+                        branch,
+                        force,
+                    }),
                 ..
             })) => {
                 assert!(!delete_local);
@@ -763,11 +779,15 @@ mod tests {
 
     #[test]
     fn parse_wt_rm_with_branch_and_local() {
-        let cli =
-            Cli::try_parse_from(["clust", "wt", "rm", "-b", "my-branch", "-l"]).unwrap();
+        let cli = Cli::try_parse_from(["clust", "wt", "rm", "-b", "my-branch", "-l"]).unwrap();
         match cli.command {
             Some(Commands::Wt(WtArgs {
-                command: WtCommands::Rm(WtRmArgs { delete_local, branch, force }),
+                command:
+                    WtCommands::Rm(WtRmArgs {
+                        delete_local,
+                        branch,
+                        force,
+                    }),
                 ..
             })) => {
                 assert!(delete_local);
@@ -808,8 +828,7 @@ mod tests {
 
     #[test]
     fn parse_wt_with_repo_flag() {
-        let cli =
-            Cli::try_parse_from(["clust", "wt", "-r", "my-repo", "add", "feat"]).unwrap();
+        let cli = Cli::try_parse_from(["clust", "wt", "-r", "my-repo", "add", "feat"]).unwrap();
         match cli.command {
             Some(Commands::Wt(WtArgs { repo, command })) => {
                 assert_eq!(repo.as_deref(), Some("my-repo"));
