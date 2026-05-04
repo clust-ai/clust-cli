@@ -375,14 +375,14 @@ enum ActiveMenu {
 }
 
 /// Compute the Repositories tab's right-panel `Rect` from the full content
-/// area. The split is hard-coded to 40 / divider / 60 — this duplicates the
+/// area. The split is hard-coded to 30 / divider / 70 — this duplicates the
 /// render-side `Layout::horizontal` so key handlers can derive the same Rect
 /// without crossing the render boundary.
 fn repositories_right_area(content_area: Rect) -> Rect {
     let [_, _, right] = Layout::horizontal([
-        Constraint::Percentage(40),
+        Constraint::Percentage(30),
         Constraint::Length(1),
-        Constraint::Percentage(60),
+        Constraint::Percentage(70),
     ])
     .areas(content_area);
     right
@@ -1372,11 +1372,11 @@ pub fn run(hub_name: &str) -> io::Result<()> {
 
                 match cur_tab {
                     ActiveTab::Repositories => {
-                        // Content: left (40%) + divider (1 col) + right (60%)
+                        // Content: left (30%) + divider (1 col) + right (70%)
                         let [left_area, divider_area, right_area] = Layout::horizontal([
-                            Constraint::Percentage(40),
+                            Constraint::Percentage(30),
                             Constraint::Length(1),
-                            Constraint::Percentage(60),
+                            Constraint::Percentage(70),
                         ])
                         .areas(content_area);
 
