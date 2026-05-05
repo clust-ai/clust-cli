@@ -78,7 +78,8 @@ The CLI is a thin client. It does NOT manage agent processes directly.
 - Split-stream variants for bidirectional sessions
 - Socket path and clust directory helpers
 - Known agent registry (`KNOWN_AGENTS`) with accept-edits, bypass-permissions, plan-mode, allow-bypass, and stop-hook metadata (`supports_stop_hook` indicates whether the agent honors the per-task "Exit when done" flag, currently `claude` only)
-- Branch name sanitization (`sanitize_branch_name`) for converting user input into valid git branch names
+- Branch name sanitization (`sanitize_branch_name`) for converting user input into valid git branch names. NFC-normalises input, strips control characters, rejects ref-style prefixes (`refs/heads/`, `refs/remotes/`), reflog syntax (`@{`), and leading dots so the result is always a valid git branch name.
+- Maximum frame guard (`MAX_MESSAGE_BYTES = 64 MiB`) and `validate_client_version` helper
 
 ## IPC Design
 
@@ -97,6 +98,8 @@ Messages between CLI and Hub use a length-prefixed binary format:
 ```
 
 Serialization uses **MessagePack** via `rmp-serde` (compact, fast, schema-friendly).
+
+The receive path enforces an upper bound (`MAX_MESSAGE_BYTES`, currently 64 MiB) on the length prefix before allocating a buffer. This guards against a peer sending an arbitrarily large length and forcing the receiver to allocate gigabytes before failing the read. Legitimate traffic is well under 1 MiB per frame (largest frames are terminal output bursts).
 
 ### Message Types
 
@@ -212,6 +215,8 @@ Hub -> CLI:
 The IPC protocol includes a version check to detect stale hubs. `clust-ipc` exports a `PROTOCOL_VERSION` constant (currently `7`) that must be bumped whenever the `CliMessage` or `HubMessage` enum shapes change (since `rmp-serde` uses numeric enum indices).
 
 On connection, the CLI sends a `Ping { protocol_version }` message. The hub replies with `Pong { protocol_version }` carrying its own version. If versions mismatch, the CLI stops the stale hub and spawns a fresh one before proceeding.
+
+The crate also exports a `validate_client_version(client: u32)` helper that returns a static error string on mismatch. Hubs MAY use it to reject incompatible clients explicitly; the canonical enforcement path remains the CLI-side `Ping`/`Pong` check, which gracefully bounces an outdated hub before the user's command runs.
 
 ### Connection Lifecycle
 

@@ -36,6 +36,60 @@ const PAGE_DOWN: &[u8] = b"\x1b[6~";
 const F2_SS3: &[u8] = b"\x1bOQ";
 const F2_CSI: &[u8] = b"\x1b[12~";
 
+/// RAII guard for the alternate screen + raw mode pair.
+///
+/// `EnterAlternateScreen` and `enable_raw_mode()` are called sequentially,
+/// and either may fail. Without a guard, a failure between the two calls
+/// would leak the alt-screen state into the user's shell. Dropping this
+/// guard restores both states.
+///
+/// The session also explicitly calls [`AltScreenGuard::disarm`] on the
+/// happy path so the destructor is a no-op when ordering matters (e.g.
+/// before printing the post-session update notice).
+struct AltScreenGuard {
+    alt_screen_active: bool,
+    raw_mode_active: bool,
+}
+
+impl AltScreenGuard {
+    /// Enter alternate screen and enable raw mode. Restores partial state
+    /// on failure so that an `enable_raw_mode()` error still leaves the
+    /// terminal in a usable state.
+    fn enter() -> io::Result<Self> {
+        io::stdout().execute(EnterAlternateScreen)?;
+        let mut guard = Self {
+            alt_screen_active: true,
+            raw_mode_active: false,
+        };
+        if let Err(e) = enable_raw_mode() {
+            // `Drop` will run `LeaveAlternateScreen` because alt_screen_active
+            // is still true. We just propagate the error.
+            drop(guard);
+            return Err(e);
+        }
+        guard.raw_mode_active = true;
+        Ok(guard)
+    }
+
+    /// Mark the guard as already cleaned up — `Drop` becomes a no-op.
+    /// Used after explicit cleanup on the happy path.
+    fn disarm(&mut self) {
+        self.alt_screen_active = false;
+        self.raw_mode_active = false;
+    }
+}
+
+impl Drop for AltScreenGuard {
+    fn drop(&mut self) {
+        if self.raw_mode_active {
+            let _ = disable_raw_mode();
+        }
+        if self.alt_screen_active {
+            let _ = io::stdout().execute(LeaveAlternateScreen);
+        }
+    }
+}
+
 /// Scrollback navigation state shared between input and output tasks.
 struct ScrollState {
     /// Current scroll offset (0 = live mode, >0 = scrolled back).
@@ -95,8 +149,9 @@ impl AttachedSession {
             }
         });
 
-        io::stdout().execute(EnterAlternateScreen)?;
-        enable_raw_mode()?;
+        // Enter alt-screen + raw mode under an RAII guard so that a failure
+        // anywhere below still restores the terminal.
+        let mut guard = AltScreenGuard::enter()?;
 
         // Enable mouse button tracking (1000h) + SGR encoding (1006h) so
         // scroll wheel events arrive as parseable mouse escape sequences
@@ -115,10 +170,12 @@ impl AttachedSession {
 
         let result = self.run_inner().await;
 
-        // Restore terminal
+        // Restore terminal explicitly so we control ordering of the post-
+        // session println!s. Then disarm the guard so its Drop is a no-op.
         disable_mouse_tracking();
         disable_raw_mode()?;
         io::stdout().execute(LeaveAlternateScreen)?;
+        guard.disarm();
         println!();
 
         if let Some(ref msg) = *update_notice.lock().unwrap() {
@@ -296,11 +353,19 @@ impl AttachedSession {
                 }
             };
 
-            // Flush any remaining buffered bytes
+            // Flush any remaining buffered bytes. The shadow VT always
+            // sees them (so scrollback stays consistent), but stdout
+            // only receives them when:
+            //   * the replay completed (otherwise the bytes were never
+            //     supposed to be written to stdout in the first place), and
+            //   * we are in live mode (offset == 0).
+            // In particular, if `replaying` is still true, the buffered
+            // bytes are guaranteed to be a partial escape that would paint
+            // garbage in the user's restored shell — so we drop them.
             let remaining = filter_chain.flush();
             if !remaining.is_empty() {
                 scrollback_out.lock().unwrap().process(&remaining);
-                if scroll_state_out.lock().unwrap().offset == 0 {
+                if !replaying && scroll_state_out.lock().unwrap().offset == 0 {
                     let mut stdout = io::stdout().lock();
                     let _ = stdout.write_all(&remaining);
                     let _ = stdout.flush();
@@ -372,10 +437,15 @@ impl AttachedSession {
                                     return SessionEnd::Detached;
                                 }
 
-                                // F2 = toggle mouse tracking
-                                let f2_pos = find_sequence(data, F2_SS3)
-                                    .or_else(|| find_sequence(data, F2_CSI));
-                                if let Some(pos) = f2_pos {
+                                // F2 = toggle mouse tracking. Loop so that
+                                // multiple F2 sequences in the same chunk
+                                // (e.g. an SS3 followed by a CSI variant)
+                                // are all detected and stripped in order.
+                                let mut remaining: Vec<u8> = Vec::new();
+                                let mut cursor: &[u8] = data;
+                                let mut any_f2 = false;
+                                while let Some((pos, seq_len)) = find_first_f2(cursor) {
+                                    any_f2 = true;
                                     let was_enabled = mouse_tracking_in.fetch_xor(true, Ordering::Relaxed);
                                     if was_enabled {
                                         disable_mouse_tracking();
@@ -391,19 +461,16 @@ impl AttachedSession {
                                         total_rows,
                                         !was_enabled,
                                     );
-                                    // Forward bytes before/after F2 to agent
-                                    let seq_len = if find_sequence(data, F2_SS3) == Some(pos) {
-                                        F2_SS3.len()
-                                    } else {
-                                        F2_CSI.len()
-                                    };
-                                    let mut remaining = Vec::new();
+                                    // Forward bytes before this F2; continue scanning what's after.
                                     if pos > 0 {
-                                        remaining.extend_from_slice(&data[..pos]);
+                                        remaining.extend_from_slice(&cursor[..pos]);
                                     }
-                                    let after = pos + seq_len;
-                                    if after < data.len() {
-                                        remaining.extend_from_slice(&data[after..]);
+                                    cursor = &cursor[pos + seq_len..];
+                                }
+                                if any_f2 {
+                                    // Trailing bytes (after the last F2) are forwarded too.
+                                    if !cursor.is_empty() {
+                                        remaining.extend_from_slice(cursor);
                                     }
                                     if !remaining.is_empty() {
                                         let _ = clust_ipc::send_message_write(
@@ -517,90 +584,147 @@ impl AttachedSession {
                                     }
                                 } else {
                                     // ── Scrollback mode ──────────────────────
+                                    // Split the chunk on PageUp/PageDown so
+                                    // bytes around them are still processed
+                                    // (mirrors the live-mode path which
+                                    // preserves bytes around PageUp). Without
+                                    // this loop, e.g. "PageUp + Right" would
+                                    // scroll a page but silently swallow the
+                                    // arrow key.
                                     let (_, total_rows) = terminal::size().unwrap_or((80, 24));
                                     let viewport_height = total_rows.saturating_sub(1).max(1) as usize;
 
-                                    // PageUp: scroll up by a page
-                                    if find_sequence(data, PAGE_UP).is_some() {
-                                        {
-                                            let mut state = scroll_state_in.lock().unwrap();
-                                            let max = {
-                                                let mut vt = scrollback_in.lock().unwrap();
-                                                vt.scrollback_len()
+                                    let mut cursor: &[u8] = data;
+                                    while !cursor.is_empty() {
+                                        let (pos, seq_len, is_page_up) =
+                                            match find_first_page_event(cursor) {
+                                                Some((p, PageEvent::Up)) => (p, PAGE_UP.len(), true),
+                                                Some((p, PageEvent::Down)) => (p, PAGE_DOWN.len(), false),
+                                                None => (cursor.len(), 0, false),
                                             };
-                                            state.offset = state.offset.saturating_add(viewport_height).min(max);
-                                        }
-                                        let _ = scroll_cmd_tx.send(ScrollCommand::Redraw).await;
-                                        continue;
-                                    }
 
-                                    // PageDown: scroll down by a page
-                                    if find_sequence(data, PAGE_DOWN).is_some() {
-                                        let reached_live = {
-                                            let mut state = scroll_state_in.lock().unwrap();
-                                            state.offset = state.offset.saturating_sub(viewport_height);
-                                            state.offset == 0
-                                        };
-                                        if reached_live {
-                                            let _ = scroll_cmd_tx.send(ScrollCommand::ExitScrollback).await;
-                                            trigger_agent_redraw(
-                                                &mut writer,
-                                                &agent_id_for_input,
-                                            ).await;
-                                        } else {
-                                            let _ = scroll_cmd_tx.send(ScrollCommand::Redraw).await;
-                                        }
-                                        continue;
-                                    }
+                                        // ── Prefix: bytes before the page event ──
+                                        // Run them through filter_intercept so
+                                        // mouse scrolls are turned into scroll
+                                        // commands; non-scroll bytes exit
+                                        // scrollback and are forwarded.
+                                        if pos > 0 {
+                                            let prefix = &cursor[..pos];
+                                            let result = scroll_break.filter_intercept(prefix);
 
-                                    // Filter for mouse scroll events
-                                    let result = scroll_break.filter_intercept(data);
+                                            if result.scroll_up > 0 || result.scroll_down > 0 {
+                                                let (changed, reached_live) = {
+                                                    let mut state = scroll_state_in.lock().unwrap();
+                                                    let max = {
+                                                        let mut vt = scrollback_in.lock().unwrap();
+                                                        vt.scrollback_len()
+                                                    };
+                                                    let prev = state.offset;
+                                                    state.offset = state.offset
+                                                        .saturating_add(result.scroll_up as usize * SCROLL_STEP)
+                                                        .min(max);
+                                                    state.offset = state.offset
+                                                        .saturating_sub(result.scroll_down as usize * SCROLL_STEP);
+                                                    (state.offset != prev, state.offset == 0)
+                                                };
+                                                if changed {
+                                                    if reached_live {
+                                                        let _ = scroll_cmd_tx.send(ScrollCommand::ExitScrollback).await;
+                                                        trigger_agent_redraw(
+                                                            &mut writer,
+                                                            &agent_id_for_input,
+                                                        ).await;
+                                                    } else {
+                                                        let _ = scroll_cmd_tx.send(ScrollCommand::Redraw).await;
+                                                    }
+                                                }
+                                            }
 
-                                    if result.scroll_up > 0 || result.scroll_down > 0 {
-                                        let (changed, reached_live) = {
-                                            let mut state = scroll_state_in.lock().unwrap();
-                                            let max = {
-                                                let mut vt = scrollback_in.lock().unwrap();
-                                                vt.scrollback_len()
-                                            };
-                                            let prev = state.offset;
-                                            state.offset = state.offset
-                                                .saturating_add(result.scroll_up as usize * SCROLL_STEP)
-                                                .min(max);
-                                            state.offset = state.offset
-                                                .saturating_sub(result.scroll_down as usize * SCROLL_STEP);
-                                            (state.offset != prev, state.offset == 0)
-                                        };
-                                        if changed {
-                                            if reached_live {
+                                            if !result.bytes.is_empty() {
+                                                {
+                                                    scroll_state_in.lock().unwrap().offset = 0;
+                                                }
                                                 let _ = scroll_cmd_tx.send(ScrollCommand::ExitScrollback).await;
                                                 trigger_agent_redraw(
                                                     &mut writer,
                                                     &agent_id_for_input,
                                                 ).await;
-                                            } else {
-                                                let _ = scroll_cmd_tx.send(ScrollCommand::Redraw).await;
+                                                let _ = clust_ipc::send_message_write(
+                                                    &mut writer,
+                                                    &CliMessage::AgentInput {
+                                                        id: agent_id_for_input.clone(),
+                                                        data: result.bytes,
+                                                    },
+                                                ).await;
                                             }
                                         }
-                                    }
 
-                                    // Any non-scroll keypress exits scrollback
-                                    if !result.bytes.is_empty() {
-                                        {
-                                            scroll_state_in.lock().unwrap().offset = 0;
+                                        // ── No more page events: stop ──
+                                        if seq_len == 0 {
+                                            break;
                                         }
-                                        let _ = scroll_cmd_tx.send(ScrollCommand::ExitScrollback).await;
-                                        trigger_agent_redraw(
-                                            &mut writer,
-                                            &agent_id_for_input,
-                                        ).await;
-                                        let _ = clust_ipc::send_message_write(
-                                            &mut writer,
-                                            &CliMessage::AgentInput {
-                                                id: agent_id_for_input.clone(),
-                                                data: result.bytes,
-                                            },
-                                        ).await;
+
+                                        // ── The page event itself ──
+                                        // Note: the prefix may have already
+                                        // exited scrollback (offset==0). If so,
+                                        // a PageUp here re-enters scrollback
+                                        // by scrolling up, and a PageDown is a
+                                        // no-op (saturating_sub on 0).
+                                        let in_scrollback = scroll_state_in.lock().unwrap().offset > 0;
+                                        if is_page_up {
+                                            if in_scrollback {
+                                                {
+                                                    let mut state = scroll_state_in.lock().unwrap();
+                                                    let max = {
+                                                        let mut vt = scrollback_in.lock().unwrap();
+                                                        vt.scrollback_len()
+                                                    };
+                                                    state.offset = state.offset
+                                                        .saturating_add(viewport_height)
+                                                        .min(max);
+                                                }
+                                                let _ = scroll_cmd_tx.send(ScrollCommand::Redraw).await;
+                                            } else {
+                                                // Scrollback was just exited; forward PageUp to agent.
+                                                let _ = clust_ipc::send_message_write(
+                                                    &mut writer,
+                                                    &CliMessage::AgentInput {
+                                                        id: agent_id_for_input.clone(),
+                                                        data: PAGE_UP.to_vec(),
+                                                    },
+                                                ).await;
+                                            }
+                                        } else {
+                                            // PageDown
+                                            if in_scrollback {
+                                                let reached_live = {
+                                                    let mut state = scroll_state_in.lock().unwrap();
+                                                    state.offset = state.offset
+                                                        .saturating_sub(viewport_height);
+                                                    state.offset == 0
+                                                };
+                                                if reached_live {
+                                                    let _ = scroll_cmd_tx.send(ScrollCommand::ExitScrollback).await;
+                                                    trigger_agent_redraw(
+                                                        &mut writer,
+                                                        &agent_id_for_input,
+                                                    ).await;
+                                                } else {
+                                                    let _ = scroll_cmd_tx.send(ScrollCommand::Redraw).await;
+                                                }
+                                            } else {
+                                                // Already in live mode; forward PageDown to agent.
+                                                let _ = clust_ipc::send_message_write(
+                                                    &mut writer,
+                                                    &CliMessage::AgentInput {
+                                                        id: agent_id_for_input.clone(),
+                                                        data: PAGE_DOWN.to_vec(),
+                                                    },
+                                                ).await;
+                                            }
+                                        }
+
+                                        cursor = &cursor[pos + seq_len..];
                                     }
                                 }
                             }
@@ -646,12 +770,26 @@ impl AttachedSession {
             }
         });
 
-        // Wait for either task to finish
+        // Wait for either task to finish. Whichever task ends first wins;
+        // the other is aborted and awaited to completion so it cannot keep
+        // writing to a now-restored terminal (e.g. the output task after
+        // Ctrl+Q detach). We poll the JoinHandles by mutable reference so
+        // that the unselected handle survives `select!` and we can abort
+        // it explicitly. Dropping a `JoinHandle` only detaches the task;
+        // it does not cancel it.
+        let mut output_handle = output_task;
+        let mut input_handle = input_task;
+
         let end = tokio::select! {
-            result = output_task => {
+            biased;
+            result = &mut output_handle => {
+                input_handle.abort();
+                let _ = input_handle.await;
                 result.unwrap_or(SessionEnd::ConnectionLost)
             }
-            result = input_task => {
+            result = &mut input_handle => {
+                output_handle.abort();
+                let _ = output_handle.await;
                 result.unwrap_or(SessionEnd::ConnectionLost)
             }
         };
@@ -673,6 +811,49 @@ pub enum SessionEnd {
 /// Find a byte sequence in a data buffer.
 fn find_sequence(data: &[u8], seq: &[u8]) -> Option<usize> {
     data.windows(seq.len()).position(|w| w == seq)
+}
+
+/// One step of input chunk segmentation in scrollback mode.
+///
+/// Returns the prefix bytes (everything before the next page event), the
+/// kind of page event (or `None` if no page event remains), and the byte
+/// length of that page event. The caller advances by `prefix.len() + page_seq_len`
+/// into the chunk.
+#[derive(Debug, PartialEq, Eq)]
+enum PageEvent {
+    /// PageUp escape sequence found at this position.
+    Up,
+    /// PageDown escape sequence found at this position.
+    Down,
+}
+
+/// Find the first `\x1b[5~` (PageUp) or `\x1b[6~` (PageDown) in `data`.
+/// Returns `(pos, event)` of the earlier sequence, or `None`.
+/// PageUp wins ties (they don't overlap so this is theoretical).
+fn find_first_page_event(data: &[u8]) -> Option<(usize, PageEvent)> {
+    let pu = find_sequence(data, PAGE_UP);
+    let pd = find_sequence(data, PAGE_DOWN);
+    match (pu, pd) {
+        (Some(u), Some(d)) if u <= d => Some((u, PageEvent::Up)),
+        (Some(_), Some(d)) => Some((d, PageEvent::Down)),
+        (Some(u), None) => Some((u, PageEvent::Up)),
+        (None, Some(d)) => Some((d, PageEvent::Down)),
+        (None, None) => None,
+    }
+}
+
+/// Find the first F2 sequence (either SS3 or CSI variant) in `data`.
+/// Returns `(pos, seq_len)`, or `None` if no F2 was found.
+fn find_first_f2(data: &[u8]) -> Option<(usize, usize)> {
+    let ss3 = find_sequence(data, F2_SS3);
+    let csi = find_sequence(data, F2_CSI);
+    match (ss3, csi) {
+        (Some(s), Some(c)) if s < c => Some((s, F2_SS3.len())),
+        (Some(_), Some(c)) => Some((c, F2_CSI.len())),
+        (Some(s), None) => Some((s, F2_SS3.len())),
+        (None, Some(c)) => Some((c, F2_CSI.len())),
+        (None, None) => None,
+    }
 }
 
 /// Send a ResizeAgent message to trigger an agent redraw after exiting scrollback.
@@ -879,4 +1060,189 @@ fn exit_scrollback_mode(scrollback: &Arc<Mutex<TerminalEmulator>>, viewport_rows
     }
     let _ = write!(stdout, "\x1b[1;1H\x1b[?25h");
     let _ = stdout.flush();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Walk the page-event segmenter the same way the input task does and
+    /// collect a flat list of `(prefix_bytes, event)` segments plus a final
+    /// trailing prefix. This lets us assert that bytes around PageUp/PageDown
+    /// are preserved.
+    #[derive(Debug, PartialEq, Eq)]
+    enum Segment<'a> {
+        Bytes(&'a [u8]),
+        PageUp,
+        PageDown,
+    }
+
+    fn segment_scrollback_chunk(data: &[u8]) -> Vec<Segment<'_>> {
+        let mut out = Vec::new();
+        let mut cursor: &[u8] = data;
+        while !cursor.is_empty() {
+            match find_first_page_event(cursor) {
+                Some((pos, ev)) => {
+                    if pos > 0 {
+                        out.push(Segment::Bytes(&cursor[..pos]));
+                    }
+                    let seq_len = match ev {
+                        PageEvent::Up => {
+                            out.push(Segment::PageUp);
+                            PAGE_UP.len()
+                        }
+                        PageEvent::Down => {
+                            out.push(Segment::PageDown);
+                            PAGE_DOWN.len()
+                        }
+                    };
+                    cursor = &cursor[pos + seq_len..];
+                }
+                None => {
+                    out.push(Segment::Bytes(cursor));
+                    break;
+                }
+            }
+        }
+        out
+    }
+
+    // ── Page-event segmentation (Bug #4) ────────────────────────────
+
+    #[test]
+    fn page_event_segmenter_empty() {
+        let segs = segment_scrollback_chunk(b"");
+        assert!(segs.is_empty());
+    }
+
+    #[test]
+    fn page_event_segmenter_no_events() {
+        let segs = segment_scrollback_chunk(b"hello");
+        assert_eq!(segs, vec![Segment::Bytes(b"hello".as_slice())]);
+    }
+
+    #[test]
+    fn page_event_segmenter_just_page_up() {
+        let segs = segment_scrollback_chunk(PAGE_UP);
+        assert_eq!(segs, vec![Segment::PageUp]);
+    }
+
+    #[test]
+    fn page_event_segmenter_page_up_followed_by_right_arrow() {
+        // The "Right" arrow (CSI C) right after PageUp must NOT be dropped:
+        // this was the regression in bug #4.
+        let mut input = Vec::new();
+        input.extend_from_slice(PAGE_UP);
+        input.extend_from_slice(b"\x1b[C"); // Right arrow
+        let segs = segment_scrollback_chunk(&input);
+        assert_eq!(
+            segs,
+            vec![Segment::PageUp, Segment::Bytes(b"\x1b[C".as_slice())]
+        );
+    }
+
+    #[test]
+    fn page_event_segmenter_arbitrary_key_after_page_down() {
+        let mut input = Vec::new();
+        input.extend_from_slice(PAGE_DOWN);
+        input.extend_from_slice(b"q"); // arbitrary key
+        let segs = segment_scrollback_chunk(&input);
+        assert_eq!(
+            segs,
+            vec![Segment::PageDown, Segment::Bytes(b"q".as_slice())]
+        );
+    }
+
+    #[test]
+    fn page_event_segmenter_bytes_around_page_up() {
+        let mut input = b"abc".to_vec();
+        input.extend_from_slice(PAGE_UP);
+        input.extend_from_slice(b"def");
+        let segs = segment_scrollback_chunk(&input);
+        assert_eq!(
+            segs,
+            vec![
+                Segment::Bytes(b"abc".as_slice()),
+                Segment::PageUp,
+                Segment::Bytes(b"def".as_slice()),
+            ]
+        );
+    }
+
+    #[test]
+    fn page_event_segmenter_multiple_page_events() {
+        let mut input = b"a".to_vec();
+        input.extend_from_slice(PAGE_UP);
+        input.extend_from_slice(b"b");
+        input.extend_from_slice(PAGE_DOWN);
+        input.extend_from_slice(b"c");
+        let segs = segment_scrollback_chunk(&input);
+        assert_eq!(
+            segs,
+            vec![
+                Segment::Bytes(b"a".as_slice()),
+                Segment::PageUp,
+                Segment::Bytes(b"b".as_slice()),
+                Segment::PageDown,
+                Segment::Bytes(b"c".as_slice()),
+            ]
+        );
+    }
+
+    #[test]
+    fn page_event_segmenter_back_to_back_page_events() {
+        let mut input = Vec::new();
+        input.extend_from_slice(PAGE_UP);
+        input.extend_from_slice(PAGE_UP);
+        let segs = segment_scrollback_chunk(&input);
+        assert_eq!(segs, vec![Segment::PageUp, Segment::PageUp]);
+    }
+
+    // ── F2 detection (Bug #3) ───────────────────────────────────────
+
+    #[test]
+    fn find_first_f2_picks_earliest_variant() {
+        // CSI variant comes first
+        let mut input = b"prefix".to_vec();
+        input.extend_from_slice(F2_CSI);
+        input.extend_from_slice(b"middle");
+        input.extend_from_slice(F2_SS3);
+        let (pos, len) = find_first_f2(&input).unwrap();
+        assert_eq!(pos, 6);
+        assert_eq!(len, F2_CSI.len());
+
+        // SS3 comes first
+        let mut input2 = b"prefix".to_vec();
+        input2.extend_from_slice(F2_SS3);
+        input2.extend_from_slice(b"middle");
+        input2.extend_from_slice(F2_CSI);
+        let (pos, len) = find_first_f2(&input2).unwrap();
+        assert_eq!(pos, 6);
+        assert_eq!(len, F2_SS3.len());
+    }
+
+    #[test]
+    fn find_first_f2_none() {
+        assert!(find_first_f2(b"hello").is_none());
+        assert!(find_first_f2(b"").is_none());
+    }
+
+    #[test]
+    fn find_first_f2_iterates_until_no_more() {
+        // Both variants in the same buffer — we should find each in order
+        // (this is the regression in bug #3: previously only the first was
+        // found and the rest were forwarded as raw input).
+        let mut input = Vec::new();
+        input.extend_from_slice(F2_SS3);
+        input.extend_from_slice(F2_CSI);
+
+        let mut cursor: &[u8] = &input;
+        let mut found = Vec::new();
+        while let Some((pos, len)) = find_first_f2(cursor) {
+            found.push(len);
+            cursor = &cursor[pos + len..];
+        }
+        assert_eq!(found, vec![F2_SS3.len(), F2_CSI.len()]);
+        assert!(cursor.is_empty());
+    }
 }

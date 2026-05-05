@@ -401,11 +401,7 @@ fn scoped_agent_ids<'a>(
             .collect()
     };
 
-    matched.sort_by(|a, b| {
-        a.started_at
-            .cmp(&b.started_at)
-            .then(a.id.cmp(&b.id))
-    });
+    matched.sort_by(|a, b| a.started_at.cmp(&b.started_at).then(a.id.cmp(&b.id)));
 
     if matched.is_empty() {
         let empty = if repo.path.is_empty() {
@@ -416,7 +412,10 @@ fn scoped_agent_ids<'a>(
         return (Vec::new(), empty);
     }
 
-    (matched.into_iter().map(|a| a.id.clone()).collect(), window_view::EmptyKind::Logo)
+    (
+        matched.into_iter().map(|a| a.id.clone()).collect(),
+        window_view::EmptyKind::Logo,
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -944,10 +943,15 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                 if panel.exited && panel.is_worktree && !panel.worktree_cleanup_shown {
                     panel.worktree_cleanup_shown = true;
                     if let (Some(rp), Some(bn)) = (&panel.repo_path, &panel.branch_name) {
-                        pending_worktree_cleanups = vec![crate::worktree::WorktreeCleanup {
-                            repo_path: rp.clone(),
-                            branch_name: bn.clone(),
-                        }];
+                        // Append rather than overwrite — other pending
+                        // cleanups (e.g. from earlier batch removals) must
+                        // still be surfaced after this one is dismissed.
+                        pending_worktree_cleanups.extend(std::iter::once(
+                            crate::worktree::WorktreeCleanup {
+                                repo_path: rp.clone(),
+                                branch_name: bn.clone(),
+                            },
+                        ));
                         active_menu = pop_worktree_cleanup_menu(&mut pending_worktree_cleanups);
                     }
                 }
@@ -972,7 +976,22 @@ pub fn run(hub_name: &str) -> io::Result<()> {
             }
         }
 
-        // Check for completed agent start requests (drain all pending)
+        // Check for completed agent start requests (drain all pending). The
+        // channel must be drained even when a modal is open so it doesn't grow
+        // unbounded — but destructive state transitions (entering focus mode,
+        // switching tabs) are skipped while a modal is up to avoid corrupting
+        // modal state. The status message is still set so the user gets
+        // feedback that the agent started.
+        let any_modal_open = create_modal.is_some()
+            || create_batch_modal.is_some()
+            || import_batch_modal.is_some()
+            || add_task_modal.is_some()
+            || batch_deps_modal.is_some()
+            || edit_field_modal.is_some()
+            || timer_modal.is_some()
+            || search_modal.is_some()
+            || detached_modal.is_some()
+            || repo_modal.is_some();
         while let Ok(result) = agent_start_rx.try_recv() {
             match result {
                 AgentStartResult::Started {
@@ -986,7 +1005,7 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                     if active_tab == ActiveTab::Overview {
                         // Stay in overview mode; select the agent after next sync
                         pending_overview_select = Some(agent_id.clone());
-                    } else {
+                    } else if !any_modal_open {
                         let fm_cols = (last_content_area.width * 40 / 100)
                             .saturating_sub(2)
                             .max(1);
@@ -1004,6 +1023,10 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                             existing_terminals,
                         );
                         in_focus_mode = true;
+                    } else {
+                        // Modal is open — surface the agent in overview on the
+                        // next render instead of entering focus mode mid-modal.
+                        pending_overview_select = Some(agent_id.clone());
                     }
                     let label = branch_name.as_deref().unwrap_or(&working_dir);
                     status_message = Some(StatusMessage {
@@ -1113,10 +1136,7 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                         if task_count == 1 { "" } else { "s" },
                     );
                     if !unresolved.is_empty() {
-                        text.push_str(&format!(
-                            " (unresolved deps: {})",
-                            unresolved.join(", ")
-                        ));
+                        text.push_str(&format!(" (unresolved deps: {})", unresolved.join(", ")));
                     }
                     status_message = Some(StatusMessage {
                         text,
@@ -1281,7 +1301,42 @@ pub fn run(hub_name: &str) -> io::Result<()> {
             });
             dr
         };
+        // Detect whether the previously-selected entry was a real repo (not
+        // synthetic). Synthetic entries are "No Repository" (empty path) and
+        // the "Add Repository" sentinel. We use this to nudge selection back
+        // onto a real repo if `clamp` lands it on a synthetic one (e.g. after
+        // deleting the last real repo at the tail of the list).
+        let prev_was_real_repo = display_repos
+            .get(selection.repo_idx)
+            .is_some_and(|r| !r.path.is_empty() && r.path != ADD_REPO_SENTINEL);
         selection.clamp(&display_repos);
+        if prev_was_real_repo {
+            let landed_on_synthetic = display_repos
+                .get(selection.repo_idx)
+                .is_some_and(|r| r.path.is_empty() || r.path == ADD_REPO_SENTINEL);
+            if landed_on_synthetic {
+                // Find the closest real repo: scan backwards first, then
+                // forwards. If none exist, leave the clamp result as-is.
+                let real_idx = (0..selection.repo_idx)
+                    .rev()
+                    .find(|&i| {
+                        display_repos
+                            .get(i)
+                            .is_some_and(|r| !r.path.is_empty() && r.path != ADD_REPO_SENTINEL)
+                    })
+                    .or_else(|| {
+                        (selection.repo_idx + 1..display_repos.len()).find(|&i| {
+                            display_repos
+                                .get(i)
+                                .is_some_and(|r| !r.path.is_empty() && r.path != ADD_REPO_SENTINEL)
+                        })
+                    });
+                if let Some(idx) = real_idx {
+                    selection.repo_idx = idx;
+                    selection.clamp(&display_repos);
+                }
+            }
+        }
 
         // Sync overview agent connections when agents are refreshed. The
         // panel set (lifecycle) is synced regardless of tab so the
@@ -1377,11 +1432,8 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                             &mut click_map,
                         );
                         render_divider(frame, divider_area);
-                        let (scoped_ids, empty) = scoped_agent_ids(
-                            &agents,
-                            &display_repos,
-                            &selection,
-                        );
+                        let (scoped_ids, empty) =
+                            scoped_agent_ids(&agents, &display_repos, &selection);
                         let batch_map = tasks_state.batch_agent_map();
                         window_view::render(
                             frame,
@@ -1579,6 +1631,11 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                 if in_focus_mode {
                                     if let Some((aid, cache)) = focus_mode_state.detach() {
                                         overview_state.store_agent_terminals(aid, cache);
+                                    } else {
+                                        // detach() returned None: either no panel was attached
+                                        // or there were no terminal panels to cache. Any
+                                        // previously-stored cache for this agent in
+                                        // overview_state is preserved as-is.
                                     }
                                     in_focus_mode = false;
                                 }
@@ -1589,6 +1646,8 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                 if in_focus_mode {
                                     if let Some((aid, cache)) = focus_mode_state.detach() {
                                         overview_state.store_agent_terminals(aid, cache);
+                                    } else {
+                                        // See note above: preserve any existing cache.
                                     }
                                     in_focus_mode = false;
                                 }
@@ -1604,6 +1663,8 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                 if in_focus_mode {
                                     if let Some((aid, cache)) = focus_mode_state.detach() {
                                         overview_state.store_agent_terminals(aid, cache);
+                                    } else {
+                                        // See note above: preserve any existing cache.
                                     }
                                     in_focus_mode = false;
                                 }
@@ -2277,7 +2338,11 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                                         Instant::now() - Duration::from_secs(10);
                                                 }
                                                 BranchAction::BaseWorktreeOff => {
-                                                    if let Some(repo_info) = repos
+                                                    if create_modal.is_some() {
+                                                        // Modal already open — skip to avoid
+                                                        // stacking. (Caller should close the
+                                                        // existing modal first.)
+                                                    } else if let Some(repo_info) = repos
                                                         .iter()
                                                         .find(|r| r.path == repo_path)
                                                         .cloned()
@@ -2870,6 +2935,10 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                                     });
                                                 }
                                                 tasks_state.remove_batch(batch_idx);
+                                                invalidate_batch_origin_if(
+                                                    &mut focus_mode_state,
+                                                    batch_idx,
+                                                );
                                                 status_message = Some(StatusMessage {
                                                     text: "Batch removed".to_string(),
                                                     level: StatusLevel::Info,
@@ -2916,6 +2985,10 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                                     }
                                                 }
                                                 tasks_state.remove_batch(batch_idx);
+                                                invalidate_batch_origin_if(
+                                                    &mut focus_mode_state,
+                                                    batch_idx,
+                                                );
                                                 last_agent_fetch =
                                                     Instant::now() - Duration::from_secs(10);
                                                 status_message = Some(StatusMessage {
@@ -2970,6 +3043,10 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                                     }
                                                 }
                                                 tasks_state.remove_batch(batch_idx);
+                                                invalidate_batch_origin_if(
+                                                    &mut focus_mode_state,
+                                                    batch_idx,
+                                                );
                                                 last_agent_fetch =
                                                     Instant::now() - Duration::from_secs(10);
                                                 last_repo_fetch =
@@ -3170,13 +3247,14 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                 // tasks_state so the TUI shows them immediately.
                                 // hub_batch_id is filled in later as each
                                 // BatchRegistered comes back through the channel.
-                                let mut to_register: Vec<(usize, crate::import_batch_modal::BatchJson)> =
-                                    Vec::with_capacity(batch_count);
+                                let mut to_register: Vec<(
+                                    usize,
+                                    crate::import_batch_modal::BatchJson,
+                                )> = Vec::with_capacity(batch_count);
                                 for batch_json in output.batches {
-                                    let launch_mode =
-                                        crate::import_batch_modal::parse_launch_mode(
-                                            batch_json.launch_mode.as_deref(),
-                                        );
+                                    let launch_mode = crate::import_batch_modal::parse_launch_mode(
+                                        batch_json.launch_mode.as_deref(),
+                                    );
                                     let batch_output =
                                         crate::create_batch_modal::BatchModalOutput {
                                             repo_path: output.repo_path.clone(),
@@ -3241,12 +3319,13 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                     let mut unresolved: Vec<String> = Vec::new();
 
                                     for (local_idx, batch_json) in to_register {
-                                        let launch_mode_str = match crate::import_batch_modal::parse_launch_mode(
-                                            batch_json.launch_mode.as_deref(),
-                                        ) {
-                                            tasks::LaunchMode::Manual => "manual",
-                                            tasks::LaunchMode::Auto => "auto",
-                                        };
+                                        let launch_mode_str =
+                                            match crate::import_batch_modal::parse_launch_mode(
+                                                batch_json.launch_mode.as_deref(),
+                                            ) {
+                                                tasks::LaunchMode::Manual => "manual",
+                                                tasks::LaunchMode::Auto => "auto",
+                                            };
 
                                         let mut resolved_deps: Vec<String> = Vec::new();
                                         for dep in &batch_json.depends_on {
@@ -3256,9 +3335,10 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                             }
                                         }
 
-                                        let title = batch_json.title.clone().unwrap_or_else(
-                                            || format!("Batch {}", local_idx + 1),
-                                        );
+                                        let title = batch_json
+                                            .title
+                                            .clone()
+                                            .unwrap_or_else(|| format!("Batch {}", local_idx + 1));
 
                                         let ipc_tasks: Vec<clust_ipc::QueuedTask> = batch_json
                                             .tasks
@@ -3301,15 +3381,12 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                                 )
                                                 .await
                                                 {
-                                                    title_to_hub
-                                                        .insert(title, batch_id.clone());
+                                                    title_to_hub.insert(title, batch_id.clone());
                                                     let _ = tx
-                                                        .send(
-                                                            AgentStartResult::BatchRegistered {
-                                                                local_batch_idx: local_idx,
-                                                                hub_batch_id: batch_id,
-                                                            },
-                                                        )
+                                                        .send(AgentStartResult::BatchRegistered {
+                                                            local_batch_idx: local_idx,
+                                                            hub_batch_id: batch_id,
+                                                        })
                                                         .await;
                                                 }
                                             }
@@ -3755,7 +3832,7 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                         && key.modifiers.contains(KeyModifiers::ALT)
                     {
                         // Global shortcut: Alt+E opens create-agent modal
-                        if !repos.is_empty() {
+                        if !repos.is_empty() && create_modal.is_none() {
                             let modal = CreateAgentModal::new(repos.clone());
                             create_modal = Some(modal);
                             show_help = false;
@@ -3764,14 +3841,16 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                         && key.modifiers.contains(KeyModifiers::ALT)
                     {
                         // Global shortcut: Alt+D opens detached agent modal
-                        let modal = DetachedAgentModal::new();
-                        detached_modal = Some(modal);
-                        show_help = false;
+                        if detached_modal.is_none() {
+                            let modal = DetachedAgentModal::new();
+                            detached_modal = Some(modal);
+                            show_help = false;
+                        }
                     } else if key.code == KeyCode::Char('f')
                         && key.modifiers.contains(KeyModifiers::ALT)
                     {
                         // Global shortcut: Alt+F opens search-agent modal
-                        if !agents.is_empty() {
+                        if !agents.is_empty() && search_modal.is_none() {
                             search_modal = Some(SearchModal::new(agents.clone()));
                             show_help = false;
                         }
@@ -3779,8 +3858,10 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                         && key.modifiers.contains(KeyModifiers::ALT)
                     {
                         // Global shortcut: Alt+N opens new repository modal
-                        repo_modal = Some(RepoModal::new());
-                        show_help = false;
+                        if repo_modal.is_none() {
+                            repo_modal = Some(RepoModal::new());
+                            show_help = false;
+                        }
                     } else if key.code == KeyCode::Char('v')
                         && key.modifiers.contains(KeyModifiers::ALT)
                     {
@@ -3945,10 +4026,15 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                     KeyCode::Up => {
                                         // Exit focus mode — return to batch screen if opened from one
                                         if let Some(origin) = focus_mode_state.batch_origin.take() {
-                                            active_tab = ActiveTab::Tasks;
-                                            tasks_state.focus =
-                                                tasks::TasksFocus::BatchCard(origin.batch_idx);
-                                            tasks_state.focused_task = Some(origin.task_idx);
+                                            // Clamp the batch_idx in case the batch was removed
+                                            // while we were in focus mode. If it's now out of
+                                            // range, drop the restore and fall back to default.
+                                            if origin.batch_idx < tasks_state.batches.len() {
+                                                active_tab = ActiveTab::Tasks;
+                                                tasks_state.focus =
+                                                    tasks::TasksFocus::BatchCard(origin.batch_idx);
+                                                tasks_state.focused_task = Some(origin.task_idx);
+                                            }
                                         } else if active_tab == ActiveTab::Overview
                                             && overview_state.initialized
                                         {
@@ -3956,6 +4042,9 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                         }
                                         if let Some((aid, cache)) = focus_mode_state.detach() {
                                             overview_state.store_agent_terminals(aid, cache);
+                                        } else {
+                                            // detach() returned None: nothing new to cache.
+                                            // Any previously-stored cache is preserved.
                                         }
                                         in_focus_mode = false;
                                     }
@@ -4137,10 +4226,14 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                     KeyCode::Up => {
                                         // Exit focus mode — return to batch screen if opened from one
                                         if let Some(origin) = focus_mode_state.batch_origin.take() {
-                                            active_tab = ActiveTab::Tasks;
-                                            tasks_state.focus =
-                                                tasks::TasksFocus::BatchCard(origin.batch_idx);
-                                            tasks_state.focused_task = Some(origin.task_idx);
+                                            // Clamp the batch_idx in case the batch was removed
+                                            // while we were in focus mode.
+                                            if origin.batch_idx < tasks_state.batches.len() {
+                                                active_tab = ActiveTab::Tasks;
+                                                tasks_state.focus =
+                                                    tasks::TasksFocus::BatchCard(origin.batch_idx);
+                                                tasks_state.focused_task = Some(origin.task_idx);
+                                            }
                                         } else if active_tab == ActiveTab::Overview
                                             && overview_state.initialized
                                         {
@@ -4148,6 +4241,9 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                         }
                                         if let Some((aid, cache)) = focus_mode_state.detach() {
                                             overview_state.store_agent_terminals(aid, cache);
+                                        } else {
+                                            // detach() returned None: nothing new to cache.
+                                            // Any previously-stored cache is preserved.
                                         }
                                         in_focus_mode = false;
                                     }
@@ -4272,12 +4368,16 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                                     if let (Some(rp), Some(bn)) =
                                                         (&panel.repo_path, &panel.branch_name)
                                                     {
-                                                        pending_worktree_cleanups = vec![
-                                                            crate::worktree::WorktreeCleanup {
-                                                                repo_path: rp.clone(),
-                                                                branch_name: bn.clone(),
-                                                            },
-                                                        ];
+                                                        // Append rather than overwrite — earlier
+                                                        // pending cleanups must remain queued.
+                                                        pending_worktree_cleanups.extend(
+                                                            std::iter::once(
+                                                                crate::worktree::WorktreeCleanup {
+                                                                    repo_path: rp.clone(),
+                                                                    branch_name: bn.clone(),
+                                                                },
+                                                            ),
+                                                        );
                                                     }
                                                 }
                                             }
@@ -4840,33 +4940,28 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                             {
                                                 if repo.path == ADD_REPO_SENTINEL {
                                                     // Open the repo create/clone modal
-                                                    repo_modal = Some(RepoModal::new());
-                                                    show_help = false;
+                                                    if repo_modal.is_none() {
+                                                        repo_modal = Some(RepoModal::new());
+                                                        show_help = false;
+                                                    }
                                                 } else if !repo.path.is_empty() {
-                                                    active_menu =
-                                                        Some(ActiveMenu::RepoActions {
-                                                            repo_path: repo.path.clone(),
-                                                            menu: ContextMenu::new(
-                                                                &repo.name,
-                                                                vec![
-                                                                    "Change Color".to_string(),
-                                                                    "Open in File System"
-                                                                        .to_string(),
-                                                                    "Open in Terminal"
-                                                                        .to_string(),
-                                                                    "Stop All Agents"
-                                                                        .to_string(),
-                                                                    "Clean Stale Refs"
-                                                                        .to_string(),
-                                                                    "Detach".to_string(),
-                                                                    "Purge".to_string(),
-                                                                    "Remove Repository"
-                                                                        .to_string(),
-                                                                    "Delete Repository"
-                                                                        .to_string(),
-                                                                ],
-                                                            ),
-                                                        });
+                                                    active_menu = Some(ActiveMenu::RepoActions {
+                                                        repo_path: repo.path.clone(),
+                                                        menu: ContextMenu::new(
+                                                            &repo.name,
+                                                            vec![
+                                                                "Change Color".to_string(),
+                                                                "Open in File System".to_string(),
+                                                                "Open in Terminal".to_string(),
+                                                                "Stop All Agents".to_string(),
+                                                                "Clean Stale Refs".to_string(),
+                                                                "Detach".to_string(),
+                                                                "Purge".to_string(),
+                                                                "Remove Repository".to_string(),
+                                                                "Delete Repository".to_string(),
+                                                            ],
+                                                        ),
+                                                    });
                                                 }
                                             }
                                         }
@@ -4899,19 +4994,13 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                                         let mut labels = Vec::new();
                                                         let mut actions = Vec::new();
                                                         if branch.active_agent_count > 0 {
-                                                            labels
-                                                                .push("Open Agent".to_string());
-                                                            actions
-                                                                .push(BranchAction::OpenAgent);
+                                                            labels.push("Open Agent".to_string());
+                                                            actions.push(BranchAction::OpenAgent);
                                                         }
+                                                        labels.push(open_in_editor_label(branch));
+                                                        actions.push(BranchAction::OpenInEditor);
                                                         labels.push(
-                                                            open_in_editor_label(branch),
-                                                        );
-                                                        actions
-                                                            .push(BranchAction::OpenInEditor);
-                                                        labels.push(
-                                                            "Start Agent (worktree)"
-                                                                .to_string(),
+                                                            "Start Agent (worktree)".to_string(),
                                                         );
                                                         actions.push(BranchAction::StartAgent);
                                                         if branch.is_head {
@@ -4923,43 +5012,33 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                                                 BranchAction::StartAgentInPlace,
                                                             );
                                                             labels.push("Detach".to_string());
-                                                            actions
-                                                                .push(BranchAction::DetachHead);
+                                                            actions.push(BranchAction::DetachHead);
                                                         }
-                                                        if !branch.is_head && !branch.is_worktree
-                                                        {
+                                                        if !branch.is_head && !branch.is_worktree {
                                                             labels.push("Checkout".to_string());
-                                                            actions.push(
-                                                                BranchAction::CheckoutLocal,
-                                                            );
+                                                            actions
+                                                                .push(BranchAction::CheckoutLocal);
                                                         }
-                                                        labels.push(
-                                                            "Base Worktree Off".to_string(),
-                                                        );
-                                                        actions
-                                                            .push(BranchAction::BaseWorktreeOff);
+                                                        labels
+                                                            .push("Base Worktree Off".to_string());
+                                                        actions.push(BranchAction::BaseWorktreeOff);
                                                         labels.push("Pull".to_string());
                                                         actions.push(BranchAction::Pull);
                                                         if branch.active_agent_count > 0 {
-                                                            labels
-                                                                .push("Stop Agents".to_string());
-                                                            actions
-                                                                .push(BranchAction::StopAgents);
+                                                            labels.push("Stop Agents".to_string());
+                                                            actions.push(BranchAction::StopAgents);
                                                         }
                                                         if branch.is_worktree {
                                                             labels.push(
                                                                 "Remove Worktree".to_string(),
                                                             );
-                                                            actions.push(
-                                                                BranchAction::RemoveWorktree,
-                                                            );
+                                                            actions
+                                                                .push(BranchAction::RemoveWorktree);
                                                         }
-                                                        labels
-                                                            .push("Delete Branch".to_string());
-                                                        actions
-                                                            .push(BranchAction::DeleteBranch);
-                                                        active_menu = Some(
-                                                            ActiveMenu::BranchActions {
+                                                        labels.push("Delete Branch".to_string());
+                                                        actions.push(BranchAction::DeleteBranch);
+                                                        active_menu =
+                                                            Some(ActiveMenu::BranchActions {
                                                                 repo_path: repo.path.clone(),
                                                                 branch_name: branch.name.clone(),
                                                                 is_head: branch.is_head,
@@ -4969,8 +5048,7 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                                                     &branch.name,
                                                                     labels,
                                                                 ),
-                                                            },
-                                                        );
+                                                            });
                                                     }
                                                 } else if selection.category_idx == 1 {
                                                     // Remote branch context menu
@@ -4981,31 +5059,25 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                                         let mut labels = Vec::new();
                                                         let mut actions = Vec::new();
                                                         labels.push(
-                                                            "Checkout & Track Locally"
-                                                                .to_string(),
+                                                            "Checkout & Track Locally".to_string(),
                                                         );
-                                                        actions
-                                                            .push(BranchAction::CheckoutRemote);
+                                                        actions.push(BranchAction::CheckoutRemote);
                                                         labels.push(
                                                             "Start Agent (checkout)".to_string(),
                                                         );
-                                                        actions.push(
-                                                            BranchAction::RemoteStartAgent,
-                                                        );
-                                                        labels.push(
-                                                            "Create Worktree".to_string(),
-                                                        );
+                                                        actions
+                                                            .push(BranchAction::RemoteStartAgent);
+                                                        labels.push("Create Worktree".to_string());
                                                         actions.push(
                                                             BranchAction::RemoteCreateWorktree,
                                                         );
                                                         labels.push(
                                                             "Delete Remote Branch".to_string(),
                                                         );
-                                                        actions.push(
-                                                            BranchAction::DeleteRemoteBranch,
-                                                        );
-                                                        active_menu = Some(
-                                                            ActiveMenu::BranchActions {
+                                                        actions
+                                                            .push(BranchAction::DeleteRemoteBranch);
+                                                        active_menu =
+                                                            Some(ActiveMenu::BranchActions {
                                                                 repo_path: repo.path.clone(),
                                                                 branch_name: branch.name.clone(),
                                                                 is_head: false,
@@ -5015,16 +5087,13 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                                                     &branch.name,
                                                                     labels,
                                                                 ),
-                                                            },
-                                                        );
+                                                            });
                                                     }
                                                 }
                                             }
                                         }
                                     },
-                                    KeyCode::Up
-                                        if key.modifiers.contains(KeyModifiers::SHIFT) =>
-                                    {
+                                    KeyCode::Up if key.modifiers.contains(KeyModifiers::SHIFT) => {
                                         selection.jump_prev_repo(&display_repos);
                                     }
                                     KeyCode::Down
@@ -5174,40 +5243,52 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                     } else if active_menu.is_some() {
                         if click_map.menu_inner_rect.contains(pos) {
                             let idx = (row - click_map.menu_inner_rect.y) as usize;
-                            let item_count = match active_menu.as_ref().unwrap() {
-                                ActiveMenu::AgentPicker { menu, .. } => menu.items.len(),
-                                ActiveMenu::RepoActions { menu, .. } => menu.items.len(),
-                                ActiveMenu::ColorPicker { menu, .. } => menu.items.len(),
-                                ActiveMenu::BranchActions { menu, .. } => menu.items.len(),
-                                ActiveMenu::ConfirmAction { menu, .. } => menu.items.len(),
-                                ActiveMenu::WorktreeCleanup { menu, .. } => menu.items.len(),
-                                ActiveMenu::EditorPicker { menu, .. } => menu.items.len(),
-                                ActiveMenu::EditorRemember { menu, .. } => menu.items.len(),
-                                ActiveMenu::BatchCleanup { menu, .. } => menu.items.len(),
+                            let item_count = if let Some(menu) = active_menu.as_ref() {
+                                match menu {
+                                    ActiveMenu::AgentPicker { menu, .. } => menu.items.len(),
+                                    ActiveMenu::RepoActions { menu, .. } => menu.items.len(),
+                                    ActiveMenu::ColorPicker { menu, .. } => menu.items.len(),
+                                    ActiveMenu::BranchActions { menu, .. } => menu.items.len(),
+                                    ActiveMenu::ConfirmAction { menu, .. } => menu.items.len(),
+                                    ActiveMenu::WorktreeCleanup { menu, .. } => menu.items.len(),
+                                    ActiveMenu::EditorPicker { menu, .. } => menu.items.len(),
+                                    ActiveMenu::EditorRemember { menu, .. } => menu.items.len(),
+                                    ActiveMenu::BatchCleanup { menu, .. } => menu.items.len(),
+                                }
+                            } else {
+                                0
                             };
                             if idx < item_count {
                                 // Highlight the clicked item then select it
-                                match active_menu.as_mut().unwrap() {
-                                    ActiveMenu::AgentPicker { menu, .. } => menu.selected_idx = idx,
-                                    ActiveMenu::RepoActions { menu, .. } => menu.selected_idx = idx,
-                                    ActiveMenu::ColorPicker { menu, .. } => menu.selected_idx = idx,
-                                    ActiveMenu::BranchActions { menu, .. } => {
-                                        menu.selected_idx = idx
-                                    }
-                                    ActiveMenu::ConfirmAction { menu, .. } => {
-                                        menu.selected_idx = idx
-                                    }
-                                    ActiveMenu::WorktreeCleanup { menu, .. } => {
-                                        menu.selected_idx = idx
-                                    }
-                                    ActiveMenu::EditorPicker { menu, .. } => {
-                                        menu.selected_idx = idx
-                                    }
-                                    ActiveMenu::EditorRemember { menu, .. } => {
-                                        menu.selected_idx = idx
-                                    }
-                                    ActiveMenu::BatchCleanup { menu, .. } => {
-                                        menu.selected_idx = idx
+                                if let Some(menu) = active_menu.as_mut() {
+                                    match menu {
+                                        ActiveMenu::AgentPicker { menu, .. } => {
+                                            menu.selected_idx = idx
+                                        }
+                                        ActiveMenu::RepoActions { menu, .. } => {
+                                            menu.selected_idx = idx
+                                        }
+                                        ActiveMenu::ColorPicker { menu, .. } => {
+                                            menu.selected_idx = idx
+                                        }
+                                        ActiveMenu::BranchActions { menu, .. } => {
+                                            menu.selected_idx = idx
+                                        }
+                                        ActiveMenu::ConfirmAction { menu, .. } => {
+                                            menu.selected_idx = idx
+                                        }
+                                        ActiveMenu::WorktreeCleanup { menu, .. } => {
+                                            menu.selected_idx = idx
+                                        }
+                                        ActiveMenu::EditorPicker { menu, .. } => {
+                                            menu.selected_idx = idx
+                                        }
+                                        ActiveMenu::EditorRemember { menu, .. } => {
+                                            menu.selected_idx = idx
+                                        }
+                                        ActiveMenu::BatchCleanup { menu, .. } => {
+                                            menu.selected_idx = idx
+                                        }
                                     }
                                 }
                                 let taken = active_menu.take().unwrap();
@@ -5797,7 +5878,11 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                                         Instant::now() - Duration::from_secs(10);
                                                 }
                                                 BranchAction::BaseWorktreeOff => {
-                                                    if let Some(repo_info) = repos
+                                                    if create_modal.is_some() {
+                                                        // Modal already open — skip to avoid
+                                                        // stacking. (Caller should close the
+                                                        // existing modal first.)
+                                                    } else if let Some(repo_info) = repos
                                                         .iter()
                                                         .find(|r| r.path == repo_path)
                                                         .cloned()
@@ -6398,6 +6483,10 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                                     });
                                                 }
                                                 tasks_state.remove_batch(batch_idx);
+                                                invalidate_batch_origin_if(
+                                                    &mut focus_mode_state,
+                                                    batch_idx,
+                                                );
                                                 status_message = Some(StatusMessage {
                                                     text: "Batch removed".to_string(),
                                                     level: StatusLevel::Info,
@@ -6439,6 +6528,10 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                                     }
                                                 }
                                                 tasks_state.remove_batch(batch_idx);
+                                                invalidate_batch_origin_if(
+                                                    &mut focus_mode_state,
+                                                    batch_idx,
+                                                );
                                                 last_agent_fetch =
                                                     Instant::now() - Duration::from_secs(10);
                                                 status_message = Some(StatusMessage {
@@ -6488,6 +6581,10 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                                     }
                                                 }
                                                 tasks_state.remove_batch(batch_idx);
+                                                invalidate_batch_origin_if(
+                                                    &mut focus_mode_state,
+                                                    batch_idx,
+                                                );
                                                 last_agent_fetch =
                                                     Instant::now() - Duration::from_secs(10);
                                                 last_repo_fetch =
@@ -6517,9 +6614,14 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                         // Focus mode click handling
                         if click_map.focus_back_button.contains(pos) {
                             if let Some(origin) = focus_mode_state.batch_origin.take() {
-                                active_tab = ActiveTab::Tasks;
-                                tasks_state.focus = tasks::TasksFocus::BatchCard(origin.batch_idx);
-                                tasks_state.focused_task = Some(origin.task_idx);
+                                // Clamp the batch_idx in case the batch was removed
+                                // while we were in focus mode.
+                                if origin.batch_idx < tasks_state.batches.len() {
+                                    active_tab = ActiveTab::Tasks;
+                                    tasks_state.focus =
+                                        tasks::TasksFocus::BatchCard(origin.batch_idx);
+                                    tasks_state.focused_task = Some(origin.task_idx);
+                                }
                             } else if active_tab == ActiveTab::Overview
                                 && overview_state.initialized
                             {
@@ -6527,6 +6629,9 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                             }
                             if let Some((aid, cache)) = focus_mode_state.detach() {
                                 overview_state.store_agent_terminals(aid, cache);
+                            } else {
+                                // detach() returned None: nothing new to cache.
+                                // Any previously-stored cache is preserved.
                             }
                             in_focus_mode = false;
                         } else if focus_mode_state.repo_path.is_some() {
@@ -7910,7 +8015,10 @@ fn render_help_overlay(frame: &mut Frame, area: Rect, active_tab: ActiveTab, in_
         lines.push(header_line("Repositories — left tree"));
         lines.push(binding_line("\u{2191} / \u{2193}", "Navigate items"));
         lines.push(binding_line("\u{2190} / \u{2192}", "Navigate tree"));
-        lines.push(binding_line("Shift+\u{2191}/\u{2193}", "Jump prev / next repo"));
+        lines.push(binding_line(
+            "Shift+\u{2191}/\u{2193}",
+            "Jump prev / next repo",
+        ));
         lines.push(binding_line("Enter", "Open menu"));
         lines.push(binding_line("Space", "Collapse / expand"));
     }
@@ -8274,6 +8382,20 @@ fn remove_worktree_ipc(repo_path: &str, branch_name: &str, delete_branch: bool, 
     });
 }
 
+/// Clear `focus_mode_state.batch_origin` if it still references the batch
+/// at `removed_batch_idx`. Call next to every `tasks_state.remove_batch`
+/// to avoid restoring focus onto a now-invalid batch index when leaving
+/// focus mode.
+fn invalidate_batch_origin_if(state: &mut overview::FocusModeState, removed_batch_idx: usize) {
+    if state
+        .batch_origin
+        .as_ref()
+        .is_some_and(|o| o.batch_idx == removed_batch_idx)
+    {
+        state.batch_origin = None;
+    }
+}
+
 /// Pop the first pending worktree cleanup and return the corresponding `ActiveMenu`, if any.
 fn pop_worktree_cleanup_menu(
     pending: &mut Vec<crate::worktree::WorktreeCleanup>,
@@ -8382,7 +8504,10 @@ fn checkout_worktree_ipc(repo_path: &str, branch_name: &str) -> Option<String> {
         )
         .await
         .ok()?;
-        match clust_ipc::recv_message::<HubMessage>(&mut stream).await.ok()? {
+        match clust_ipc::recv_message::<HubMessage>(&mut stream)
+            .await
+            .ok()?
+        {
             HubMessage::WorktreeAdded { path, .. } => Some(path),
             _ => None,
         }

@@ -3,7 +3,7 @@ use std::time::Duration;
 
 use clust_ipc::QueuedTask;
 
-use crate::agent::{self, SharedHubState, HubState, SpawnAgentParams};
+use crate::agent::{self, HubState, SharedHubState, SpawnAgentParams};
 use crate::db;
 
 // ---------------------------------------------------------------------------
@@ -167,11 +167,7 @@ pub fn validate_unique_sanitized_branches(tasks: &[QueuedTask]) -> Result<(), St
 /// a cycle (or include a self-reference). The TUI already rejects cycles in
 /// `batch_deps_modal::would_create_cycle`; this is the IPC-side guard for
 /// requests that bypass the TUI.
-pub fn would_create_cycle(
-    batches: &[HubBatchEntry],
-    target_id: &str,
-    new_deps: &[String],
-) -> bool {
+pub fn would_create_cycle(batches: &[HubBatchEntry], target_id: &str, new_deps: &[String]) -> bool {
     if new_deps.iter().any(|d| d == target_id) {
         return true;
     }
@@ -395,9 +391,7 @@ async fn check_and_advance_batches(state: &SharedHubState) {
                     }
                     "task_active_pending" => {
                         if let Some((idx, _)) = task_info {
-                            let _ = db::update_task_status(
-                                db, batch_id, *idx, "active", None,
-                            );
+                            let _ = db::update_task_status(db, batch_id, *idx, "active", None);
                         }
                     }
                     _ => {}
@@ -432,10 +426,7 @@ async fn check_and_advance_batches(state: &SharedHubState) {
         // (see validate_unique_sanitized_branches).
         let orphan_to_stop: Option<String> = {
             let mut hub = state.lock().await;
-            let batch = hub
-                .queued_batches
-                .iter_mut()
-                .find(|b| b.id == req.batch_id);
+            let batch = hub.queued_batches.iter_mut().find(|b| b.id == req.batch_id);
             match batch {
                 None => {
                     // Batch was deleted while we were spawning. Surface the
@@ -599,18 +590,18 @@ pub async fn create_worktree_and_spawn_agent(
         None
     };
 
-    let worktree_path =
-        crate::repo::add_worktree(repo_root, &branch_name, base, checkout_existing)
-            .map_err(|e| {
-                if e.contains("already checked out") {
-                    format!(
-                        "Branch '{}' is already checked out and cannot be used as a worktree.",
-                        branch_name
-                    )
-                } else {
-                    e
-                }
-            })?;
+    let worktree_path = crate::repo::add_worktree(repo_root, &branch_name, base, checkout_existing)
+        .await
+        .map_err(|e| {
+            if e.contains("already checked out") {
+                format!(
+                    "Branch '{}' is already checked out and cannot be used as a worktree.",
+                    branch_name
+                )
+            } else {
+                e
+            }
+        })?;
 
     let working_dir = worktree_path.to_string_lossy().into_owned();
 

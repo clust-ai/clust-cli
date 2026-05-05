@@ -1,5 +1,7 @@
 use std::fmt;
-use std::process::Command;
+use std::process::{Command, Stdio};
+use std::thread;
+use std::time::{Duration, Instant};
 
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub struct Version {
@@ -60,20 +62,59 @@ pub(crate) fn format_update_message(current: &Version, latest: &Version) -> Opti
 
 const REPO_URL: &str = "https://github.com/clust-ai/clust-cli.git";
 
+/// Maximum time to wait for `git ls-remote` before killing it.
+const LS_REMOTE_TIMEOUT: Duration = Duration::from_secs(5);
+
 pub fn check_update() -> Option<String> {
-    let output = Command::new("git")
-        .args(["ls-remote", "--tags", REPO_URL])
-        .output()
-        .ok()?;
-
-    if !output.status.success() {
-        return None;
-    }
-
-    let stdout = String::from_utf8(output.stdout).ok()?;
+    let stdout = run_ls_remote_with_timeout(LS_REMOTE_TIMEOUT)?;
     let latest = parse_latest_tag(&stdout)?;
     let current = Version::current();
     format_update_message(&current, &latest)
+}
+
+/// Run `git ls-remote --tags <REPO_URL>` and return its stdout, or `None` if
+/// the command fails or exceeds `timeout`.
+///
+/// This is best-effort: on timeout we attempt to kill the child process, but
+/// we do not panic if the kill fails (e.g. process already exited).
+fn run_ls_remote_with_timeout(timeout: Duration) -> Option<String> {
+    let mut child = Command::new("git")
+        .args(["ls-remote", "--tags", REPO_URL])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .ok()?;
+
+    let deadline = Instant::now() + timeout;
+    let poll_interval = Duration::from_millis(50);
+
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                if !status.success() {
+                    return None;
+                }
+                // Drain stdout. wait_with_output consumes the child handle.
+                let output = child.wait_with_output().ok()?;
+                return String::from_utf8(output.stdout).ok();
+            }
+            Ok(None) => {
+                if Instant::now() >= deadline {
+                    // Best-effort kill; ignore failure (process may have just exited).
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return None;
+                }
+                thread::sleep(poll_interval);
+            }
+            Err(_) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return None;
+            }
+        }
+    }
 }
 
 fn parse_latest_tag(output: &str) -> Option<Version> {

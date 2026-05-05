@@ -12,19 +12,13 @@ use crate::ShutdownSignal;
 
 /// Run the IPC server, listening for CLI connections on the Unix domain socket.
 /// Runs inside a tokio runtime on a background thread.
-pub async fn run_ipc_server(
-    shutdown_signal: Arc<dyn ShutdownSignal>,
-    state: SharedHubState,
-) {
+pub async fn run_ipc_server(shutdown_signal: Arc<dyn ShutdownSignal>, state: SharedHubState) {
     if let Err(e) = run(shutdown_signal, state).await {
         eprintln!("ipc server error: {e}");
     }
 }
 
-async fn run(
-    shutdown_signal: Arc<dyn ShutdownSignal>,
-    state: SharedHubState,
-) -> io::Result<()> {
+async fn run(shutdown_signal: Arc<dyn ShutdownSignal>, state: SharedHubState) -> io::Result<()> {
     let dir = clust_ipc::clust_dir();
     tokio::fs::create_dir_all(&dir).await?;
 
@@ -64,14 +58,43 @@ async fn run(
     }
 }
 
+/// Compare two canonical paths component-by-component. Returns `true` iff
+/// `ancestor` is `path` or a strict ancestor of `path`.
+///
+/// Unlike `Path::starts_with`, which compares the underlying byte string,
+/// this only matches whole path components — so `/tmp/foo` is NOT considered
+/// an ancestor of `/tmp/foo-bar`.
+fn is_canonical_ancestor(ancestor: &std::path::Path, path: &std::path::Path) -> bool {
+    let mut a = ancestor.components();
+    let mut p = path.components();
+    loop {
+        match (a.next(), p.next()) {
+            (None, _) => return true,        // ancestor exhausted → match
+            (Some(_), None) => return false, // path exhausted before ancestor
+            (Some(ac), Some(pc)) if ac == pc => continue,
+            _ => return false,
+        }
+    }
+}
+
+/// Canonicalize a path that should already exist. Returns an error rather
+/// than falling back to the non-canonical path; callers must know the exact
+/// path on disk before performing a destructive operation.
+fn canonicalize_existing(path: &std::path::Path) -> Result<std::path::PathBuf, String> {
+    if !path.exists() {
+        return Err(format!("path does not exist: {}", path.display()));
+    }
+    std::fs::canonicalize(path).map_err(|e| format!("could not resolve {}: {e}", path.display()))
+}
+
 /// Verify that `target` is safe to recursively delete. Returns the canonical
 /// path on success.
 ///
 /// Refuses the filesystem root, the user's home directory, the clust state
-/// directory, and any ancestor of either.
+/// directory, and any ancestor of either. Comparisons are component-aware
+/// so prefix tricks like `/tmp/foo` vs `/tmp/foo-bar` are rejected.
 fn check_safe_to_delete(target: &std::path::Path) -> Result<std::path::PathBuf, String> {
-    let canonical = std::fs::canonicalize(target)
-        .map_err(|e| format!("could not resolve {}: {e}", target.display()))?;
+    let canonical = canonicalize_existing(target)?;
     if !canonical.is_dir() {
         return Err(format!("{} is not a directory", canonical.display()));
     }
@@ -79,19 +102,23 @@ fn check_safe_to_delete(target: &std::path::Path) -> Result<std::path::PathBuf, 
         return Err("refusing to delete the filesystem root".into());
     }
     if let Some(home) = std::env::var_os("HOME") {
-        if let Ok(home_canonical) = std::fs::canonicalize(std::path::PathBuf::from(home)) {
+        let home_path = std::path::PathBuf::from(home);
+        if home_path.exists() {
+            let home_canonical = canonicalize_existing(&home_path)?;
             if canonical == home_canonical {
                 return Err("refusing to delete the home directory".into());
             }
-            if home_canonical.starts_with(&canonical) {
+            if is_canonical_ancestor(&canonical, &home_canonical) {
                 return Err(
                     "refusing to delete a directory that contains the home directory".into(),
                 );
             }
         }
     }
-    if let Ok(clust_canonical) = std::fs::canonicalize(clust_ipc::clust_dir()) {
-        if canonical == clust_canonical || clust_canonical.starts_with(&canonical) {
+    let clust_dir = clust_ipc::clust_dir();
+    if clust_dir.exists() {
+        let clust_canonical = canonicalize_existing(&clust_dir)?;
+        if canonical == clust_canonical || is_canonical_ancestor(&canonical, &clust_canonical) {
             return Err("refusing to delete the clust state directory".into());
         }
     }
@@ -158,7 +185,9 @@ async fn handle_connection(
                     {
                         let hub_state = state.lock().await;
                         if let Some(ref db) = hub_state.db {
-                            if let Some(root) = crate::repo::detect_git_root(&working_dir_for_register) {
+                            if let Some(root) =
+                                crate::repo::detect_git_root(&working_dir_for_register)
+                            {
                                 let root_str = root.to_string_lossy().into_owned();
                                 let name = root
                                     .file_name()
@@ -171,9 +200,11 @@ async fn handle_connection(
                     }
                     let (ag_is_worktree, ag_repo_path, ag_branch_name) = {
                         let hub_state = state.lock().await;
-                        hub_state.agents.get(&id).map(|e| {
-                            (e.is_worktree, e.repo_path.clone(), e.branch_name.clone())
-                        }).unwrap_or((false, None, None))
+                        hub_state
+                            .agents
+                            .get(&id)
+                            .map(|e| (e.is_worktree, e.repo_path.clone(), e.branch_name.clone()))
+                            .unwrap_or((false, None, None))
                     };
                     clust_ipc::send_message_write(
                         &mut writer,
@@ -189,11 +220,8 @@ async fn handle_connection(
                     handle_attached_session(&id, reader, writer, state).await?;
                 }
                 Err(e) => {
-                    clust_ipc::send_message_write(
-                        &mut writer,
-                        &HubMessage::Error { message: e },
-                    )
-                    .await?;
+                    clust_ipc::send_message_write(&mut writer, &HubMessage::Error { message: e })
+                        .await?;
                 }
             }
         }
@@ -201,7 +229,12 @@ async fn handle_connection(
             let agent_info = {
                 let hub = state.lock().await;
                 hub.agents.get(&id).map(|e| {
-                    (e.agent_binary.clone(), e.is_worktree, e.repo_path.clone(), e.branch_name.clone())
+                    (
+                        e.agent_binary.clone(),
+                        e.is_worktree,
+                        e.repo_path.clone(),
+                        e.branch_name.clone(),
+                    )
                 })
             };
             match agent_info {
@@ -238,14 +271,13 @@ async fn handle_connection(
                 let hub_state = state.lock().await;
 
                 // Build a map of agent_id → (batch_id, batch_title) from queued batches
-                let mut agent_batch_map: std::collections::HashMap<
-                    &str,
-                    (&str, &str),
-                > = std::collections::HashMap::new();
+                let mut agent_batch_map: std::collections::HashMap<&str, (&str, &str)> =
+                    std::collections::HashMap::new();
                 for batch in &hub_state.queued_batches {
                     for task in &batch.tasks {
                         if let Some(ref aid) = task.agent_id {
-                            agent_batch_map.insert(aid.as_str(), (batch.id.as_str(), batch.title.as_str()));
+                            agent_batch_map
+                                .insert(aid.as_str(), (batch.id.as_str(), batch.title.as_str()));
                         }
                     }
                 }
@@ -255,20 +287,16 @@ async fn handle_connection(
                     .values()
                     .filter(|e| filter.as_ref().is_none_or(|f| &e.hub == f))
                     .map(|e| {
-                        let (batch_id, batch_title) =
-                            agent_batch_map.get(e.id.as_str()).map_or(
-                                (None, None),
-                                |&(bid, btitle)| {
-                                    (Some(bid.to_owned()), Some(btitle.to_owned()))
-                                },
-                            );
+                        let (batch_id, batch_title) = agent_batch_map
+                            .get(e.id.as_str())
+                            .map_or((None, None), |&(bid, btitle)| {
+                                (Some(bid.to_owned()), Some(btitle.to_owned()))
+                            });
                         clust_ipc::AgentInfo {
                             id: e.id.clone(),
                             agent_binary: e.agent_binary.clone(),
                             started_at: e.started_at.clone(),
-                            attached_clients: e
-                                .attached_count
-                                .load(Ordering::Relaxed),
+                            attached_clients: e.attached_count.load(Ordering::Relaxed),
                             hub: e.hub.clone(),
                             working_dir: e.working_dir.clone(),
                             repo_path: e.repo_path.clone(),
@@ -281,15 +309,14 @@ async fn handle_connection(
                     .filter(|a| {
                         batch_filter.as_ref().is_none_or(|bf| {
                             a.batch_id.as_deref().is_some_and(|bid| bid == bf)
-                                || a.batch_title
-                                    .as_deref()
-                                    .is_some_and(|bt| bt.to_lowercase().contains(&bf.to_lowercase()))
+                                || a.batch_title.as_deref().is_some_and(|bt| {
+                                    bt.to_lowercase().contains(&bf.to_lowercase())
+                                })
                         })
                     })
                     .collect()
             };
-            clust_ipc::send_message_write(&mut writer, &HubMessage::AgentList { agents })
-                .await?;
+            clust_ipc::send_message_write(&mut writer, &HubMessage::AgentList { agents }).await?;
         }
         CliMessage::StopHub => {
             clust_ipc::send_message_write(&mut writer, &HubMessage::Ok).await?;
@@ -344,11 +371,8 @@ async fn handle_connection(
                     clust_ipc::send_message_write(&mut writer, &HubMessage::Ok).await?;
                 }
                 Err(e) => {
-                    clust_ipc::send_message_write(
-                        &mut writer,
-                        &HubMessage::Error { message: e },
-                    )
-                    .await?;
+                    clust_ipc::send_message_write(&mut writer, &HubMessage::Error { message: e })
+                        .await?;
                 }
             }
         }
@@ -381,11 +405,8 @@ async fn handle_connection(
                     clust_ipc::send_message_write(&mut writer, &HubMessage::Ok).await?;
                 }
                 Err(e) => {
-                    clust_ipc::send_message_write(
-                        &mut writer,
-                        &HubMessage::Error { message: e },
-                    )
-                    .await?;
+                    clust_ipc::send_message_write(&mut writer, &HubMessage::Error { message: e })
+                        .await?;
                 }
             }
         }
@@ -394,11 +415,8 @@ async fn handle_connection(
                 let hub = state.lock().await;
                 hub.bypass_permissions
             };
-            clust_ipc::send_message_write(
-                &mut writer,
-                &HubMessage::BypassPermissions { enabled },
-            )
-            .await?;
+            clust_ipc::send_message_write(&mut writer, &HubMessage::BypassPermissions { enabled })
+                .await?;
         }
         CliMessage::RegisterRepo { path } => {
             // Detect git root BEFORE acquiring the lock (avoid holding lock during I/O)
@@ -432,11 +450,8 @@ async fn handle_connection(
                     .await?;
                 }
                 Err(e) => {
-                    clust_ipc::send_message_write(
-                        &mut writer,
-                        &HubMessage::Error { message: e },
-                    )
-                    .await?;
+                    clust_ipc::send_message_write(&mut writer, &HubMessage::Error { message: e })
+                        .await?;
                 }
             }
         }
@@ -449,31 +464,29 @@ async fn handle_connection(
                 } else {
                     vec![]
                 };
-                let snapshots: std::collections::HashMap<
-                    String,
-                    crate::repo::AgentSnapshot,
-                > = hub_state
-                    .agents
-                    .iter()
-                    .map(|(k, v)| {
-                        (
-                            k.clone(),
-                            crate::repo::AgentSnapshot {
-                                id: v.id.clone(),
-                                agent_binary: v.agent_binary.clone(),
-                                started_at: v.started_at.clone(),
-                                attached_clients: v
-                                    .attached_count
-                                    .load(std::sync::atomic::Ordering::Relaxed),
-                                hub: v.hub.clone(),
-                                working_dir: v.working_dir.clone(),
-                                repo_path: v.repo_path.clone(),
-                                branch_name: v.branch_name.clone(),
-                                is_worktree: v.is_worktree,
-                            },
-                        )
-                    })
-                    .collect();
+                let snapshots: std::collections::HashMap<String, crate::repo::AgentSnapshot> =
+                    hub_state
+                        .agents
+                        .iter()
+                        .map(|(k, v)| {
+                            (
+                                k.clone(),
+                                crate::repo::AgentSnapshot {
+                                    id: v.id.clone(),
+                                    agent_binary: v.agent_binary.clone(),
+                                    started_at: v.started_at.clone(),
+                                    attached_clients: v
+                                        .attached_count
+                                        .load(std::sync::atomic::Ordering::Relaxed),
+                                    hub: v.hub.clone(),
+                                    working_dir: v.working_dir.clone(),
+                                    repo_path: v.repo_path.clone(),
+                                    branch_name: v.branch_name.clone(),
+                                    is_worktree: v.is_worktree,
+                                },
+                            )
+                        })
+                        .collect();
                 (list, snapshots)
             };
             // Do git I/O outside the lock
@@ -504,9 +517,7 @@ async fn handle_connection(
             }
             clust_ipc::send_message_write(
                 &mut writer,
-                &HubMessage::RepoList {
-                    repos: valid_repos,
-                },
+                &HubMessage::RepoList { repos: valid_repos },
             )
             .await?;
         }
@@ -528,11 +539,8 @@ async fn handle_connection(
                     .await?;
                 }
                 Err(e) => {
-                    clust_ipc::send_message_write(
-                        &mut writer,
-                        &HubMessage::Error { message: e },
-                    )
-                    .await?;
+                    clust_ipc::send_message_write(&mut writer, &HubMessage::Error { message: e })
+                        .await?;
                 }
             }
         }
@@ -554,11 +562,8 @@ async fn handle_connection(
                     .await?;
                 }
                 Err(e) => {
-                    clust_ipc::send_message_write(
-                        &mut writer,
-                        &HubMessage::Error { message: e },
-                    )
-                    .await?;
+                    clust_ipc::send_message_write(&mut writer, &HubMessage::Error { message: e })
+                        .await?;
                 }
             }
         }
@@ -573,18 +578,12 @@ async fn handle_connection(
             };
             match result {
                 Ok(()) => {
-                    clust_ipc::send_message_write(
-                        &mut writer,
-                        &HubMessage::DefaultEditorSet,
-                    )
-                    .await?;
+                    clust_ipc::send_message_write(&mut writer, &HubMessage::DefaultEditorSet)
+                        .await?;
                 }
                 Err(e) => {
-                    clust_ipc::send_message_write(
-                        &mut writer,
-                        &HubMessage::Error { message: e },
-                    )
-                    .await?;
+                    clust_ipc::send_message_write(&mut writer, &HubMessage::Error { message: e })
+                        .await?;
                 }
             }
         }
@@ -641,11 +640,8 @@ async fn handle_connection(
                     .await?;
                 }
                 Err(e) => {
-                    clust_ipc::send_message_write(
-                        &mut writer,
-                        &HubMessage::Error { message: e },
-                    )
-                    .await?;
+                    clust_ipc::send_message_write(&mut writer, &HubMessage::Error { message: e })
+                        .await?;
                 }
             }
         }
@@ -699,55 +695,60 @@ async fn handle_connection(
                             let _ = agent::stop_agent(&state, &id).await;
                         });
                     }
-                    // Delete on disk first; only unregister from the DB if
-                    // the directory is actually gone.
-                    if let Err(e) = std::fs::remove_dir_all(&canonical) {
-                        clust_ipc::send_message_write(
-                            &mut writer,
-                            &HubMessage::Error {
-                                message: format!(
-                                    "Failed to delete {}: {e}",
-                                    canonical.display()
-                                ),
-                            },
-                        )
-                        .await?;
-                    } else {
-                        let db_result = {
-                            let hub_state = state.lock().await;
-                            hub_state
-                                .db
-                                .as_ref()
-                                .map(|db| crate::db::unregister_repo(db, &root_str))
-                        };
-                        match db_result {
-                            Some(Ok(_)) => {
+                    // Unregister from the DB first. If the filesystem delete
+                    // then fails the DB row is already gone — that is the
+                    // safer state: an orphaned directory can be removed by
+                    // hand, but an orphaned DB row would surface as a dead
+                    // repo in the TUI. If the unregister itself fails we do
+                    // NOT touch the filesystem.
+                    let db_result = {
+                        let hub_state = state.lock().await;
+                        hub_state
+                            .db
+                            .as_ref()
+                            .map(|db| crate::db::unregister_repo(db, &root_str))
+                    };
+                    match db_result {
+                        None => {
+                            clust_ipc::send_message_write(
+                                &mut writer,
+                                &HubMessage::Error {
+                                    message: "database not initialized".into(),
+                                },
+                            )
+                            .await?;
+                        }
+                        Some(Err(e)) => {
+                            clust_ipc::send_message_write(
+                                &mut writer,
+                                &HubMessage::Error {
+                                    message: format!(
+                                        "Failed to unregister repo (folder NOT deleted): {e}"
+                                    ),
+                                },
+                            )
+                            .await?;
+                        }
+                        Some(Ok(_)) => {
+                            if let Err(e) = std::fs::remove_dir_all(&canonical) {
+                                clust_ipc::send_message_write(
+                                    &mut writer,
+                                    &HubMessage::Error {
+                                        message: format!(
+                                            "Repo unregistered but failed to delete {}: {e}. \
+                                             Remove the directory manually.",
+                                            canonical.display()
+                                        ),
+                                    },
+                                )
+                                .await?;
+                            } else {
                                 clust_ipc::send_message_write(
                                     &mut writer,
                                     &HubMessage::RepoDeleted {
                                         path: root_str,
                                         name,
                                         stopped_agents: count,
-                                    },
-                                )
-                                .await?;
-                            }
-                            Some(Err(e)) => {
-                                clust_ipc::send_message_write(
-                                    &mut writer,
-                                    &HubMessage::Error {
-                                        message: format!(
-                                            "Folder deleted but failed to unregister: {e}"
-                                        ),
-                                    },
-                                )
-                                .await?;
-                            }
-                            None => {
-                                clust_ipc::send_message_write(
-                                    &mut writer,
-                                    &HubMessage::Error {
-                                        message: "database not initialized".into(),
                                     },
                                 )
                                 .await?;
@@ -798,11 +799,8 @@ async fn handle_connection(
                     .await?;
                 }
                 Err(e) => {
-                    clust_ipc::send_message_write(
-                        &mut writer,
-                        &HubMessage::Error { message: e },
-                    )
-                    .await?;
+                    clust_ipc::send_message_write(&mut writer, &HubMessage::Error { message: e })
+                        .await?;
                 }
             }
         }
@@ -832,9 +830,7 @@ async fn handle_connection(
                                         id: v.id.clone(),
                                         agent_binary: v.agent_binary.clone(),
                                         started_at: v.started_at.clone(),
-                                        attached_clients: v
-                                            .attached_count
-                                            .load(Ordering::Relaxed),
+                                        attached_clients: v.attached_count.load(Ordering::Relaxed),
                                         hub: v.hub.clone(),
                                         working_dir: v.working_dir.clone(),
                                         repo_path: v.repo_path.clone(),
@@ -849,7 +845,7 @@ async fn handle_connection(
                         .file_name()
                         .map(|n| n.to_string_lossy().into_owned())
                         .unwrap_or_default();
-                    match crate::repo::list_worktrees(&root, &agent_snapshots) {
+                    match crate::repo::list_worktrees(&root, &agent_snapshots).await {
                         Ok(worktrees) => {
                             clust_ipc::send_message_write(
                                 &mut writer,
@@ -871,11 +867,8 @@ async fn handle_connection(
                     }
                 }
                 Err(e) => {
-                    clust_ipc::send_message_write(
-                        &mut writer,
-                        &HubMessage::Error { message: e },
-                    )
-                    .await?;
+                    clust_ipc::send_message_write(&mut writer, &HubMessage::Error { message: e })
+                        .await?;
                 }
             }
         }
@@ -907,7 +900,9 @@ async fn handle_connection(
                         &branch_name,
                         base_branch.as_deref(),
                         checkout_existing,
-                    ) {
+                    )
+                    .await
+                    {
                         Ok(wt_path) => {
                             clust_ipc::send_message_write(
                                 &mut writer,
@@ -937,11 +932,8 @@ async fn handle_connection(
                     }
                 }
                 Err(e) => {
-                    clust_ipc::send_message_write(
-                        &mut writer,
-                        &HubMessage::Error { message: e },
-                    )
-                    .await?;
+                    clust_ipc::send_message_write(&mut writer, &HubMessage::Error { message: e })
+                        .await?;
                 }
             }
         }
@@ -978,7 +970,11 @@ async fn handle_connection(
                         return Ok(());
                     }
 
-                    // Stop agents running in this worktree
+                    // Stop agents running in this worktree, then wait for the
+                    // stop tasks to drain BEFORE invoking `git worktree remove`.
+                    // Otherwise an agent process can still be holding files in
+                    // the worktree directory and git refuses to delete it
+                    // (or worse, removes a half-occupied tree).
                     let root_str = root.to_string_lossy().into_owned();
                     let agent_ids = {
                         let hub_state = state.lock().await;
@@ -994,12 +990,24 @@ async fn handle_connection(
                     };
                     let stopped_count = agent_ids.len();
 
+                    let mut stop_handles = Vec::with_capacity(agent_ids.len());
                     for id in &agent_ids {
                         let state = state.clone();
                         let id = id.clone();
-                        tokio::spawn(async move {
-                            let _ = agent::stop_agent(&state, &id).await;
-                        });
+                        stop_handles.push(tokio::spawn(async move {
+                            agent::stop_agent(&state, &id).await
+                        }));
+                    }
+                    for handle in stop_handles {
+                        match handle.await {
+                            Ok(Ok(())) => {}
+                            Ok(Err(e)) => {
+                                eprintln!("stop_agent failed during worktree removal: {e}");
+                            }
+                            Err(e) => {
+                                eprintln!("stop_agent task panicked during worktree removal: {e}");
+                            }
+                        }
                     }
 
                     match crate::repo::remove_worktree(
@@ -1007,7 +1015,9 @@ async fn handle_connection(
                         &branch_name,
                         delete_local_branch,
                         force,
-                    ) {
+                    )
+                    .await
+                    {
                         Ok(()) => {
                             clust_ipc::send_message_write(
                                 &mut writer,
@@ -1028,11 +1038,8 @@ async fn handle_connection(
                     }
                 }
                 Err(e) => {
-                    clust_ipc::send_message_write(
-                        &mut writer,
-                        &HubMessage::Error { message: e },
-                    )
-                    .await?;
+                    clust_ipc::send_message_write(&mut writer, &HubMessage::Error { message: e })
+                        .await?;
                 }
             }
         }
@@ -1063,9 +1070,7 @@ async fn handle_connection(
                                         id: v.id.clone(),
                                         agent_binary: v.agent_binary.clone(),
                                         started_at: v.started_at.clone(),
-                                        attached_clients: v
-                                            .attached_count
-                                            .load(Ordering::Relaxed),
+                                        attached_clients: v.attached_count.load(Ordering::Relaxed),
                                         hub: v.hub.clone(),
                                         working_dir: v.working_dir.clone(),
                                         repo_path: v.repo_path.clone(),
@@ -1076,7 +1081,7 @@ async fn handle_connection(
                             })
                             .collect::<std::collections::HashMap<_, _>>()
                     };
-                    match crate::repo::list_worktrees(&root, &agent_snapshots) {
+                    match crate::repo::list_worktrees(&root, &agent_snapshots).await {
                         Ok(worktrees) => {
                             match worktrees.into_iter().find(|w| w.branch_name == branch_name) {
                                 Some(info) => {
@@ -1109,11 +1114,8 @@ async fn handle_connection(
                     }
                 }
                 Err(e) => {
-                    clust_ipc::send_message_write(
-                        &mut writer,
-                        &HubMessage::Error { message: e },
-                    )
-                    .await?;
+                    clust_ipc::send_message_write(&mut writer, &HubMessage::Error { message: e })
+                        .await?;
                 }
             }
         }
@@ -1171,11 +1173,8 @@ async fn handle_connection(
                     .await?;
                 }
                 Err(e) => {
-                    clust_ipc::send_message_write(
-                        &mut writer,
-                        &HubMessage::Error { message: e },
-                    )
-                    .await?;
+                    clust_ipc::send_message_write(&mut writer, &HubMessage::Error { message: e })
+                        .await?;
                 }
             }
         }
@@ -1204,8 +1203,7 @@ async fn handle_connection(
                             .values()
                             .filter(|e| {
                                 e.repo_path.as_deref() == Some(root_str.as_str())
-                                    && e.branch_name.as_deref()
-                                        == Some(branch_name.as_str())
+                                    && e.branch_name.as_deref() == Some(branch_name.as_str())
                             })
                             .map(|e| e.id.clone())
                             .collect::<Vec<_>>()
@@ -1220,8 +1218,7 @@ async fn handle_connection(
                         });
                     }
 
-                    match crate::repo::delete_local_branch(&root, &branch_name, force)
-                    {
+                    match crate::repo::delete_local_branch(&root, &branch_name, force).await {
                         Ok(()) => {
                             clust_ipc::send_message_write(
                                 &mut writer,
@@ -1242,11 +1239,8 @@ async fn handle_connection(
                     }
                 }
                 Err(e) => {
-                    clust_ipc::send_message_write(
-                        &mut writer,
-                        &HubMessage::Error { message: e },
-                    )
-                    .await?;
+                    clust_ipc::send_message_write(&mut writer, &HubMessage::Error { message: e })
+                        .await?;
                 }
             }
         }
@@ -1264,30 +1258,25 @@ async fn handle_connection(
                 )
             };
             match repo_root {
-                Ok(root) => {
-                    match crate::repo::delete_remote_branch(&root, &branch_name) {
-                        Ok(()) => {
-                            clust_ipc::send_message_write(
-                                &mut writer,
-                                &HubMessage::RemoteBranchDeleted { branch_name },
-                            )
-                            .await?;
-                        }
-                        Err(e) => {
-                            clust_ipc::send_message_write(
-                                &mut writer,
-                                &HubMessage::Error { message: e },
-                            )
-                            .await?;
-                        }
+                Ok(root) => match crate::repo::delete_remote_branch(&root, &branch_name).await {
+                    Ok(()) => {
+                        clust_ipc::send_message_write(
+                            &mut writer,
+                            &HubMessage::RemoteBranchDeleted { branch_name },
+                        )
+                        .await?;
                     }
-                }
+                    Err(e) => {
+                        clust_ipc::send_message_write(
+                            &mut writer,
+                            &HubMessage::Error { message: e },
+                        )
+                        .await?;
+                    }
+                },
                 Err(e) => {
-                    clust_ipc::send_message_write(
-                        &mut writer,
-                        &HubMessage::Error { message: e },
-                    )
-                    .await?;
+                    clust_ipc::send_message_write(&mut writer, &HubMessage::Error { message: e })
+                        .await?;
                 }
             }
         }
@@ -1306,7 +1295,7 @@ async fn handle_connection(
             };
             match repo_root {
                 Ok(root) => {
-                    match crate::repo::checkout_remote_branch(&root, &remote_branch) {
+                    match crate::repo::checkout_remote_branch(&root, &remote_branch).await {
                         Ok(branch_name) => {
                             clust_ipc::send_message_write(
                                 &mut writer,
@@ -1324,30 +1313,20 @@ async fn handle_connection(
                     }
                 }
                 Err(e) => {
-                    clust_ipc::send_message_write(
-                        &mut writer,
-                        &HubMessage::Error { message: e },
-                    )
-                    .await?;
+                    clust_ipc::send_message_write(&mut writer, &HubMessage::Error { message: e })
+                        .await?;
                 }
             }
         }
         CliMessage::DetachHead { repo_path } => {
             let repo_root = std::path::Path::new(&repo_path);
-            match crate::repo::detach_head(repo_root) {
+            match crate::repo::detach_head(repo_root).await {
                 Ok(()) => {
-                    clust_ipc::send_message_write(
-                        &mut writer,
-                        &HubMessage::HeadDetached,
-                    )
-                    .await?;
+                    clust_ipc::send_message_write(&mut writer, &HubMessage::HeadDetached).await?;
                 }
                 Err(e) => {
-                    clust_ipc::send_message_write(
-                        &mut writer,
-                        &HubMessage::Error { message: e },
-                    )
-                    .await?;
+                    clust_ipc::send_message_write(&mut writer, &HubMessage::Error { message: e })
+                        .await?;
                 }
             }
         }
@@ -1356,7 +1335,7 @@ async fn handle_connection(
             branch_name,
         } => {
             let repo_root = std::path::Path::new(&repo_path);
-            match crate::repo::checkout_local_branch(repo_root, &branch_name) {
+            match crate::repo::checkout_local_branch(repo_root, &branch_name).await {
                 Ok(()) => {
                     clust_ipc::send_message_write(
                         &mut writer,
@@ -1365,11 +1344,8 @@ async fn handle_connection(
                     .await?;
                 }
                 Err(e) => {
-                    clust_ipc::send_message_write(
-                        &mut writer,
-                        &HubMessage::Error { message: e },
-                    )
-                    .await?;
+                    clust_ipc::send_message_write(&mut writer, &HubMessage::Error { message: e })
+                        .await?;
                 }
             }
         }
@@ -1385,16 +1361,18 @@ async fn handle_connection(
                         hub_state
                             .agents
                             .values()
-                            .filter(|e| {
-                                e.repo_path.as_deref() == Some(root_str.as_str())
-                            })
+                            .filter(|e| e.repo_path.as_deref() == Some(root_str.as_str()))
                             .map(|e| e.id.clone())
                             .collect::<Vec<_>>()
                     };
                     let stopped_agents = agent_ids.len();
 
                     if stopped_agents > 0 {
-                        let label = if stopped_agents == 1 { "agent" } else { "agents" };
+                        let label = if stopped_agents == 1 {
+                            "agent"
+                        } else {
+                            "agents"
+                        };
                         clust_ipc::send_message_write(
                             &mut writer,
                             &HubMessage::PurgeProgress {
@@ -1416,6 +1394,13 @@ async fn handle_connection(
                         }
                     }
 
+                    // Purge is a best-effort operation. Collect each phase's
+                    // failure (if any) as a warning instead of swallowing it,
+                    // and surface warnings to the user as PurgeProgress
+                    // messages before the final RepoPurged. The success
+                    // counts for each phase are reported regardless.
+                    let mut warnings: Vec<String> = Vec::new();
+
                     // Phase 2: Remove worktrees
                     clust_ipc::send_message_write(
                         &mut writer,
@@ -1424,8 +1409,13 @@ async fn handle_connection(
                         },
                     )
                     .await?;
-                    let removed_worktrees =
-                        crate::repo::purge_worktrees(&root).unwrap_or(0);
+                    let removed_worktrees = match crate::repo::purge_worktrees(&root).await {
+                        Ok(n) => n,
+                        Err(e) => {
+                            warnings.push(format!("purge_worktrees: {e}"));
+                            0
+                        }
+                    };
 
                     // Phase 3: Delete local branches
                     clust_ipc::send_message_write(
@@ -1435,8 +1425,13 @@ async fn handle_connection(
                         },
                     )
                     .await?;
-                    let deleted_branches =
-                        crate::repo::purge_branches(&root).unwrap_or(0);
+                    let deleted_branches = match crate::repo::purge_branches(&root).await {
+                        Ok(n) => n,
+                        Err(e) => {
+                            warnings.push(format!("purge_branches: {e}"));
+                            0
+                        }
+                    };
 
                     // Phase 4: Clean stale refs
                     clust_ipc::send_message_write(
@@ -1446,7 +1441,21 @@ async fn handle_connection(
                         },
                     )
                     .await?;
-                    let _ = crate::repo::clean_stale_refs(&root);
+                    if let Err(e) = crate::repo::clean_stale_refs(&root).await {
+                        warnings.push(format!("clean_stale_refs: {e}"));
+                    }
+
+                    // Surface warnings as progress entries before the final
+                    // result so the user sees partial-failure context.
+                    for w in &warnings {
+                        clust_ipc::send_message_write(
+                            &mut writer,
+                            &HubMessage::PurgeProgress {
+                                step: format!("\u{26a0} {w}"),
+                            },
+                        )
+                        .await?;
+                    }
 
                     // Done
                     clust_ipc::send_message_write(
@@ -1484,32 +1493,27 @@ async fn handle_connection(
                 )
             };
             match repo_root {
-                Ok(root) => {
-                    match crate::repo::clean_stale_refs(&root) {
-                        Ok(()) => {
-                            clust_ipc::send_message_write(
-                                &mut writer,
-                                &HubMessage::StaleRefsCleaned {
-                                    path: root.to_string_lossy().into_owned(),
-                                },
-                            )
-                            .await?;
-                        }
-                        Err(e) => {
-                            clust_ipc::send_message_write(
-                                &mut writer,
-                                &HubMessage::Error { message: e },
-                            )
-                            .await?;
-                        }
+                Ok(root) => match crate::repo::clean_stale_refs(&root).await {
+                    Ok(()) => {
+                        clust_ipc::send_message_write(
+                            &mut writer,
+                            &HubMessage::StaleRefsCleaned {
+                                path: root.to_string_lossy().into_owned(),
+                            },
+                        )
+                        .await?;
                     }
-                }
+                    Err(e) => {
+                        clust_ipc::send_message_write(
+                            &mut writer,
+                            &HubMessage::Error { message: e },
+                        )
+                        .await?;
+                    }
+                },
                 Err(e) => {
-                    clust_ipc::send_message_write(
-                        &mut writer,
-                        &HubMessage::Error { message: e },
-                    )
-                    .await?;
+                    clust_ipc::send_message_write(&mut writer, &HubMessage::Error { message: e })
+                        .await?;
                 }
             }
         }
@@ -1518,7 +1522,7 @@ async fn handle_connection(
             branch_name,
         } => {
             let repo_root = std::path::Path::new(&repo_path);
-            match crate::repo::pull_branch(repo_root, &branch_name) {
+            match crate::repo::pull_branch(repo_root, &branch_name).await {
                 Ok(summary) => {
                     clust_ipc::send_message_write(
                         &mut writer,
@@ -1530,17 +1534,14 @@ async fn handle_connection(
                     .await?;
                 }
                 Err(e) => {
-                    clust_ipc::send_message_write(
-                        &mut writer,
-                        &HubMessage::Error { message: e },
-                    )
-                    .await?;
+                    clust_ipc::send_message_write(&mut writer, &HubMessage::Error { message: e })
+                        .await?;
                 }
             }
         }
         CliMessage::CreateRepo { parent_dir, name } => {
             // git init runs outside the lock
-            match crate::repo::init_repo(std::path::Path::new(&parent_dir), &name) {
+            match crate::repo::init_repo(std::path::Path::new(&parent_dir), &name).await {
                 Ok(repo_path) => {
                     let path_str = repo_path.to_string_lossy().into_owned();
                     // Register in DB under lock
@@ -1561,11 +1562,8 @@ async fn handle_connection(
                     .await?;
                 }
                 Err(e) => {
-                    clust_ipc::send_message_write(
-                        &mut writer,
-                        &HubMessage::Error { message: e },
-                    )
-                    .await?;
+                    clust_ipc::send_message_write(&mut writer, &HubMessage::Error { message: e })
+                        .await?;
                 }
             }
         }
@@ -1577,6 +1575,7 @@ async fn handle_connection(
         } => {
             // Spawn child process outside the lock
             match crate::repo::start_clone(&url, std::path::Path::new(&parent_dir), name.as_deref())
+                .await
             {
                 Ok((mut child, repo_path)) => {
                     clust_ipc::send_message_write(
@@ -1614,9 +1613,8 @@ async fn handle_connection(
                                 let _ = tx.send(Ok("__CLONE_DONE__".into()));
                             }
                             Ok(status) => {
-                                let _ = tx.send(Err(format!(
-                                    "git clone exited with status {status}"
-                                )));
+                                let _ =
+                                    tx.send(Err(format!("git clone exited with status {status}")));
                             }
                             Err(e) => {
                                 let _ = tx.send(Err(format!("failed to wait for git: {e}")));
@@ -1657,22 +1655,51 @@ async fn handle_connection(
                             .file_name()
                             .map(|n| n.to_string_lossy().into_owned())
                             .unwrap_or_else(|| path_str.clone());
-                        {
+                        // Register the new repo in the DB. If registration
+                        // fails the clone is in a half-state (on disk but
+                        // unknown to the hub); best-effort remove the
+                        // freshly cloned directory and surface the error so
+                        // the user can retry.
+                        let register_result: Result<(), String> = {
                             let hub = state.lock().await;
-                            if let Some(ref db) = hub.db {
-                                let color = crate::db::next_repo_color(db);
-                                let _ =
-                                    crate::db::register_repo(db, &path_str, &repo_name, color);
+                            match hub.db.as_ref() {
+                                Some(db) => {
+                                    let color = crate::db::next_repo_color(db);
+                                    crate::db::register_repo(db, &path_str, &repo_name, color)
+                                }
+                                None => Err("database not initialized".into()),
+                            }
+                        };
+                        match register_result {
+                            Ok(()) => {
+                                clust_ipc::send_message_write(
+                                    &mut writer,
+                                    &HubMessage::RepoCloned {
+                                        path: path_str,
+                                        name: repo_name,
+                                    },
+                                )
+                                .await?;
+                            }
+                            Err(reg_err) => {
+                                let cleanup_note = match std::fs::remove_dir_all(&repo_path) {
+                                    Ok(()) => "cloned directory removed".to_string(),
+                                    Err(rm_err) => format!(
+                                        "could not clean up clone at {}: {rm_err}",
+                                        repo_path.display()
+                                    ),
+                                };
+                                clust_ipc::send_message_write(
+                                    &mut writer,
+                                    &HubMessage::Error {
+                                        message: format!(
+                                            "clone succeeded but registration failed: {reg_err} ({cleanup_note})"
+                                        ),
+                                    },
+                                )
+                                .await?;
                             }
                         }
-                        clust_ipc::send_message_write(
-                            &mut writer,
-                            &HubMessage::RepoCloned {
-                                path: path_str,
-                                name: repo_name,
-                            },
-                        )
-                        .await?;
                     } else {
                         clust_ipc::send_message_write(
                             &mut writer,
@@ -1684,11 +1711,8 @@ async fn handle_connection(
                     }
                 }
                 Err(e) => {
-                    clust_ipc::send_message_write(
-                        &mut writer,
-                        &HubMessage::Error { message: e },
-                    )
-                    .await?;
+                    clust_ipc::send_message_write(&mut writer, &HubMessage::Error { message: e })
+                        .await?;
                 }
             }
         }
@@ -1710,7 +1734,12 @@ async fn handle_connection(
         }
 
         // Terminal session management
-        CliMessage::StartTerminal { working_dir, cols, rows, agent_id } => {
+        CliMessage::StartTerminal {
+            working_dir,
+            cols,
+            rows,
+            agent_id,
+        } => {
             let result = {
                 let mut hub_state = state.lock().await;
                 agent::spawn_terminal(
@@ -1732,11 +1761,8 @@ async fn handle_connection(
                     handle_attached_terminal_session(&id, reader, writer, state).await?;
                 }
                 Err(e) => {
-                    clust_ipc::send_message_write(
-                        &mut writer,
-                        &HubMessage::Error { message: e },
-                    )
-                    .await?;
+                    clust_ipc::send_message_write(&mut writer, &HubMessage::Error { message: e })
+                        .await?;
                 }
             }
         }
@@ -1804,11 +1830,8 @@ async fn handle_connection(
         } => {
             // Validate sanitized branch uniqueness before doing anything else.
             if let Err(msg) = crate::batch::validate_unique_sanitized_branches(&tasks) {
-                clust_ipc::send_message_write(
-                    &mut writer,
-                    &HubMessage::Error { message: msg },
-                )
-                .await?;
+                clust_ipc::send_message_write(&mut writer, &HubMessage::Error { message: msg })
+                    .await?;
                 return Ok(());
             }
             // Treat max_concurrent=0 as "unlimited" — passing it through
@@ -1823,11 +1846,7 @@ async fn handle_connection(
                         let mut id;
                         loop {
                             id = format!("b{:05x}", rand::random::<u32>() & 0xFFFFF);
-                            if !hub_state
-                                .queued_batches
-                                .iter()
-                                .any(|b| b.id == id)
-                            {
+                            if !hub_state.queued_batches.iter().any(|b| b.id == id) {
                                 break;
                             }
                         }
@@ -1870,14 +1889,16 @@ async fn handle_connection(
                     // Persist to database
                     let task_data: Vec<(String, String, bool, bool, bool, bool)> = tasks
                         .iter()
-                        .map(|t| (
-                            t.branch_name.clone(),
-                            t.prompt.clone(),
-                            t.use_prefix,
-                            t.use_suffix,
-                            t.plan_mode,
-                            t.exit_when_done,
-                        ))
+                        .map(|t| {
+                            (
+                                t.branch_name.clone(),
+                                t.prompt.clone(),
+                                t.use_prefix,
+                                t.use_suffix,
+                                t.plan_mode,
+                                t.exit_when_done,
+                            )
+                        })
                         .collect();
                     {
                         let hub_state = state.lock().await;
@@ -1929,22 +1950,19 @@ async fn handle_connection(
                 }
             }
         }
-        CliMessage::CancelQueuedBatch { batch_id, cleanup_mode } => {
+        CliMessage::CancelQueuedBatch {
+            batch_id,
+            cleanup_mode,
+        } => {
             let found = {
                 let hub_state = state.lock().await;
-                hub_state
-                    .queued_batches
-                    .iter()
-                    .any(|b| b.id == batch_id)
+                hub_state.queued_batches.iter().any(|b| b.id == batch_id)
             };
             if found {
                 // Collect info needed for cleanup
                 let (agent_ids, branch_cleanup): (Vec<String>, Vec<(String, String)>) = {
                     let hub_state = state.lock().await;
-                    let batch = hub_state
-                        .queued_batches
-                        .iter()
-                        .find(|b| b.id == batch_id);
+                    let batch = hub_state.queued_batches.iter().find(|b| b.id == batch_id);
                     match batch {
                         Some(b) => {
                             let aids: Vec<String> = b
@@ -1975,25 +1993,22 @@ async fn handle_connection(
                 if cleanup_mode == clust_ipc::BatchCleanupMode::StopAgentsAndRemoveBranches {
                     for (repo_path, branch_name) in &branch_cleanup {
                         let repo_root = std::path::Path::new(repo_path.as_str());
-                        let _ = crate::repo::remove_worktree(repo_root, branch_name, true, true);
+                        let _ =
+                            crate::repo::remove_worktree(repo_root, branch_name, true, true).await;
                     }
                 }
 
                 // Remove from state and database
                 {
                     let mut hub_state = state.lock().await;
-                    hub_state
-                        .queued_batches
-                        .retain(|b| b.id != batch_id);
+                    hub_state.queued_batches.retain(|b| b.id != batch_id);
                     if let Some(ref db) = hub_state.db {
                         let _ = crate::db::delete_queued_batch(db, &batch_id);
                     }
                 }
                 clust_ipc::send_message_write(
                     &mut writer,
-                    &HubMessage::BatchCancelled {
-                        batch_id,
-                    },
+                    &HubMessage::BatchCancelled { batch_id },
                 )
                 .await?;
             } else {
@@ -2024,16 +2039,12 @@ async fn handle_connection(
                         tasks_done: b
                             .tasks
                             .iter()
-                            .filter(|t| {
-                                t.status == crate::batch::HubTaskStatus::Done
-                            })
+                            .filter(|t| t.status == crate::batch::HubTaskStatus::Done)
                             .count(),
                         tasks_active: b
                             .tasks
                             .iter()
-                            .filter(|t| {
-                                t.status == crate::batch::HubTaskStatus::Active
-                            })
+                            .filter(|t| t.status == crate::batch::HubTaskStatus::Active)
                             .count(),
                         tasks: b
                             .tasks
@@ -2060,11 +2071,8 @@ async fn handle_connection(
                     })
                     .collect()
             };
-            clust_ipc::send_message_write(
-                &mut writer,
-                &HubMessage::QueuedBatchList { batches },
-            )
-            .await?;
+            clust_ipc::send_message_write(&mut writer, &HubMessage::QueuedBatchList { batches })
+                .await?;
         }
         CliMessage::RegisterBatch {
             repo_path,
@@ -2082,11 +2090,8 @@ async fn handle_connection(
             depends_on,
         } => {
             if let Err(msg) = crate::batch::validate_unique_sanitized_branches(&tasks) {
-                clust_ipc::send_message_write(
-                    &mut writer,
-                    &HubMessage::Error { message: msg },
-                )
-                .await?;
+                clust_ipc::send_message_write(&mut writer, &HubMessage::Error { message: msg })
+                    .await?;
                 return Ok(());
             }
             let max_concurrent = max_concurrent.filter(|&m| m != 0);
@@ -2138,20 +2143,22 @@ async fn handle_connection(
             // Persist to database
             let task_data: Vec<(String, String, bool, bool, bool, bool)> = tasks
                 .iter()
-                .map(|t| (
-                    t.branch_name.clone(),
-                    t.prompt.clone(),
-                    t.use_prefix,
-                    t.use_suffix,
-                    t.plan_mode,
-                    t.exit_when_done,
-                ))
+                .map(|t| {
+                    (
+                        t.branch_name.clone(),
+                        t.prompt.clone(),
+                        t.use_prefix,
+                        t.use_suffix,
+                        t.plan_mode,
+                        t.exit_when_done,
+                    )
+                })
                 .collect();
             {
                 let hub_state = state.lock().await;
                 if let Some(ref db) = hub_state.db {
-                    let depends_on_json = serde_json::to_string(&depends_on)
-                        .unwrap_or_else(|_| "[]".to_string());
+                    let depends_on_json =
+                        serde_json::to_string(&depends_on).unwrap_or_else(|_| "[]".to_string());
                     let row = crate::db::QueuedBatchRow {
                         id: batch_id.clone(),
                         title,
@@ -2179,11 +2186,8 @@ async fn handle_connection(
                 hub_state.queued_batches.push(batch_entry);
             }
 
-            clust_ipc::send_message_write(
-                &mut writer,
-                &HubMessage::BatchRegistered { batch_id },
-            )
-            .await?;
+            clust_ipc::send_message_write(&mut writer, &HubMessage::BatchRegistered { batch_id })
+                .await?;
         }
         CliMessage::AddBatchTask {
             batch_id,
@@ -2191,14 +2195,15 @@ async fn handle_connection(
             prompt,
         } => {
             let mut hub_state = state.lock().await;
-            let outcome: Result<(), String> = if let Some(batch) =
-                hub_state.queued_batches.iter_mut().find(|b| b.id == batch_id)
+            let outcome: Result<(), String> = if let Some(batch) = hub_state
+                .queued_batches
+                .iter_mut()
+                .find(|b| b.id == batch_id)
             {
                 // Reject if the new branch's sanitized form collides with an
                 // existing task's — phase-3 lookup uses branch_name so we
                 // must keep them unique.
-                let new_sanitized =
-                    clust_ipc::branch::sanitize_branch_name(&branch_name);
+                let new_sanitized = clust_ipc::branch::sanitize_branch_name(&branch_name);
                 if batch.tasks.iter().any(|t| {
                     clust_ipc::branch::sanitize_branch_name(&t.branch_name) == new_sanitized
                 }) {
@@ -2235,15 +2240,10 @@ async fn handle_connection(
                 Err(format!("batch {batch_id} not found"))
             };
             match outcome {
-                Ok(()) => {
-                    clust_ipc::send_message_write(&mut writer, &HubMessage::Ok).await?
-                }
+                Ok(()) => clust_ipc::send_message_write(&mut writer, &HubMessage::Ok).await?,
                 Err(message) => {
-                    clust_ipc::send_message_write(
-                        &mut writer,
-                        &HubMessage::Error { message },
-                    )
-                    .await?
+                    clust_ipc::send_message_write(&mut writer, &HubMessage::Error { message })
+                        .await?
                 }
             }
         }
@@ -2255,7 +2255,11 @@ async fn handle_connection(
         } => {
             let mut hub_state = state.lock().await;
             let mut ok = false;
-            if let Some(batch) = hub_state.queued_batches.iter_mut().find(|b| b.id == batch_id) {
+            if let Some(batch) = hub_state
+                .queued_batches
+                .iter_mut()
+                .find(|b| b.id == batch_id)
+            {
                 if let Some(task) = batch.tasks.get_mut(task_index) {
                     task.status = crate::batch::HubTaskStatus::parse_status(&status);
                     task.agent_id = agent_id.clone();
@@ -2292,7 +2296,11 @@ async fn handle_connection(
         } => {
             let mut hub_state = state.lock().await;
             let mut ok = false;
-            if let Some(batch) = hub_state.queued_batches.iter_mut().find(|b| b.id == batch_id) {
+            if let Some(batch) = hub_state
+                .queued_batches
+                .iter_mut()
+                .find(|b| b.id == batch_id)
+            {
                 batch.prompt_prefix = prompt_prefix.clone();
                 batch.prompt_suffix = prompt_suffix.clone();
                 batch.plan_mode = plan_mode;
@@ -2321,13 +2329,14 @@ async fn handle_connection(
                 .await?;
             }
         }
-        CliMessage::UpdateBatchStatus {
-            batch_id,
-            status,
-        } => {
+        CliMessage::UpdateBatchStatus { batch_id, status } => {
             let mut hub_state = state.lock().await;
             let mut ok = false;
-            if let Some(batch) = hub_state.queued_batches.iter_mut().find(|b| b.id == batch_id) {
+            if let Some(batch) = hub_state
+                .queued_batches
+                .iter_mut()
+                .find(|b| b.id == batch_id)
+            {
                 batch.status = crate::batch::HubBatchStatus::parse(&status);
                 if let Some(ref db) = hub_state.db {
                     let _ = crate::db::update_batch_status(db, &batch_id, &status);
@@ -2351,57 +2360,47 @@ async fn handle_connection(
             depends_on,
         } => {
             let mut hub_state = state.lock().await;
-            let outcome: Result<(), String> = if hub_state
-                .queued_batches
-                .iter()
-                .any(|b| b.id == batch_id)
-            {
-                if crate::batch::would_create_cycle(
-                    &hub_state.queued_batches,
-                    &batch_id,
-                    &depends_on,
-                ) {
-                    Err(
-                        "dependency change would create a cycle (or self-reference)"
-                            .to_string(),
-                    )
-                } else if let Some(batch) = hub_state
-                    .queued_batches
-                    .iter_mut()
-                    .find(|b| b.id == batch_id)
-                {
-                    batch.depends_on = depends_on.clone();
-                    if let Some(ref db) = hub_state.db {
-                        let _ = crate::db::update_batch_depends_on(
-                            db,
-                            &batch_id,
-                            &depends_on,
-                        );
+            let outcome: Result<(), String> =
+                if hub_state.queued_batches.iter().any(|b| b.id == batch_id) {
+                    if crate::batch::would_create_cycle(
+                        &hub_state.queued_batches,
+                        &batch_id,
+                        &depends_on,
+                    ) {
+                        Err("dependency change would create a cycle (or self-reference)"
+                            .to_string())
+                    } else if let Some(batch) = hub_state
+                        .queued_batches
+                        .iter_mut()
+                        .find(|b| b.id == batch_id)
+                    {
+                        batch.depends_on = depends_on.clone();
+                        if let Some(ref db) = hub_state.db {
+                            let _ = crate::db::update_batch_depends_on(db, &batch_id, &depends_on);
+                        }
+                        Ok(())
+                    } else {
+                        Err(format!("batch {batch_id} not found"))
                     }
-                    Ok(())
                 } else {
                     Err(format!("batch {batch_id} not found"))
-                }
-            } else {
-                Err(format!("batch {batch_id} not found"))
-            };
+                };
             match outcome {
-                Ok(()) => {
-                    clust_ipc::send_message_write(&mut writer, &HubMessage::Ok).await?
-                }
+                Ok(()) => clust_ipc::send_message_write(&mut writer, &HubMessage::Ok).await?,
                 Err(message) => {
-                    clust_ipc::send_message_write(
-                        &mut writer,
-                        &HubMessage::Error { message },
-                    )
-                    .await?
+                    clust_ipc::send_message_write(&mut writer, &HubMessage::Error { message })
+                        .await?
                 }
             }
         }
         CliMessage::RemoveDoneBatchTasks { batch_id } => {
             let mut hub_state = state.lock().await;
             let mut ok = false;
-            if let Some(batch) = hub_state.queued_batches.iter_mut().find(|b| b.id == batch_id) {
+            if let Some(batch) = hub_state
+                .queued_batches
+                .iter_mut()
+                .find(|b| b.id == batch_id)
+            {
                 batch
                     .tasks
                     .retain(|t| t.status != crate::batch::HubTaskStatus::Done);
@@ -2484,14 +2483,27 @@ async fn handle_attached_session(
 ) -> io::Result<()> {
     // Subscribe to agent output broadcast and assign a client ID.
     // Also grab a handle to the replay buffer for replay-on-attach and lag recovery.
-    let (mut output_rx, client_id, replay_buf) = {
+    //
+    // We clone the `Arc<AtomicUsize>` for `attached_count` and keep it outside
+    // the lock so the cleanup decrement at the end of this function runs even
+    // if the agent has been removed from `state.agents` before we get there
+    // (e.g. the PTY reader observed exit and dropped the entry). The atomic
+    // outlives the entry; orphan decrements are harmless because the count is
+    // only read off live entries via `entry.attached_count.load(...)`.
+    let (mut output_rx, client_id, replay_buf, attached_count) = {
         let hub = state.lock().await;
-        let entry = hub.agents.get(agent_id).ok_or_else(|| {
-            io::Error::new(io::ErrorKind::NotFound, "agent not found")
-        })?;
+        let entry = hub
+            .agents
+            .get(agent_id)
+            .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "agent not found"))?;
         entry.attached_count.fetch_add(1, Ordering::Relaxed);
         let cid = entry.next_client_id();
-        (entry.output_tx.subscribe(), cid, entry.replay_buffer.clone())
+        (
+            entry.output_tx.subscribe(),
+            cid,
+            entry.replay_buffer.clone(),
+            entry.attached_count.clone(),
+        )
     };
 
     let agent_id_owned = agent_id.to_string();
@@ -2556,11 +2568,8 @@ async fn handle_attached_session(
                     break;
                 }
                 Ok(AgentEvent::HubShutdown) => {
-                    let _ = clust_ipc::send_message_write(
-                        &mut writer,
-                        &HubMessage::HubShutdown,
-                    )
-                    .await;
+                    let _ =
+                        clust_ipc::send_message_write(&mut writer, &HubMessage::HubShutdown).await;
                     break;
                 }
                 Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
@@ -2648,10 +2657,14 @@ async fn handle_attached_session(
         _ = input_task => {}
     }
 
-    // Decrement attached count and remove client from size tracking
+    // Decrement attached count via the cloned Arc — runs even if the agent
+    // entry has already been removed (e.g. the agent exited mid-session).
+    attached_count.fetch_sub(1, Ordering::Relaxed);
+
+    // Best-effort: clear per-client size tracking and active-client marker if
+    // the entry is still around. If it's gone there is nothing to clean up.
     let mut hub = state_for_cleanup.lock().await;
     if let Some(entry) = hub.agents.get_mut(&agent_id_for_cleanup) {
-        entry.attached_count.fetch_sub(1, Ordering::Relaxed);
         entry.client_sizes.remove(&client_id);
         if entry.active_client_id == Some(client_id) {
             entry.active_client_id = None;
@@ -2671,14 +2684,23 @@ async fn handle_attached_terminal_session(
     mut writer: OwnedWriteHalf,
     state: SharedHubState,
 ) -> io::Result<()> {
-    let (mut output_rx, client_id, replay_buf) = {
+    // Same invariant as `handle_attached_session`: clone the `Arc<AtomicUsize>`
+    // so the cleanup decrement always runs even if the terminal entry has been
+    // removed by the PTY reader before we reach the end of this function.
+    let (mut output_rx, client_id, replay_buf, attached_count) = {
         let hub = state.lock().await;
-        let entry = hub.terminals.get(terminal_id).ok_or_else(|| {
-            io::Error::new(io::ErrorKind::NotFound, "terminal not found")
-        })?;
+        let entry = hub
+            .terminals
+            .get(terminal_id)
+            .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "terminal not found"))?;
         entry.attached_count.fetch_add(1, Ordering::Relaxed);
         let cid = entry.next_client_id();
-        (entry.output_tx.subscribe(), cid, entry.replay_buffer.clone())
+        (
+            entry.output_tx.subscribe(),
+            cid,
+            entry.replay_buffer.clone(),
+            entry.attached_count.clone(),
+        )
     };
 
     let terminal_id_owned = terminal_id.to_string();
@@ -2741,11 +2763,8 @@ async fn handle_attached_terminal_session(
                     break;
                 }
                 Ok(AgentEvent::HubShutdown) => {
-                    let _ = clust_ipc::send_message_write(
-                        &mut writer,
-                        &HubMessage::HubShutdown,
-                    )
-                    .await;
+                    let _ =
+                        clust_ipc::send_message_write(&mut writer, &HubMessage::HubShutdown).await;
                     break;
                 }
                 Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
@@ -2824,9 +2843,12 @@ async fn handle_attached_terminal_session(
         _ = input_task => {}
     }
 
+    // Always decrement the attached count via the cloned Arc, even if the
+    // terminal entry is gone.
+    attached_count.fetch_sub(1, Ordering::Relaxed);
+
     let mut hub = state_for_cleanup.lock().await;
     if let Some(entry) = hub.terminals.get_mut(&terminal_id_for_cleanup) {
-        entry.attached_count.fetch_sub(1, Ordering::Relaxed);
         entry.client_sizes.remove(&client_id);
         if entry.active_client_id == Some(client_id) {
             entry.active_client_id = None;
@@ -2834,4 +2856,94 @@ async fn handle_attached_terminal_session(
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `is_canonical_ancestor` should match only on whole path components,
+    /// so `/tmp/foo` is NOT an ancestor of `/tmp/foo-bar`.
+    #[test]
+    fn canonical_ancestor_rejects_prefix_trick() {
+        let a = std::path::Path::new("/tmp/foo");
+        let p = std::path::Path::new("/tmp/foo-bar");
+        assert!(
+            !is_canonical_ancestor(a, p),
+            "/tmp/foo must not be considered an ancestor of /tmp/foo-bar"
+        );
+    }
+
+    #[test]
+    fn canonical_ancestor_accepts_equal() {
+        let a = std::path::Path::new("/a/b/c");
+        let p = std::path::Path::new("/a/b/c");
+        assert!(is_canonical_ancestor(a, p));
+    }
+
+    #[test]
+    fn canonical_ancestor_accepts_strict_ancestor() {
+        let a = std::path::Path::new("/a/b");
+        let p = std::path::Path::new("/a/b/c");
+        assert!(is_canonical_ancestor(a, p));
+    }
+
+    #[test]
+    fn canonical_ancestor_rejects_unrelated() {
+        let a = std::path::Path::new("/a/b");
+        let p = std::path::Path::new("/x/y/z");
+        assert!(!is_canonical_ancestor(a, p));
+    }
+
+    /// Asking to delete a path that doesn't exist must return an error
+    /// rather than silently falling back to the non-canonical path.
+    #[test]
+    fn check_safe_to_delete_errors_on_missing_path() {
+        let p = std::path::Path::new("/this/path/should/never/exist/abc123-clust-test");
+        assert!(check_safe_to_delete(p).is_err());
+    }
+
+    /// `check_safe_to_delete` must reject the prefix-trick case where the
+    /// home dir shares a string prefix with the target but is not a real
+    /// path-component ancestor.
+    ///
+    /// Strategy: create two sibling dirs `home_dir` and `home_dir-extra`
+    /// inside a tempdir, point `HOME` at `home_dir`, then ask whether
+    /// `home_dir-extra` is safe to delete. The new code uses canonical-
+    /// component comparison so this case is allowed (whereas a buggy
+    /// `Path::starts_with` based check would mis-classify).
+    #[test]
+    fn check_safe_to_delete_canonical_components_not_byte_prefix() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let home_dir = tmp.path().join("home_dir");
+        let extra_dir = tmp.path().join("home_dir-extra");
+        std::fs::create_dir(&home_dir).unwrap();
+        std::fs::create_dir(&extra_dir).unwrap();
+
+        // Save and restore HOME so other tests aren't affected.
+        let prev_home = std::env::var_os("HOME");
+        // SAFETY: cargo runs tests within a process; mutating env may race
+        // with parallel tests that read HOME. This test does not assume
+        // exclusivity, so we restore HOME before asserting.
+        unsafe {
+            std::env::set_var("HOME", &home_dir);
+        }
+        let result = check_safe_to_delete(&extra_dir);
+        match prev_home {
+            Some(h) => unsafe {
+                std::env::set_var("HOME", h);
+            },
+            None => unsafe {
+                std::env::remove_var("HOME");
+            },
+        }
+
+        assert!(
+            result.is_ok(),
+            "deleting {:?} (sibling of HOME={:?}) should be allowed, got: {:?}",
+            extra_dir,
+            home_dir,
+            result
+        );
+    }
 }

@@ -279,9 +279,7 @@ pub fn spawn_agent(
         }
     }
 
-    let settings_path = if params.exit_when_done
-        && clust_ipc::agents::supports_stop_hook(&binary)
-    {
+    let settings_path = if params.exit_when_done && clust_ipc::agents::supports_stop_hook(&binary) {
         match write_exit_when_done_settings(&id) {
             Ok(path) => {
                 cmd.arg("--settings");
@@ -378,8 +376,7 @@ fn write_exit_when_done_settings(agent_id: &str) -> Result<std::path::PathBuf, S
         "{{\"hooks\":{{\"Stop\":[{{\"hooks\":[{{\"type\":\"command\",\"command\":\"{}\"}}]}}]}}}}",
         cmd.replace('\\', "\\\\").replace('"', "\\\"")
     );
-    std::fs::write(&path, json)
-        .map_err(|e| format!("failed to write agent settings file: {e}"))?;
+    std::fs::write(&path, json).map_err(|e| format!("failed to write agent settings file: {e}"))?;
     Ok(path)
 }
 
@@ -388,8 +385,7 @@ fn write_exit_when_done_settings(agent_id: &str) -> Result<std::path::PathBuf, S
 /// who installed both into `~/.clust/bin/` get the expected behavior even when
 /// the hook runs without inheriting `PATH`.
 fn stop_hook_command() -> Result<String, String> {
-    let exe = std::env::current_exe()
-        .map_err(|e| format!("failed to resolve current_exe: {e}"))?;
+    let exe = std::env::current_exe().map_err(|e| format!("failed to resolve current_exe: {e}"))?;
     let dir = exe
         .parent()
         .ok_or_else(|| "current_exe has no parent dir".to_string())?;
@@ -487,9 +483,7 @@ pub async fn stop_agent(state: &SharedHubState, id: &str) -> Result<(), String> 
             .agents
             .get(id)
             .ok_or_else(|| format!("agent {id} not found"))?;
-        entry
-            .pid
-            .ok_or_else(|| format!("agent {id} has no PID"))?
+        entry.pid.ok_or_else(|| format!("agent {id} has no PID"))?
     };
 
     // SIGTERM
@@ -582,8 +576,7 @@ pub fn spawn_terminal(
 ) -> Result<String, String> {
     let id = generate_terminal_id(&state.terminals);
 
-    let shell = std::env::var("SHELL")
-        .unwrap_or_else(|_| "/bin/zsh".to_string());
+    let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".to_string());
 
     let pty_system = portable_pty::native_pty_system();
     let pair = pty_system

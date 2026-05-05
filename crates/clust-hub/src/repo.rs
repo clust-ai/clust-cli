@@ -354,17 +354,23 @@ pub fn is_worktree_dirty(wt_path: &Path) -> bool {
 
 /// List all worktrees in a repository.
 ///
-/// Uses `git worktree list --porcelain` for reliable parsing.
+/// Uses `git worktree list --porcelain -z` (NUL-separated) so paths
+/// containing whitespace or newlines are parsed correctly.
 /// Returns entries for the main checkout and all worktrees.
-pub fn list_worktrees<A: AgentMatcher>(
+pub async fn list_worktrees<A: AgentMatcher>(
     repo_root: &Path,
     agents: &HashMap<String, A>,
 ) -> Result<Vec<WorktreeEntry>, String> {
-    let output = std::process::Command::new("git")
-        .args(["worktree", "list", "--porcelain"])
-        .current_dir(repo_root)
-        .output()
-        .map_err(|e| format!("failed to run git: {e}"))?;
+    let repo_root_owned = repo_root.to_path_buf();
+    let output = tokio::task::spawn_blocking(move || {
+        std::process::Command::new("git")
+            .args(["worktree", "list", "--porcelain", "-z"])
+            .current_dir(&repo_root_owned)
+            .output()
+    })
+    .await
+    .map_err(|e| format!("blocking task failed: {e}"))?
+    .map_err(|e| format!("failed to run git: {e}"))?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -379,63 +385,89 @@ pub fn list_worktrees<A: AgentMatcher>(
         .trim_end_matches('/')
         .to_string();
 
+    parse_worktree_list_porcelain_z(&stdout, &repo_root_str, agents)
+}
+
+/// Parse the output of `git worktree list --porcelain -z`.
+///
+/// In `-z` mode, fields within a worktree block are separated by NUL bytes
+/// and worktree blocks are separated by an additional NUL (i.e. `\0\0`).
+/// This is robust to whitespace and newlines embedded in worktree paths.
+fn parse_worktree_list_porcelain_z<A: AgentMatcher>(
+    stdout: &str,
+    repo_root_str: &str,
+    agents: &HashMap<String, A>,
+) -> Result<Vec<WorktreeEntry>, String> {
     let mut entries = Vec::new();
+
+    // Split on NUL; an empty token marks the end of a worktree block.
     let mut current_path: Option<String> = None;
     let mut current_branch: Option<String> = None;
     let mut is_bare = false;
 
-    for line in stdout.lines().chain(std::iter::once("")) {
-        if line.is_empty() {
-            // End of a worktree block
-            if let (Some(path), Some(branch)) = (current_path.take(), current_branch.take()) {
-                if !is_bare {
-                    let wt_path = Path::new(&path);
-                    let canon_path = wt_path
-                        .canonicalize()
-                        .unwrap_or_else(|_| wt_path.to_path_buf())
-                        .to_string_lossy()
-                        .trim_end_matches('/')
-                        .to_string();
-                    let is_main = canon_path == repo_root_str;
-                    let is_dirty = is_worktree_dirty(wt_path);
+    let flush = |entries: &mut Vec<WorktreeEntry>,
+                 current_path: &mut Option<String>,
+                 current_branch: &mut Option<String>,
+                 is_bare: &mut bool| {
+        if let (Some(path), Some(branch)) = (current_path.take(), current_branch.take()) {
+            if !*is_bare {
+                let wt_path = Path::new(&path);
+                let canon_path = wt_path
+                    .canonicalize()
+                    .unwrap_or_else(|_| wt_path.to_path_buf())
+                    .to_string_lossy()
+                    .trim_end_matches('/')
+                    .to_string();
+                let is_main = canon_path == repo_root_str;
+                let is_dirty = is_worktree_dirty(wt_path);
 
-                    let matching_agents: Vec<AgentInfo> = agents
-                        .values()
-                        .filter(|a| {
-                            a.repo_path().map(|rp| rp.trim_end_matches('/'))
-                                == Some(repo_root_str.as_str())
-                                && a.branch_name() == Some(branch.as_str())
-                        })
-                        .map(|a| AgentInfo {
-                            id: a.id().to_string(),
-                            agent_binary: a.agent_binary().to_string(),
-                            started_at: a.started_at().to_string(),
-                            attached_clients: a.attached_clients(),
-                            hub: a.hub().to_string(),
-                            working_dir: a.working_dir().to_string(),
-                            repo_path: a.repo_path().map(|s| s.to_string()),
-                            branch_name: a.branch_name().map(|s| s.to_string()),
-                            is_worktree: a.is_worktree(),
-                            batch_id: None,
-                            batch_title: None,
-                        })
-                        .collect();
+                let matching_agents: Vec<AgentInfo> = agents
+                    .values()
+                    .filter(|a| {
+                        a.repo_path().map(|rp| rp.trim_end_matches('/')) == Some(repo_root_str)
+                            && a.branch_name() == Some(branch.as_str())
+                    })
+                    .map(|a| AgentInfo {
+                        id: a.id().to_string(),
+                        agent_binary: a.agent_binary().to_string(),
+                        started_at: a.started_at().to_string(),
+                        attached_clients: a.attached_clients(),
+                        hub: a.hub().to_string(),
+                        working_dir: a.working_dir().to_string(),
+                        repo_path: a.repo_path().map(|s| s.to_string()),
+                        branch_name: a.branch_name().map(|s| s.to_string()),
+                        is_worktree: a.is_worktree(),
+                        batch_id: None,
+                        batch_title: None,
+                    })
+                    .collect();
 
-                    entries.push(WorktreeEntry {
-                        branch_name: branch,
-                        path,
-                        is_main,
-                        is_dirty,
-                        active_agents: matching_agents,
-                    });
-                }
+                entries.push(WorktreeEntry {
+                    branch_name: branch,
+                    path,
+                    is_main,
+                    is_dirty,
+                    active_agents: matching_agents,
+                });
             }
-            current_path = None;
-            current_branch = None;
-            is_bare = false;
-        } else if let Some(path) = line.strip_prefix("worktree ") {
+        }
+        *current_path = None;
+        *current_branch = None;
+        *is_bare = false;
+    };
+
+    for token in stdout.split('\0') {
+        if token.is_empty() {
+            // End of a worktree block
+            flush(
+                &mut entries,
+                &mut current_path,
+                &mut current_branch,
+                &mut is_bare,
+            );
+        } else if let Some(path) = token.strip_prefix("worktree ") {
             current_path = Some(path.to_string());
-        } else if let Some(branch_ref) = line.strip_prefix("branch ") {
+        } else if let Some(branch_ref) = token.strip_prefix("branch ") {
             // branch refs/heads/feature/auth -> feature/auth
             current_branch = Some(
                 branch_ref
@@ -443,15 +475,23 @@ pub fn list_worktrees<A: AgentMatcher>(
                     .unwrap_or(branch_ref)
                     .to_string(),
             );
-        } else if line == "bare" {
+        } else if token == "bare" {
             is_bare = true;
-        } else if line == "detached" {
+        } else if token == "detached" {
             // Detached HEAD — use "HEAD" as branch name
             if current_branch.is_none() {
                 current_branch = Some("HEAD".to_string());
             }
         }
     }
+
+    // Flush the final block in case the output didn't end with a blank token
+    flush(
+        &mut entries,
+        &mut current_path,
+        &mut current_branch,
+        &mut is_bare,
+    );
 
     Ok(entries)
 }
@@ -468,12 +508,17 @@ fn is_branch_head(repo_root: &Path, branch: &str) -> bool {
 }
 
 /// Detach HEAD in the main worktree so a branch can be moved to a linked worktree.
-pub fn detach_head(repo_root: &Path) -> Result<(), String> {
-    let output = std::process::Command::new("git")
-        .current_dir(repo_root)
-        .args(["checkout", "--detach"])
-        .output()
-        .map_err(|e| format!("failed to run git checkout --detach: {e}"))?;
+pub async fn detach_head(repo_root: &Path) -> Result<(), String> {
+    let repo_root_owned = repo_root.to_path_buf();
+    let output = tokio::task::spawn_blocking(move || {
+        std::process::Command::new("git")
+            .current_dir(&repo_root_owned)
+            .args(["checkout", "--detach"])
+            .output()
+    })
+    .await
+    .map_err(|e| format!("blocking task failed: {e}"))?
+    .map_err(|e| format!("failed to run git checkout --detach: {e}"))?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -487,20 +532,26 @@ pub fn detach_head(repo_root: &Path) -> Result<(), String> {
 /// For remote refs like `origin/feature`, fetches the branch from the
 /// named remote. For local branches, delegates to [`pull_branch`] which
 /// handles branches checked out at HEAD, in worktrees, or not checked out.
-fn fetch_latest(repo_root: &Path, branch: &str) -> Result<(), String> {
+async fn fetch_latest(repo_root: &Path, branch: &str) -> Result<(), String> {
     if let Some(remote_branch) = branch.strip_prefix("origin/") {
-        let output = std::process::Command::new("git")
-            .current_dir(repo_root)
-            .args(["fetch", "origin", remote_branch])
-            .output()
-            .map_err(|e| format!("failed to run git fetch: {e}"))?;
+        let repo_root_owned = repo_root.to_path_buf();
+        let remote_branch_owned = remote_branch.to_string();
+        let output = tokio::task::spawn_blocking(move || {
+            std::process::Command::new("git")
+                .current_dir(&repo_root_owned)
+                .args(["fetch", "origin", &remote_branch_owned])
+                .output()
+        })
+        .await
+        .map_err(|e| format!("blocking task failed: {e}"))?
+        .map_err(|e| format!("failed to run git fetch: {e}"))?;
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
             return Err(format!("git fetch failed: {}", stderr.trim()));
         }
         Ok(())
     } else {
-        pull_branch(repo_root, branch).map(|_| ())
+        pull_branch(repo_root, branch).await.map(|_| ())
     }
 }
 
@@ -516,7 +567,7 @@ fn fetch_latest(repo_root: &Path, branch: &str) -> Result<(), String> {
 /// When checking out an existing branch that is currently HEAD,
 /// HEAD is automatically detached first so the branch can be moved
 /// to the new worktree.
-pub fn add_worktree(
+pub async fn add_worktree(
     repo_root: &Path,
     branch: &str,
     base: Option<&str>,
@@ -540,13 +591,13 @@ pub fn add_worktree(
         base
     };
     if let Some(target) = fetch_target {
-        let _ = fetch_latest(repo_root, target);
+        let _ = fetch_latest(repo_root, target).await;
     }
 
     // If the branch is currently checked out in the main worktree,
     // detach HEAD first so `git worktree add` can claim it.
     if checkout_existing && is_branch_head(repo_root, branch) {
-        detach_head(repo_root)?;
+        detach_head(repo_root).await?;
     }
 
     if let Some(parent) = wt_path.parent() {
@@ -554,24 +605,36 @@ pub fn add_worktree(
             .map_err(|e| format!("failed to create worktree directory: {e}"))?;
     }
 
-    let mut cmd = std::process::Command::new("git");
-    cmd.current_dir(repo_root);
-    cmd.args(["worktree", "add"]);
+    // Build the argv on the async side, then run git in spawn_blocking.
+    let repo_root_owned = repo_root.to_path_buf();
+    let wt_path_str = wt_path
+        .to_str()
+        .ok_or_else(|| "invalid worktree path encoding".to_string())?
+        .to_string();
+    let branch_owned = branch.to_string();
+    let base_owned = base.map(|s| s.to_string());
 
-    if checkout_existing {
-        cmd.arg(wt_path.to_str().unwrap());
-        cmd.arg(branch);
-    } else {
-        cmd.args(["-b", branch]);
-        cmd.arg(wt_path.to_str().unwrap());
-        if let Some(base) = base {
-            cmd.arg(base);
+    let output = tokio::task::spawn_blocking(move || {
+        let mut cmd = std::process::Command::new("git");
+        cmd.current_dir(&repo_root_owned);
+        cmd.args(["worktree", "add"]);
+
+        if checkout_existing {
+            cmd.arg(&wt_path_str);
+            cmd.arg(&branch_owned);
+        } else {
+            cmd.args(["-b", &branch_owned]);
+            cmd.arg(&wt_path_str);
+            if let Some(ref base) = base_owned {
+                cmd.arg(base);
+            }
         }
-    }
 
-    let output = cmd
-        .output()
-        .map_err(|e| format!("failed to run git: {e}"))?;
+        cmd.output()
+    })
+    .await
+    .map_err(|e| format!("blocking task failed: {e}"))?
+    .map_err(|e| format!("failed to run git: {e}"))?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -582,7 +645,7 @@ pub fn add_worktree(
 }
 
 /// Remove a worktree and optionally delete its local branch.
-pub fn remove_worktree(
+pub async fn remove_worktree(
     repo_root: &Path,
     branch: &str,
     delete_branch: bool,
@@ -594,17 +657,25 @@ pub fn remove_worktree(
         return Err(format!("worktree for branch '{branch}' not found"));
     }
 
-    let mut cmd = std::process::Command::new("git");
-    cmd.current_dir(repo_root);
-    cmd.args(["worktree", "remove"]);
-    if force {
-        cmd.arg("--force");
-    }
-    cmd.arg(wt_path.to_str().unwrap());
+    let repo_root_owned = repo_root.to_path_buf();
+    let wt_path_str = wt_path
+        .to_str()
+        .ok_or_else(|| "invalid worktree path encoding".to_string())?
+        .to_string();
 
-    let output = cmd
-        .output()
-        .map_err(|e| format!("failed to run git: {e}"))?;
+    let output = tokio::task::spawn_blocking(move || {
+        let mut cmd = std::process::Command::new("git");
+        cmd.current_dir(&repo_root_owned);
+        cmd.args(["worktree", "remove"]);
+        if force {
+            cmd.arg("--force");
+        }
+        cmd.arg(&wt_path_str);
+        cmd.output()
+    })
+    .await
+    .map_err(|e| format!("blocking task failed: {e}"))?
+    .map_err(|e| format!("failed to run git: {e}"))?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -612,16 +683,21 @@ pub fn remove_worktree(
     }
 
     if delete_branch {
-        let mut cmd = std::process::Command::new("git");
-        cmd.current_dir(repo_root);
-        if force {
-            cmd.args(["branch", "-D", branch]);
-        } else {
-            cmd.args(["branch", "-d", branch]);
-        }
-        let output = cmd
-            .output()
-            .map_err(|e| format!("failed to run git branch -d: {e}"))?;
+        let repo_root_owned = repo_root.to_path_buf();
+        let branch_owned = branch.to_string();
+        let output = tokio::task::spawn_blocking(move || {
+            let mut cmd = std::process::Command::new("git");
+            cmd.current_dir(&repo_root_owned);
+            if force {
+                cmd.args(["branch", "-D", &branch_owned]);
+            } else {
+                cmd.args(["branch", "-d", &branch_owned]);
+            }
+            cmd.output()
+        })
+        .await
+        .map_err(|e| format!("blocking task failed: {e}"))?
+        .map_err(|e| format!("failed to run git branch -d: {e}"))?;
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
@@ -633,24 +709,33 @@ pub fn remove_worktree(
 }
 
 /// Delete a local branch, removing its worktree first if one exists.
-pub fn delete_local_branch(repo_root: &Path, branch: &str, force: bool) -> Result<(), String> {
+pub async fn delete_local_branch(
+    repo_root: &Path,
+    branch: &str,
+    force: bool,
+) -> Result<(), String> {
     let wt_path = worktree_path(repo_root, branch);
     if wt_path.exists() {
         // remove_worktree with delete_branch=true handles both
-        return remove_worktree(repo_root, branch, true, force);
+        return remove_worktree(repo_root, branch, true, force).await;
     }
 
     // No worktree – just delete the branch
-    let mut cmd = std::process::Command::new("git");
-    cmd.current_dir(repo_root);
-    if force {
-        cmd.args(["branch", "-D", branch]);
-    } else {
-        cmd.args(["branch", "-d", branch]);
-    }
-    let output = cmd
-        .output()
-        .map_err(|e| format!("failed to run git: {e}"))?;
+    let repo_root_owned = repo_root.to_path_buf();
+    let branch_owned = branch.to_string();
+    let output = tokio::task::spawn_blocking(move || {
+        let mut cmd = std::process::Command::new("git");
+        cmd.current_dir(&repo_root_owned);
+        if force {
+            cmd.args(["branch", "-D", &branch_owned]);
+        } else {
+            cmd.args(["branch", "-d", &branch_owned]);
+        }
+        cmd.output()
+    })
+    .await
+    .map_err(|e| format!("blocking task failed: {e}"))?
+    .map_err(|e| format!("failed to run git: {e}"))?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -660,13 +745,49 @@ pub fn delete_local_branch(repo_root: &Path, branch: &str, force: bool) -> Resul
     Ok(())
 }
 
+/// Validate that a ref name (branch name) is safe to pass to git on the
+/// command line and to embed inside a refspec like `<name>:<name>`.
+///
+/// Rejects names that:
+/// - start with `-` (could be parsed as a flag)
+/// - are empty
+/// - contain control characters or spaces
+/// - contain any of: `..`, `:`, `~`, `^`, `?`, `*`, `[`
+fn validate_ref_name(name: &str) -> Result<(), String> {
+    if name.is_empty() {
+        return Err("ref name is empty".into());
+    }
+    if name.starts_with('-') {
+        return Err(format!("ref name '{name}' starts with '-'"));
+    }
+    if name.contains("..") {
+        return Err(format!("ref name '{name}' contains '..'"));
+    }
+    for ch in name.chars() {
+        if ch.is_ascii_control() {
+            return Err(format!("ref name '{name}' contains a control character"));
+        }
+        if ch == ' ' {
+            return Err(format!("ref name '{name}' contains whitespace"));
+        }
+        if matches!(ch, ':' | '~' | '^' | '?' | '*' | '[') {
+            return Err(format!(
+                "ref name '{name}' contains invalid character '{ch}'"
+            ));
+        }
+    }
+    Ok(())
+}
+
 /// Pull latest changes for a branch.
 ///
 /// Strategy depends on where the branch is checked out:
 /// - Repo HEAD: `git pull` in repo root
 /// - Worktree: `git pull` in worktree directory
 /// - Not checked out: `git fetch origin <branch>:<branch>` (fast-forward only)
-pub fn pull_branch(repo_root: &Path, branch: &str) -> Result<String, String> {
+pub async fn pull_branch(repo_root: &Path, branch: &str) -> Result<String, String> {
+    validate_ref_name(branch)?;
+
     // Determine head branch of the main worktree
     let repo =
         git2::Repository::open(repo_root).map_err(|e| format!("failed to open repo: {e}"))?;
@@ -677,11 +798,16 @@ pub fn pull_branch(repo_root: &Path, branch: &str) -> Result<String, String> {
 
     if head_branch.as_deref() == Some(branch) {
         // Branch is checked out in the main worktree — git pull in repo root
-        let output = std::process::Command::new("git")
-            .current_dir(repo_root)
-            .args(["pull"])
-            .output()
-            .map_err(|e| format!("failed to run git: {e}"))?;
+        let repo_root_owned = repo_root.to_path_buf();
+        let output = tokio::task::spawn_blocking(move || {
+            std::process::Command::new("git")
+                .current_dir(&repo_root_owned)
+                .args(["pull"])
+                .output()
+        })
+        .await
+        .map_err(|e| format!("blocking task failed: {e}"))?
+        .map_err(|e| format!("failed to run git: {e}"))?;
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
             return Err(format!("git pull failed: {}", stderr.trim()));
@@ -693,11 +819,16 @@ pub fn pull_branch(repo_root: &Path, branch: &str) -> Result<String, String> {
     // Check if branch is in a linked worktree
     let wt_path = worktree_path(repo_root, branch);
     if wt_path.exists() {
-        let output = std::process::Command::new("git")
-            .current_dir(&wt_path)
-            .args(["pull"])
-            .output()
-            .map_err(|e| format!("failed to run git: {e}"))?;
+        let wt_path_owned = wt_path.clone();
+        let output = tokio::task::spawn_blocking(move || {
+            std::process::Command::new("git")
+                .current_dir(&wt_path_owned)
+                .args(["pull"])
+                .output()
+        })
+        .await
+        .map_err(|e| format!("blocking task failed: {e}"))?
+        .map_err(|e| format!("failed to run git: {e}"))?;
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
             return Err(format!("git pull failed: {}", stderr.trim()));
@@ -706,13 +837,19 @@ pub fn pull_branch(repo_root: &Path, branch: &str) -> Result<String, String> {
         return Ok(stdout.trim().to_string());
     }
 
-    // Branch not checked out anywhere — fast-forward fetch
+    // Branch not checked out anywhere — fast-forward fetch.
+    // `branch` has been validated against ref-injection above.
+    let repo_root_owned = repo_root.to_path_buf();
     let refspec = format!("{branch}:{branch}");
-    let output = std::process::Command::new("git")
-        .current_dir(repo_root)
-        .args(["fetch", "origin", &refspec])
-        .output()
-        .map_err(|e| format!("failed to run git: {e}"))?;
+    let output = tokio::task::spawn_blocking(move || {
+        std::process::Command::new("git")
+            .current_dir(&repo_root_owned)
+            .args(["fetch", "origin", "--", &refspec])
+            .output()
+    })
+    .await
+    .map_err(|e| format!("blocking task failed: {e}"))?
+    .map_err(|e| format!("failed to run git: {e}"))?;
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         return Err(format!("git fetch failed: {}", stderr.trim()));
@@ -722,7 +859,7 @@ pub fn pull_branch(repo_root: &Path, branch: &str) -> Result<String, String> {
 }
 
 /// Delete a remote branch (e.g. "origin/feature-x").
-pub fn delete_remote_branch(repo_root: &Path, remote_branch: &str) -> Result<(), String> {
+pub async fn delete_remote_branch(repo_root: &Path, remote_branch: &str) -> Result<(), String> {
     let mut parts = remote_branch.splitn(2, '/');
     let remote = parts
         .next()
@@ -731,11 +868,25 @@ pub fn delete_remote_branch(repo_root: &Path, remote_branch: &str) -> Result<(),
         .next()
         .ok_or_else(|| format!("invalid remote branch name: {remote_branch}"))?;
 
-    let output = std::process::Command::new("git")
-        .current_dir(repo_root)
-        .args(["push", remote, "--delete", branch])
-        .output()
-        .map_err(|e| format!("failed to run git: {e}"))?;
+    if remote.is_empty() || remote.starts_with('-') {
+        return Err(format!("invalid remote name: '{remote}'"));
+    }
+    validate_ref_name(branch)?;
+
+    let repo_root_owned = repo_root.to_path_buf();
+    let remote_owned = remote.to_string();
+    let branch_owned = branch.to_string();
+    let output = tokio::task::spawn_blocking(move || {
+        std::process::Command::new("git")
+            .current_dir(&repo_root_owned)
+            // `--` separates options from positional args so the remote
+            // and branch can never be parsed as flags.
+            .args(["push", "--delete", "--", &remote_owned, &branch_owned])
+            .output()
+    })
+    .await
+    .map_err(|e| format!("blocking task failed: {e}"))?
+    .map_err(|e| format!("failed to run git: {e}"))?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -746,20 +897,37 @@ pub fn delete_remote_branch(repo_root: &Path, remote_branch: &str) -> Result<(),
 }
 
 /// Checkout a remote branch locally with tracking (e.g. "origin/feature-x").
-pub fn checkout_remote_branch(repo_root: &Path, remote_branch: &str) -> Result<String, String> {
+pub async fn checkout_remote_branch(
+    repo_root: &Path,
+    remote_branch: &str,
+) -> Result<String, String> {
     let mut parts = remote_branch.splitn(2, '/');
-    let _remote = parts
+    let remote = parts
         .next()
         .ok_or_else(|| format!("invalid remote branch name: {remote_branch}"))?;
     let local_branch = parts
         .next()
         .ok_or_else(|| format!("invalid remote branch name: {remote_branch}"))?;
 
-    let output = std::process::Command::new("git")
-        .current_dir(repo_root)
-        .args(["checkout", "--track", remote_branch])
-        .output()
-        .map_err(|e| format!("failed to run git: {e}"))?;
+    if remote.is_empty() || remote.starts_with('-') {
+        return Err(format!("invalid remote name: '{remote}'"));
+    }
+    validate_ref_name(local_branch)?;
+
+    // We cannot use `--` here because git would treat the argument as a
+    // pathspec rather than a remote-tracking branch. The validation above
+    // rejects names that start with `-`, so the value is safe to pass.
+    let repo_root_owned = repo_root.to_path_buf();
+    let remote_branch_owned = remote_branch.to_string();
+    let output = tokio::task::spawn_blocking(move || {
+        std::process::Command::new("git")
+            .current_dir(&repo_root_owned)
+            .args(["checkout", "--track", &remote_branch_owned])
+            .output()
+    })
+    .await
+    .map_err(|e| format!("blocking task failed: {e}"))?
+    .map_err(|e| format!("failed to run git: {e}"))?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -770,12 +938,22 @@ pub fn checkout_remote_branch(repo_root: &Path, remote_branch: &str) -> Result<S
 }
 
 /// Checkout a local branch in the main worktree.
-pub fn checkout_local_branch(repo_root: &Path, branch: &str) -> Result<(), String> {
-    let output = std::process::Command::new("git")
-        .current_dir(repo_root)
-        .args(["checkout", branch])
-        .output()
-        .map_err(|e| format!("failed to run git checkout: {e}"))?;
+pub async fn checkout_local_branch(repo_root: &Path, branch: &str) -> Result<(), String> {
+    // Validate the branch name; we cannot use `--` here because that would
+    // make git treat the argument as a pathspec rather than a branch.
+    validate_ref_name(branch)?;
+
+    let repo_root_owned = repo_root.to_path_buf();
+    let branch_owned = branch.to_string();
+    let output = tokio::task::spawn_blocking(move || {
+        std::process::Command::new("git")
+            .current_dir(&repo_root_owned)
+            .args(["checkout", &branch_owned])
+            .output()
+    })
+    .await
+    .map_err(|e| format!("blocking task failed: {e}"))?
+    .map_err(|e| format!("failed to run git checkout: {e}"))?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -791,47 +969,62 @@ pub struct PurgeResult {
 }
 
 /// Remove all non-main worktrees and the `.clust/worktrees/` directory.
-pub fn purge_worktrees(repo_root: &Path) -> Result<usize, String> {
-    let wt_output = std::process::Command::new("git")
-        .current_dir(repo_root)
-        .args(["worktree", "list", "--porcelain"])
-        .output()
-        .map_err(|e| format!("failed to list worktrees: {e}"))?;
+pub async fn purge_worktrees(repo_root: &Path) -> Result<usize, String> {
+    let repo_root_owned = repo_root.to_path_buf();
+    let wt_output = tokio::task::spawn_blocking(move || {
+        std::process::Command::new("git")
+            .current_dir(&repo_root_owned)
+            .args(["worktree", "list", "--porcelain", "-z"])
+            .output()
+    })
+    .await
+    .map_err(|e| format!("blocking task failed: {e}"))?
+    .map_err(|e| format!("failed to list worktrees: {e}"))?;
 
     let mut removed_worktrees = 0;
     let mut current_path: Option<String> = None;
     let mut is_main = false;
+    let main_path = repo_root
+        .to_string_lossy()
+        .trim_end_matches('/')
+        .to_string();
 
-    for line in String::from_utf8_lossy(&wt_output.stdout).lines() {
-        if let Some(path) = line.strip_prefix("worktree ") {
+    let stdout = String::from_utf8_lossy(&wt_output.stdout);
+    let mut paths_to_remove: Vec<String> = Vec::new();
+
+    for token in stdout.split('\0') {
+        if let Some(path) = token.strip_prefix("worktree ") {
             current_path = Some(path.to_string());
             is_main = false;
-        } else if line == "bare"
-            || current_path.as_deref() == Some(repo_root.to_string_lossy().trim_end_matches('/'))
-        {
+        } else if token == "bare" {
             is_main = true;
-        } else if line.is_empty() {
+        } else if token.is_empty() {
             if let Some(ref path) = current_path {
-                if !is_main && path != repo_root.to_string_lossy().trim_end_matches('/') {
-                    let _ = std::process::Command::new("git")
-                        .current_dir(repo_root)
-                        .args(["worktree", "remove", "--force", path])
-                        .output();
-                    removed_worktrees += 1;
+                if !is_main && path != &main_path {
+                    paths_to_remove.push(path.clone());
                 }
             }
             current_path = None;
+            is_main = false;
         }
     }
-    // Handle last entry if file doesn't end with blank line
+    // Handle last entry if output didn't end with NUL terminator
     if let Some(ref path) = current_path {
-        if !is_main && path != repo_root.to_string_lossy().trim_end_matches('/') {
-            let _ = std::process::Command::new("git")
-                .current_dir(repo_root)
-                .args(["worktree", "remove", "--force", path])
-                .output();
-            removed_worktrees += 1;
+        if !is_main && path != &main_path {
+            paths_to_remove.push(path.clone());
         }
+    }
+
+    for path in paths_to_remove {
+        let repo_root_owned = repo_root.to_path_buf();
+        let _ = tokio::task::spawn_blocking(move || {
+            std::process::Command::new("git")
+                .current_dir(&repo_root_owned)
+                .args(["worktree", "remove", "--force", &path])
+                .output()
+        })
+        .await;
+        removed_worktrees += 1;
     }
 
     // Remove the .clust/worktrees/ directory itself (may contain leftover files)
@@ -841,7 +1034,7 @@ pub fn purge_worktrees(repo_root: &Path) -> Result<usize, String> {
 }
 
 /// Delete all non-HEAD local branches.
-pub fn purge_branches(repo_root: &Path) -> Result<usize, String> {
+pub async fn purge_branches(repo_root: &Path) -> Result<usize, String> {
     let repo =
         git2::Repository::open(repo_root).map_err(|e| format!("failed to open repo: {e}"))?;
     let head_name = repo
@@ -849,22 +1042,28 @@ pub fn purge_branches(repo_root: &Path) -> Result<usize, String> {
         .ok()
         .and_then(|h| h.shorthand().map(String::from));
 
-    let mut deleted_branches = 0;
-    if let Ok(branches) = repo.branches(Some(git2::BranchType::Local)) {
-        let names: Vec<String> = branches
+    let names: Vec<String> = match repo.branches(Some(git2::BranchType::Local)) {
+        Ok(branches) => branches
             .filter_map(|b| b.ok())
             .filter_map(|(branch, _)| branch.name().ok()?.map(String::from))
             .filter(|name| head_name.as_deref() != Some(name.as_str()))
-            .collect();
+            .collect(),
+        Err(_) => Vec::new(),
+    };
 
-        for name in &names {
-            let result = std::process::Command::new("git")
-                .current_dir(repo_root)
-                .args(["branch", "-D", name])
-                .output();
-            if result.is_ok() {
-                deleted_branches += 1;
-            }
+    let mut deleted_branches = 0;
+    for name in &names {
+        let repo_root_owned = repo_root.to_path_buf();
+        let name_owned = name.clone();
+        let result = tokio::task::spawn_blocking(move || {
+            std::process::Command::new("git")
+                .current_dir(&repo_root_owned)
+                .args(["branch", "-D", &name_owned])
+                .output()
+        })
+        .await;
+        if matches!(result, Ok(Ok(_))) {
+            deleted_branches += 1;
         }
     }
 
@@ -873,10 +1072,10 @@ pub fn purge_branches(repo_root: &Path) -> Result<usize, String> {
 
 /// Purge a repository: remove all worktrees, delete all non-HEAD local branches,
 /// and clean stale remote refs.
-pub fn purge_repo(repo_root: &Path) -> Result<PurgeResult, String> {
-    let removed_worktrees = purge_worktrees(repo_root)?;
-    let deleted_branches = purge_branches(repo_root)?;
-    let _ = clean_stale_refs(repo_root);
+pub async fn purge_repo(repo_root: &Path) -> Result<PurgeResult, String> {
+    let removed_worktrees = purge_worktrees(repo_root).await?;
+    let deleted_branches = purge_branches(repo_root).await?;
+    let _ = clean_stale_refs(repo_root).await;
 
     Ok(PurgeResult {
         removed_worktrees,
@@ -903,7 +1102,7 @@ pub fn repo_name_from_url(url: &str) -> Option<String> {
 }
 
 /// Create a new git repository via `git init`.
-pub fn init_repo(parent_dir: &Path, name: &str) -> Result<PathBuf, String> {
+pub async fn init_repo(parent_dir: &Path, name: &str) -> Result<PathBuf, String> {
     if !parent_dir.is_dir() {
         return Err(format!(
             "Parent directory does not exist: {}",
@@ -914,15 +1113,18 @@ pub fn init_repo(parent_dir: &Path, name: &str) -> Result<PathBuf, String> {
     if repo_path.exists() {
         return Err(format!("Directory already exists: {}", repo_path.display()));
     }
-    let output = std::process::Command::new("git")
-        .args([
-            "init",
-            repo_path
-                .to_str()
-                .ok_or_else(|| "invalid path encoding".to_string())?,
-        ])
-        .output()
-        .map_err(|e| format!("failed to run git: {e}"))?;
+    let repo_path_str = repo_path
+        .to_str()
+        .ok_or_else(|| "invalid path encoding".to_string())?
+        .to_string();
+    let output = tokio::task::spawn_blocking(move || {
+        std::process::Command::new("git")
+            .args(["init", &repo_path_str])
+            .output()
+    })
+    .await
+    .map_err(|e| format!("blocking task failed: {e}"))?
+    .map_err(|e| format!("failed to run git: {e}"))?;
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         return Err(format!("git init failed: {}", stderr.trim()));
@@ -976,7 +1178,7 @@ pub fn ensure_main_branch(repo_path: &Path) {
 ///
 /// The caller is responsible for reading the child's stderr (progress output)
 /// and waiting for completion.
-pub fn start_clone(
+pub async fn start_clone(
     url: &str,
     parent_dir: &Path,
     name: Option<&str>,
@@ -997,38 +1199,57 @@ pub fn start_clone(
         return Err(format!("Directory already exists: {}", repo_path.display()));
     }
 
-    let mut cmd = std::process::Command::new("git");
-    cmd.current_dir(parent_dir);
-    cmd.args(["clone", "--progress", url]);
-    if name.is_some() {
-        cmd.arg(&dir_name);
-    }
-    cmd.stdout(std::process::Stdio::null());
-    cmd.stderr(std::process::Stdio::piped());
+    let parent_dir_owned = parent_dir.to_path_buf();
+    let url_owned = url.to_string();
+    let dir_name_owned = dir_name.clone();
+    let pass_name = name.is_some();
 
-    let child = cmd
-        .spawn()
-        .map_err(|e| format!("failed to start git clone: {e}"))?;
+    let child = tokio::task::spawn_blocking(move || {
+        let mut cmd = std::process::Command::new("git");
+        cmd.current_dir(&parent_dir_owned);
+        cmd.args(["clone", "--progress", "--", &url_owned]);
+        if pass_name {
+            cmd.arg(&dir_name_owned);
+        }
+        cmd.stdout(std::process::Stdio::null());
+        cmd.stderr(std::process::Stdio::piped());
+        cmd.spawn()
+    })
+    .await
+    .map_err(|e| format!("blocking task failed: {e}"))?
+    .map_err(|e| format!("failed to start git clone: {e}"))?;
     Ok((child, repo_path))
 }
 
 /// Prune stale remote tracking refs for all remotes.
-pub fn clean_stale_refs(repo_root: &Path) -> Result<(), String> {
-    let output = std::process::Command::new("git")
-        .current_dir(repo_root)
-        .args(["remote"])
-        .output()
-        .map_err(|e| format!("failed to list remotes: {e}"))?;
+pub async fn clean_stale_refs(repo_root: &Path) -> Result<(), String> {
+    let repo_root_owned = repo_root.to_path_buf();
+    let output = tokio::task::spawn_blocking(move || {
+        std::process::Command::new("git")
+            .current_dir(&repo_root_owned)
+            .args(["remote"])
+            .output()
+    })
+    .await
+    .map_err(|e| format!("blocking task failed: {e}"))?
+    .map_err(|e| format!("failed to list remotes: {e}"))?;
 
     let remotes = String::from_utf8_lossy(&output.stdout);
-    for remote in remotes.lines() {
-        let remote = remote.trim();
-        if !remote.is_empty() {
-            let _ = std::process::Command::new("git")
-                .current_dir(repo_root)
-                .args(["remote", "prune", remote])
-                .output();
-        }
+    let remote_names: Vec<String> = remotes
+        .lines()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect();
+
+    for remote in remote_names {
+        let repo_root_owned = repo_root.to_path_buf();
+        let _ = tokio::task::spawn_blocking(move || {
+            std::process::Command::new("git")
+                .current_dir(&repo_root_owned)
+                .args(["remote", "prune", &remote])
+                .output()
+        })
+        .await;
     }
 
     Ok(())
@@ -1475,11 +1696,11 @@ mod tests {
         );
     }
 
-    #[test]
-    fn add_and_list_worktrees() {
+    #[tokio::test]
+    async fn add_and_list_worktrees() {
         let (dir, _repo) = create_test_repo();
 
-        let result = add_worktree(dir.path(), "test-wt", None, false);
+        let result = add_worktree(dir.path(), "test-wt", None, false).await;
         if result.is_err() {
             return; // skip if git worktree not available
         }
@@ -1487,7 +1708,7 @@ mod tests {
         assert!(wt_path.exists());
 
         let agents: HashMap<String, AgentEntry> = HashMap::new();
-        let worktrees = list_worktrees(dir.path(), &agents).unwrap();
+        let worktrees = list_worktrees(dir.path(), &agents).await.unwrap();
 
         // Should have main checkout + our new worktree
         assert!(worktrees.len() >= 2);
@@ -1497,31 +1718,35 @@ mod tests {
         assert!(!wt.unwrap().is_main);
     }
 
-    #[test]
-    fn add_and_remove_worktree() {
+    #[tokio::test]
+    async fn add_and_remove_worktree() {
         let (dir, _repo) = create_test_repo();
 
-        let result = add_worktree(dir.path(), "rm-test", None, false);
+        let result = add_worktree(dir.path(), "rm-test", None, false).await;
         if result.is_err() {
             return;
         }
         let wt_path = result.unwrap();
         assert!(wt_path.exists());
 
-        remove_worktree(dir.path(), "rm-test", false, false).unwrap();
+        remove_worktree(dir.path(), "rm-test", false, false)
+            .await
+            .unwrap();
         assert!(!wt_path.exists());
     }
 
-    #[test]
-    fn remove_worktree_with_branch_deletion() {
+    #[tokio::test]
+    async fn remove_worktree_with_branch_deletion() {
         let (dir, repo) = create_test_repo();
 
-        let result = add_worktree(dir.path(), "rm-branch-test", None, false);
+        let result = add_worktree(dir.path(), "rm-branch-test", None, false).await;
         if result.is_err() {
             return;
         }
 
-        remove_worktree(dir.path(), "rm-branch-test", true, false).unwrap();
+        remove_worktree(dir.path(), "rm-branch-test", true, false)
+            .await
+            .unwrap();
 
         // Branch should be deleted
         assert!(
@@ -1544,42 +1769,42 @@ mod tests {
         assert!(is_worktree_dirty(dir.path()));
     }
 
-    #[test]
-    fn add_worktree_with_base_branch() {
+    #[tokio::test]
+    async fn add_worktree_with_base_branch() {
         let (dir, repo) = create_test_repo();
 
         // Create a branch to use as base
         let head = repo.head().unwrap().peel_to_commit().unwrap();
         repo.branch("base-branch", &head, false).unwrap();
 
-        let result = add_worktree(dir.path(), "from-base", Some("base-branch"), false);
+        let result = add_worktree(dir.path(), "from-base", Some("base-branch"), false).await;
         if result.is_err() {
             return;
         }
         assert!(result.unwrap().exists());
     }
 
-    #[test]
-    fn add_worktree_checkout_existing() {
+    #[tokio::test]
+    async fn add_worktree_checkout_existing() {
         let (dir, repo) = create_test_repo();
 
         // Create a branch that we'll checkout in a worktree
         let head = repo.head().unwrap().peel_to_commit().unwrap();
         repo.branch("existing-branch", &head, false).unwrap();
 
-        let result = add_worktree(dir.path(), "existing-branch", None, true);
+        let result = add_worktree(dir.path(), "existing-branch", None, true).await;
         if result.is_err() {
             return;
         }
         assert!(result.unwrap().exists());
     }
 
-    #[test]
-    fn list_worktrees_includes_main() {
+    #[tokio::test]
+    async fn list_worktrees_includes_main() {
         let (dir, _repo) = create_test_repo();
 
         let agents: HashMap<String, AgentEntry> = HashMap::new();
-        let worktrees = list_worktrees(dir.path(), &agents).unwrap();
+        let worktrees = list_worktrees(dir.path(), &agents).await.unwrap();
 
         assert!(!worktrees.is_empty());
         assert!(
@@ -1588,10 +1813,79 @@ mod tests {
         );
     }
 
-    #[test]
-    fn remove_nonexistent_worktree_errors() {
+    #[tokio::test]
+    async fn remove_nonexistent_worktree_errors() {
         let (dir, _repo) = create_test_repo();
-        let result = remove_worktree(dir.path(), "nonexistent", false, false);
+        let result = remove_worktree(dir.path(), "nonexistent", false, false).await;
         assert!(result.is_err());
+    }
+
+    // ── Worktree-list parser regression tests ───────────────────
+
+    #[test]
+    fn parse_worktree_list_handles_path_with_whitespace() {
+        // Simulate `git worktree list --porcelain -z` output where the
+        // worktree path contains a space. In `-z` mode, fields are
+        // separated by NUL bytes and blocks by an extra NUL.
+        let stdout = "worktree /tmp/repo with space\0HEAD abcd\0branch refs/heads/main\0\0";
+        let agents: HashMap<String, AgentEntry> = HashMap::new();
+        let entries =
+            parse_worktree_list_porcelain_z(stdout, "/tmp/repo with space", &agents).unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].path, "/tmp/repo with space");
+        assert_eq!(entries[0].branch_name, "main");
+    }
+
+    #[test]
+    fn parse_worktree_list_handles_multiple_blocks() {
+        let stdout = "worktree /tmp/main\0HEAD abcd\0branch refs/heads/main\0\0\
+                      worktree /tmp/feature one\0HEAD efgh\0branch refs/heads/feature\0\0";
+        let agents: HashMap<String, AgentEntry> = HashMap::new();
+        let entries = parse_worktree_list_porcelain_z(stdout, "/tmp/main", &agents).unwrap();
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].path, "/tmp/main");
+        assert_eq!(entries[0].branch_name, "main");
+        assert_eq!(entries[1].path, "/tmp/feature one");
+        assert_eq!(entries[1].branch_name, "feature");
+    }
+
+    // ── validate_ref_name unit tests ────────────────────────────
+
+    #[test]
+    fn validate_ref_name_accepts_normal_names() {
+        assert!(validate_ref_name("main").is_ok());
+        assert!(validate_ref_name("feature/auth").is_ok());
+        assert!(validate_ref_name("v1.2.3").is_ok());
+    }
+
+    #[test]
+    fn validate_ref_name_rejects_dash_prefix() {
+        assert!(validate_ref_name("--force").is_err());
+        assert!(validate_ref_name("-x").is_err());
+    }
+
+    #[test]
+    fn validate_ref_name_rejects_double_dot() {
+        assert!(validate_ref_name("foo..bar").is_err());
+    }
+
+    #[test]
+    fn validate_ref_name_rejects_special_chars() {
+        for s in [
+            "foo:bar", "foo~bar", "foo^bar", "foo?bar", "foo*bar", "foo[bar", "foo bar",
+        ] {
+            assert!(validate_ref_name(s).is_err(), "should reject: {s}");
+        }
+    }
+
+    #[test]
+    fn validate_ref_name_rejects_control_chars() {
+        assert!(validate_ref_name("foo\x00bar").is_err());
+        assert!(validate_ref_name("foo\nbar").is_err());
+    }
+
+    #[test]
+    fn validate_ref_name_rejects_empty() {
+        assert!(validate_ref_name("").is_err());
     }
 }

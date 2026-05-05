@@ -14,7 +14,39 @@ pub const DEFAULT_HUB: &str = "default_hub";
 
 /// Protocol version for IPC compatibility checks.
 /// Bump this whenever `CliMessage` or `HubMessage` enum shapes change.
+///
+/// Both the CLI and the hub MUST verify the peer's reported version on the
+/// `Ping`/`Pong` round-trip and refuse to interoperate on mismatch. Hub-side
+/// enforcement is informational today (it logs the mismatch but still answers)
+/// because the CLI bounces an outdated hub via `connect_to_hub`. See
+/// `validate_client_version` for a helper hubs may use to reject mismatched
+/// clients explicitly.
 pub const PROTOCOL_VERSION: u32 = 7;
+
+/// Maximum size of a single IPC message payload.
+///
+/// The wire format is `[u32 BE length][payload]`. Without an upper bound a
+/// peer could send an arbitrarily large length prefix and force the receiver
+/// to allocate gigabytes before the read fails. Cap at 64 MiB which is
+/// comfortably above legitimate traffic (largest legitimate frames are
+/// terminal output bursts, well under 1 MiB).
+pub const MAX_MESSAGE_BYTES: usize = 64 * 1024 * 1024;
+
+/// Verify that a client's reported protocol version matches the hub's.
+///
+/// Returns `Ok(())` on match and a static error string on mismatch suitable
+/// for logging or relaying back to the client. Hubs MAY use this to reject
+/// connections from incompatible clients; the canonical enforcement path is
+/// the `Ping`/`Pong` round-trip on the CLI side, which already aborts when
+/// the hub's reported version differs from the CLI's compiled-in
+/// `PROTOCOL_VERSION`.
+pub fn validate_client_version(client: u32) -> Result<(), &'static str> {
+    if client == PROTOCOL_VERSION {
+        Ok(())
+    } else {
+        Err("protocol version mismatch")
+    }
+}
 
 /// Cleanup mode when cancelling/deleting a batch.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
@@ -598,10 +630,19 @@ pub async fn send_message<T: Serialize>(stream: &mut UnixStream, msg: &T) -> io:
 }
 
 /// Receive a length-prefixed MessagePack message from a Unix stream.
+///
+/// Rejects messages whose declared length exceeds [`MAX_MESSAGE_BYTES`] so a
+/// hostile or buggy peer cannot force an unbounded allocation.
 pub async fn recv_message<T: DeserializeOwned>(stream: &mut UnixStream) -> io::Result<T> {
     let mut len_buf = [0u8; 4];
     stream.read_exact(&mut len_buf).await?;
     let len = u32::from_be_bytes(len_buf) as usize;
+    if len > MAX_MESSAGE_BYTES {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("message length {len} exceeds maximum of {MAX_MESSAGE_BYTES} bytes"),
+        ));
+    }
     let mut payload = vec![0u8; len];
     stream.read_exact(&mut payload).await?;
     rmp_serde::from_slice(&payload).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
@@ -624,10 +665,19 @@ pub async fn send_message_write<T: Serialize>(
 
 /// Receive a length-prefixed MessagePack message from a split read half.
 /// Used for bidirectional streaming sessions where read and write happen concurrently.
+///
+/// Rejects messages whose declared length exceeds [`MAX_MESSAGE_BYTES`] so a
+/// hostile or buggy peer cannot force an unbounded allocation.
 pub async fn recv_message_read<T: DeserializeOwned>(reader: &mut OwnedReadHalf) -> io::Result<T> {
     let mut len_buf = [0u8; 4];
     reader.read_exact(&mut len_buf).await?;
     let len = u32::from_be_bytes(len_buf) as usize;
+    if len > MAX_MESSAGE_BYTES {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("message length {len} exceeds maximum of {MAX_MESSAGE_BYTES} bytes"),
+        ));
+    }
     let mut payload = vec![0u8; len];
     reader.read_exact(&mut payload).await?;
     rmp_serde::from_slice(&payload).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
@@ -994,6 +1044,65 @@ mod tests {
 
         let result: io::Result<CliMessage> = recv_message(&mut b).await;
         assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn rejects_oversized_length_prefix() {
+        let (mut a, mut b) = UnixStream::pair().unwrap();
+
+        // Declare a length one byte beyond the cap. We do not need to send a
+        // payload — the receiver should reject the prefix before allocating.
+        let oversized = (MAX_MESSAGE_BYTES as u32).wrapping_add(1);
+        a.write_all(&oversized.to_be_bytes()).await.unwrap();
+        a.flush().await.unwrap();
+        drop(a);
+
+        let result: io::Result<CliMessage> = recv_message(&mut b).await;
+        let err = result.expect_err("expected length cap rejection");
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+        assert!(err.to_string().contains("exceeds maximum"));
+    }
+
+    #[tokio::test]
+    async fn rejects_max_u32_length_prefix() {
+        let (mut a, mut b) = UnixStream::pair().unwrap();
+
+        // u32::MAX would otherwise allocate 4 GiB.
+        a.write_all(&u32::MAX.to_be_bytes()).await.unwrap();
+        a.flush().await.unwrap();
+        drop(a);
+
+        let result: io::Result<CliMessage> = recv_message(&mut b).await;
+        let err = result.expect_err("expected length cap rejection");
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+    }
+
+    #[tokio::test]
+    async fn split_stream_rejects_oversized_length_prefix() {
+        let (a, b) = UnixStream::pair().unwrap();
+        let (_, mut a_write) = a.into_split();
+        let (mut b_read, _) = b.into_split();
+
+        let oversized = (MAX_MESSAGE_BYTES as u32).wrapping_add(1);
+        a_write.write_all(&oversized.to_be_bytes()).await.unwrap();
+        a_write.flush().await.unwrap();
+        drop(a_write);
+
+        let result: io::Result<CliMessage> = recv_message_read(&mut b_read).await;
+        let err = result.expect_err("expected length cap rejection on split read half");
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+        assert!(err.to_string().contains("exceeds maximum"));
+    }
+
+    #[test]
+    fn validate_client_version_matches() {
+        assert!(validate_client_version(PROTOCOL_VERSION).is_ok());
+    }
+
+    #[test]
+    fn validate_client_version_rejects_mismatch() {
+        let bad = PROTOCOL_VERSION.wrapping_add(1);
+        assert!(validate_client_version(bad).is_err());
     }
 
     // ── New message variant round-trips ────────────────────────

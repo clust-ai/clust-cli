@@ -1,3 +1,5 @@
+use std::path::Path;
+
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use fuzzy_matcher::skim::SkimMatcherV2;
 use fuzzy_matcher::FuzzyMatcher;
@@ -10,6 +12,30 @@ use ratatui::{
 };
 
 use crate::theme;
+
+/// Resolve the parent directory of `path` (which is expected to end with `/`).
+///
+/// Best-effort: tries `canonicalize()` first to follow symlinks, then asks
+/// `Path::parent()` for the lexical parent. Falls back to the lexical parent
+/// of the original (un-canonicalized) path when `canonicalize` fails. Returns
+/// an absolute path string ending in `/`. Cannot fully prevent symlink loops.
+fn parent_of(path: &str) -> Option<String> {
+    let trimmed = path.trim_end_matches('/');
+    if trimmed.is_empty() {
+        return None;
+    }
+    let canonical = std::fs::canonicalize(trimmed).ok();
+    let candidate: &Path = canonical.as_deref().unwrap_or_else(|| Path::new(trimmed));
+    let parent = candidate.parent()?;
+    let parent_str = parent.to_string_lossy().into_owned();
+    if parent_str.is_empty() {
+        Some("/".to_string())
+    } else if parent_str.ends_with('/') {
+        Some(parent_str)
+    } else {
+        Some(format!("{parent_str}/"))
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -189,12 +215,15 @@ impl RepoModal {
                     && self.input.is_empty()
                     && self.base_path != "/"
                 {
-                    let trimmed = self.base_path.trim_end_matches('/');
-                    if let Some(pos) = trimmed.rfind('/') {
-                        self.base_path = format!("{}/", &trimmed[..pos]);
-                        if self.base_path == "/" || self.base_path.is_empty() {
-                            self.base_path = "/".to_string();
-                        }
+                    // Navigate up one directory level. parent_of canonicalizes
+                    // first so symlinks are followed; falls back to lexical
+                    // parent when canonicalize fails. Best-effort only.
+                    if let Some(parent) = parent_of(&self.base_path) {
+                        self.base_path = if parent.is_empty() {
+                            "/".to_string()
+                        } else {
+                            parent
+                        };
                         self.refresh_entries();
                     }
                 } else if self.cursor_pos > 0 {
@@ -295,8 +324,7 @@ impl RepoModal {
                 } else {
                     RepoAction::Clone
                 };
-                self.step = Step::SelectDirectory;
-                self.reset_input();
+                self.step_to(Step::SelectDirectory);
                 self.init_directory_browser();
                 RepoModalResult::Pending
             }
@@ -314,11 +342,11 @@ impl RepoModal {
                 // Confirm current base_path as parent directory
                 let pd = self.base_path.trim_end_matches('/').to_string();
                 self.parent_dir = if pd.is_empty() { "/".to_string() } else { pd };
-                self.reset_input();
-                match self.action {
-                    RepoAction::Clone => self.step = Step::EnterUrl,
-                    RepoAction::Create => self.step = Step::EnterName,
-                }
+                let next = match self.action {
+                    RepoAction::Clone => Step::EnterUrl,
+                    RepoAction::Create => Step::EnterName,
+                };
+                self.step_to(next);
                 RepoModalResult::Pending
             }
             Step::EnterUrl => {
@@ -327,8 +355,7 @@ impl RepoModal {
                     return RepoModalResult::Pending;
                 }
                 self.url = url;
-                self.step = Step::EnterName;
-                self.reset_input();
+                self.step_to(Step::EnterName);
                 RepoModalResult::Pending
             }
             Step::EnterName => match self.action {
@@ -353,6 +380,15 @@ impl RepoModal {
                 }
             },
         }
+    }
+
+    /// Transition to the next step, clearing the input buffer/cursor/selection
+    /// in one place. Without resetting on every forward step, filter text from
+    /// the previous step (e.g. SelectDirectory → EnterUrl) leaks into the next
+    /// view as a stale prefix.
+    fn step_to(&mut self, next: Step) {
+        self.step = next;
+        self.reset_input();
     }
 
     pub fn handle_paste(&mut self, text: &str) {
