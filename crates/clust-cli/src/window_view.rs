@@ -1,7 +1,7 @@
 //! Window view: a recursive 2×2 grid that shows live PTY output for the
 //! agents belonging to the currently-selected repo on the Repositories tab.
 //!
-//! Cells are filled in column-major order — top-left, bottom-left, top-right,
+//! Cells are filled in row-major order — top-left, top-right, bottom-left,
 //! bottom-right — and each quadrant is recursively subdivided once it holds
 //! more than one agent. So an N-agent grid is a binary space partition tree
 //! whose leaves are agents.
@@ -35,7 +35,7 @@ pub enum EmptyKind<'a> {
 /// `scoped_ids` is the ordered list of agent IDs that belong to the
 /// currently-selected repo on the left panel. Each ID must exist in
 /// `overview_state.panels`. Cells are laid out via [`window_layout`] in
-/// column-major fill order; the panel for each cell is looked up by ID,
+/// row-major fill order; the panel for each cell is looked up by ID,
 /// resized to the cell's interior, and rendered with [`render_agent_panel`].
 ///
 /// The right panel is view-only — it has no focus and no per-cell selection.
@@ -122,7 +122,7 @@ fn render_centered_message(frame: &mut Frame, area: Rect, msg: &str) {
 
 /// Lay out `n` agent cells inside `rect`.
 ///
-/// Fill order is column-major: top-left, bottom-left, top-right, bottom-right.
+/// Fill order is row-major: top-left, top-right, bottom-left, bottom-right.
 /// For `n > 4` the four quadrants of `rect` each receive a share of the
 /// remaining agents (TL gets the remainder first) and the function recurses.
 ///
@@ -133,35 +133,35 @@ pub fn window_layout(rect: Rect, n: usize) -> Vec<Rect> {
         0 => Vec::new(),
         1 => vec![rect],
         2 => {
-            let [top, bottom] =
-                Layout::vertical([Constraint::Ratio(1, 2); 2]).areas(rect);
-            vec![top, bottom]
+            let [left, right] =
+                Layout::horizontal([Constraint::Ratio(1, 2); 2]).areas(rect);
+            vec![left, right]
         }
         3 => {
-            let [left, right] =
-                Layout::horizontal([Constraint::Ratio(1, 2); 2]).areas(rect);
-            let [tl, bl] =
-                Layout::vertical([Constraint::Ratio(1, 2); 2]).areas(left);
-            vec![tl, bl, right]
+            let [top, bottom] =
+                Layout::vertical([Constraint::Ratio(1, 2); 2]).areas(rect);
+            let [tl, tr] =
+                Layout::horizontal([Constraint::Ratio(1, 2); 2]).areas(top);
+            vec![tl, tr, bottom]
         }
         4 => {
-            let [left, right] =
-                Layout::horizontal([Constraint::Ratio(1, 2); 2]).areas(rect);
-            let [tl, bl] =
-                Layout::vertical([Constraint::Ratio(1, 2); 2]).areas(left);
-            let [tr, br] =
-                Layout::vertical([Constraint::Ratio(1, 2); 2]).areas(right);
-            vec![tl, bl, tr, br]
+            let [top, bottom] =
+                Layout::vertical([Constraint::Ratio(1, 2); 2]).areas(rect);
+            let [tl, tr] =
+                Layout::horizontal([Constraint::Ratio(1, 2); 2]).areas(top);
+            let [bl, br] =
+                Layout::horizontal([Constraint::Ratio(1, 2); 2]).areas(bottom);
+            vec![tl, tr, bl, br]
         }
         _ => {
-            let [left, right] =
-                Layout::horizontal([Constraint::Ratio(1, 2); 2]).areas(rect);
-            let [tl, bl] =
-                Layout::vertical([Constraint::Ratio(1, 2); 2]).areas(left);
-            let [tr, br] =
-                Layout::vertical([Constraint::Ratio(1, 2); 2]).areas(right);
+            let [top, bottom] =
+                Layout::vertical([Constraint::Ratio(1, 2); 2]).areas(rect);
+            let [tl, tr] =
+                Layout::horizontal([Constraint::Ratio(1, 2); 2]).areas(top);
+            let [bl, br] =
+                Layout::horizontal([Constraint::Ratio(1, 2); 2]).areas(bottom);
             let counts = distribute(n, 4);
-            [tl, bl, tr, br]
+            [tl, tr, bl, br]
                 .into_iter()
                 .zip(counts)
                 .flat_map(|(quadrant, count)| window_layout(quadrant, count))
@@ -218,36 +218,36 @@ mod tests {
     }
 
     #[test]
-    fn n_two_splits_top_bottom() {
+    fn n_two_splits_left_right() {
         let cells = window_layout(rect(), 2);
         assert_eq!(cells.len(), 2);
-        // TL on top, BL on bottom — same x range, contiguous y
-        assert_eq!(cells[0].x, cells[1].x);
-        assert_eq!(cells[0].width, cells[1].width);
-        assert_eq!(cells[0].y + cells[0].height, cells[1].y);
+        // TL on left, TR on right — same y range, contiguous x
+        assert_eq!(cells[0].y, cells[1].y);
+        assert_eq!(cells[0].height, cells[1].height);
+        assert_eq!(cells[0].x + cells[0].width, cells[1].x);
     }
 
     #[test]
-    fn n_three_left_column_split_full_right() {
+    fn n_three_top_row_split_full_bottom() {
         let cells = window_layout(rect(), 3);
         assert_eq!(cells.len(), 3);
-        let [tl, bl, right] = [cells[0], cells[1], cells[2]];
-        // TL and BL share x and width
-        assert_eq!(tl.x, bl.x);
-        assert_eq!(tl.width, bl.width);
-        // TL above BL, contiguous
-        assert_eq!(tl.y + tl.height, bl.y);
-        // right column to the right of left column, full height
-        assert_eq!(tl.x + tl.width, right.x);
-        assert_eq!(right.y, rect().y);
-        assert_eq!(right.height, rect().height);
+        let [tl, tr, bottom] = [cells[0], cells[1], cells[2]];
+        // TL and TR share y and height
+        assert_eq!(tl.y, tr.y);
+        assert_eq!(tl.height, tr.height);
+        // TL left of TR, contiguous
+        assert_eq!(tl.x + tl.width, tr.x);
+        // bottom row beneath top row, full width
+        assert_eq!(tl.y + tl.height, bottom.y);
+        assert_eq!(bottom.x, rect().x);
+        assert_eq!(bottom.width, rect().width);
     }
 
     #[test]
     fn n_four_full_2x2_grid() {
         let cells = window_layout(rect(), 4);
         assert_eq!(cells.len(), 4);
-        let [tl, bl, tr, br] = [cells[0], cells[1], cells[2], cells[3]];
+        let [tl, tr, bl, br] = [cells[0], cells[1], cells[2], cells[3]];
         // Column alignment
         assert_eq!(tl.x, bl.x);
         assert_eq!(tr.x, br.x);
@@ -269,25 +269,25 @@ mod tests {
         let cells = window_layout(rect(), 5);
         assert_eq!(cells.len(), 5);
         // First two cells live inside the would-be TL quadrant (top-left
-        // half of the screen). Verify they share the left half's x range
-        // and together cover its height.
+        // half of the screen). Verify they share the top half's y range
+        // and together cover its width.
         let half_w = rect().width / 2;
         let half_h = rect().height / 2;
         let inner_tl = cells[0];
-        let inner_bl = cells[1];
-        assert!(inner_tl.x < half_w);
-        assert!(inner_bl.x < half_w);
-        assert_eq!(inner_tl.x, inner_bl.x);
-        assert_eq!(inner_tl.width, inner_bl.width);
-        assert_eq!(inner_tl.y + inner_tl.height, inner_bl.y);
-        // Cells 2, 3, 4 are BL, TR, BR each at quarter size
-        let bl = cells[2];
-        let tr = cells[3];
+        let inner_tr = cells[1];
+        assert!(inner_tl.y < half_h);
+        assert!(inner_tr.y < half_h);
+        assert_eq!(inner_tl.y, inner_tr.y);
+        assert_eq!(inner_tl.height, inner_tr.height);
+        assert_eq!(inner_tl.x + inner_tl.width, inner_tr.x);
+        // Cells 2, 3, 4 are TR, BL, BR each at quarter size
+        let tr = cells[2];
+        let bl = cells[3];
         let br = cells[4];
-        assert_eq!(bl.x, inner_tl.x);
-        assert!(bl.y >= half_h);
         assert!(tr.x >= half_w);
         assert_eq!(tr.y, 0);
+        assert_eq!(bl.x, inner_tl.x);
+        assert!(bl.y >= half_h);
         assert_eq!(br.x, tr.x);
         assert!(br.y >= half_h);
     }
