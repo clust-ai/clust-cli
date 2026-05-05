@@ -106,7 +106,13 @@ impl ScrollBreak {
         let mut input = std::mem::take(&mut self.pending);
         input.extend_from_slice(data);
 
-        // Safety valve: if buffer is too large, flush everything
+        // Safety valve: if the buffered partial has grown past `MAX_PENDING`,
+        // forward the whole buffer raw. In `Full`/`RateLimited` modes this
+        // means a single scroll event may slip past the rate-limit; that's
+        // an acceptable trade for keeping plain text moving. The
+        // intercept-mode equivalent (`filter_mouse_internal`) drops the
+        // buffer instead, since leaking raw mouse bytes would violate the
+        // intercept contract.
         if input.len() > MAX_PENDING {
             return input;
         }
@@ -204,11 +210,18 @@ impl ScrollBreak {
     }
 
     /// Decide whether a scroll event should be forwarded based on the rate limit.
+    ///
+    /// In `Intercept` mode, returns `false` so that `filter()` drops every
+    /// forwarded scroll event (intercept's contract is that no scroll bytes
+    /// reach the agent). The intended interception path is `filter_intercept`,
+    /// but `filter()` must still behave deterministically if called.
     fn should_allow_scroll(&mut self, now: Instant) -> bool {
         match self.mode {
             ScrollMode::Full => true,
-            // Intercept mode uses filter_intercept_at, not this path.
-            ScrollMode::Intercept => unreachable!(),
+            // Intercept mode: drop all scrolls from `filter()`. The expected
+            // intercept path uses `filter_intercept`, which counts and reports
+            // them separately.
+            ScrollMode::Intercept => false,
             ScrollMode::RateLimited { max_per_sec } => {
                 if max_per_sec == 0 {
                     return false;
@@ -249,10 +262,13 @@ impl ScrollBreak {
         let mut input = std::mem::take(&mut self.pending);
         input.extend_from_slice(data);
 
-        // Safety valve: if buffer is too large, flush everything
+        // Safety valve: if the buffered partial sequence has grown past
+        // `MAX_PENDING`, drop it entirely. Returning the raw buffer would
+        // violate intercept's contract (mouse bytes must never reach the
+        // agent), so we trade one pathological partial for safety.
         if input.len() > MAX_PENDING {
             return ScrollFilterResult {
-                bytes: input,
+                bytes: Vec::new(),
                 scroll_up: 0,
                 scroll_down: 0,
             };
@@ -1040,5 +1056,74 @@ mod tests {
         let r = sb.filter_scroll_only(b"\x1b[1;2H\x1b[31m");
         assert_eq!(r.bytes, b"\x1b[1;2H\x1b[31m");
         assert_eq!(r.scroll_up, 0);
+    }
+
+    // ── Overflow behaviour in intercept mode ────────────────────────
+
+    #[test]
+    fn intercept_overflow_drops_buffered_bytes() {
+        // In intercept mode, the safety valve must NOT return raw bytes
+        // (that would leak mouse-event bytes to the agent). Instead, the
+        // buffered partial is dropped silently.
+        let mut sb = intercept();
+        let mut big = vec![0x1b, b'[', b'<'];
+        big.extend(vec![b'1'; MAX_PENDING + 100]);
+        let r = sb.filter_intercept(&big);
+        assert!(r.bytes.is_empty());
+        assert_eq!(r.scroll_up, 0);
+        assert_eq!(r.scroll_down, 0);
+        assert!(sb.pending.is_empty());
+    }
+
+    #[test]
+    fn scroll_only_overflow_drops_buffered_bytes() {
+        // Same contract as `intercept_overflow_drops_buffered_bytes`:
+        // partial sequences could be mouse events, so we drop them rather
+        // than risk leaking scroll bytes through.
+        let mut sb = scroll_only();
+        let mut big = vec![0x1b, b'[', b'<'];
+        big.extend(vec![b'1'; MAX_PENDING + 100]);
+        let r = sb.filter_scroll_only(&big);
+        assert!(r.bytes.is_empty());
+        assert_eq!(r.scroll_up, 0);
+        assert_eq!(r.scroll_down, 0);
+        assert!(sb.pending.is_empty());
+    }
+
+    // ── ScrollBreak::Intercept + filter() does not panic ────────────
+
+    #[test]
+    fn intercept_filter_does_not_panic() {
+        // Bug #6: previously `should_allow_scroll` panicked with
+        // `unreachable!()` if anyone called `filter()` on an Intercept-mode
+        // ScrollBreak. Now it deterministically drops the scroll.
+        let mut sb = ScrollBreak::new(ScrollMode::Intercept);
+        let scroll = sgr_mouse(64, 10, 20, true);
+        // Should not panic; should drop the scroll event.
+        let out = sb.filter(&scroll);
+        assert!(out.is_empty());
+    }
+
+    #[test]
+    fn intercept_filter_drops_scroll_keeps_text() {
+        // In Intercept mode, `filter()` drops scroll bytes but otherwise
+        // behaves like a pass-through.
+        let mut sb = ScrollBreak::new(ScrollMode::Intercept);
+        let mut input = b"hello".to_vec();
+        input.extend_from_slice(&sgr_mouse(64, 10, 20, true));
+        input.extend_from_slice(b"world");
+        let out = sb.filter(&input);
+        assert_eq!(out, b"helloworld");
+    }
+
+    #[test]
+    fn intercept_filter_keeps_non_scroll_mouse() {
+        // `filter()` only drops scroll events. Non-scroll mouse events
+        // (left click) still pass through. To strip *all* mouse events,
+        // callers must use `filter_intercept` instead.
+        let mut sb = ScrollBreak::new(ScrollMode::Intercept);
+        let click = sgr_mouse(0, 15, 20, true);
+        let out = sb.filter(&click);
+        assert_eq!(out, click);
     }
 }

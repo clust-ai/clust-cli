@@ -140,7 +140,7 @@ CREATE TABLE schema_version (
 );
 ```
 
-On startup, the hub checks `schema_version` and applies any pending migrations sequentially. This keeps the database forward-compatible as features are added.
+On startup, the hub checks `schema_version` and applies any pending migrations sequentially. The whole sequence runs inside a single `BEGIN IMMEDIATE` transaction, which acquires a RESERVED lock immediately. If two hubs race to claim the IPC socket and both try to migrate, the loser's `BEGIN IMMEDIATE` blocks (or returns `SQLITE_BUSY`, in which case it retries with backoff) until the winner commits, then re-checks `schema_version` and finds nothing to do. This prevents partial migrations from being observed during concurrent startup. The transaction also keeps the database forward-compatible as features are added.
 
 ## What Goes Where
 

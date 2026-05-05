@@ -169,10 +169,7 @@ impl ImportBatchModal {
         self.file_entries.clear();
         if let Ok(read) = std::fs::read_dir(&self.base_path) {
             for entry in read.flatten() {
-                let is_dir = entry
-                    .file_type()
-                    .map(|ft| ft.is_dir())
-                    .unwrap_or(false);
+                let is_dir = entry.file_type().map(|ft| ft.is_dir()).unwrap_or(false);
                 if let Some(name) = entry.file_name().to_str() {
                     if name.starts_with('.') {
                         continue;
@@ -192,9 +189,8 @@ impl ImportBatchModal {
             }
         }
         // Sort: directories first, then files, both alphabetically
-        self.file_entries.sort_by(|a, b| {
-            b.is_dir.cmp(&a.is_dir).then(a.name.cmp(&b.name))
-        });
+        self.file_entries
+            .sort_by(|a, b| b.is_dir.cmp(&a.is_dir).then(a.name.cmp(&b.name)));
         self.selected_idx = 0;
     }
 
@@ -226,9 +222,7 @@ impl ImportBatchModal {
             Ok(contents) => {
                 // Try list format first, then single-object format (backward compat)
                 let batches = serde_json::from_str::<Vec<BatchJson>>(&contents)
-                    .or_else(|_| {
-                        serde_json::from_str::<BatchJson>(&contents).map(|b| vec![b])
-                    });
+                    .or_else(|_| serde_json::from_str::<BatchJson>(&contents).map(|b| vec![b]));
                 match batches {
                     Ok(mut list) => {
                         if list.is_empty() || list.iter().all(|b| b.tasks.is_empty()) {
@@ -347,10 +341,7 @@ impl ImportBatchModal {
                 ImportBatchResult::Pending
             }
             KeyCode::Backspace => {
-                if self.step == Step::File
-                    && self.input.is_empty()
-                    && self.base_path != "/"
-                {
+                if self.step == Step::File && self.input.is_empty() && self.base_path != "/" {
                     // Navigate up
                     let trimmed = self.base_path.trim_end_matches('/');
                     if let Some(pos) = trimmed.rfind('/') {
@@ -384,8 +375,11 @@ impl ImportBatchModal {
             }
             KeyCode::Right => {
                 if self.cursor_pos < self.input.len() {
-                    self.cursor_pos +=
-                        self.input[self.cursor_pos..].chars().next().unwrap().len_utf8();
+                    self.cursor_pos += self.input[self.cursor_pos..]
+                        .chars()
+                        .next()
+                        .unwrap()
+                        .len_utf8();
                 }
                 ImportBatchResult::Pending
             }
@@ -652,10 +646,7 @@ impl ImportBatchModal {
                 let is_selected = vis_idx + scroll == self.selected_idx;
                 let mut spans = self.list_item_spans(&branch.name, is_selected);
                 if branch.is_head {
-                    spans.push(Span::styled(
-                        " HEAD",
-                        Style::default().fg(theme::R_SUCCESS),
-                    ));
+                    spans.push(Span::styled(" HEAD", Style::default().fg(theme::R_SUCCESS)));
                 }
                 if branch.is_worktree {
                     spans.push(Span::styled(
@@ -668,7 +659,11 @@ impl ImportBatchModal {
                         format!(
                             " ({} agent{})",
                             branch.active_agent_count,
-                            if branch.active_agent_count == 1 { "" } else { "s" }
+                            if branch.active_agent_count == 1 {
+                                ""
+                            } else {
+                                "s"
+                            }
                         ),
                         Style::default().fg(theme::R_WARNING),
                     ));
@@ -693,10 +688,7 @@ impl ImportBatchModal {
                 let is_selected = vis_idx + scroll == self.selected_idx;
                 if entry.is_dir {
                     let mut spans = self.list_item_spans(&entry.name, is_selected);
-                    spans.push(Span::styled(
-                        "/",
-                        Style::default().fg(theme::R_ACCENT),
-                    ));
+                    spans.push(Span::styled("/", Style::default().fg(theme::R_ACCENT)));
                     Line::from(spans)
                 } else {
                     Line::from(self.list_item_spans(&entry.name, is_selected))
@@ -709,7 +701,11 @@ impl ImportBatchModal {
     fn render_input(&self, frame: &mut Frame, area: Rect) {
         let before_cursor = &self.input[..self.cursor_pos];
         let (cursor_char, after_cursor) = if self.cursor_pos < self.input.len() {
-            let ch_len = self.input[self.cursor_pos..].chars().next().unwrap().len_utf8();
+            let ch_len = self.input[self.cursor_pos..]
+                .chars()
+                .next()
+                .unwrap()
+                .len_utf8();
             (
                 &self.input[self.cursor_pos..self.cursor_pos + ch_len],
                 &self.input[self.cursor_pos + ch_len..],
@@ -757,7 +753,12 @@ impl ImportBatchModal {
     // Helpers
     // -----------------------------------------------------------------------
 
-    fn render_list_item<'a>(&self, name: &'a str, detail: Option<&'a str>, selected: bool) -> Line<'a> {
+    fn render_list_item<'a>(
+        &self,
+        name: &'a str,
+        detail: Option<&'a str>,
+        selected: bool,
+    ) -> Line<'a> {
         let mut all = self.list_item_spans(name, selected);
         if let Some(d) = detail {
             all.push(Span::styled("  ", Style::default()));

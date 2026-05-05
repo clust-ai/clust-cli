@@ -1,11 +1,16 @@
 use std::collections::HashSet;
-use std::io::{self, Write};
+use std::io::{self, IsTerminal, Write};
 use std::path::Path;
 
 use crossterm::event::{self, Event, KeyCode, KeyEventKind};
 
 use crate::ipc;
 use crate::theme;
+
+/// Returns true if both stdin and stdout are TTYs.
+fn stdio_is_tty() -> bool {
+    io::stdin().is_terminal() && io::stdout().is_terminal()
+}
 
 /// Info about a worktree that may need cleanup after agent stop.
 pub struct WorktreeCleanup {
@@ -181,6 +186,17 @@ pub fn prompt_worktree_cleanup(worktrees: &[WorktreeCleanup]) {
 const OPTIONS: [&str; 3] = ["keep", "discard worktree", "discard worktree + branch"];
 
 fn run_worktree_selector(branch_name: &str, dirty: bool) -> CleanupChoice {
+    if !stdio_is_tty() {
+        eprintln!(
+            "\n  {}✘{} {}interactive mode requires a TTY{}\n",
+            theme::ERROR,
+            theme::RESET,
+            theme::TEXT_PRIMARY,
+            theme::RESET,
+        );
+        return CleanupChoice::Keep;
+    }
+
     let mut stdout = io::stdout();
 
     // Header
@@ -209,9 +225,15 @@ fn run_worktree_selector(branch_name: &str, dirty: bool) -> CleanupChoice {
     render_worktree_selector(&mut stdout, selected);
 
     loop {
+        // On `event::read()` errors, bail out with the default action (Keep)
+        // rather than spinning. A failing terminal read is unrecoverable here
+        // and continuing would either busy-loop or repeatedly fail.
         let ev = match event::read() {
             Ok(ev) => ev,
-            Err(_) => continue,
+            Err(_) => {
+                selected = 0; // default: keep
+                break;
+            }
         };
         let Event::Key(key) = ev else { continue };
         if key.kind != KeyEventKind::Press {

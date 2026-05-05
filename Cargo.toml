@@ -5,3 +5,6 @@ members = [
     "crates/clust-hub",
     "crates/clust-ipc",
 ]
+
+[workspace.dependencies]
+unicode-normalization = "0.1"

@@ -1,3 +1,5 @@
+use std::path::Path;
+
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use fuzzy_matcher::skim::SkimMatcherV2;
 use fuzzy_matcher::FuzzyMatcher;
@@ -10,6 +12,34 @@ use ratatui::{
 };
 
 use crate::theme;
+
+/// Resolve the parent directory of `path` (which is expected to end with `/`).
+///
+/// Best-effort: tries `canonicalize()` first to follow symlinks, then asks
+/// `Path::parent()` for the lexical parent. Falls back to the lexical parent
+/// of the original (un-canonicalized) path when `canonicalize` fails (e.g.
+/// permission errors or transient I/O). Returns the result as an absolute
+/// path string ending in `/`.
+///
+/// This cannot fully prevent symlink loops if the kernel itself loops; we
+/// rely on `canonicalize` to break cycles where it can.
+fn parent_of(path: &str) -> Option<String> {
+    let trimmed = path.trim_end_matches('/');
+    if trimmed.is_empty() {
+        return None;
+    }
+    let canonical = std::fs::canonicalize(trimmed).ok();
+    let candidate: &Path = canonical.as_deref().unwrap_or_else(|| Path::new(trimmed));
+    let parent = candidate.parent()?;
+    let parent_str = parent.to_string_lossy().into_owned();
+    if parent_str.is_empty() {
+        Some("/".to_string())
+    } else if parent_str.ends_with('/') {
+        Some(parent_str)
+    } else {
+        Some(format!("{parent_str}/"))
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -177,13 +207,15 @@ impl DetachedAgentModal {
                     && self.input.is_empty()
                     && self.base_path != "/"
                 {
-                    // Navigate up one directory level
-                    let trimmed = self.base_path.trim_end_matches('/');
-                    if let Some(pos) = trimmed.rfind('/') {
-                        self.base_path = format!("{}/", &trimmed[..pos]);
-                        if self.base_path == "/" || self.base_path.is_empty() {
-                            self.base_path = "/".to_string();
-                        }
+                    // Navigate up one directory level. parent_of canonicalizes
+                    // first so symlinks are followed; falls back to lexical
+                    // parent when canonicalize fails. Best-effort only.
+                    if let Some(parent) = parent_of(&self.base_path) {
+                        self.base_path = if parent.is_empty() {
+                            "/".to_string()
+                        } else {
+                            parent
+                        };
                         self.refresh_entries();
                     }
                 } else if self.cursor_pos > 0 {

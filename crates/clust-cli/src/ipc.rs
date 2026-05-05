@@ -1,4 +1,5 @@
 use std::io;
+use std::path::Path;
 use std::time::Duration;
 
 use tokio::net::UnixStream;
@@ -8,9 +9,78 @@ use clust_ipc::{CliMessage, HubMessage};
 
 use crate::hub_launcher;
 
+/// How long to wait for the old hub's socket file to disappear after StopHub.
+const SOCKET_REMOVAL_TIMEOUT: Duration = Duration::from_secs(2);
+/// How long to wait for a freshly spawned hub to bind the socket.
+const HUB_BIND_TIMEOUT: Duration = Duration::from_secs(2);
+/// Polling cadence for both wait loops.
+const POLL_INTERVAL: Duration = Duration::from_millis(50);
+/// Initial settle delay after spawning the hub before the first connect attempt.
+const SPAWN_INITIAL_DELAY: Duration = Duration::from_millis(50);
+
+/// Wait for the socket file at `sock` to disappear.
+///
+/// Polls every `POLL_INTERVAL` for up to `SOCKET_REMOVAL_TIMEOUT`. Returns Ok
+/// once the socket is gone, or a TimedOut error if it persists.
+async fn wait_for_socket_removal(sock: &Path) -> io::Result<()> {
+    let mut elapsed = Duration::ZERO;
+    while elapsed < SOCKET_REMOVAL_TIMEOUT {
+        if !sock.exists() {
+            return Ok(());
+        }
+        sleep(POLL_INTERVAL).await;
+        elapsed += POLL_INTERVAL;
+    }
+    if !sock.exists() {
+        return Ok(());
+    }
+    Err(io::Error::new(
+        io::ErrorKind::TimedOut,
+        format!(
+            "timed out waiting for stale hub to release socket at {}",
+            sock.display()
+        ),
+    ))
+}
+
+/// Wait for a freshly spawned hub to bind the socket and accept a connection.
+///
+/// Adds a brief initial delay so we don't race the hub before it has a chance
+/// to bind, then polls every `POLL_INTERVAL` for up to `HUB_BIND_TIMEOUT`.
+async fn wait_for_hub_bind(sock: &Path) -> io::Result<UnixStream> {
+    // Give the hub a brief head start so its initial bind has a chance to land
+    // before our first connect attempt.
+    sleep(SPAWN_INITIAL_DELAY).await;
+
+    let mut elapsed = Duration::ZERO;
+    while elapsed < HUB_BIND_TIMEOUT {
+        if sock.exists() {
+            if let Ok(stream) = UnixStream::connect(sock).await {
+                return Ok(stream);
+            }
+        }
+        sleep(POLL_INTERVAL).await;
+        elapsed += POLL_INTERVAL;
+    }
+    // Final attempt before giving up
+    if sock.exists() {
+        if let Ok(stream) = UnixStream::connect(sock).await {
+            return Ok(stream);
+        }
+    }
+    Err(io::Error::new(
+        io::ErrorKind::TimedOut,
+        format!(
+            "hub spawned but did not bind socket within {}s — check {} for errors",
+            HUB_BIND_TIMEOUT.as_secs(),
+            clust_ipc::log_path().display()
+        ),
+    ))
+}
+
 /// Connect to the hub, auto-spawning it if not running.
 /// Detects stale hubs via protocol version check and restarts them.
-/// Retries every 50ms for up to 2 seconds after spawning.
+/// Polls for socket existence with a 2 second ceiling around each phase.
 pub async fn connect_to_hub() -> io::Result<UnixStream> {
     let sock = clust_ipc::socket_path();
 
@@ -23,12 +93,12 @@ pub async fn connect_to_hub() -> io::Result<UnixStream> {
                 return UnixStream::connect(&sock).await;
             }
             Err(_) => {
-                // Stale hub — stop it, then fall through to spawn a new one
+                // Stale hub — stop it, then poll for socket removal before
+                // spawning a new one.
                 if let Ok(mut stream) = UnixStream::connect(&sock).await {
                     let _ = send_stop(&mut stream).await;
                 }
-                // Give old hub time to release the socket
-                sleep(Duration::from_millis(200)).await;
+                wait_for_socket_removal(&sock).await?;
             }
         }
     }
@@ -36,27 +106,8 @@ pub async fn connect_to_hub() -> io::Result<UnixStream> {
     // Hub not running (or we just stopped a stale one) — spawn it
     hub_launcher::spawn_hub()?;
 
-    // Retry with backoff
-    let max_wait = Duration::from_secs(2);
-    let interval = Duration::from_millis(50);
-    let mut elapsed = Duration::ZERO;
-
-    while elapsed < max_wait {
-        sleep(interval).await;
-        elapsed += interval;
-
-        if let Ok(stream) = UnixStream::connect(&sock).await {
-            return Ok(stream);
-        }
-    }
-
-    Err(io::Error::new(
-        io::ErrorKind::TimedOut,
-        format!(
-            "timed out waiting for hub to start (check {} for errors)",
-            clust_ipc::log_path().display()
-        ),
-    ))
+    // Wait for the hub to bind, with an initial settle delay.
+    wait_for_hub_bind(&sock).await
 }
 
 /// Check that the running hub speaks the same protocol version.
@@ -191,25 +242,34 @@ pub async fn send_stop_repo_agents(stream: &mut UnixStream, path: &str) -> io::R
     }
 }
 
-/// Fetch the full agent list from the hub. Returns empty vec if hub is unreachable.
-pub async fn fetch_agent_list() -> Vec<clust_ipc::AgentInfo> {
-    let Ok(mut stream) = try_connect().await else {
-        return vec![];
-    };
-    if clust_ipc::send_message(
+/// Fetch the full agent list from the hub.
+///
+/// Returns `Ok(agents)` on success (possibly empty), or `Err` if the hub is
+/// unreachable or returned an unexpected response. Callers must distinguish
+/// between "no agents running" (legitimately empty) and "could not query hub"
+/// to avoid silently skipping cleanup prompts.
+pub async fn try_fetch_agent_list() -> io::Result<Vec<clust_ipc::AgentInfo>> {
+    let mut stream = try_connect().await?;
+    clust_ipc::send_message(
         &mut stream,
         &CliMessage::ListAgents {
             hub: None,
             batch: None,
         },
     )
-    .await
-    .is_err()
-    {
-        return vec![];
+    .await?;
+    match clust_ipc::recv_message::<HubMessage>(&mut stream).await? {
+        HubMessage::AgentList { agents } => Ok(agents),
+        _ => Err(io::Error::other(
+            "unexpected response from hub while listing agents",
+        )),
     }
-    match clust_ipc::recv_message::<HubMessage>(&mut stream).await {
-        Ok(HubMessage::AgentList { agents }) => agents,
-        _ => vec![],
-    }
+}
+
+/// Fetch the full agent list from the hub. Returns empty vec if hub is unreachable.
+///
+/// Prefer [`try_fetch_agent_list`] when the caller needs to distinguish between
+/// "empty" and "hub unreachable" (e.g. to avoid silently skipping cleanup prompts).
+pub async fn fetch_agent_list() -> Vec<clust_ipc::AgentInfo> {
+    try_fetch_agent_list().await.unwrap_or_default()
 }

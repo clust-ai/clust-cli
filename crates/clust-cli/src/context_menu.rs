@@ -6,6 +6,7 @@ use ratatui::{
     widgets::{Block, Borders, Clear, Padding, Paragraph},
     Frame,
 };
+use unicode_width::UnicodeWidthStr;
 
 use crate::theme;
 
@@ -101,14 +102,32 @@ impl ContextMenu {
     /// Render the context menu as a centered modal overlay.
     /// Returns `(modal_rect, inner_rect)` for mouse hit-testing.
     pub fn render(&self, frame: &mut Frame, area: Rect) -> (Rect, Rect) {
-        // Calculate dimensions
+        // Re-clamp selection in case the items list shrank between the last
+        // key event and now (e.g. dynamic items rebuilt on tick). If items is
+        // empty we do not render anything at all. We clamp into a local copy
+        // because `&self` cannot mutate; `handle_key` keeps `self.selected_idx`
+        // bounded for any future input.
+        if self.items.is_empty() {
+            let modal_rect = Rect {
+                x: area.x,
+                y: area.y,
+                width: 0,
+                height: 0,
+            };
+            return (modal_rect, modal_rect);
+        }
+        let render_selected_idx = self.selected_idx.min(self.items.len() - 1);
+
+        // Calculate dimensions. Use display width (UnicodeWidthStr::width)
+        // for alignment math since ratatui paints in cells, not chars; emoji
+        // and CJK characters render at width 2.
         let label_max: usize = self
             .items
             .iter()
-            .map(|i| i.label.chars().count())
+            .map(|i| UnicodeWidthStr::width(i.label.as_str()))
             .max()
             .unwrap_or(0);
-        let title_len = self.title.chars().count();
+        let title_len = UnicodeWidthStr::width(self.title.as_str());
         // "  N  ● label  " => 2 + 1 + 2 + 2 + label + 2
         let item_width = 5 + 2 + label_max + 2; // number prefix + optional dot + label + padding
         let desc_lines: Vec<&str> = self
@@ -118,7 +137,7 @@ impl ContextMenu {
             .unwrap_or_default();
         let desc_max_width: usize = desc_lines
             .iter()
-            .map(|l| l.chars().count())
+            .map(|l| UnicodeWidthStr::width(*l))
             .max()
             .unwrap_or(0);
         let content_width = item_width.max(title_len + 4).max(desc_max_width + 2);
@@ -178,7 +197,7 @@ impl ContextMenu {
         }
 
         for (i, item) in self.items.iter().enumerate() {
-            let is_selected = i == self.selected_idx;
+            let is_selected = i == render_selected_idx;
             let num = index_to_char(i);
             let bg = if is_selected {
                 theme::R_BG_HOVER
@@ -205,8 +224,13 @@ impl ContextMenu {
                 Style::default().fg(label_fg).bg(bg),
             ));
 
-            // Pad to fill width
-            let content_len: usize = spans.iter().map(|s| s.content.chars().count()).sum();
+            // Pad to fill width. Use display width since ratatui paints in
+            // terminal cells; chars().count() over-counts narrow chars and
+            // under-counts wide chars (CJK, emoji), producing misalignment.
+            let content_len: usize = spans
+                .iter()
+                .map(|s| UnicodeWidthStr::width(s.content.as_ref()))
+                .sum();
             let remaining = (inner.width as usize).saturating_sub(content_len);
             if remaining > 0 {
                 spans.push(Span::styled(" ".repeat(remaining), Style::default().bg(bg)));

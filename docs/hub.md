@@ -23,11 +23,13 @@ The hub starts automatically when any `clust` command is run and no hub is alrea
 **Hub startup:**
 
 1. Create `~/.clust/` directory if it doesn't exist
-2. Open/create SQLite database at `~/.clust/clust.db`
+2. Open/create SQLite database at `~/.clust/clust.db`. Schema migrations run inside a single `BEGIN IMMEDIATE` transaction so that two hubs racing to claim the socket can't see a partially-migrated DB; the loser blocks until the winner commits and then re-checks `schema_version`.
 3. Ensure `.clust/worktrees` is in the global git exclude file (see Git Exclusion below)
 4. Check for stale socket file at `~/.clust/clust.sock` → remove if exists
 5. Create and bind Unix domain socket
 6. Enter main event loop (accept connections, manage agents)
+
+All hub-side git invocations run inside `tokio::task::spawn_blocking` so that long-running operations (clone, fetch, large `git status`) never block the tokio reactor and stall IPC for other clients. Branch names, remote names, and ref names are validated via dedicated helpers (`validate_ref_name`, sanitiser in `clust-ipc`) before being passed to `git`, and every git invocation appends `--` as an end-of-options marker so that arguments resembling flags (e.g., `-foo`) cannot be misinterpreted as switches. `git worktree list` parsing uses NUL-separated records (`-z`) so that worktree paths containing whitespace or newlines parse correctly.
 
 ### Shutdown
 
@@ -356,13 +358,13 @@ When the hub receives a `CleanStaleRefs` message:
 When the hub receives a `PurgeRepo` message:
 
 1. Detect the git root from the provided path.
-2. Stop all agents associated with the repository. Sends `PurgeProgress { step: "Stopping agents..." }` and awaits agent process termination before proceeding.
-3. Remove all non-main worktrees using `git worktree remove --force`. Sends `PurgeProgress { step: "Removing worktrees..." }`. Also removes the `.clust/worktrees/` directory entirely to catch any leftover files.
-4. Delete all non-HEAD local branches using `git branch -D`. Sends `PurgeProgress { step: "Deleting branches..." }`.
-5. Clean stale remote refs (same as `CleanStaleRefs`). Sends `PurgeProgress { step: "Cleaning stale refs..." }`.
+2. Stop all agents associated with the repository. Sends `PurgeProgress { step: "Stopping <N> agent(s)" }` and **awaits** every agent stop task before moving on, so worktree removal cannot race a still-running PTY.
+3. Remove all non-main worktrees using `git worktree remove --force`. Sends `PurgeProgress { step: "Removing worktrees" }`. Also removes the `.clust/worktrees/` directory entirely to catch any leftover files.
+4. Delete all non-HEAD local branches using `git branch -D`. Sends `PurgeProgress { step: "Deleting local branches" }`.
+5. Clean stale remote refs (same as `CleanStaleRefs`). Sends `PurgeProgress { step: "Cleaning stale refs" }`.
 6. Return `RepoPurged { path, stopped_agents, removed_worktrees, deleted_branches }`.
 
-Each phase sends a `PurgeProgress` IPC message to the client before execution, allowing the TUI to display real-time progress. The hub awaits agent stops before proceeding to worktree removal to prevent race conditions.
+Each phase sends a `PurgeProgress` IPC message to the client before execution, allowing the TUI to display real-time progress. Phases are best-effort: a failure in one phase is collected as a warning and surfaced to the client as a `PurgeProgress { step: "⚠ <phase>: <error>" }` message before the final `RepoPurged` result, instead of aborting the whole purge.
 
 ### Delete Repository
 
@@ -372,8 +374,8 @@ When the hub receives a `DeleteRepo` message:
 2. Run a safety check (`check_safe_to_delete`) that canonicalises the target and refuses to proceed if the path is the filesystem root, the user's `$HOME`, the clust state directory, or any ancestor of either. Failures are returned as `Error { message }`.
 3. Collect the IDs of all agents associated with the repository.
 4. Spawn a stop task per agent (so each can drain outside the state lock).
-5. Recursively delete the repository directory with `std::fs::remove_dir_all`. If this fails, return `Error { message }` and leave the DB entry intact.
-6. Unregister the repo from the SQLite database. If this fails, the folder is already gone, so return `Error { message: "Folder deleted but failed to unregister: ..." }`.
+5. Unregister the repo from the SQLite database **first** so the DB never points at a folder that is partially deleted. If unregistering fails, return `Error { message }` and leave the folder intact.
+6. Recursively delete the repository directory with `std::fs::remove_dir_all`. If deletion fails after DB cleanup, return `Error { message: "Repo unregistered but failed to delete..." }` so the user can remove the orphaned directory manually.
 7. Return `RepoDeleted { path, name, stopped_agents }`.
 
 This operation is exposed as the "Delete Repository" entry in the TUI repo context menu, gated behind a confirmation dialog. The TUI shows the success or refusal message in the status bar.

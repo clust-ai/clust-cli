@@ -11,15 +11,36 @@ fn db_path() -> PathBuf {
 }
 
 /// Open (or create) the SQLite database and run any pending migrations.
+///
+/// Migrations are wrapped in a `BEGIN IMMEDIATE` transaction so that a second
+/// hub starting concurrently (and racing on the same DB file) blocks until
+/// the first finishes. The second hub then sees the post-migration version
+/// inside its own transaction and skips all migration steps.
 pub fn open_or_create() -> Result<Connection, String> {
-    let path = db_path();
-    let conn = Connection::open(&path).map_err(|e| format!("failed to open database: {e}"))?;
+    open_or_create_at(&db_path())
+}
 
-    // Enable WAL mode for better concurrent read performance
+/// Same as [`open_or_create`] but at an explicit path. Public to the crate
+/// (and to integration tests) so we can exercise the concurrency-safe
+/// migration logic without touching the user's real `~/.clust/clust.db`.
+pub fn open_or_create_at(path: &std::path::Path) -> Result<Connection, String> {
+    let conn = Connection::open(path).map_err(|e| format!("failed to open database: {e}"))?;
+
+    // Enable WAL mode for better concurrent read performance.
+    // WAL is set at the database level (not per-connection), so doing this
+    // outside the migration transaction is fine.
     conn.execute_batch("PRAGMA journal_mode=WAL;")
         .map_err(|e| format!("failed to set journal mode: {e}"))?;
 
-    // Ensure schema_version table exists
+    // Increase the busy timeout so concurrent migrators wait on SQLite's
+    // file lock rather than failing fast. Migrations are tiny (milliseconds),
+    // so 5 seconds is plenty.
+    conn.busy_timeout(std::time::Duration::from_secs(5))
+        .map_err(|e| format!("failed to set busy timeout: {e}"))?;
+
+    // Ensure schema_version table exists. Using IF NOT EXISTS, this is safe
+    // to run from two connections simultaneously — each will either create
+    // the table or no-op.
     conn.execute_batch(
         "CREATE TABLE IF NOT EXISTS schema_version (
             version INTEGER PRIMARY KEY
@@ -31,48 +52,105 @@ pub fn open_or_create() -> Result<Connection, String> {
     Ok(conn)
 }
 
-/// Check current schema version and apply pending migrations.
+/// Highest schema version this binary knows how to produce.
+const LATEST_SCHEMA_VERSION: i64 = 10;
+
+/// Read the current `schema_version` value (0 if no rows).
+fn read_schema_version(conn: &Connection) -> Result<i64, String> {
+    conn.query_row(
+        "SELECT COALESCE(MAX(version), 0) FROM schema_version",
+        [],
+        |row| row.get(0),
+    )
+    .map_err(|e| format!("failed to read schema version: {e}"))
+}
+
+/// Check current schema version and apply pending migrations atomically.
+///
+/// The whole migration sequence runs inside a single `BEGIN IMMEDIATE`
+/// transaction so racing hubs serialize on SQLite's reserved lock. The second
+/// caller observes the post-migration version inside its own transaction and
+/// becomes a no-op — no idempotent backfills run twice.
 fn run_migrations(conn: &Connection) -> Result<(), String> {
-    let current_version: i64 = conn
-        .query_row(
-            "SELECT COALESCE(MAX(version), 0) FROM schema_version",
-            [],
-            |row| row.get(0),
-        )
-        .map_err(|e| format!("failed to read schema version: {e}"))?;
-
-    if current_version < 1 {
-        migrate_v1(conn)?;
-    }
-    if current_version < 2 {
-        migrate_v2(conn)?;
-    }
-    if current_version < 3 {
-        migrate_v3(conn)?;
-    }
-    if current_version < 4 {
-        migrate_v4(conn)?;
-    }
-    if current_version < 5 {
-        migrate_v5(conn)?;
-    }
-    if current_version < 6 {
-        migrate_v6(conn)?;
-    }
-    if current_version < 7 {
-        migrate_v7(conn)?;
-    }
-    if current_version < 8 {
-        migrate_v8(conn)?;
-    }
-    if current_version < 9 {
-        migrate_v9(conn)?;
-    }
-    if current_version < 10 {
-        migrate_v10(conn)?;
+    // Fast path: if we are already at the latest version, skip the
+    // transaction entirely. This is the common case after the first run.
+    let pre_version = read_schema_version(conn)?;
+    if pre_version >= LATEST_SCHEMA_VERSION {
+        return Ok(());
     }
 
-    Ok(())
+    // BEGIN IMMEDIATE acquires a RESERVED lock immediately, so a second
+    // concurrent migrator either succeeds in serialization (waiting here) or
+    // fails fast with SQLITE_BUSY. We retry busy with a short backoff to
+    // give the holder time to commit.
+    let mut attempts = 0u32;
+    loop {
+        match conn.execute_batch("BEGIN IMMEDIATE;") {
+            Ok(()) => break,
+            Err(e) => {
+                let is_busy = matches!(
+                    e.sqlite_error_code(),
+                    Some(rusqlite::ErrorCode::DatabaseBusy)
+                        | Some(rusqlite::ErrorCode::DatabaseLocked)
+                );
+                attempts += 1;
+                if !is_busy || attempts > 50 {
+                    return Err(format!("failed to begin migration transaction: {e}"));
+                }
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+        }
+    }
+
+    // Re-read schema_version inside the transaction. If another hub already
+    // applied the migrations between our pre-check and this point, the
+    // version is now caught up and we commit a no-op transaction.
+    let inner_result = (|| -> Result<(), String> {
+        let current_version = read_schema_version(conn)?;
+
+        if current_version < 1 {
+            migrate_v1(conn)?;
+        }
+        if current_version < 2 {
+            migrate_v2(conn)?;
+        }
+        if current_version < 3 {
+            migrate_v3(conn)?;
+        }
+        if current_version < 4 {
+            migrate_v4(conn)?;
+        }
+        if current_version < 5 {
+            migrate_v5(conn)?;
+        }
+        if current_version < 6 {
+            migrate_v6(conn)?;
+        }
+        if current_version < 7 {
+            migrate_v7(conn)?;
+        }
+        if current_version < 8 {
+            migrate_v8(conn)?;
+        }
+        if current_version < 9 {
+            migrate_v9(conn)?;
+        }
+        if current_version < 10 {
+            migrate_v10(conn)?;
+        }
+        Ok(())
+    })();
+
+    match inner_result {
+        Ok(()) => conn
+            .execute_batch("COMMIT;")
+            .map_err(|e| format!("failed to commit migrations: {e}")),
+        Err(err) => {
+            // Best-effort rollback; surface the original error regardless.
+            let _ = conn.execute_batch("ROLLBACK;");
+            Err(err)
+        }
+    }
 }
 
 /// Migration v1: create the config table.
@@ -332,9 +410,7 @@ pub fn load_queued_batches(
                 title: row.get(1)?,
                 repo_path: row.get(2)?,
                 target_branch: row.get(3)?,
-                max_concurrent: row
-                    .get::<_, Option<i64>>(4)?
-                    .map(|v| v as usize),
+                max_concurrent: row.get::<_, Option<i64>>(4)?.map(|v| v as usize),
                 prompt_prefix: row.get(5)?,
                 prompt_suffix: row.get(6)?,
                 plan_mode: row.get::<_, i32>(7)? != 0,
@@ -343,8 +419,12 @@ pub fn load_queued_batches(
                 hub: row.get(10)?,
                 scheduled_at: row.get(11)?,
                 status: row.get(12)?,
-                launch_mode: row.get::<_, Option<String>>(13)?.unwrap_or_else(|| "auto".to_string()),
-                depends_on: row.get::<_, Option<String>>(14)?.unwrap_or_else(|| "[]".to_string()),
+                launch_mode: row
+                    .get::<_, Option<String>>(13)?
+                    .unwrap_or_else(|| "auto".to_string()),
+                depends_on: row
+                    .get::<_, Option<String>>(14)?
+                    .unwrap_or_else(|| "[]".to_string()),
             })
         })
         .map_err(|e| format!("failed to query queued batches: {e}"))?
@@ -360,10 +440,7 @@ pub fn load_queued_batches(
 }
 
 /// Load tasks for a specific batch.
-fn load_batch_tasks(
-    conn: &Connection,
-    batch_id: &str,
-) -> Result<Vec<QueuedBatchTaskRow>, String> {
+fn load_batch_tasks(conn: &Connection, batch_id: &str) -> Result<Vec<QueuedBatchTaskRow>, String> {
     let mut stmt = conn
         .prepare(
             "SELECT task_index, branch_name, prompt, status, agent_id, use_prefix, use_suffix, plan_mode, exit_when_done
@@ -476,7 +553,13 @@ pub fn update_batch_config(
     conn.execute(
         "UPDATE queued_batches SET prompt_prefix = ?1, prompt_suffix = ?2,
          plan_mode = ?3, allow_bypass = ?4 WHERE id = ?5",
-        rusqlite::params![prompt_prefix, prompt_suffix, plan_mode as i32, allow_bypass as i32, id],
+        rusqlite::params![
+            prompt_prefix,
+            prompt_suffix,
+            plan_mode as i32,
+            allow_bypass as i32,
+            id
+        ],
     )
     .map_err(|e| format!("failed to update batch config: {e}"))?;
     Ok(())
@@ -507,9 +590,7 @@ pub fn remove_done_batch_tasks(conn: &Connection, batch_id: &str) -> Result<(), 
     .map_err(|e| format!("failed to remove done tasks: {e}"))?;
     // Re-index remaining tasks
     let mut stmt = conn
-        .prepare(
-            "SELECT id FROM queued_batch_tasks WHERE batch_id = ?1 ORDER BY task_index",
-        )
+        .prepare("SELECT id FROM queued_batch_tasks WHERE batch_id = ?1 ORDER BY task_index")
         .map_err(|e| format!("failed to prepare re-index query: {e}"))?;
     let ids: Vec<i64> = stmt
         .query_map([batch_id], |row| row.get(0))
@@ -529,11 +610,8 @@ pub fn remove_done_batch_tasks(conn: &Connection, batch_id: &str) -> Result<(), 
 /// Delete a queued batch and its tasks (cascade).
 pub fn delete_queued_batch(conn: &Connection, id: &str) -> Result<(), String> {
     // Delete tasks first (SQLite foreign key cascade may not be enabled)
-    conn.execute(
-        "DELETE FROM queued_batch_tasks WHERE batch_id = ?1",
-        [id],
-    )
-    .map_err(|e| format!("failed to delete batch tasks: {e}"))?;
+    conn.execute("DELETE FROM queued_batch_tasks WHERE batch_id = ?1", [id])
+        .map_err(|e| format!("failed to delete batch tasks: {e}"))?;
     conn.execute("DELETE FROM queued_batches WHERE id = ?1", [id])
         .map_err(|e| format!("failed to delete batch: {e}"))?;
     Ok(())
@@ -541,8 +619,7 @@ pub fn delete_queued_batch(conn: &Connection, id: &str) -> Result<(), String> {
 
 /// Available colors for repository identification.
 pub const REPO_COLORS: &[&str] = &[
-    "red", "orange", "yellow", "lime", "green",
-    "teal", "blue", "purple", "pink", "coral",
+    "red", "orange", "yellow", "lime", "green", "teal", "blue", "purple", "pink", "coral",
 ];
 
 /// Register a repository path with a color. Silently ignores duplicates.
@@ -562,7 +639,9 @@ pub fn list_repos(conn: &Connection) -> Result<Vec<RepoRow>, String> {
         .prepare("SELECT path, name, color, editor FROM repos ORDER BY name")
         .map_err(|e| format!("failed to prepare repo query: {e}"))?;
     let rows = stmt
-        .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)))
+        .query_map([], |row| {
+            Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+        })
         .map_err(|e| format!("failed to query repos: {e}"))?;
     rows.collect::<Result<Vec<_>, _>>()
         .map_err(|e| format!("failed to collect repos: {e}"))
@@ -969,6 +1048,111 @@ mod tests {
             register_repo(&conn, &format!("/r{i}"), &format!("r{i}"), color).unwrap();
         }
         assert_eq!(next_repo_color(&conn), REPO_COLORS[0]);
+    }
+
+    // ── Concurrent migration tests ──────────────────────────────
+
+    #[test]
+    fn concurrent_open_or_create_runs_migrations_once() {
+        // Two hubs racing on a fresh DB file must not double-apply the v3
+        // backfill (which would produce duplicate rows from idempotent UPDATEs)
+        // nor leave the schema_version table with extra entries.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("clust.db");
+
+        // Pre-seed the DB with two repos *without* colors so that v3's
+        // backfill logic has work to do. We do this by manually applying v1
+        // and v2 only, then inserting rows.
+        {
+            let conn = Connection::open(&path).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE IF NOT EXISTS schema_version (version INTEGER PRIMARY KEY);",
+            )
+            .unwrap();
+            migrate_v1(&conn).unwrap();
+            migrate_v2(&conn).unwrap();
+            let now = chrono::Utc::now().to_rfc3339();
+            conn.execute(
+                "INSERT INTO repos (path, name, registered_at) VALUES (?1, ?2, ?3)",
+                rusqlite::params!["/a/alpha", "alpha", now],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO repos (path, name, registered_at) VALUES (?1, ?2, ?3)",
+                rusqlite::params!["/b/beta", "beta", now],
+            )
+            .unwrap();
+        }
+
+        // Now race two threads through open_or_create_at. They share the
+        // same on-disk DB but each owns its own Connection.
+        let path1 = path.clone();
+        let path2 = path.clone();
+        let h1 = std::thread::spawn(move || {
+            super::open_or_create_at(&path1).expect("thread 1 open_or_create")
+        });
+        let h2 = std::thread::spawn(move || {
+            super::open_or_create_at(&path2).expect("thread 2 open_or_create")
+        });
+        h1.join().expect("thread 1 joined");
+        h2.join().expect("thread 2 joined");
+
+        // Both opens must have committed the schema. Re-open and inspect.
+        let conn = Connection::open(&path).unwrap();
+
+        // Schema is at the latest version exactly once. With the bug, the
+        // second migrator could `INSERT INTO schema_version (version) VALUES (3)`
+        // a second time, producing two rows for version 3. The PRIMARY KEY
+        // constraint would actually error — but more importantly, the v3
+        // backfill is an UPDATE, not an INSERT, so without the transaction
+        // guard it could run twice and overwrite colors set by the first
+        // migrator with colors derived from the same ordering. The cleanest
+        // assertion is: schema_version has exactly LATEST_SCHEMA_VERSION rows
+        // (one per applied migration, no duplicates).
+        let row_count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM schema_version", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(
+            row_count,
+            super::LATEST_SCHEMA_VERSION,
+            "schema_version table should have exactly one row per migration"
+        );
+
+        let max_version: i64 = conn
+            .query_row("SELECT MAX(version) FROM schema_version", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(max_version, super::LATEST_SCHEMA_VERSION);
+
+        // Repos still exist and have non-null colors after the race.
+        let count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM repos WHERE color IS NOT NULL",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 2, "both repos should have a color after migration");
+
+        // No duplicate repos either.
+        let total: i64 = conn
+            .query_row("SELECT COUNT(*) FROM repos", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(total, 2);
+    }
+
+    #[test]
+    fn open_or_create_at_is_idempotent() {
+        // Calling sequentially (not racing) twice should still leave the DB
+        // in a known-good state with no duplicate schema_version rows.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("clust.db");
+        let _conn1 = super::open_or_create_at(&path).unwrap();
+        let _conn2 = super::open_or_create_at(&path).unwrap();
+        let conn = Connection::open(&path).unwrap();
+        let row_count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM schema_version", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(row_count, super::LATEST_SCHEMA_VERSION);
     }
 
     #[test]
