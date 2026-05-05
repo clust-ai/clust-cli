@@ -59,6 +59,7 @@ pub struct AddTaskModal {
 }
 
 impl AddTaskModal {
+    #[allow(dead_code)]
     pub fn new(
         batch_idx: usize,
         batch_title: String,

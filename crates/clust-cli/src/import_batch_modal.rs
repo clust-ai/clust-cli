@@ -131,6 +131,7 @@ struct FileEntry {
 }
 
 impl ImportBatchModal {
+    #[allow(dead_code)]
     pub fn new(repos: Vec<clust_ipc::RepoInfo>) -> Self {
         let downloads = dirs::download_dir()
             .or_else(|| dirs::home_dir().map(|h| h.join("Downloads")))
