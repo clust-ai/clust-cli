@@ -1,4 +1,7 @@
+use std::collections::HashSet;
 use std::time::Duration;
+
+use clust_ipc::QueuedTask;
 
 use crate::agent::{self, SharedHubState, HubState, SpawnAgentParams};
 use crate::db;
@@ -40,6 +43,9 @@ pub enum HubTaskStatus {
     Idle,
     Active,
     Done,
+    /// The task's worktree or agent could not be spawned. Terminal state,
+    /// distinct from Done so the UI can surface failures.
+    Failed,
 }
 
 impl HubTaskStatus {
@@ -48,6 +54,7 @@ impl HubTaskStatus {
             Self::Idle => "idle",
             Self::Active => "active",
             Self::Done => "done",
+            Self::Failed => "failed",
         }
     }
 
@@ -55,6 +62,7 @@ impl HubTaskStatus {
         match s {
             "active" => Self::Active,
             "done" => Self::Done,
+            "failed" => Self::Failed,
             _ => Self::Idle,
         }
     }
@@ -130,10 +138,58 @@ impl HubBatchEntry {
             .collect()
     }
 
-    /// Whether all tasks have completed.
+    /// Whether all tasks have reached a terminal state (Done or Failed).
     fn all_done(&self) -> bool {
-        self.tasks.iter().all(|t| t.status == HubTaskStatus::Done)
+        self.tasks
+            .iter()
+            .all(|t| matches!(t.status, HubTaskStatus::Done | HubTaskStatus::Failed))
     }
+}
+
+/// Reject batches whose task list contains two tasks that sanitize to the same
+/// branch name — they would race each other on the same worktree.
+pub fn validate_unique_sanitized_branches(tasks: &[QueuedTask]) -> Result<(), String> {
+    let mut seen: HashSet<String> = HashSet::new();
+    for t in tasks {
+        let s = clust_ipc::branch::sanitize_branch_name(&t.branch_name);
+        if !seen.insert(s.clone()) {
+            return Err(format!(
+                "duplicate sanitized branch name '{s}' in batch (raw: '{}')",
+                t.branch_name
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Return true if setting `target_id`'s `depends_on` to `new_deps` would form
+/// a cycle (or include a self-reference). The TUI already rejects cycles in
+/// `batch_deps_modal::would_create_cycle`; this is the IPC-side guard for
+/// requests that bypass the TUI.
+pub fn would_create_cycle(
+    batches: &[HubBatchEntry],
+    target_id: &str,
+    new_deps: &[String],
+) -> bool {
+    if new_deps.iter().any(|d| d == target_id) {
+        return true;
+    }
+    let mut visited: HashSet<String> = HashSet::new();
+    let mut stack: Vec<String> = new_deps.to_vec();
+    while let Some(cur) = stack.pop() {
+        if cur == target_id {
+            return true;
+        }
+        if !visited.insert(cur.clone()) {
+            continue;
+        }
+        if let Some(b) = batches.iter().find(|b| b.id == cur) {
+            for d in &b.depends_on {
+                stack.push(d.clone());
+            }
+        }
+    }
+    false
 }
 
 // ---------------------------------------------------------------------------
@@ -204,17 +260,39 @@ async fn check_and_advance_batches(state: &SharedHubState) {
                     continue;
                 }
 
-                // Collect tasks to spawn
-                for (task_idx, task) in batch.next_tasks_to_start() {
+                // Collect tasks to spawn AND pre-mark them Active under lock
+                // so the next timer tick won't pick them up again, and so a
+                // racing RemoveDoneBatchTasks won't shift their indices.
+                let to_start: Vec<(usize, String, String, bool)> = batch
+                    .next_tasks_to_start()
+                    .into_iter()
+                    .map(|(idx, task)| {
+                        (
+                            idx,
+                            task.branch_name.clone(),
+                            batch.build_prompt(task),
+                            task.plan_mode,
+                        )
+                    })
+                    .collect();
+                for (task_idx, branch_name, prompt, plan_mode) in to_start {
+                    if let Some(t) = batch.tasks.get_mut(task_idx) {
+                        t.status = HubTaskStatus::Active;
+                        t.agent_id = None;
+                    }
+                    db_updates.push((
+                        "task_active_pending",
+                        batch.id.clone(),
+                        Some((task_idx, None)),
+                    ));
                     tasks_to_spawn.push(TaskSpawnRequest {
                         batch_id: batch.id.clone(),
-                        task_index: task_idx,
                         repo_path: batch.repo_path.clone(),
                         target_branch: batch.target_branch.clone(),
-                        branch_name: task.branch_name.clone(),
-                        prompt: batch.build_prompt(task),
+                        branch_name,
+                        prompt,
                         agent_binary: batch.agent_binary.clone(),
-                        plan_mode: task.plan_mode,
+                        plan_mode,
                         allow_bypass: batch.allow_bypass,
                         hub: batch.hub.clone(),
                     });
@@ -223,7 +301,8 @@ async fn check_and_advance_batches(state: &SharedHubState) {
         }
 
         // Auto-start idle batches whose dependencies are all satisfied.
-        // Collect completed/absent IDs first (immutable pass), then apply transitions.
+        // Manual-launch batches are NEVER auto-started — they require explicit
+        // per-task user action regardless of dependency state.
         let completed_ids: std::collections::HashSet<String> = hub
             .queued_batches
             .iter()
@@ -234,7 +313,11 @@ async fn check_and_advance_batches(state: &SharedHubState) {
         let batches_to_start: Vec<String> = hub
             .queued_batches
             .iter()
-            .filter(|b| b.status == HubBatchStatus::Idle && !b.depends_on.is_empty())
+            .filter(|b| {
+                b.status == HubBatchStatus::Idle
+                    && b.launch_mode == "auto"
+                    && !b.depends_on.is_empty()
+            })
             .filter(|b| {
                 b.depends_on.iter().all(|dep_id| {
                     // Satisfied if completed or no longer in memory (deleted/evicted)
@@ -250,17 +333,36 @@ async fn check_and_advance_batches(state: &SharedHubState) {
                 batch.status = HubBatchStatus::Running;
                 db_updates.push(("running", batch.id.clone(), None));
 
-                // Collect tasks to spawn for newly started batches
-                for (task_idx, task) in batch.next_tasks_to_start() {
+                let to_start: Vec<(usize, String, String, bool)> = batch
+                    .next_tasks_to_start()
+                    .into_iter()
+                    .map(|(idx, task)| {
+                        (
+                            idx,
+                            task.branch_name.clone(),
+                            batch.build_prompt(task),
+                            task.plan_mode,
+                        )
+                    })
+                    .collect();
+                for (task_idx, branch_name, prompt, plan_mode) in to_start {
+                    if let Some(t) = batch.tasks.get_mut(task_idx) {
+                        t.status = HubTaskStatus::Active;
+                        t.agent_id = None;
+                    }
+                    db_updates.push((
+                        "task_active_pending",
+                        batch.id.clone(),
+                        Some((task_idx, None)),
+                    ));
                     tasks_to_spawn.push(TaskSpawnRequest {
                         batch_id: batch.id.clone(),
-                        task_index: task_idx,
                         repo_path: batch.repo_path.clone(),
                         target_branch: batch.target_branch.clone(),
-                        branch_name: task.branch_name.clone(),
-                        prompt: batch.build_prompt(task),
+                        branch_name,
+                        prompt,
                         agent_binary: batch.agent_binary.clone(),
-                        plan_mode: task.plan_mode,
+                        plan_mode,
                         allow_bypass: batch.allow_bypass,
                         hub: batch.hub.clone(),
                     });
@@ -283,6 +385,13 @@ async fn check_and_advance_batches(state: &SharedHubState) {
                                 *idx,
                                 "done",
                                 agent_id.as_deref(),
+                            );
+                        }
+                    }
+                    "task_active_pending" => {
+                        if let Some((idx, _)) = task_info {
+                            let _ = db::update_task_status(
+                                db, batch_id, *idx, "active", None,
                             );
                         }
                     }
@@ -311,43 +420,73 @@ async fn check_and_advance_batches(state: &SharedHubState) {
         })
         .await;
 
-        // Phase 3: Update task state with the result (under lock)
-        let mut hub = state.lock().await;
-        if let Some(batch) = hub
-            .queued_batches
-            .iter_mut()
-            .find(|b| b.id == req.batch_id)
-        {
-            if let Some(task) = batch.tasks.get_mut(req.task_index) {
-                match result {
-                    Ok((agent_id, _, _)) => {
-                        task.status = HubTaskStatus::Active;
-                        task.agent_id = Some(agent_id.clone());
-                        if let Some(ref db) = hub.db {
-                            let _ = db::update_task_status(
-                                db,
-                                &req.batch_id,
-                                req.task_index,
-                                "active",
-                                Some(&agent_id),
-                            );
-                        }
-                    }
-                    Err(_) => {
-                        // Mark as done on failure to avoid retrying forever
-                        task.status = HubTaskStatus::Done;
-                        if let Some(ref db) = hub.db {
-                            let _ = db::update_task_status(
-                                db,
-                                &req.batch_id,
-                                req.task_index,
-                                "done",
-                                None,
-                            );
-                        }
+        // Phase 3: Update task state with the result (under lock).
+        // Lookup by branch_name (not task_index) because RemoveDoneBatchTasks
+        // can re-index between phases. Branch names are unique within a batch
+        // (see validate_unique_sanitized_branches).
+        let orphan_to_stop: Option<String> = {
+            let mut hub = state.lock().await;
+            let batch = hub
+                .queued_batches
+                .iter_mut()
+                .find(|b| b.id == req.batch_id);
+            match batch {
+                None => {
+                    // Batch was deleted while we were spawning. Surface the
+                    // orphan agent_id so we can stop it after dropping lock.
+                    match result {
+                        Ok((agent_id, _, _)) => Some(agent_id),
+                        Err(_) => None,
                     }
                 }
+                Some(batch) => {
+                    // Recompute task_index for DB write (lookup before
+                    // taking the mutable borrow below).
+                    let task_idx = batch
+                        .tasks
+                        .iter()
+                        .position(|t| t.branch_name == req.branch_name);
+                    if let Some(task) = batch
+                        .tasks
+                        .iter_mut()
+                        .find(|t| t.branch_name == req.branch_name)
+                    {
+                        match result {
+                            Ok((agent_id, _, _)) => {
+                                task.status = HubTaskStatus::Active;
+                                task.agent_id = Some(agent_id.clone());
+                                if let (Some(ref db), Some(idx)) = (&hub.db, task_idx) {
+                                    let _ = db::update_task_status(
+                                        db,
+                                        &req.batch_id,
+                                        idx,
+                                        "active",
+                                        Some(&agent_id),
+                                    );
+                                }
+                            }
+                            Err(_) => {
+                                // Spawn failed — terminal Failed state, not Done.
+                                task.status = HubTaskStatus::Failed;
+                                task.agent_id = None;
+                                if let (Some(ref db), Some(idx)) = (&hub.db, task_idx) {
+                                    let _ = db::update_task_status(
+                                        db,
+                                        &req.batch_id,
+                                        idx,
+                                        "failed",
+                                        None,
+                                    );
+                                }
+                            }
+                        }
+                    }
+                    None
+                }
             }
+        };
+        if let Some(aid) = orphan_to_stop {
+            let _ = agent::stop_agent(state, &aid).await;
         }
     }
 }
@@ -388,7 +527,6 @@ pub fn on_agent_exited(hub: &mut HubState, agent_id: &str) {
 
 struct TaskSpawnRequest {
     batch_id: String,
-    task_index: usize,
     repo_path: String,
     target_branch: String,
     branch_name: String,
@@ -536,13 +674,23 @@ pub fn load_batches_from_db(hub: &HubState) -> Vec<HubBatchEntry> {
 
     rows.into_iter()
         .map(|(batch_row, task_rows)| {
-            let scheduled_at = batch_row.scheduled_at.as_ref().and_then(|s| {
+            let parsed_at = batch_row.scheduled_at.as_ref().and_then(|s| {
                 chrono::DateTime::parse_from_rfc3339(s)
                     .ok()
                     .map(|dt| dt.with_timezone(&chrono::Utc))
             });
 
             let status = HubBatchStatus::parse(&batch_row.status);
+
+            // Recovery for corrupt rows: if a batch is persisted as
+            // Scheduled but has an unparseable/missing timestamp, treat it
+            // as due immediately so the next timer tick advances it instead
+            // of leaving it stuck forever.
+            let scheduled_at = if status == HubBatchStatus::Scheduled && parsed_at.is_none() {
+                Some(chrono::Utc::now())
+            } else {
+                parsed_at
+            };
 
             let tasks = task_rows
                 .into_iter()

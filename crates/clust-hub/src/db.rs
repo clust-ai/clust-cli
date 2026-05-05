@@ -394,11 +394,18 @@ pub fn update_task_status(
 }
 
 /// Add a task to an existing batch. Returns the assigned task_index.
+///
+/// Caller must pass the in-memory defaults for `plan_mode`, `use_prefix`, and
+/// `use_suffix` so they survive a hub restart — without this, all three reset
+/// to the column defaults on reload (plan_mode=0, prefix/suffix=1).
 pub fn add_batch_task(
     conn: &Connection,
     batch_id: &str,
     branch_name: &str,
     prompt: &str,
+    plan_mode: bool,
+    use_prefix: bool,
+    use_suffix: bool,
 ) -> Result<usize, String> {
     let max_index: i64 = conn
         .query_row(
@@ -409,9 +416,18 @@ pub fn add_batch_task(
         .map_err(|e| format!("failed to query max task index: {e}"))?;
     let new_index = (max_index + 1) as usize;
     conn.execute(
-        "INSERT INTO queued_batch_tasks (batch_id, task_index, branch_name, prompt, status)
-         VALUES (?1, ?2, ?3, ?4, 'idle')",
-        rusqlite::params![batch_id, new_index as i64, branch_name, prompt],
+        "INSERT INTO queued_batch_tasks
+            (batch_id, task_index, branch_name, prompt, status, plan_mode, use_prefix, use_suffix)
+         VALUES (?1, ?2, ?3, ?4, 'idle', ?5, ?6, ?7)",
+        rusqlite::params![
+            batch_id,
+            new_index as i64,
+            branch_name,
+            prompt,
+            plan_mode as i32,
+            use_prefix as i32,
+            use_suffix as i32,
+        ],
     )
     .map_err(|e| format!("failed to insert batch task: {e}"))?;
     Ok(new_index)

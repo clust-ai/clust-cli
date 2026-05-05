@@ -62,6 +62,19 @@ pub enum TaskStatus {
     Idle,
     Active,
     Done,
+    /// Spawning the worktree or agent failed. Terminal, distinct from Done.
+    Failed,
+}
+
+/// Map a hub-side status string to the local enum. Unknown values fall back
+/// to Idle (defensive — DB only ever holds a known set).
+fn parse_task_status(s: &str) -> TaskStatus {
+    match s {
+        "active" => TaskStatus::Active,
+        "done" => TaskStatus::Done,
+        "failed" => TaskStatus::Failed,
+        _ => TaskStatus::Idle,
+    }
 }
 
 /// A single task within a batch.
@@ -570,11 +583,7 @@ impl TasksState {
                 .map(|t| TaskEntry {
                     branch_name: t.branch_name.clone(),
                     prompt: t.prompt.clone(),
-                    status: match t.status.as_str() {
-                        "active" => TaskStatus::Active,
-                        "done" => TaskStatus::Done,
-                        _ => TaskStatus::Idle,
-                    },
+                    status: parse_task_status(&t.status),
                     agent_id: t.agent_id.clone(),
                     use_prefix: t.use_prefix,
                     use_suffix: t.use_suffix,
@@ -651,12 +660,7 @@ impl TasksState {
             // Sync per-task status and agent_id
             for (i, hub_task) in hub_info.tasks.iter().enumerate() {
                 if let Some(task) = batch.tasks.get_mut(i) {
-                    let new_status = match hub_task.status.as_str() {
-                        "active" => TaskStatus::Active,
-                        "done" => TaskStatus::Done,
-                        _ => TaskStatus::Idle,
-                    };
-                    task.status = new_status;
+                    task.status = parse_task_status(&hub_task.status);
                     if hub_task.agent_id.is_some() {
                         task.agent_id = hub_task.agent_id.clone();
                     }
@@ -669,11 +673,7 @@ impl TasksState {
                     batch.tasks.push(TaskEntry {
                         branch_name: hub_task.branch_name.clone(),
                         prompt: hub_task.prompt.clone(),
-                        status: match hub_task.status.as_str() {
-                            "active" => TaskStatus::Active,
-                            "done" => TaskStatus::Done,
-                            _ => TaskStatus::Idle,
-                        },
+                        status: parse_task_status(&hub_task.status),
                         agent_id: hub_task.agent_id.clone(),
                         use_prefix: hub_task.use_prefix,
                         use_suffix: hub_task.use_suffix,
@@ -701,7 +701,9 @@ impl TasksState {
 
     pub fn remove_done_tasks(&mut self, batch_idx: usize) {
         if let Some(batch) = self.batches.get_mut(batch_idx) {
-            batch.tasks.retain(|t| t.status != TaskStatus::Done);
+            batch
+                .tasks
+                .retain(|t| !matches!(t.status, TaskStatus::Done | TaskStatus::Failed));
         }
     }
 
@@ -1289,12 +1291,13 @@ fn render_task_boxes(
         return;
     }
 
-    // Sort: Active first, then Idle, then Done
+    // Sort: Active first, then Idle, then Done, then Failed (terminal states last)
     let mut sorted_indices: Vec<usize> = (0..batch.tasks.len()).collect();
     sorted_indices.sort_by_key(|&i| match batch.tasks[i].status {
         TaskStatus::Active => 0,
         TaskStatus::Idle => 1,
         TaskStatus::Done => 2,
+        TaskStatus::Failed => 3,
     });
 
     // Compute heights for all sorted tasks
@@ -1452,6 +1455,12 @@ fn render_single_task_box(
                 .add_modifier(Modifier::BOLD),
         ),
         TaskStatus::Done => ("Done", Style::default().fg(theme::R_WARNING)),
+        TaskStatus::Failed => (
+            "Failed",
+            Style::default()
+                .fg(theme::R_ERROR)
+                .add_modifier(Modifier::BOLD),
+        ),
     };
 
     // Separator color based on status (accent when focused)
@@ -1462,6 +1471,7 @@ fn render_single_task_box(
             TaskStatus::Active => theme::R_SUCCESS,
             TaskStatus::Idle => theme::R_TEXT_DISABLED,
             TaskStatus::Done => theme::R_TEXT_TERTIARY,
+            TaskStatus::Failed => theme::R_ERROR,
         }
     };
 
