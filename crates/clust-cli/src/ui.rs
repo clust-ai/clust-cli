@@ -3207,6 +3207,7 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                             task.use_prefix,
                                             task.use_suffix,
                                             task.plan_mode,
+                                            task.exit_when_done,
                                         );
                                     }
                                     to_register.push((batch_idx, batch_json));
@@ -3268,6 +3269,7 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                                 use_prefix: t.use_prefix,
                                                 use_suffix: t.use_suffix,
                                                 plan_mode: t.plan_mode,
+                                                exit_when_done: t.exit_when_done,
                                             })
                                             .collect();
 
@@ -3371,6 +3373,7 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                     output.use_prefix,
                                     output.use_suffix,
                                     output.plan_mode,
+                                    output.exit_when_done,
                                 );
                             }
                             AddTaskResult::Pending => {}
@@ -3446,6 +3449,7 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                                 use_prefix: t.use_prefix,
                                                 use_suffix: t.use_suffix,
                                                 plan_mode: t.plan_mode,
+                                                exit_when_done: t.exit_when_done,
                                             })
                                             .collect();
                                         let msg = CliMessage::QueueBatch {
@@ -4540,6 +4544,7 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                                     batch.prompt_prefix.is_some(),
                                                     batch.prompt_suffix.is_some(),
                                                     batch.plan_mode,
+                                                    true,
                                                 ));
                                                 show_help = false;
                                             }

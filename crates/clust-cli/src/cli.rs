@@ -82,6 +82,15 @@ pub enum Commands {
         #[arg(short = 's', long = "stop")]
         stop: bool,
     },
+    /// Internal helpers invoked by hub-injected agent hooks. Not for direct use.
+    #[command(hide = true, subcommand)]
+    Internal(InternalCommands),
+}
+
+#[derive(Subcommand)]
+pub enum InternalCommands {
+    /// Stop hook: send SIGTERM to the parent agent process so it exits.
+    StopHook,
 }
 
 #[derive(Args)]

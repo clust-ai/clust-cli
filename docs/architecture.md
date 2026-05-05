@@ -77,7 +77,7 @@ The CLI is a thin client. It does NOT manage agent processes directly.
 - Protocol version constant (`PROTOCOL_VERSION`) for detecting stale hubs after rebuilds
 - Split-stream variants for bidirectional sessions
 - Socket path and clust directory helpers
-- Known agent registry (`KNOWN_AGENTS`) with accept-edits, bypass-permissions, plan-mode, and allow-bypass metadata
+- Known agent registry (`KNOWN_AGENTS`) with accept-edits, bypass-permissions, plan-mode, allow-bypass, and stop-hook metadata (`supports_stop_hook` indicates whether the agent honors the per-task "Exit when done" flag, currently `claude` only)
 - Branch name sanitization (`sanitize_branch_name`) for converting user input into valid git branch names
 
 ## IPC Design

@@ -90,6 +90,9 @@ pub struct TaskEntry {
     pub use_suffix: bool,
     /// Whether this task should run in plan mode (overrides batch default).
     pub plan_mode: bool,
+    /// When true, the agent terminates itself at its first natural stopping
+    /// point (Stop hook fires) so the task transitions to Done automatically.
+    pub exit_when_done: bool,
 }
 
 /// Batch membership info for an agent displayed in the overview.
@@ -160,6 +163,9 @@ impl BatchInfo {
                 }
                 if !t.use_suffix {
                     task_obj["use_suffix"] = serde_json::json!(false);
+                }
+                if t.exit_when_done {
+                    task_obj["exit_when_done"] = serde_json::json!(true);
                 }
                 task_obj
             })
@@ -334,6 +340,7 @@ impl TasksState {
         idx
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn add_task(
         &mut self,
         batch_idx: usize,
@@ -342,6 +349,7 @@ impl TasksState {
         use_prefix: bool,
         use_suffix: bool,
         plan_mode: bool,
+        exit_when_done: bool,
     ) {
         if let Some(batch) = self.batches.get_mut(batch_idx) {
             batch.tasks.push(TaskEntry {
@@ -352,6 +360,7 @@ impl TasksState {
                 use_prefix,
                 use_suffix,
                 plan_mode,
+                exit_when_done,
             });
         }
     }
@@ -588,6 +597,7 @@ impl TasksState {
                     use_prefix: t.use_prefix,
                     use_suffix: t.use_suffix,
                     plan_mode: t.plan_mode,
+                    exit_when_done: t.exit_when_done,
                 })
                 .collect();
 
@@ -678,6 +688,7 @@ impl TasksState {
                         use_prefix: hub_task.use_prefix,
                         use_suffix: hub_task.use_suffix,
                         plan_mode: hub_task.plan_mode,
+                        exit_when_done: hub_task.exit_when_done,
                     });
                 }
             }

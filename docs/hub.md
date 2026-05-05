@@ -412,6 +412,18 @@ Agent spawning happens outside the hub state lock to avoid blocking other operat
 
 When an agent exits (`on_agent_exited`), the batch engine marks the matching queued batch task as `Done` and updates the database. Actual task advancement (starting next idle tasks) happens on the next timer tick to avoid performing slow worktree operations in the PTY reader thread.
 
+### Per-Task "Exit when done"
+
+Tasks can opt in to automatic agent termination via the `exit_when_done` flag (set in the Add Task modal with `Alt+X`). When the flag is `true` and the agent binary's `KnownAgent.supports_stop_hook` is `true` (currently only `claude`), the hub:
+
+1. Writes a small JSON settings file to `<clust_dir>/agents/<agent_id>/settings.json` containing a `Stop` hook whose command is `<clust> internal stop-hook` (resolved to a `clust` binary sitting next to the running `clust-hub`, falling back to `clust` on PATH).
+2. Appends `--settings <path>` to the agent's launch arguments so Claude picks up the hook.
+3. The hidden `clust internal stop-hook` subcommand sends `SIGTERM` to its parent process (via `libc::kill(getppid(), SIGTERM)`), which is the agent. The agent exits cleanly.
+4. The existing PTY-exit-as-Done flow detects the exit, calls `on_agent_exited`, and the batch engine marks the task `Done`.
+5. The PTY reader's cleanup path removes the settings file when the agent exits, so no stale files accumulate under `<clust_dir>/agents/`.
+
+For agents that do not support the Stop hook (`KnownAgent.supports_stop_hook == false`), the flag is silently ignored at spawn time -- the agent runs normally and the user must stop it manually.
+
 ### Shared Worktree Helper
 
 The `create_worktree_and_spawn_agent()` function extracts the worktree creation and agent spawning logic previously inline in the `CreateWorktreeAgent` IPC handler. It accepts a `CreateWorktreeParams` struct and is used by both the IPC handler and the batch timer task. The function:

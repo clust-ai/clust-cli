@@ -76,6 +76,7 @@ pub struct HubTaskEntry {
     pub use_prefix: bool,
     pub use_suffix: bool,
     pub plan_mode: bool,
+    pub exit_when_done: bool,
 }
 
 pub struct HubBatchEntry {
@@ -263,7 +264,7 @@ async fn check_and_advance_batches(state: &SharedHubState) {
                 // Collect tasks to spawn AND pre-mark them Active under lock
                 // so the next timer tick won't pick them up again, and so a
                 // racing RemoveDoneBatchTasks won't shift their indices.
-                let to_start: Vec<(usize, String, String, bool)> = batch
+                let to_start: Vec<(usize, String, String, bool, bool)> = batch
                     .next_tasks_to_start()
                     .into_iter()
                     .map(|(idx, task)| {
@@ -272,10 +273,11 @@ async fn check_and_advance_batches(state: &SharedHubState) {
                             task.branch_name.clone(),
                             batch.build_prompt(task),
                             task.plan_mode,
+                            task.exit_when_done,
                         )
                     })
                     .collect();
-                for (task_idx, branch_name, prompt, plan_mode) in to_start {
+                for (task_idx, branch_name, prompt, plan_mode, exit_when_done) in to_start {
                     if let Some(t) = batch.tasks.get_mut(task_idx) {
                         t.status = HubTaskStatus::Active;
                         t.agent_id = None;
@@ -295,6 +297,7 @@ async fn check_and_advance_batches(state: &SharedHubState) {
                         plan_mode,
                         allow_bypass: batch.allow_bypass,
                         hub: batch.hub.clone(),
+                        exit_when_done,
                     });
                 }
             }
@@ -333,7 +336,7 @@ async fn check_and_advance_batches(state: &SharedHubState) {
                 batch.status = HubBatchStatus::Running;
                 db_updates.push(("running", batch.id.clone(), None));
 
-                let to_start: Vec<(usize, String, String, bool)> = batch
+                let to_start: Vec<(usize, String, String, bool, bool)> = batch
                     .next_tasks_to_start()
                     .into_iter()
                     .map(|(idx, task)| {
@@ -342,10 +345,11 @@ async fn check_and_advance_batches(state: &SharedHubState) {
                             task.branch_name.clone(),
                             batch.build_prompt(task),
                             task.plan_mode,
+                            task.exit_when_done,
                         )
                     })
                     .collect();
-                for (task_idx, branch_name, prompt, plan_mode) in to_start {
+                for (task_idx, branch_name, prompt, plan_mode, exit_when_done) in to_start {
                     if let Some(t) = batch.tasks.get_mut(task_idx) {
                         t.status = HubTaskStatus::Active;
                         t.agent_id = None;
@@ -365,6 +369,7 @@ async fn check_and_advance_batches(state: &SharedHubState) {
                         plan_mode,
                         allow_bypass: batch.allow_bypass,
                         hub: batch.hub.clone(),
+                        exit_when_done,
                     });
                 }
             }
@@ -417,6 +422,7 @@ async fn check_and_advance_batches(state: &SharedHubState) {
             hub: &req.hub,
             cols: 120,
             rows: 40,
+            exit_when_done: req.exit_when_done,
         })
         .await;
 
@@ -535,6 +541,7 @@ struct TaskSpawnRequest {
     plan_mode: bool,
     allow_bypass: bool,
     hub: String,
+    exit_when_done: bool,
 }
 
 /// Parameters for `create_worktree_and_spawn_agent`.
@@ -550,6 +557,7 @@ pub struct CreateWorktreeParams<'a> {
     pub hub: &'a str,
     pub cols: u16,
     pub rows: u16,
+    pub exit_when_done: bool,
 }
 
 /// Create a git worktree and spawn an agent in it.
@@ -572,6 +580,7 @@ pub async fn create_worktree_and_spawn_agent(
         hub,
         cols,
         rows,
+        exit_when_done,
     } = params;
     // Determine branch name
     let sanitized_new = new_branch.map(clust_ipc::branch::sanitize_branch_name);
@@ -634,6 +643,7 @@ pub async fn create_worktree_and_spawn_agent(
                 repo_path: wt_repo_path,
                 branch_name: wt_branch_name,
                 is_worktree,
+                exit_when_done,
             },
             state.clone(),
         )
@@ -702,6 +712,7 @@ pub fn load_batches_from_db(hub: &HubState) -> Vec<HubBatchEntry> {
                     use_prefix: t.use_prefix,
                     use_suffix: t.use_suffix,
                     plan_mode: t.plan_mode,
+                    exit_when_done: t.exit_when_done,
                 })
                 .collect();
 
