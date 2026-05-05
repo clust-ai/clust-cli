@@ -49,10 +49,6 @@ pub enum Commands {
         /// Filter agents by hub name
         #[arg(short = 'H', long = "hub")]
         hub: Option<String>,
-
-        /// Filter agents by batch ID or title
-        #[arg(short = 'B', long = "batch")]
-        batch: Option<String>,
     },
     /// Open the Clust terminal UI
     Ui,
@@ -274,7 +270,6 @@ mod tests {
             Some(Commands::Ls {
                 select: false,
                 hub: None,
-                batch: None,
             })
         ));
     }
@@ -287,7 +282,6 @@ mod tests {
             Some(Commands::Ls {
                 select: true,
                 hub: None,
-                batch: None,
             })
         ));
     }
@@ -300,7 +294,6 @@ mod tests {
             Some(Commands::Ls {
                 select: true,
                 hub: None,
-                batch: None,
             })
         ));
     }

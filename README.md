@@ -144,7 +144,7 @@ clust repo -s
 | `←` `→` | Navigate tree / scroll viewport |
 | `Enter` | Open context menu or focus mode |
 | `Space` | Toggle collapse/expand |
-| `Shift+←` / `Shift+→` | Switch panel or batch |
+| `Shift+←` / `Shift+→` | Switch panel |
 | `Shift+↓` | Enter terminal / focus mode |
 | `Alt+E` | Create new agent on a worktree |
 | `v` | Toggle agent grouping (by-repo / by-hub) |
@@ -155,84 +155,12 @@ clust repo -s
 
 ## Terminal UI
 
-The TUI dashboard (`clust ui`) has three tabs:
+The TUI dashboard (`clust ui`) has two tabs:
 
 - **Repositories** — Browse tracked repos and branches in a tree view, see which agents are running where, and jump into focus mode. Repos are color-coded for quick identification.
 - **Overview** — Side-by-side terminal panels showing all running agents with full ANSI rendering, scrollback, and Cmd+click URL opening.
-- **Batches** — Batch creation and task management with horizontal batch cards, scheduling, and JSON import.
 
 Mouse support includes click navigation, scroll, and Cmd+click to open URLs.
-
-## Batch JSON Import
-
-Batches can be imported from JSON files using `Alt+I` in the TUI. The file browser opens in `~/Downloads` by default and filters for `.json` files.
-
-### Structure
-
-```json
-{
-  "title": "My Batch",
-  "prefix": "You are working on the auth module.",
-  "suffix": "Run tests before finishing.",
-  "launch_mode": "auto",
-  "max_concurrent": 2,
-  "plan_mode": false,
-  "allow_bypass": false,
-  "depends_on": [],
-  "tasks": [
-    {
-      "branch": "feat/login-form",
-      "prompt": "Implement the login form component"
-    },
-    {
-      "branch": "feat/login-api",
-      "prompt": "Add the login API endpoint"
-    },
-    {
-      "branch": "feat/login-tests",
-      "prompt": "Write integration tests for the login flow"
-    }
-  ]
-}
-```
-
-Batches can depend on other batches. When a dependency batch completes all its tasks, dependent batches auto-start. Use `depends_on` with the titles of existing batches:
-
-```json
-{
-  "title": "Integration Tests",
-  "depends_on": ["My Batch"],
-  "tasks": [
-    {
-      "branch": "feat/integration-tests",
-      "prompt": "Write integration tests for the auth module"
-    }
-  ]
-}
-```
-
-### Fields
-
-| Field | Type | Required | Description |
-|-------|------|----------|-------------|
-| `title` | string | No | Batch name. Auto-generates "Batch N" if omitted. |
-| `prefix` | string | No | Prompt prefix prepended to every task. |
-| `suffix` | string | No | Prompt suffix appended to every task. |
-| `launch_mode` | string | No | `"auto"` (default) or `"manual"`. |
-| `max_concurrent` | number | No | Max concurrent agents (auto mode). Null = unlimited. |
-| `plan_mode` | boolean | No | Start agents in plan mode. Default `false`. |
-| `allow_bypass` | boolean | No | Allow agents to bypass permission prompts. Default `false`. |
-| `depends_on` | array | No | Titles of batches this batch depends on. Batch auto-starts when all dependencies complete. |
-| `tasks` | array | Yes | List of task objects (at least one required). |
-
-**Task fields:**
-
-| Field | Type | Required | Description |
-|-------|------|----------|-------------|
-| `branch` | string | Yes | Branch name for the worktree. |
-| `prompt` | string | Yes | The prompt for the agent. |
-
-After selecting a JSON file, you'll be prompted to choose a repository and branch. The batch is created with all tasks pre-populated. Dependencies can also be configured after creation using `Shift+D` in the TUI.
 
 ## Architecture
 

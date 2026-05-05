@@ -59,60 +59,7 @@ Migration v3 adds the `color` column and backfills existing repos with cycling c
 
 Migration v4 adds the `editor` column for per-repository editor preferences. When set, the TUI skips the editor picker modal and opens the repository directly in the saved editor.
 
-#### `queued_batches` *(migration v5, extended in v6, v7, v8)*
-
-Batches persisted by the hub daemon. Includes idle batches (registered from the CLI Tasks tab), scheduled batches (with a timer), and running batches. Persisted so batches survive hub restarts.
-
-```sql
-CREATE TABLE queued_batches (
-    id              TEXT PRIMARY KEY,
-    title           TEXT NOT NULL,
-    repo_path       TEXT NOT NULL,
-    target_branch   TEXT NOT NULL,
-    max_concurrent  INTEGER,
-    prompt_prefix   TEXT,
-    prompt_suffix   TEXT,
-    plan_mode       INTEGER NOT NULL DEFAULT 0,
-    allow_bypass    INTEGER NOT NULL DEFAULT 0,
-    agent_binary    TEXT,
-    hub             TEXT NOT NULL,
-    scheduled_at    TEXT,                -- RFC 3339 timestamp; NULL for idle batches
-    status          TEXT NOT NULL DEFAULT 'scheduled',  -- idle, scheduled, running, completed
-    created_at      TEXT NOT NULL,       -- RFC 3339 timestamp
-    launch_mode     TEXT NOT NULL DEFAULT 'auto',  -- auto or manual; added in migration v7
-    depends_on      TEXT NOT NULL DEFAULT '[]'    -- JSON array of hub batch IDs; added in migration v8
-);
-```
-
-Migration v7 adds the `launch_mode` column (with default `'auto'`) and makes `scheduled_at` effectively nullable for idle batches that have no scheduled start time.
-
-Migration v8 adds the `depends_on` column which stores a JSON array of hub batch IDs that this batch depends on. When all dependency batches complete (or are no longer present), the hub's batch timer auto-starts the dependent batch by transitioning it from Idle to Running.
-
-#### `queued_batch_tasks` *(migration v5, extended in v6)*
-
-Individual tasks within a queued batch. Each task maps to an agent that will be spawned in a worktree.
-
-```sql
-CREATE TABLE queued_batch_tasks (
-    id          INTEGER PRIMARY KEY AUTOINCREMENT,
-    batch_id    TEXT NOT NULL REFERENCES queued_batches(id) ON DELETE CASCADE,
-    task_index  INTEGER NOT NULL,
-    branch_name TEXT NOT NULL,
-    prompt      TEXT NOT NULL,
-    status      TEXT NOT NULL DEFAULT 'idle',  -- idle, active, done
-    agent_id    TEXT,                           -- set when the task's agent is started
-    use_prefix     INTEGER NOT NULL DEFAULT 1,    -- per-task prefix toggle (1 = apply, 0 = skip); added in migration v6
-    use_suffix     INTEGER NOT NULL DEFAULT 1,    -- per-task suffix toggle (1 = apply, 0 = skip); added in migration v6
-    plan_mode      INTEGER NOT NULL DEFAULT 0,    -- per-task plan mode override (1 = plan, 0 = inherit batch default); added in migration v9
-    exit_when_done INTEGER NOT NULL DEFAULT 0     -- per-task auto-exit toggle (1 = inject Stop hook so the agent terminates when it finishes); added in migration v10
-);
-```
-
-Migration v6 adds `use_prefix` and `use_suffix` columns for per-task control over whether the batch's prompt prefix and suffix are applied when building the full prompt. Both default to 1 (true) for backward compatibility.
-
-Migration v9 adds the `plan_mode` column for per-task plan mode control. When set to 1, the task's agent is started in plan mode regardless of the batch-level plan_mode setting. Defaults to 0 (inherit batch default) for backward compatibility.
-
-Migration v10 adds the `exit_when_done` column for per-task auto-exit control. When set to 1, the hub injects a `--settings` file with a `Stop` hook so the agent process terminates at its first natural stopping point — the existing process-exit-as-Done plumbing then transitions the task to `done`. Defaults to 0 (manual stop) for backward compatibility. Only honored for agents whose `KnownAgent.supports_stop_hook` is `true` (currently `claude` only).
+Migrations v5–v10 originally created and evolved the schedule/batches feature. The schedule system was removed; v5–v10 are kept as version-bump stubs (no schema change) for compatibility with older databases. Migration v11 drops the orphaned `queued_batches` and `queued_batch_tasks` tables on existing databases that ran the schedule feature.
 
 #### `agent_history` *(deferred — future migration)*
 
@@ -152,7 +99,6 @@ On startup, the hub checks `schema_version` and applies any pending migrations s
 | Registered repositories | SQLite `repos` table | Persistent (auto-cleaned if path deleted) |
 | Per-repo editor preference | SQLite `repos` table (`editor` column) | Persistent (survives restarts) |
 | Agent session history | SQLite `agent_history` table | Persistent *(not yet implemented)* |
-| Queued batches | SQLite `queued_batches` + `queued_batch_tasks` tables | Persistent (survives restarts, loaded on startup) |
 | Running agent state | Hub in-memory | Ephemeral (dies with hub) |
 | Repository branch/worktree data | Fetched from git on demand | Ephemeral (never persisted) |
 | IPC socket | `~/.clust/clust.sock` | Runtime only |

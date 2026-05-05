@@ -150,15 +150,9 @@ pub async fn count_hubs() -> usize {
     let Ok(mut stream) = try_connect().await else {
         return 1;
     };
-    if clust_ipc::send_message(
-        &mut stream,
-        &CliMessage::ListAgents {
-            hub: None,
-            batch: None,
-        },
-    )
-    .await
-    .is_err()
+    if clust_ipc::send_message(&mut stream, &CliMessage::ListAgents { hub: None })
+        .await
+        .is_err()
     {
         return 1;
     }
@@ -250,14 +244,7 @@ pub async fn send_stop_repo_agents(stream: &mut UnixStream, path: &str) -> io::R
 /// to avoid silently skipping cleanup prompts.
 pub async fn try_fetch_agent_list() -> io::Result<Vec<clust_ipc::AgentInfo>> {
     let mut stream = try_connect().await?;
-    clust_ipc::send_message(
-        &mut stream,
-        &CliMessage::ListAgents {
-            hub: None,
-            batch: None,
-        },
-    )
-    .await?;
+    clust_ipc::send_message(&mut stream, &CliMessage::ListAgents { hub: None }).await?;
     match clust_ipc::recv_message::<HubMessage>(&mut stream).await? {
         HubMessage::AgentList { agents } => Ok(agents),
         _ => Err(io::Error::other(

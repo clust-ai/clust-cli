@@ -15,7 +15,6 @@ use ratatui::widgets::Paragraph;
 use ratatui::Frame;
 
 use crate::overview::{render_agent_panel, OverviewState, PanelCommand};
-use crate::tasks::BatchAgentInfo;
 use crate::theme;
 use crate::ui::render_logo;
 
@@ -54,7 +53,6 @@ pub fn render(
     scoped_ids: &[String],
     empty: EmptyKind<'_>,
     repo_colors: &HashMap<String, String>,
-    batch_map: &HashMap<String, BatchAgentInfo>,
 ) {
     if scoped_ids.is_empty() {
         match empty {
@@ -113,9 +111,8 @@ pub fn render(
             .as_ref()
             .and_then(|rp| repo_colors.get(rp.as_str()))
             .map(|cn| theme::repo_color(cn));
-        let batch_info = batch_map.get(&panel.id);
 
-        render_agent_panel(frame, *cell, panel, false, false, panel_color, batch_info);
+        render_agent_panel(frame, *cell, panel, false, false, panel_color);
     }
 }
 

@@ -46,7 +46,7 @@ Triggered by `clust -s` / `clust --stop` (no argument).
 
 ### Crash Recovery
 
-Since the hub is mostly ephemeral (batches are the exception -- idle, scheduled, and running batches are persisted in SQLite and reloaded on startup):
+Hub state is ephemeral:
 
 - If the hub crashes, the socket file may be stale
 - On next startup, the hub removes any existing socket file before binding
@@ -79,12 +79,9 @@ clust ls
 
 # List only agents in a specific hub
 clust ls -H my_feature
-
-# List only agents belonging to a batch
-clust ls -B refactor
 ```
 
-The TUI (`clust ui`) shows hub names in the left sidebar and groups agent cards by hub in the main panel. The `clust ls` output includes a BATCH column showing which batch each agent belongs to (if any).
+The TUI (`clust ui`) shows hub names in the left sidebar and groups agent cards by hub in the main panel.
 
 ## Agent Management
 
@@ -380,98 +377,6 @@ When the hub receives a `DeleteRepo` message:
 
 This operation is exposed as the "Delete Repository" entry in the TUI repo context menu, gated behind a confirmation dialog. The TUI shows the success or refusal message in the status bar.
 
-## Batch Engine
-
-The hub includes a batch engine (`batch.rs`) that manages batch persistence and scheduled execution. Batches in all non-completed states (idle, scheduled, running) are persisted in SQLite and survive hub restarts. The CLI registers batches with the hub immediately upon creation, and all subsequent mutations (adding tasks, changing config, toggling status) are synced to the hub in real time.
-
-### IPC Messages
-
-- **QueueBatch**: Creates a new queued batch with a scheduled start time. The batch and its tasks are persisted to the `queued_batches` and `queued_batch_tasks` tables. Returns `BatchQueued { batch_id, scheduled_at }`.
-- **CancelQueuedBatch**: Cancels a queued batch by ID with a `cleanup_mode` field (`BatchCleanupMode` enum). `NoCleanup` removes the batch record without stopping agents or cleaning up worktrees. `StopAgents` stops all active agents associated with the batch before removing it. `StopAgentsAndRemoveBranches` stops agents, removes their worktrees, and deletes their local branches before removing the batch. Returns `BatchCancelled { batch_id }`.
-- **ListQueuedBatches**: Returns a list of all non-completed queued batches as `QueuedBatchList { batches: Vec<QueuedBatchInfo> }`. Each `QueuedBatchInfo` includes full per-task detail (`tasks: Vec<QueuedBatchTaskInfo>`), `launch_mode`, `max_concurrent`, `prompt_prefix`, `prompt_suffix`, `plan_mode`, `allow_bypass`, `agent_binary`, and `depends_on` so the CLI can fully reconstruct batch state.
-- **RegisterBatch**: Registers a new batch with the hub for persistence without scheduling it (status = `idle`). Used by the CLI when a batch is created in the Tasks tab. The batch and its tasks are persisted immediately. Accepts an optional `depends_on` field (list of hub batch IDs). Returns `BatchRegistered { batch_id }`.
-- **UpdateBatchDependencies**: Updates the dependency list (`depends_on`) of a batch by ID. Persists the new list to the database. Returns `Ok`.
-- **AddBatchTask**: Adds a task to an existing registered batch. The hub appends the task to the `queued_batch_tasks` table with the next available `task_index`. Returns `Ok`.
-- **UpdateBatchTask**: Updates the status and/or `agent_id` of a specific task within a batch (identified by `batch_id` and `task_index`). Returns `Ok`.
-- **UpdateBatchConfig**: Updates batch configuration fields (`prompt_prefix`, `prompt_suffix`, `plan_mode`, `allow_bypass`). Returns `Ok`.
-- **UpdateBatchStatus**: Updates the top-level status of a batch (e.g., transitioning from `idle` to `running`). Returns `Ok`.
-- **RemoveDoneBatchTasks**: Removes all tasks with status `done` from a batch and re-indexes the remaining tasks to maintain contiguous indices. Returns `Ok`.
-- **DeleteBatch**: Deletes a batch and all its tasks from both memory and the database. Returns `Ok`.
-
-### Timer Task
-
-A background tokio task (`spawn_batch_timer`) runs on a 5-second interval. On each tick it:
-
-1. Checks all scheduled batches for expired timers. If a batch's `scheduled_at` time has passed, transitions it from `Scheduled` to `Running`.
-2. For running batches, checks if any active task agents have exited (by comparing agent IDs against the hub's agent map). Exited agents' tasks are marked as `Done`.
-3. If all tasks in a batch are done, marks the batch as `Completed`.
-4. Collects idle tasks that can be started (respecting `max_concurrent`) and spawns agents for them using the shared `create_worktree_and_spawn_agent()` helper.
-5. Checks idle batches with non-empty `depends_on` lists. If all dependency batches have completed (or are no longer present in memory), the batch is auto-started by transitioning from `Idle` to `Running` and its tasks are collected for spawning.
-
-Agent spawning happens outside the hub state lock to avoid blocking other operations during slow worktree creation.
-
-### Agent Exit Hook
-
-When an agent exits (`on_agent_exited`), the batch engine marks the matching queued batch task as `Done` and updates the database. Actual task advancement (starting next idle tasks) happens on the next timer tick to avoid performing slow worktree operations in the PTY reader thread.
-
-### Per-Task "Exit when done"
-
-Tasks can opt in to automatic agent termination via the `exit_when_done` flag (set in the Add Task modal with `Alt+X`). When the flag is `true` and the agent binary's `KnownAgent.supports_stop_hook` is `true` (currently only `claude`), the hub:
-
-1. Writes a small JSON settings file to `<clust_dir>/agents/<agent_id>/settings.json` containing a `Stop` hook whose command is `<clust> internal stop-hook` (resolved to a `clust` binary sitting next to the running `clust-hub`, falling back to `clust` on PATH).
-2. Appends `--settings <path>` to the agent's launch arguments so Claude picks up the hook.
-3. The hidden `clust internal stop-hook` subcommand sends `SIGTERM` to its parent process (via `libc::kill(getppid(), SIGTERM)`), which is the agent. The agent exits cleanly.
-4. The existing PTY-exit-as-Done flow detects the exit, calls `on_agent_exited`, and the batch engine marks the task `Done`.
-5. The PTY reader's cleanup path removes the settings file when the agent exits, so no stale files accumulate under `<clust_dir>/agents/`.
-
-For agents that do not support the Stop hook (`KnownAgent.supports_stop_hook == false`), the flag is silently ignored at spawn time -- the agent runs normally and the user must stop it manually.
-
-### Shared Worktree Helper
-
-The `create_worktree_and_spawn_agent()` function extracts the worktree creation and agent spawning logic previously inline in the `CreateWorktreeAgent` IPC handler. It accepts a `CreateWorktreeParams` struct and is used by both the IPC handler and the batch timer task. The function:
-
-1. Sanitizes the branch name.
-2. Creates or checks out a git worktree (outside the lock).
-3. Detects git info from the new worktree.
-4. Spawns an agent in the worktree (under the lock).
-5. Auto-registers the repository in SQLite.
-
-### Batch Lifecycle
-
-Batches can enter the system through three paths: direct registration (idle), scheduled queueing, or dependency-based auto-start.
-
-```
-CLI sends RegisterBatch (no timer)       CLI sends QueueBatch (scheduled_at = future time)
-    |                                        |
-    v                                        v
-Hub persists batch (status: Idle)        Hub persists batch (status: Scheduled)
-    |                                        |
-    v                                        v
-CLI toggles status to Running            Timer tick: scheduled_at <= now
-    --> UpdateBatchStatus(running)           --> Batch transitions to Running
-    --> Start tasks up to max_concurrent     --> Start tasks up to max_concurrent
-    |                                        |
-    └────────────────┬───────────────────────┘
-                     v
-Agent exits --> Task marked Done
-    --> Next timer tick starts more tasks
-                     |
-                     v
-All tasks Done --> Batch transitions to Completed
-                     |
-                     v
-            Timer tick checks idle batches with depends_on
-            If all dependencies completed --> Auto-start batch (Idle -> Running)
-```
-
-**Batch Dependencies:** Batches can declare dependencies on other batches via `depends_on` (a list of hub batch IDs). When a batch completes, the timer task checks if any idle batches have all their dependencies satisfied (all dependency batches are either completed or no longer present in memory). Satisfied batches are automatically transitioned from Idle to Running and their tasks begin spawning. Circular dependencies are prevented in the TUI via a DFS cycle check before allowing a dependency to be toggled.
-
-The CLI can also mutate batches at any point via `AddBatchTask`, `UpdateBatchTask`, `UpdateBatchConfig`, `UpdateBatchDependencies`, `RemoveDoneBatchTasks`, and `DeleteBatch`. All mutations are persisted to SQLite immediately.
-
-### Hub Startup Recovery
-
-On startup, the hub loads all non-completed batches (idle, scheduled, and running) from SQLite. Any tasks that were `Active` but whose agents no longer exist (due to hub restart) are marked as `Done` in both memory and the database. The batch timer then handles starting new tasks on the next tick. Idle batches are preserved as-is, allowing the CLI to reconstruct its Tasks tab state via `ListQueuedBatches`.
-
 ## In-Memory State
 
 ```rust
@@ -481,7 +386,6 @@ struct HubState {
     default_agent: Option<String>,         // loaded from SQLite on startup; None if unset
     bypass_permissions: bool,              // loaded from SQLite on startup; false if unset
     db: Option<rusqlite::Connection>,      // open SQLite connection; Some after init_db()
-    queued_batches: Vec<HubBatchEntry>,    // loaded from SQLite on startup; managed by batch engine
 }
 
 struct AgentEntry {
@@ -521,4 +425,4 @@ struct TerminalEntry {
 }
 ```
 
-This state is mostly in-memory and does not survive a hub restart. The exception is `queued_batches`, which are persisted in SQLite and reloaded on startup (see Batch Engine section above). The `HubBatchStatus` enum includes `Idle`, `Scheduled`, `Running`, and `Completed` states, with `Idle` being used for batches registered from the CLI that have not yet been scheduled or started.
+This state is in-memory only and does not survive a hub restart.

@@ -62,7 +62,6 @@ pub struct HubState {
     pub default_agent: Option<String>,
     pub bypass_permissions: bool,
     pub db: Option<rusqlite::Connection>,
-    pub queued_batches: Vec<crate::batch::HubBatchEntry>,
 }
 
 impl HubState {
@@ -76,31 +75,6 @@ impl HubState {
         self.default_agent = crate::db::get_default_agent(&conn);
         self.bypass_permissions = crate::db::get_bypass_permissions(&conn);
         self.db = Some(conn);
-        // Load persisted queued batches
-        self.queued_batches = crate::batch::load_batches_from_db(self);
-        // Mark any "running" tasks whose agents are gone (hub restart) as done
-        for batch in self.queued_batches.iter_mut() {
-            if batch.status == crate::batch::HubBatchStatus::Running {
-                for (idx, task) in batch.tasks.iter_mut().enumerate() {
-                    if task.status == crate::batch::HubTaskStatus::Active {
-                        if let Some(ref aid) = task.agent_id {
-                            if !self.agents.contains_key(aid) {
-                                task.status = crate::batch::HubTaskStatus::Done;
-                                if let Some(ref db) = self.db {
-                                    let _ = crate::db::update_task_status(
-                                        db,
-                                        &batch.id,
-                                        idx,
-                                        "done",
-                                        task.agent_id.as_deref(),
-                                    );
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
         Ok(())
     }
 }
@@ -359,6 +333,120 @@ pub fn spawn_agent(
     Ok((id, binary_name))
 }
 
+/// Parameters for `create_worktree_and_spawn_agent`.
+pub struct CreateWorktreeParams<'a> {
+    pub state: &'a SharedHubState,
+    pub repo_path: &'a str,
+    pub target_branch: Option<&'a str>,
+    pub new_branch: Option<&'a str>,
+    pub prompt: Option<String>,
+    pub agent_binary: Option<String>,
+    pub plan_mode: bool,
+    pub allow_bypass: bool,
+    pub hub: &'a str,
+    pub cols: u16,
+    pub rows: u16,
+    pub exit_when_done: bool,
+}
+
+/// Create a git worktree and spawn an agent in it.
+/// Returns `(agent_id, agent_binary, working_dir)` on success.
+pub async fn create_worktree_and_spawn_agent(
+    params: CreateWorktreeParams<'_>,
+) -> Result<(String, String, String), String> {
+    let CreateWorktreeParams {
+        state,
+        repo_path,
+        target_branch,
+        new_branch,
+        prompt,
+        agent_binary,
+        plan_mode,
+        allow_bypass,
+        hub,
+        cols,
+        rows,
+        exit_when_done,
+    } = params;
+    let sanitized_new = new_branch.map(clust_ipc::branch::sanitize_branch_name);
+    let branch_name = sanitized_new
+        .as_deref()
+        .or(target_branch)
+        .ok_or("either target_branch or new_branch must be provided")?
+        .to_string();
+
+    let repo_root = std::path::Path::new(repo_path);
+    let checkout_existing = new_branch.is_none();
+    let base = if new_branch.is_some() {
+        target_branch
+    } else {
+        None
+    };
+
+    let worktree_path = crate::repo::add_worktree(repo_root, &branch_name, base, checkout_existing)
+        .await
+        .map_err(|e| {
+            if e.contains("already checked out") {
+                format!(
+                    "Branch '{}' is already checked out and cannot be used as a worktree.",
+                    branch_name
+                )
+            } else {
+                e
+            }
+        })?;
+
+    let working_dir = worktree_path.to_string_lossy().into_owned();
+
+    let (wt_repo_path, wt_branch_name, is_worktree) =
+        match crate::repo::detect_git_root(&working_dir) {
+            Some(root) => {
+                let rp = root.to_string_lossy().into_owned();
+                let (bn, iw) = crate::repo::detect_branch_and_worktree(&working_dir);
+                (Some(rp), bn.or(Some(branch_name)), iw)
+            }
+            None => (Some(repo_path.to_string()), Some(branch_name), true),
+        };
+
+    let result = {
+        let mut hub_state = state.lock().await;
+        spawn_agent(
+            &mut hub_state,
+            SpawnAgentParams {
+                prompt,
+                agent_binary,
+                working_dir: working_dir.clone(),
+                cols,
+                rows,
+                accept_edits: false,
+                plan_mode,
+                allow_bypass,
+                hub: hub.to_string(),
+                repo_path: wt_repo_path,
+                branch_name: wt_branch_name,
+                is_worktree,
+                exit_when_done,
+            },
+            state.clone(),
+        )
+    };
+
+    match result {
+        Ok((id, binary)) => {
+            let hub_state = state.lock().await;
+            if let Some(ref db) = hub_state.db {
+                let name = std::path::Path::new(repo_path)
+                    .file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| repo_path.to_string());
+                let _ = crate::db::register_repo(db, repo_path, &name, "");
+            }
+            Ok((id, binary, working_dir))
+        }
+        Err(e) => Err(e),
+    }
+}
+
 /// Write a per-agent settings file that registers a `Stop` hook firing
 /// `clust internal stop-hook`, which terminates the parent agent process so
 /// the task transitions to Done as soon as the model finishes responding.
@@ -439,15 +527,14 @@ fn spawn_pty_reader(
 
         let _ = output_tx.send(AgentEvent::Exited(exit_code));
 
-        // Remove agent from shared state, notify batch engine, and cascade-kill
-        // any terminals this agent spawned so long-lived processes (dev
-        // servers, etc.) don't linger after the agent dies.
+        // Remove agent from shared state and cascade-kill any terminals this
+        // agent spawned so long-lived processes (dev servers, etc.) don't
+        // linger after the agent dies.
         let handle = tokio::runtime::Handle::current();
         handle.block_on(async {
             let (terminal_ids, settings_path) = {
                 let mut hub = state.lock().await;
                 let removed = hub.agents.remove(&agent_id);
-                crate::batch::on_agent_exited(&mut hub, &agent_id);
                 let tids: Vec<String> = hub
                     .terminals
                     .values()
