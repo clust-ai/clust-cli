@@ -297,7 +297,7 @@ impl TimerModal {
 // ---------------------------------------------------------------------------
 
 /// Parse a duration string like "2h", "30m", "1h30m", "90m", "45s".
-fn parse_duration(input: &str) -> Option<std::time::Duration> {
+pub(crate) fn parse_duration(input: &str) -> Option<std::time::Duration> {
     let input = input.trim().to_lowercase();
     let mut total_secs: u64 = 0;
     let mut num_buf = String::new();
@@ -339,7 +339,7 @@ fn parse_duration(input: &str) -> Option<std::time::Duration> {
 
 /// Parse a time-of-day string like "16:00", "9:30".
 /// Returns the next occurrence of that time (today if still ahead, tomorrow if past).
-fn parse_time_of_day(input: &str) -> Option<chrono::DateTime<chrono::Utc>> {
+pub(crate) fn parse_time_of_day(input: &str) -> Option<chrono::DateTime<chrono::Utc>> {
     let parts: Vec<&str> = input.split(':').collect();
     if parts.len() != 2 {
         return None;
@@ -366,7 +366,7 @@ fn parse_time_of_day(input: &str) -> Option<chrono::DateTime<chrono::Utc>> {
 }
 
 /// Format a duration as a short human-readable string like "1h 30m" or "45m".
-fn format_duration_short(dur: std::time::Duration) -> String {
+pub(crate) fn format_duration_short(dur: std::time::Duration) -> String {
     let total_secs = dur.as_secs();
     let hours = total_secs / 3600;
     let minutes = (total_secs % 3600) / 60;
