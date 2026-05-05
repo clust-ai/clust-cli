@@ -1800,6 +1800,18 @@ async fn handle_connection(
             tasks,
             scheduled_at,
         } => {
+            // Validate sanitized branch uniqueness before doing anything else.
+            if let Err(msg) = crate::batch::validate_unique_sanitized_branches(&tasks) {
+                clust_ipc::send_message_write(
+                    &mut writer,
+                    &HubMessage::Error { message: msg },
+                )
+                .await?;
+                return Ok(());
+            }
+            // Treat max_concurrent=0 as "unlimited" — passing it through
+            // would deadlock the batch (no slots ever become available).
+            let max_concurrent = max_concurrent.filter(|&m| m != 0);
             let parsed_time = chrono::DateTime::parse_from_rfc3339(&scheduled_at);
             match parsed_time {
                 Ok(dt) => {
@@ -2058,6 +2070,15 @@ async fn handle_connection(
             tasks,
             depends_on,
         } => {
+            if let Err(msg) = crate::batch::validate_unique_sanitized_branches(&tasks) {
+                clust_ipc::send_message_write(
+                    &mut writer,
+                    &HubMessage::Error { message: msg },
+                )
+                .await?;
+                return Ok(());
+            }
+            let max_concurrent = max_concurrent.filter(|&m| m != 0);
             let batch_id = {
                 let hub_state = state.lock().await;
                 let mut id;
@@ -2151,33 +2172,58 @@ async fn handle_connection(
             prompt,
         } => {
             let mut hub_state = state.lock().await;
-            let mut ok = false;
-            if let Some(batch) = hub_state.queued_batches.iter_mut().find(|b| b.id == batch_id) {
-                let task_plan_mode = batch.plan_mode;
-                batch.tasks.push(crate::batch::HubTaskEntry {
-                    branch_name: branch_name.clone(),
-                    prompt: prompt.clone(),
-                    status: crate::batch::HubTaskStatus::Idle,
-                    agent_id: None,
-                    use_prefix: true,
-                    use_suffix: true,
-                    plan_mode: task_plan_mode,
-                });
-                if let Some(ref db) = hub_state.db {
-                    let _ = crate::db::add_batch_task(db, &batch_id, &branch_name, &prompt);
+            let outcome: Result<(), String> = if let Some(batch) =
+                hub_state.queued_batches.iter_mut().find(|b| b.id == batch_id)
+            {
+                // Reject if the new branch's sanitized form collides with an
+                // existing task's — phase-3 lookup uses branch_name so we
+                // must keep them unique.
+                let new_sanitized =
+                    clust_ipc::branch::sanitize_branch_name(&branch_name);
+                if batch.tasks.iter().any(|t| {
+                    clust_ipc::branch::sanitize_branch_name(&t.branch_name) == new_sanitized
+                }) {
+                    Err(format!(
+                        "duplicate sanitized branch name '{new_sanitized}' in batch (raw: '{branch_name}')",
+                    ))
+                } else {
+                    let task_plan_mode = batch.plan_mode;
+                    batch.tasks.push(crate::batch::HubTaskEntry {
+                        branch_name: branch_name.clone(),
+                        prompt: prompt.clone(),
+                        status: crate::batch::HubTaskStatus::Idle,
+                        agent_id: None,
+                        use_prefix: true,
+                        use_suffix: true,
+                        plan_mode: task_plan_mode,
+                    });
+                    if let Some(ref db) = hub_state.db {
+                        let _ = crate::db::add_batch_task(
+                            db,
+                            &batch_id,
+                            &branch_name,
+                            &prompt,
+                            task_plan_mode,
+                            true,
+                            true,
+                        );
+                    }
+                    Ok(())
                 }
-                ok = true;
-            }
-            if ok {
-                clust_ipc::send_message_write(&mut writer, &HubMessage::Ok).await?;
             } else {
-                clust_ipc::send_message_write(
-                    &mut writer,
-                    &HubMessage::Error {
-                        message: format!("batch {batch_id} not found"),
-                    },
-                )
-                .await?;
+                Err(format!("batch {batch_id} not found"))
+            };
+            match outcome {
+                Ok(()) => {
+                    clust_ipc::send_message_write(&mut writer, &HubMessage::Ok).await?
+                }
+                Err(message) => {
+                    clust_ipc::send_message_write(
+                        &mut writer,
+                        &HubMessage::Error { message },
+                    )
+                    .await?
+                }
             }
         }
         CliMessage::UpdateBatchTask {
@@ -2284,24 +2330,51 @@ async fn handle_connection(
             depends_on,
         } => {
             let mut hub_state = state.lock().await;
-            let mut ok = false;
-            if let Some(batch) = hub_state.queued_batches.iter_mut().find(|b| b.id == batch_id) {
-                batch.depends_on = depends_on.clone();
-                if let Some(ref db) = hub_state.db {
-                    let _ = crate::db::update_batch_depends_on(db, &batch_id, &depends_on);
+            let outcome: Result<(), String> = if hub_state
+                .queued_batches
+                .iter()
+                .any(|b| b.id == batch_id)
+            {
+                if crate::batch::would_create_cycle(
+                    &hub_state.queued_batches,
+                    &batch_id,
+                    &depends_on,
+                ) {
+                    Err(
+                        "dependency change would create a cycle (or self-reference)"
+                            .to_string(),
+                    )
+                } else if let Some(batch) = hub_state
+                    .queued_batches
+                    .iter_mut()
+                    .find(|b| b.id == batch_id)
+                {
+                    batch.depends_on = depends_on.clone();
+                    if let Some(ref db) = hub_state.db {
+                        let _ = crate::db::update_batch_depends_on(
+                            db,
+                            &batch_id,
+                            &depends_on,
+                        );
+                    }
+                    Ok(())
+                } else {
+                    Err(format!("batch {batch_id} not found"))
                 }
-                ok = true;
-            }
-            if ok {
-                clust_ipc::send_message_write(&mut writer, &HubMessage::Ok).await?;
             } else {
-                clust_ipc::send_message_write(
-                    &mut writer,
-                    &HubMessage::Error {
-                        message: format!("batch {batch_id} not found"),
-                    },
-                )
-                .await?;
+                Err(format!("batch {batch_id} not found"))
+            };
+            match outcome {
+                Ok(()) => {
+                    clust_ipc::send_message_write(&mut writer, &HubMessage::Ok).await?
+                }
+                Err(message) => {
+                    clust_ipc::send_message_write(
+                        &mut writer,
+                        &HubMessage::Error { message },
+                    )
+                    .await?
+                }
             }
         }
         CliMessage::RemoveDoneBatchTasks { batch_id } => {
@@ -2329,6 +2402,27 @@ async fn handle_connection(
             }
         }
         CliMessage::DeleteBatch { batch_id } => {
+            // Collect agent_ids of Active tasks first, drop the lock, stop
+            // them, then remove the batch. Without the stop step, deleting a
+            // running batch leaves orphan agents with no batch linkage.
+            let active_agent_ids: Vec<String> = {
+                let hub_state = state.lock().await;
+                hub_state
+                    .queued_batches
+                    .iter()
+                    .find(|b| b.id == batch_id)
+                    .map(|b| {
+                        b.tasks
+                            .iter()
+                            .filter(|t| t.status == crate::batch::HubTaskStatus::Active)
+                            .filter_map(|t| t.agent_id.clone())
+                            .collect()
+                    })
+                    .unwrap_or_default()
+            };
+            for aid in &active_agent_ids {
+                let _ = agent::stop_agent(&state, aid).await;
+            }
             let mut hub_state = state.lock().await;
             let len_before = hub_state.queued_batches.len();
             hub_state.queued_batches.retain(|b| b.id != batch_id);

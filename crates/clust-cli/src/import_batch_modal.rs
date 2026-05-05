@@ -37,7 +37,11 @@ pub struct BatchJson {
     pub allow_bypass: bool,
     /// The tasks to create in this batch.
     pub tasks: Vec<TaskJson>,
-    /// Optional list of batch titles this batch depends on.
+    /// Optional list of batch titles this batch depends on. Resolution is
+    /// progressive within an import file — a dep title is matched against
+    /// already-registered batches (pre-existing or earlier in the same file).
+    /// Forward references are reported as unresolved. Titles must be unique;
+    /// duplicates resolve unpredictably (last-write-wins per import).
     #[serde(default)]
     pub depends_on: Vec<String>,
 }
@@ -222,10 +226,15 @@ impl ImportBatchModal {
                         serde_json::from_str::<BatchJson>(&contents).map(|b| vec![b])
                     });
                 match batches {
-                    Ok(list) => {
+                    Ok(mut list) => {
                         if list.is_empty() || list.iter().all(|b| b.tasks.is_empty()) {
                             self.parse_error = Some("JSON has no tasks".to_string());
                         } else {
+                            // max_concurrent=0 would deadlock the batch
+                            // (no slots ever free). Treat as unlimited.
+                            for b in list.iter_mut() {
+                                b.max_concurrent = b.max_concurrent.filter(|&m| m != 0);
+                            }
                             self.parsed_batches = Some(list);
                             self.parse_error = None;
                             self.step = Step::Repo;

@@ -91,6 +91,13 @@ enum AgentStartResult {
         local_batch_idx: usize,
         hub_batch_id: String,
     },
+    /// Final result of a multi-batch JSON import: how many batches/tasks
+    /// landed and which dependency titles couldn't be resolved.
+    ImportComplete {
+        batch_count: usize,
+        task_count: usize,
+        unresolved: Vec<String>,
+    },
 }
 
 enum StatusLevel {
@@ -1092,6 +1099,34 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                     if let Some(batch) = tasks_state.batches.get_mut(local_batch_idx) {
                         batch.hub_batch_id = Some(hub_batch_id);
                     }
+                }
+                AgentStartResult::ImportComplete {
+                    batch_count,
+                    task_count,
+                    unresolved,
+                } => {
+                    let mut text = format!(
+                        "Imported {} batch{} with {} task{}",
+                        batch_count,
+                        if batch_count == 1 { "" } else { "es" },
+                        task_count,
+                        if task_count == 1 { "" } else { "s" },
+                    );
+                    if !unresolved.is_empty() {
+                        text.push_str(&format!(
+                            " (unresolved deps: {})",
+                            unresolved.join(", ")
+                        ));
+                    }
+                    status_message = Some(StatusMessage {
+                        text,
+                        level: if unresolved.is_empty() {
+                            StatusLevel::Success
+                        } else {
+                            StatusLevel::Info
+                        },
+                        created: Instant::now(),
+                    });
                 }
             }
         }
@@ -3130,30 +3165,18 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                 let batch_count = output.batches.len();
                                 let total_task_count: usize =
                                     output.batches.iter().map(|b| b.tasks.len()).sum();
-                                let mut all_unresolved: Vec<String> = Vec::new();
 
+                                // Step 1: synchronously add every batch to
+                                // tasks_state so the TUI shows them immediately.
+                                // hub_batch_id is filled in later as each
+                                // BatchRegistered comes back through the channel.
+                                let mut to_register: Vec<(usize, crate::import_batch_modal::BatchJson)> =
+                                    Vec::with_capacity(batch_count);
                                 for batch_json in output.batches {
-                                    let launch_mode = crate::import_batch_modal::parse_launch_mode(
-                                        batch_json.launch_mode.as_deref(),
-                                    );
-                                    let launch_mode_str = match launch_mode {
-                                        tasks::LaunchMode::Manual => "manual",
-                                        tasks::LaunchMode::Auto => "auto",
-                                    };
-                                    // Resolve depends_on titles to hub batch IDs
-                                    let mut resolved_deps: Vec<String> = Vec::new();
-                                    for dep_title in &batch_json.depends_on {
-                                        if let Some(hub_id) = tasks_state
-                                            .batches
-                                            .iter()
-                                            .find(|b| b.title == *dep_title)
-                                            .and_then(|b| b.hub_batch_id.clone())
-                                        {
-                                            resolved_deps.push(hub_id);
-                                        } else {
-                                            all_unresolved.push(dep_title.clone());
-                                        }
-                                    }
+                                    let launch_mode =
+                                        crate::import_batch_modal::parse_launch_mode(
+                                            batch_json.launch_mode.as_deref(),
+                                        );
                                     let batch_output =
                                         crate::create_batch_modal::BatchModalOutput {
                                             repo_path: output.repo_path.clone(),
@@ -3164,36 +3187,18 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                             launch_mode,
                                         };
                                     let batch_idx = tasks_state.add_batch(batch_output);
-                                    // Apply prefix/suffix
                                     if let Some(ref prefix) = batch_json.prefix {
                                         tasks_state.set_prompt_prefix(batch_idx, prefix.clone());
                                     }
                                     if let Some(ref suffix) = batch_json.suffix {
                                         tasks_state.set_prompt_suffix(batch_idx, suffix.clone());
                                     }
-                                    // Apply plan_mode and allow_bypass
                                     if batch_json.plan_mode {
                                         tasks_state.toggle_plan_mode(batch_idx);
                                     }
                                     if batch_json.allow_bypass {
                                         tasks_state.toggle_allow_bypass(batch_idx);
                                     }
-                                    // Set resolved dependencies
-                                    if let Some(batch) = tasks_state.batches.get_mut(batch_idx) {
-                                        batch.depends_on = resolved_deps.clone();
-                                    }
-                                    // Add all tasks (using per-task values)
-                                    let ipc_tasks: Vec<clust_ipc::QueuedTask> = batch_json
-                                        .tasks
-                                        .iter()
-                                        .map(|t| clust_ipc::QueuedTask {
-                                            branch_name: t.branch.clone(),
-                                            prompt: t.prompt.clone(),
-                                            use_prefix: t.use_prefix,
-                                            use_suffix: t.use_suffix,
-                                            plan_mode: t.plan_mode,
-                                        })
-                                        .collect();
                                     for task in &batch_json.tasks {
                                         tasks_state.add_task(
                                             batch_idx,
@@ -3204,33 +3209,88 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                             task.plan_mode,
                                         );
                                     }
-                                    // Register with hub
-                                    let reg_msg = CliMessage::RegisterBatch {
-                                        repo_path: output.repo_path.clone(),
-                                        target_branch: output.branch_name.clone(),
-                                        title: batch_json.title.unwrap_or_else(|| {
-                                            tasks_state
-                                                .batches
-                                                .get(batch_idx)
-                                                .map(|b| b.title.clone())
-                                                .unwrap_or_else(|| "Batch".to_string())
-                                        }),
-                                        max_concurrent: batch_json.max_concurrent,
-                                        prompt_prefix: batch_json.prefix,
-                                        prompt_suffix: batch_json.suffix,
-                                        plan_mode: batch_json.plan_mode,
-                                        allow_bypass: batch_json.allow_bypass,
-                                        agent_binary: None,
-                                        hub: hub_name.to_string(),
-                                        launch_mode: launch_mode_str.to_string(),
-                                        tasks: ipc_tasks,
-                                        depends_on: resolved_deps,
-                                    };
-                                    let tx = agent_start_tx.clone();
-                                    tokio::spawn(async move {
+                                    to_register.push((batch_idx, batch_json));
+                                }
+
+                                // Seed the title→hub_id map with batches that
+                                // were already registered before this import.
+                                let pre_existing: Vec<(String, String)> = tasks_state
+                                    .batches
+                                    .iter()
+                                    .filter_map(|b| {
+                                        b.hub_batch_id
+                                            .as_ref()
+                                            .map(|h| (b.title.clone(), h.clone()))
+                                    })
+                                    .collect();
+
+                                let tx = agent_start_tx.clone();
+                                let hub_name_owned = hub_name.to_string();
+                                let repo_path_owned = output.repo_path.clone();
+                                let target_branch_owned = output.branch_name.clone();
+
+                                // Step 2: process batches sequentially. Each
+                                // batch's depends_on is resolved against the
+                                // map *built so far*, so backward references
+                                // within a single import file work.
+                                tokio::spawn(async move {
+                                    use std::collections::HashMap;
+                                    let mut title_to_hub: HashMap<String, String> =
+                                        pre_existing.into_iter().collect();
+                                    let mut unresolved: Vec<String> = Vec::new();
+
+                                    for (local_idx, batch_json) in to_register {
+                                        let launch_mode_str = match crate::import_batch_modal::parse_launch_mode(
+                                            batch_json.launch_mode.as_deref(),
+                                        ) {
+                                            tasks::LaunchMode::Manual => "manual",
+                                            tasks::LaunchMode::Auto => "auto",
+                                        };
+
+                                        let mut resolved_deps: Vec<String> = Vec::new();
+                                        for dep in &batch_json.depends_on {
+                                            match title_to_hub.get(dep) {
+                                                Some(h) => resolved_deps.push(h.clone()),
+                                                None => unresolved.push(dep.clone()),
+                                            }
+                                        }
+
+                                        let title = batch_json.title.clone().unwrap_or_else(
+                                            || format!("Batch {}", local_idx + 1),
+                                        );
+
+                                        let ipc_tasks: Vec<clust_ipc::QueuedTask> = batch_json
+                                            .tasks
+                                            .iter()
+                                            .map(|t| clust_ipc::QueuedTask {
+                                                branch_name: t.branch.clone(),
+                                                prompt: t.prompt.clone(),
+                                                use_prefix: t.use_prefix,
+                                                use_suffix: t.use_suffix,
+                                                plan_mode: t.plan_mode,
+                                            })
+                                            .collect();
+
+                                        let reg_msg = CliMessage::RegisterBatch {
+                                            repo_path: repo_path_owned.clone(),
+                                            target_branch: target_branch_owned.clone(),
+                                            title: title.clone(),
+                                            max_concurrent: batch_json.max_concurrent,
+                                            prompt_prefix: batch_json.prefix.clone(),
+                                            prompt_suffix: batch_json.suffix.clone(),
+                                            plan_mode: batch_json.plan_mode,
+                                            allow_bypass: batch_json.allow_bypass,
+                                            agent_binary: None,
+                                            hub: hub_name_owned.clone(),
+                                            launch_mode: launch_mode_str.to_string(),
+                                            tasks: ipc_tasks,
+                                            depends_on: resolved_deps,
+                                        };
+
                                         if let Ok(mut stream) = ipc::try_connect().await {
-                                            if let Ok(()) =
-                                                clust_ipc::send_message(&mut stream, &reg_msg).await
+                                            if clust_ipc::send_message(&mut stream, &reg_msg)
+                                                .await
+                                                .is_ok()
                                             {
                                                 if let Ok(HubMessage::BatchRegistered {
                                                     batch_id,
@@ -3239,35 +3299,38 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                                 )
                                                 .await
                                                 {
+                                                    title_to_hub
+                                                        .insert(title, batch_id.clone());
                                                     let _ = tx
-                                                        .send(AgentStartResult::BatchRegistered {
-                                                            local_batch_idx: batch_idx,
-                                                            hub_batch_id: batch_id,
-                                                        })
+                                                        .send(
+                                                            AgentStartResult::BatchRegistered {
+                                                                local_batch_idx: local_idx,
+                                                                hub_batch_id: batch_id,
+                                                            },
+                                                        )
                                                         .await;
                                                 }
                                             }
                                         }
-                                    });
-                                }
+                                    }
+
+                                    let _ = tx
+                                        .send(AgentStartResult::ImportComplete {
+                                            batch_count,
+                                            task_count: total_task_count,
+                                            unresolved,
+                                        })
+                                        .await;
+                                });
 
                                 active_tab = ActiveTab::Tasks;
-                                let mut msg_text = format!(
-                                    "Imported {} batch{} with {} task{}",
-                                    batch_count,
-                                    if batch_count == 1 { "" } else { "es" },
-                                    total_task_count,
-                                    if total_task_count == 1 { "" } else { "s" },
-                                );
-                                if !all_unresolved.is_empty() {
-                                    msg_text.push_str(&format!(
-                                        " (unresolved deps: {})",
-                                        all_unresolved.join(", ")
-                                    ));
-                                }
                                 status_message = Some(StatusMessage {
-                                    text: msg_text,
-                                    level: StatusLevel::Success,
+                                    text: format!(
+                                        "Importing {} batch{}\u{2026}",
+                                        batch_count,
+                                        if batch_count == 1 { "" } else { "es" }
+                                    ),
+                                    level: StatusLevel::Info,
                                     created: Instant::now(),
                                 });
                             }
