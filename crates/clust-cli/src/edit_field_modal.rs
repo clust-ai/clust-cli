@@ -31,6 +31,7 @@ pub struct EditFieldModal {
 }
 
 impl EditFieldModal {
+    #[allow(dead_code)]
     pub fn new(label: String, hint: String, initial_value: String) -> Self {
         let cursor_pos = initial_value.len();
         Self {

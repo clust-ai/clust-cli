@@ -20,10 +20,10 @@ use crate::ui::ClickMap;
 const MIN_CARD_WIDTH: u16 = 40;
 
 /// Set to `false` to disable terminal output previews in task boxes.
-pub const SHOW_TERMINAL_PREVIEW: bool = false;
+pub const SHOW_TERMINAL_PREVIEW: bool = true;
 
 /// Number of terminal output lines shown in active task preview.
-pub const TASK_TERMINAL_PREVIEW_LINES: usize = 4;
+pub const TASK_TERMINAL_PREVIEW_LINES: usize = 12;
 
 /// Maximum number of wrapped prompt lines shown in a task box.
 const MAX_PROMPT_LINES: usize = 3;
@@ -146,6 +146,7 @@ impl BatchInfo {
 
     /// Serialize this batch to a JSON string matching the import schema.
     /// `depends_on_titles` should contain resolved batch titles (not hub IDs).
+    #[allow(dead_code)]
     pub fn to_batch_json(&self, depends_on_titles: &[String]) -> String {
         let tasks: Vec<serde_json::Value> = self
             .tasks
@@ -203,6 +204,7 @@ impl BatchInfo {
 }
 
 /// Copy text to the system clipboard. Returns Ok on success.
+#[allow(dead_code)]
 pub fn copy_to_clipboard(text: &str) -> Result<(), String> {
     #[cfg(target_os = "macos")]
     {
@@ -899,11 +901,11 @@ pub fn render_tasks(
 fn render_options_bar(frame: &mut Frame, area: Rect, state: &TasksState) {
     let count = state.batches.len();
     let count_text = if count == 0 {
-        "No batches".to_string()
+        "No tasks".to_string()
     } else if count == 1 {
-        "1 batch".to_string()
+        "1 task".to_string()
     } else {
-        format!("{} batches", count)
+        format!("{} tasks", count)
     };
 
     let mod_key = if cfg!(target_os = "macos") {
@@ -921,7 +923,7 @@ fn render_options_bar(frame: &mut Frame, area: Rect, state: &TasksState) {
                 .bg(theme::R_BG_RAISED),
         ),
         Span::styled(
-            format!("  {mod_key}+T create  {mod_key}+I import  Space toggle  T timer  {mod_key}+S start  M mode  B bypass  D deps  d clear done"),
+            format!("  {mod_key}+T schedule  Space toggle  T edit time  {mod_key}+S start  Shift+\u{2193} focus  d clear done"),
             Style::default()
                 .fg(theme::R_TEXT_TERTIARY)
                 .bg(theme::R_BG_RAISED),
@@ -950,7 +952,7 @@ fn render_empty_state(frame: &mut Frame, area: Rect) {
     };
     frame.render_widget(
         Paragraph::new(Line::from(Span::styled(
-            format!("No batches defined \u{2014} press {mod_key}+T to create one"),
+            format!("No scheduled tasks \u{2014} press {mod_key}+T to schedule one"),
             Style::default().fg(theme::R_TEXT_TERTIARY),
         )))
         .alignment(Alignment::Center)
@@ -1062,101 +1064,84 @@ fn render_batch_card(
         }
     };
 
-    let metadata_lines = vec![
+    // Single-task cards: schedule kind is derived from batch state.
+    //   - Queued{at}      → Scheduled
+    //   - depends_on != []→ Dependent
+    //   - launch_mode=Manual → Unscheduled
+    //   - Active          → Active (running)
+    let kind_span = match &batch.status {
+        BatchStatus::Active => Span::styled(
+            "Active".to_string(),
+            Style::default()
+                .fg(theme::R_SUCCESS)
+                .add_modifier(Modifier::BOLD),
+        ),
+        BatchStatus::Queued { scheduled_at, .. } => {
+            let countdown = crate::timer_modal::format_countdown(scheduled_at);
+            Span::styled(
+                format!("Scheduled {}", countdown),
+                Style::default()
+                    .fg(theme::R_INFO)
+                    .add_modifier(Modifier::BOLD),
+            )
+        }
+        BatchStatus::Idle => {
+            if !dep_titles.is_empty() {
+                Span::styled(
+                    format!("Depends on {}", dep_titles.join(", ")),
+                    Style::default().fg(theme::R_INFO),
+                )
+            } else if batch.launch_mode == LaunchMode::Manual {
+                Span::styled(
+                    "Unscheduled".to_string(),
+                    Style::default().fg(theme::R_TEXT_SECONDARY),
+                )
+            } else {
+                Span::styled(
+                    "Pending".to_string(),
+                    Style::default().fg(theme::R_TEXT_DISABLED),
+                )
+            }
+        }
+    };
+
+    let _ = (concurrency_text, status_span); // Kept for compatibility; not displayed in task view.
+
+    let mut metadata_lines = vec![
         Line::from(vec![
             indicator_span.clone(),
-            Span::styled("Repo      ", label_style),
+            Span::styled("Repo    ", label_style),
             Span::styled(&batch.repo_name, Style::default().fg(repo_color_val)),
         ]),
         Line::from(vec![
             pad_span.clone(),
-            Span::styled("Branch    ", label_style),
+            Span::styled("Based   ", label_style),
             Span::styled(&batch.branch_name, value_style),
         ]),
-        if batch.launch_mode == LaunchMode::Auto {
-            Line::from(vec![
-                pad_span.clone(),
-                Span::styled("Workers   ", label_style),
-                Span::styled(concurrency_text, value_style),
-            ])
-        } else {
-            Line::from(vec![
-                pad_span.clone(),
-                Span::styled("Mode      ", label_style),
-                Span::styled("Manual", Style::default().fg(theme::R_INFO)),
-            ])
-        },
-        Line::from(vec![
-            pad_span.clone(),
-            Span::styled("Tasks     ", label_style),
-            Span::styled(batch.tasks.len().to_string(), value_style),
-        ]),
-        Line::from(vec![
-            pad_span.clone(),
-            Span::styled("Prefix    ", label_style),
-            Span::styled(
-                batch.prompt_prefix.as_deref().unwrap_or("(none)"),
-                if batch.prompt_prefix.is_some() {
-                    value_style
-                } else {
-                    Style::default().fg(theme::R_TEXT_DISABLED)
-                },
-            ),
-        ]),
-        Line::from(vec![
-            pad_span.clone(),
-            Span::styled("Suffix    ", label_style),
-            Span::styled(
-                batch.prompt_suffix.as_deref().unwrap_or("(none)"),
-                if batch.prompt_suffix.is_some() {
-                    value_style
-                } else {
-                    Style::default().fg(theme::R_TEXT_DISABLED)
-                },
-            ),
-        ]),
-        Line::from(vec![
-            pad_span.clone(),
-            Span::styled("Mode      ", label_style),
-            if batch.plan_mode {
-                Span::styled(
-                    "Plan",
-                    Style::default()
-                        .fg(theme::R_WARNING)
-                        .add_modifier(Modifier::BOLD),
-                )
-            } else {
-                Span::styled("Normal", Style::default().fg(theme::R_TEXT_DISABLED))
-            },
-        ]),
-        Line::from(vec![
-            pad_span.clone(),
-            Span::styled("Bypass    ", label_style),
-            if batch.allow_bypass {
-                Span::styled(
-                    "Allowed",
-                    Style::default()
-                        .fg(theme::R_WARNING)
-                        .add_modifier(Modifier::BOLD),
-                )
-            } else {
-                Span::styled("Off", Style::default().fg(theme::R_TEXT_DISABLED))
-            },
-        ]),
-        Line::from(vec![
-            pad_span,
-            Span::styled("Status    ", label_style),
-            status_span,
-        ]),
-        Line::from(vec![
-            Span::styled("Depends   ", label_style),
-            if dep_titles.is_empty() {
-                Span::styled("(none)", Style::default().fg(theme::R_TEXT_DISABLED))
-            } else {
-                Span::styled(dep_titles.join(", "), Style::default().fg(theme::R_INFO))
-            },
-        ]),
+        Line::from(vec![pad_span.clone(), kind_span]),
     ];
+
+    if batch.plan_mode || batch.allow_bypass {
+        let mut spans: Vec<Span<'_>> = vec![pad_span.clone(), Span::styled("Flags   ", label_style)];
+        if batch.plan_mode {
+            spans.push(Span::styled(
+                "PLAN",
+                Style::default()
+                    .fg(theme::R_WARNING)
+                    .add_modifier(Modifier::BOLD),
+            ));
+            spans.push(Span::raw(" "));
+        }
+        if batch.allow_bypass {
+            spans.push(Span::styled(
+                "BYPASS",
+                Style::default()
+                    .fg(theme::R_WARNING)
+                    .add_modifier(Modifier::BOLD),
+            ));
+        }
+        metadata_lines.push(Line::from(spans));
+    }
 
     // Split inner area: metadata on top, task boxes below
     let metadata_height = metadata_lines.len() as u16 + 1; // +1 for blank separator

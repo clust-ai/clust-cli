@@ -14,6 +14,7 @@ mod ipc;
 mod output_filter;
 mod overview;
 mod repo_modal;
+mod schedule_task_modal;
 mod scroll_break;
 mod search_modal;
 mod syntax;

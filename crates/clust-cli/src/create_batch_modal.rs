@@ -67,6 +67,7 @@ pub struct CreateBatchModal {
 }
 
 impl CreateBatchModal {
+    #[allow(dead_code)]
     pub fn new(repos: Vec<RepoInfo>) -> Self {
         Self {
             step: BatchModalStep::SelectRepo,

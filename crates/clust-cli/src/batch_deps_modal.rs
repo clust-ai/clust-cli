@@ -44,6 +44,7 @@ impl BatchDepsModal {
     /// `batch_hub_id` — hub ID of the batch (needed for cycle detection).
     /// `current_deps` — currently selected dependency hub IDs.
     /// `all_batches` — all other batches: (hub_batch_id, title, depends_on).
+    #[allow(dead_code)]
     pub fn new(
         batch_idx: usize,
         batch_title: String,

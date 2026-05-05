@@ -95,7 +95,7 @@ A 1-row bar at the top of the terminal with three tabs:
 |-----|-------------|
 | `Repositories` | Two-panel view with repo tree and agent cards (default) |
 | `Overview` | Multi-agent terminal overview with horizontal panels |
-| `Batches` | Batch creation and task management with horizontal batch cards |
+| `Schedule` | Per-task scheduling with horizontal task cards (replaces Batches) |
 
 The active tab is highlighted with the accent color. A `Tab/Shift+Tab` hint is shown to the right of the tabs. Focus mode is not a tab -- it is an overlay state entered explicitly from either tab (see Focus Mode section below). When focus mode is active, the tab bar is replaced by a back-bar header.
 
@@ -175,54 +175,52 @@ A multi-agent terminal overview that displays all active agents side-by-side wit
 - Each panel has a `panel_scroll_offset` for scrolling through the combined scrollback + live grid. When scrolled, a `↑N` indicator appears in the panel header.
 - On exit, all connections are detached and background tasks are aborted.
 
-#### Batches Tab
+#### Schedule Tab
 
-A batch management tab that displays created batch definitions as horizontal cards. Batches have a launch mode (Auto or Manual). Auto-mode batches can be toggled between Idle and Active status, and when activated, automatically start agents for their tasks via `CreateWorktreeAgent` IPC. Manual-mode batches display "Manual" status and allow starting individual tasks one at a time via `Opt+S` / `Alt+S`. Auto-mode Idle batches can also be queued for scheduled execution via the `t` keybinding, which sends a `QueueBatch` IPC message to the hub daemon. Queued batches display a live countdown until their scheduled start time and can be cancelled with `Space`.
+The Schedule tab displays planned and running tasks as horizontal cards. Each card represents a single scheduled task; pressing `Opt+T` opens the schedule task modal where the user picks one of three schedule kinds:
+
+- **Schedule** — start the task at a specific time. Time is entered in the same format as the timer modal (`2h`, `30m`, `1h30m`, or `16:00`). Sends `QueueBatch` IPC.
+- **Dependent** — start the task automatically when another scheduled task finishes. The user picks a parent task by branch name (the parent's branch may not exist yet). The dependent task's source branch is set to the parent's branch, so its worktree is based off the parent's output. Sends `RegisterBatch` IPC with `depends_on=[parent_id]` and `launch_mode="auto"`.
+- **Unscheduled** — never auto-start; the user starts it manually. Sends `RegisterBatch` IPC with `launch_mode="manual"`.
+
+Internally each scheduled task is implemented as a single-task batch so the existing hub timer, dependency, and persistence machinery continues to apply. The user no longer interacts with batches as a parent container.
 
 **Layout:**
 
-- **Options bar (1 row):** A single-line bar at the top showing the batch count (e.g., "3 batches") and hints `Opt+T create`, `Opt+I import`, `Space toggle`, `T timer`, `Opt+S start`, `B bypass`, and `d clear done`. The bar uses `R_BG_RAISED` background.
-- **Batch cards (horizontal):** Dynamically sized columns distributed evenly across the available width. The minimum card width is 40 columns. Cards use ratio-based constraints so they fill the screen evenly. A single card never exceeds half the screen width (minimum 2 slots). When more batches exist than fit on screen, horizontal scrolling is enabled via `Left`/`Right`, and `Shift+Left`/`Shift+Right` switches between batch cards with auto-scrolling.
+- **Options bar (1 row):** Shows the task count (e.g., "3 tasks") and hints `Opt+T schedule`, `Space toggle`, `T edit time`, `Opt+S start`, `Shift+↓ focus`, and `d clear done`. The bar uses `R_BG_RAISED` background.
+- **Task cards (horizontal):** Dynamically sized columns distributed evenly across the available width (minimum card width 40 columns). When more tasks exist than fit on screen, horizontal scrolling is available via `Left`/`Right`, and `Shift+Left`/`Shift+Right` switches between task cards with auto-scrolling.
 
-Each batch card has:
-- **Box-drawing borders** using the repo's assigned color (bright when focused, dimmed when unfocused via `dim_color()`). Cards without a repo fall back to accent blue when focused and tertiary text color when unfocused.
-- **Title** displayed in the border using the repo's assigned color (bright when focused, dimmed when unfocused via `dim_color()`). Cards without a repo fall back to accent bright when focused and accent when unfocused.
-- **Card body** showing: Repo name (in repo color), Branch name, Workers (concurrency limit or infinity symbol, for Auto-mode batches) or Mode ("Manual" in info color, for Manual-mode batches), Tasks (count of tasks added to the batch), Prefix (prompt prefix or "(none)"), Suffix (prompt suffix or "(none)"), Mode ("Plan" in warning/bold when plan_mode is enabled, "Normal" in disabled text otherwise), Bypass ("Allowed" in warning/bold when allow_bypass is enabled, "Off" in disabled text otherwise), Status (Idle in disabled/gray, Active in green/bold for Auto-mode, "Queued HH:MM (Xh Ym)" in info color with live countdown for queued batches; "Manual" in info color for Manual-mode), Depends ("(none)" in disabled text when no dependencies, or comma-separated dependency batch titles in info color), and a task box list below the metadata. When the batch card is focused but no task is highlighted (batch top-part selected), a `> ` selection indicator in `R_ACCENT_BRIGHT` bold is shown on the first metadata line (Repo), with subsequent metadata lines padded by 2 spaces for alignment. Metadata labels brighten from `R_TEXT_TERTIARY` to `R_TEXT_SECONDARY` and values from `R_TEXT_SECONDARY` to `R_TEXT_PRIMARY` when the batch top is selected.
-- **Task boxes:** Each task is rendered as a full-width box within the batch card, separated by horizontal lines colored by status (green for Active, gray for Idle, tertiary for Done; accent bright when the task is focused). Each task box displays: focus indicator (`>` when focused), task number, status indicator, branch name (truncated with ellipsis if too long), wrapped prompt text (up to `MAX_PROMPT_LINES` lines, currently 3, with ellipsis on the last line if truncated), and a status bar showing prefix/suffix toggle indicators. Task box height is dynamically computed based on the wrapped prompt line count and available width. The status bar shows a plan mode indicator ("PLAN" in warning/bold when enabled, "Normal" in disabled text otherwise), followed by checkmark/cross indicators for prefix and suffix state (green when applied and the batch has a prefix/suffix, disabled color otherwise), with an `Alt+P/A/S toggle` hint when the task is focused. When a focused task is Active and has an `agent_id`, a `Shift+↓ focus` hint is shown in the task header (styled with `R_ACCENT` color) to indicate the task can be opened in focus mode. Tasks are sorted with Active tasks above Idle and Done tasks. When tasks overflow the available vertical space within a batch card, vertical scrolling is enabled with scroll indicators showing how many tasks are above/below the viewport (e.g., "N more above" / "N more below"). The viewport auto-scrolls to keep the focused task visible.
-- **Terminal preview:** Active task boxes optionally show a small terminal output preview (last 4 lines of the agent's terminal output). The preview is gated behind the `SHOW_TERMINAL_PREVIEW` constant in `tasks/mod.rs` for easy toggling. Preview data is extracted from the corresponding `AgentPanel` via the task's `agent_id` field.
+Each task card has:
+- **Box-drawing borders** using the repo's assigned color (bright when focused, dimmed via `dim_color()` when not). Cards without a repo fall back to accent blue / tertiary text.
+- **Title** showing the task's branch name in the border.
+- **Card body** when the task is inactive: Repo, "Based" (source branch), and a kind line that shows one of:
+    - `Active` (green bold) — task is running
+    - `Scheduled HH:MM (Xh Ym)` (info color, live countdown) — queued for a scheduled time
+    - `Depends on <parent title>` (info color) — waiting for a parent task to complete
+    - `Unscheduled` — manual launch mode, idle
+    - `Pending` — registered but no schedule yet (idle/auto)
+
+  An additional `Flags PLAN BYPASS` line appears only when those flags are set.
+
+- **Terminal preview** when the task is active: the latest lines of the agent's terminal output are rendered inside the card via `TASK_TERMINAL_PREVIEW_LINES` (default 12), making active task cards look similar to Overview panels. Preview data is extracted from the corresponding `AgentPanel` via the task's `agent_id` field. The preview is gated behind the `SHOW_TERMINAL_PREVIEW` constant in `tasks/mod.rs` (default `true`).
+
 - Focused cards use `R_BG_SURFACE` background; unfocused cards use `R_BG_BASE`.
 
-**Empty state:** When no batches exist, a centered message is displayed: "No batches defined -- press Opt+T to create one".
+**Empty state:** "No scheduled tasks — press Opt+T to schedule one".
 
-**Focus modes:**
-
-| Focus | Description |
-|-------|-------------|
-| BatchList | Default. No card is focused. |
-| BatchCard(N) | A specific batch card is focused and can be deleted. |
-
-**Keyboard shortcuts (Batches tab):**
+**Keyboard shortcuts (Schedule tab):**
 
 | Shortcut | Action |
 |----------|--------|
-| `Shift+Left` / `Shift+Right` | Switch between batch cards (auto-scrolls to keep focused batch visible) |
-| `Left` / `Right` | Scroll the batch viewport left/right |
-| `Down` | Focus the first visible batch card, or navigate to the next task within a focused batch card |
-| `Up` | Navigate to the previous task within a focused batch card, or return to batch list focus when no task is focused |
-| `Delete` / `Backspace` | Open the batch cleanup modal for the focused batch card |
-| `Enter` | Open the Add Task modal for the focused batch card |
-| `Space` | Toggle focused batch status between Idle and Active (Auto-mode batches only; no-op for Manual-mode). If the batch is Queued, cancels the queue via `CancelQueuedBatch` IPC and reverts to Idle. |
-| `t` | Open the Timer modal to set a scheduled start time for the focused batch (Auto-mode Idle batches only). Sends `QueueBatch` IPC to the hub daemon. |
-| `Shift+↓` | Open the focused active task in focus mode (only when the focused task is Active and has an agent_id) |
-| `Opt+P` (macOS) / `Alt+P` | Toggle plan mode: per-task when a task is focused, batch-level when the batch top is selected |
-| `Opt+A` (macOS) / `Alt+A` | Toggle per-task prefix on the focused task (only when a task is focused) |
-| `Opt+S` (macOS) / `Alt+S` | Start the focused task in a Manual-mode batch (when the task is Idle in Manual mode); otherwise toggle per-task suffix on the focused task |
-| `b` | Toggle allow bypass on the focused batch card |
-| `p` | Open the Edit Field modal to edit the prompt prefix of the focused batch |
-| `s` | Open the Edit Field modal to edit the prompt suffix of the focused batch |
-| `c` | Copy the focused batch as JSON (import schema format) to the system clipboard |
-| `D` (`Shift+D`) | Open the batch dependencies modal for the focused batch card (multi-select other batches as dependencies, with circular dependency prevention) |
-| `d` | Remove all tasks with Done status from the focused batch card |
+| `Shift+Left` / `Shift+Right` | Switch between task cards |
+| `Left` / `Right` | Scroll the task viewport |
+| `Down` / `Up` | Navigate within a focused card (e.g. into the active task box) |
+| `Shift+↓` | Open the focused active task in focus mode. Inactive tasks cannot be focused. Exiting focus mode returns to the Schedule tab with the same task selected. |
+| `Space` | Toggle the focused task between Idle and Active (Auto-mode). If queued, cancels the queue via `CancelQueuedBatch` IPC and reverts to Idle. |
+| `T` | Open the timer modal to set or change the scheduled time for the focused task. Refused for active tasks. |
+| `Opt+S` (macOS) / `Alt+S` | Start the focused task immediately when it's idle and unscheduled (manual launch mode). |
+| `Delete` / `Backspace` | Remove the focused task (with optional cleanup mode) |
+| `d` | Remove tasks in `Done` state from the card |
 
 **State management:**
 
@@ -305,12 +303,11 @@ On startup, `clust ui` automatically connects to the hub daemon, starting it if 
 | `Opt+F` (macOS) / `Alt+F` | Open the search-agent modal (only when agents are running) |
 | `Opt+B` (macOS) / `Alt+B` | Toggle bypass permissions (global, persisted in SQLite) |
 | `Opt+N` (macOS) / `Alt+N` | Open the add-repository modal |
-| `Opt+T` (macOS) / `Alt+T` | Open the create-batch modal (only when repos are registered) |
-| `Opt+I` (macOS) / `Alt+I` | Open the import-batch modal (only when repos are registered) |
+| `Opt+T` (macOS) / `Alt+T` | Open the schedule task modal (only when repos are registered) |
 | `Opt+V` (macOS) / `Alt+V` | Open in editor (see Editor Integration below) |
 | `Cmd+1` | Switch to Repositories tab (dismisses context menus, exits focus mode) |
 | `Cmd+2` | Switch to Overview tab (dismisses context menus, exits focus mode) |
-| `Cmd+3` | Switch to Batches tab (dismisses context menus, exits focus mode) |
+| `Cmd+3` | Switch to Schedule tab (dismisses context menus, exits focus mode) |
 
 **Repositories tab:**
 
