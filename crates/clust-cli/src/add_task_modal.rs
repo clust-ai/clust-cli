@@ -228,17 +228,25 @@ impl AddTaskModal {
         let inner = block.inner(modal_area);
         frame.render_widget(block, modal_area);
 
-        let input_height = if self.step == AddTaskStep::EnterPrompt {
+        let is_prompt_step = self.step == AddTaskStep::EnterPrompt;
+        let input_height = if is_prompt_step {
             Constraint::Min(3)
         } else {
             Constraint::Length(1)
+        };
+        // In the prompt step the info row is just one "Branch: name" line, so
+        // pin it to a fixed height and let the input swallow the remainder.
+        let info_height = if is_prompt_step {
+            Constraint::Length(1)
+        } else {
+            Constraint::Min(0)
         };
 
         let [hint_area, input_area, _gap, info_area, _spacer, status_area] = Layout::vertical([
             Constraint::Length(1),
             input_height,
             Constraint::Length(1),
-            Constraint::Min(0),
+            info_height,
             Constraint::Length(1),
             Constraint::Length(1),
         ])
@@ -384,8 +392,11 @@ impl AddTaskModal {
         let char_pos = self.input[..self.cursor_pos].chars().count();
         let cursor_line = (2 + char_pos).checked_div(width).unwrap_or(0);
         let visible = area.height as usize;
-        let scroll: u16 = if cursor_line >= visible {
-            (cursor_line - visible + 1) as u16
+        // Keep one empty line below the cursor so the prompt has breathing
+        // room against the bottom of the input box.
+        let max_view_line = visible.saturating_sub(2);
+        let scroll: u16 = if cursor_line > max_view_line {
+            (cursor_line - max_view_line) as u16
         } else {
             0
         };

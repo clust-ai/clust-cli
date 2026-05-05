@@ -734,8 +734,11 @@ impl ImportBatchModal {
         let char_pos = self.input[..self.cursor_pos].chars().count();
         let cursor_line = (2 + char_pos).checked_div(width).unwrap_or(0);
         let visible = area.height as usize;
-        let scroll: u16 = if cursor_line >= visible {
-            (cursor_line - visible + 1) as u16
+        // Keep one empty line below the cursor so the prompt has breathing
+        // room against the bottom of the input box.
+        let max_view_line = visible.saturating_sub(2);
+        let scroll: u16 = if cursor_line > max_view_line {
+            (cursor_line - max_view_line) as u16
         } else {
             0
         };
