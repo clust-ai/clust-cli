@@ -437,8 +437,6 @@ fn parse_worktree_list_porcelain_z<A: AgentMatcher>(
                         repo_path: a.repo_path().map(|s| s.to_string()),
                         branch_name: a.branch_name().map(|s| s.to_string()),
                         is_worktree: a.is_worktree(),
-                        batch_id: None,
-                        batch_title: None,
                     })
                     .collect();
 

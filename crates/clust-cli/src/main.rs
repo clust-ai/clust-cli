@@ -1,28 +1,20 @@
-mod add_task_modal;
-mod batch_deps_modal;
 mod cli;
 mod context_menu;
 mod create_agent_modal;
-mod create_batch_modal;
 mod detached_agent_modal;
-mod edit_field_modal;
 mod editor;
 mod format;
 mod hub_launcher;
-mod import_batch_modal;
 mod ipc;
 mod output_filter;
 mod overview;
 mod repo_modal;
-mod schedule_task_modal;
 mod scroll_break;
 mod search_modal;
 mod syntax;
-mod tasks;
 mod terminal;
 pub mod terminal_emulator;
 mod theme;
-mod timer_modal;
 mod ui;
 mod version;
 mod window_view;
@@ -95,7 +87,7 @@ async fn main() {
     }
 
     // Subcommand: ls
-    if let Some(cli::Commands::Ls { select, hub, batch }) = args.command {
+    if let Some(cli::Commands::Ls { select, hub }) = args.command {
         // Validate hub filter if provided
         if let Some(ref p) = hub {
             if let Err(e) = cli::validate_hub_name(p) {
@@ -109,7 +101,7 @@ async fn main() {
                 std::process::exit(1);
             }
         }
-        handle_ls(select, hub, batch).await;
+        handle_ls(select, hub).await;
         return;
     }
 
@@ -664,9 +656,9 @@ async fn handle_attach(id: String) {
 }
 
 /// List all running agents, or open interactive selector with `--select`.
-async fn handle_ls(select: bool, hub: Option<String>, batch: Option<String>) {
+async fn handle_ls(select: bool, hub: Option<String>) {
     if select {
-        handle_select(hub, batch).await;
+        handle_select(hub).await;
         return;
     }
 
@@ -687,10 +679,7 @@ async fn handle_ls(select: bool, hub: Option<String>, batch: Option<String>) {
 
     clust_ipc::send_message(
         &mut stream,
-        &CliMessage::ListAgents {
-            hub: hub.clone(),
-            batch: batch.clone(),
-        },
+        &CliMessage::ListAgents { hub: hub.clone() },
     )
     .await
     .unwrap_or_else(|e| {
@@ -763,7 +752,7 @@ async fn handle_ls(select: bool, hub: Option<String>, batch: Option<String>) {
 
 fn print_agent_header() {
     println!(
-        "  {}{:<8} {:<12} {:<16} {:<20} {:<10} {:<14} {:<12} ATTACHED{}",
+        "  {}{:<8} {:<12} {:<16} {:<20} {:<10} {:<14} ATTACHED{}",
         theme::TEXT_TERTIARY,
         "ID",
         "AGENT",
@@ -771,7 +760,6 @@ fn print_agent_header() {
         "BRANCH",
         "STATUS",
         "STARTED",
-        "BATCH",
         theme::RESET,
     );
 }
@@ -785,9 +773,8 @@ fn print_agent_row(agent: &clust_ipc::AgentInfo) {
         .map(format_repo_display)
         .unwrap_or_else(|| "—".to_string());
     let branch = agent.branch_name.as_deref().unwrap_or("—").to_string();
-    let batch_display = agent.batch_title.as_deref().unwrap_or("—").to_string();
     println!(
-        "  {}{:<8}{} {}{:<12}{} {}{:<16}{} {}{:<20}{} {}{:<10}{} {}{:<14}{} {}{:<12}{} {}{}{}",
+        "  {}{:<8}{} {}{:<12}{} {}{:<16}{} {}{:<20}{} {}{:<10}{} {}{:<14}{} {}{}{}",
         theme::ACCENT,
         agent.id,
         theme::RESET,
@@ -805,9 +792,6 @@ fn print_agent_row(agent: &clust_ipc::AgentInfo) {
         theme::RESET,
         theme::TEXT_SECONDARY,
         started,
-        theme::RESET,
-        theme::TEXT_SECONDARY,
-        batch_display,
         theme::RESET,
         theme::TEXT_SECONDARY,
         attached,
@@ -872,16 +856,13 @@ fn print_tty_required_error() {
 }
 
 /// Interactive agent selector.
-async fn handle_select(hub: Option<String>, batch: Option<String>) {
+async fn handle_select(hub: Option<String>) {
     // Fetch agent list (hub might not be running)
     let agents = match ipc::try_connect().await {
         Ok(mut stream) => {
             if clust_ipc::send_message(
                 &mut stream,
-                &CliMessage::ListAgents {
-                    hub: hub.clone(),
-                    batch,
-                },
+                &CliMessage::ListAgents { hub: hub.clone() },
             )
             .await
             .is_err()

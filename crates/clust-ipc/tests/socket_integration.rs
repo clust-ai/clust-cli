@@ -18,15 +18,9 @@ async fn request_response_over_real_socket() {
         let sock_path = sock_path.clone();
         async move {
             let mut stream = UnixStream::connect(&sock_path).await.unwrap();
-            send_message(
-                &mut stream,
-                &CliMessage::ListAgents {
-                    hub: None,
-                    batch: None,
-                },
-            )
-            .await
-            .unwrap();
+            send_message(&mut stream, &CliMessage::ListAgents { hub: None })
+                .await
+                .unwrap();
             let resp: HubMessage = recv_message(&mut stream).await.unwrap();
             resp
         }
@@ -35,13 +29,7 @@ async fn request_response_over_real_socket() {
     // Server receives the message and responds
     let (mut server_stream, _) = listener.accept().await.unwrap();
     let msg: CliMessage = recv_message(&mut server_stream).await.unwrap();
-    assert_eq!(
-        msg,
-        CliMessage::ListAgents {
-            hub: None,
-            batch: None,
-        }
-    );
+    assert_eq!(msg, CliMessage::ListAgents { hub: None });
 
     let response = HubMessage::AgentList {
         agents: vec![AgentInfo {
@@ -54,8 +42,6 @@ async fn request_response_over_real_socket() {
             repo_path: None,
             branch_name: None,
             is_worktree: false,
-            batch_id: None,
-            batch_title: None,
         }],
     };
     send_message(&mut server_stream, &response).await.unwrap();

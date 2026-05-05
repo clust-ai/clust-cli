@@ -110,7 +110,7 @@ CLI -> Hub:
   DetachAgent { id: String }
   AgentInput { id: String, data: Vec<u8> }
   ResizeAgent { id: String, cols: u16, rows: u16 }
-  ListAgents { hub: Option<String>, batch: Option<String> }
+  ListAgents { hub: Option<String> }
   StopHub
   StopAgent { id: String }
   SetDefault { agent_binary: String }
@@ -146,17 +146,6 @@ CLI -> Hub:
   TerminalInput { id: String, data: Vec<u8> }
   ResizeTerminal { id: String, cols: u16, rows: u16 }
   StopTerminal { id: String }
-  QueueBatch { repo_path: String, target_branch: String, title: String, max_concurrent: Option<usize>, prompt_prefix: Option<String>, prompt_suffix: Option<String>, plan_mode: bool, allow_bypass: bool, agent_binary: Option<String>, hub: String, tasks: Vec<QueuedTask>, scheduled_at: String }
-  CancelQueuedBatch { batch_id: String, cleanup_mode: BatchCleanupMode }
-  ListQueuedBatches
-  RegisterBatch { repo_path: String, target_branch: String, title: String, max_concurrent: Option<usize>, prompt_prefix: Option<String>, prompt_suffix: Option<String>, plan_mode: bool, allow_bypass: bool, agent_binary: Option<String>, hub: String, launch_mode: String, tasks: Vec<QueuedTask>, depends_on: Vec<String> }
-  AddBatchTask { batch_id: String, branch_name: String, prompt: String }
-  UpdateBatchTask { batch_id: String, task_index: usize, status: String, agent_id: Option<String> }
-  UpdateBatchConfig { batch_id: String, prompt_prefix: Option<String>, prompt_suffix: Option<String>, plan_mode: bool, allow_bypass: bool }
-  UpdateBatchStatus { batch_id: String, status: String }
-  UpdateBatchDependencies { batch_id: String, depends_on: Vec<String> }
-  RemoveDoneBatchTasks { batch_id: String }
-  DeleteBatch { batch_id: String }
   Ping { protocol_version: u32 }
 
 Hub -> CLI:
@@ -203,16 +192,12 @@ Hub -> CLI:
   TerminalExited { id: String, exit_code: i32 }
   TerminalReplayComplete { id: String }
   TerminalStopped { id: String }
-  BatchQueued { batch_id: String, scheduled_at: String }
-  BatchCancelled { batch_id: String }
-  QueuedBatchList { batches: Vec<QueuedBatchInfo> }
-  BatchRegistered { batch_id: String }
   Pong { protocol_version: u32 }
 ```
 
 ### Protocol Versioning
 
-The IPC protocol includes a version check to detect stale hubs. `clust-ipc` exports a `PROTOCOL_VERSION` constant (currently `7`) that must be bumped whenever the `CliMessage` or `HubMessage` enum shapes change (since `rmp-serde` uses numeric enum indices).
+The IPC protocol includes a version check to detect stale hubs. `clust-ipc` exports a `PROTOCOL_VERSION` constant (currently `8`) that must be bumped whenever the `CliMessage` or `HubMessage` enum shapes change (since `rmp-serde` uses numeric enum indices).
 
 On connection, the CLI sends a `Ping { protocol_version }` message. The hub replies with `Pong { protocol_version }` carrying its own version. If versions mismatch, the CLI stops the stale hub and spawns a fresh one before proceeding.
 

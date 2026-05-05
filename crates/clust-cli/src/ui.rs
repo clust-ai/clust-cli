@@ -27,22 +27,14 @@ use ratatui::{
 use clust_ipc::{AgentInfo, CliMessage, HubMessage, RepoInfo};
 
 use crate::{
-    add_task_modal::{AddTaskModal, AddTaskResult},
-    batch_deps_modal::{BatchDepsModal, BatchDepsResult},
     context_menu::{ContextMenu, ContextMenuItem, MenuResult},
     create_agent_modal::{CreateAgentModal, ModalResult},
-    create_batch_modal::{BatchModalResult, CreateBatchModal},
     detached_agent_modal::{DetachedAgentModal, DetachedModalResult},
-    edit_field_modal::{EditFieldModal, EditFieldResult},
-    import_batch_modal::{ImportBatchModal, ImportBatchResult},
     ipc,
     overview::{self, OverviewFocus, OverviewState},
     repo_modal::{RepoModal, RepoModalResult},
     search_modal::{SearchModal, SearchResult},
-    tasks::{self, TasksFocus, TasksState},
-    terminal_emulator, theme,
-    timer_modal::{TimerModal, TimerResult},
-    version, window_view,
+    terminal_emulator, theme, version, window_view,
 };
 
 /// Maximum interval between two Esc presses to count as a "double-tap".
@@ -68,42 +60,11 @@ enum AgentStartResult {
         is_worktree: bool,
     },
     Failed(String),
-    BatchTaskStarted {
-        batch_id: usize,
-        task_index: usize,
-        agent_id: String,
-        agent_binary: String,
-        working_dir: String,
-        repo_path: Option<String>,
-        branch_name: Option<String>,
-    },
-    BatchTaskFailed {
-        batch_id: usize,
-        task_index: usize,
-        message: String,
-    },
-    BatchQueued {
-        local_batch_idx: usize,
-        hub_batch_id: String,
-        scheduled_at: String,
-    },
-    BatchRegistered {
-        local_batch_idx: usize,
-        hub_batch_id: String,
-    },
-    /// Final result of a multi-batch JSON import: how many batches/tasks
-    /// landed and which dependency titles couldn't be resolved.
-    ImportComplete {
-        batch_count: usize,
-        task_count: usize,
-        unresolved: Vec<String>,
-    },
 }
 
 enum StatusLevel {
     Error,
     Success,
-    Info,
 }
 
 struct StatusMessage {
@@ -185,23 +146,20 @@ enum TreeLevel {
 enum ActiveTab {
     Repositories,
     Overview,
-    Tasks,
 }
 
 impl ActiveTab {
     fn next(self) -> Self {
         match self {
             Self::Repositories => Self::Overview,
-            Self::Overview => Self::Tasks,
-            Self::Tasks => Self::Repositories,
+            Self::Overview => Self::Repositories,
         }
     }
 
     fn prev(self) -> Self {
         match self {
-            Self::Repositories => Self::Tasks,
+            Self::Repositories => Self::Overview,
             Self::Overview => Self::Repositories,
-            Self::Tasks => Self::Overview,
         }
     }
 
@@ -209,7 +167,6 @@ impl ActiveTab {
         match self {
             Self::Repositories => "Repositories",
             Self::Overview => "Overview",
-            Self::Tasks => "Schedule",
         }
     }
 }
@@ -255,9 +212,6 @@ pub(crate) struct ClickMap {
     // Terminal content areas (inner area excluding borders/header) for URL click
     pub(crate) overview_content_areas: Vec<(Rect, usize)>, // (content_area, panel_idx)
     pub(crate) focus_right_content_area: Rect,
-
-    // Tasks tab
-    pub(crate) tasks_batch_cards: Vec<(Rect, usize)>, // (area, batch_idx)
 
     // Context menu overlay
     menu_modal_rect: Rect,
@@ -357,19 +311,6 @@ enum ActiveMenu {
     EditorRemember {
         repo_path: Option<String>,
         editor: crate::editor::DetectedEditor,
-        menu: ContextMenu,
-    },
-    /// Batch cleanup confirmation dialog shown when deleting a batch.
-    BatchCleanup {
-        batch_idx: usize,
-        /// Hub batch ID (for queued batches).
-        hub_batch_id: Option<String>,
-        /// Repo path for worktree removal.
-        repo_path: String,
-        /// Branch names of tasks (for worktree/branch cleanup).
-        branch_names: Vec<String>,
-        /// Agent IDs of active tasks (for stopping agents).
-        agent_ids: Vec<String>,
         menu: ContextMenu,
     },
 }
@@ -884,25 +825,6 @@ pub fn run(hub_name: &str) -> io::Result<()> {
 
     // Create-agent modal state
     let mut create_modal: Option<CreateAgentModal> = None;
-    // Schedule task modal state (Opt+T)
-    let mut schedule_modal: Option<crate::schedule_task_modal::ScheduleTaskModal> = None;
-    // Legacy batch modals — retained for compatibility but no longer triggered.
-    let mut create_batch_modal: Option<CreateBatchModal> = None;
-    let mut import_batch_modal: Option<ImportBatchModal> = None;
-    let mut add_task_modal: Option<AddTaskModal> = None;
-    let mut batch_deps_modal: Option<BatchDepsModal> = None;
-    let mut edit_field_modal: Option<EditFieldModal> = None;
-    let mut edit_field_target: Option<(usize, bool)> = None; // (batch_idx, is_suffix)
-    let mut timer_modal: Option<TimerModal> = None;
-    let mut timer_modal_batch_idx: Option<usize> = None;
-    // Tasks tab state — load persisted batches from hub
-    let mut tasks_state = TasksState::new();
-    {
-        let hub_batches = fetch_queued_batches();
-        if !hub_batches.is_empty() {
-            tasks_state.load_from_hub(hub_batches);
-        }
-    }
     // Search-agent modal state
     let mut search_modal: Option<SearchModal> = None;
     // Agent ID to select in overview after next sync
@@ -985,12 +907,6 @@ pub fn run(hub_name: &str) -> io::Result<()> {
         // modal state. The status message is still set so the user gets
         // feedback that the agent started.
         let any_modal_open = create_modal.is_some()
-            || create_batch_modal.is_some()
-            || import_batch_modal.is_some()
-            || add_task_modal.is_some()
-            || batch_deps_modal.is_some()
-            || edit_field_modal.is_some()
-            || timer_modal.is_some()
             || search_modal.is_some()
             || detached_modal.is_some()
             || repo_modal.is_some();
@@ -1041,112 +957,6 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                     status_message = Some(StatusMessage {
                         text: msg,
                         level: StatusLevel::Error,
-                        created: Instant::now(),
-                    });
-                }
-                AgentStartResult::BatchTaskStarted {
-                    batch_id,
-                    task_index,
-                    agent_id,
-                    agent_binary: _,
-                    working_dir: _,
-                    repo_path: _,
-                    branch_name,
-                } => {
-                    if let Some(batch) = tasks_state.batch_by_id_mut(batch_id) {
-                        if let Some(task) = batch.tasks.get_mut(task_index) {
-                            task.status = tasks::TaskStatus::Active;
-                            task.agent_id = Some(agent_id.clone());
-                        }
-                        // Sync task status to hub
-                        if let Some(ref hub_id) = batch.hub_batch_id {
-                            let msg = CliMessage::UpdateBatchTask {
-                                batch_id: hub_id.clone(),
-                                task_index,
-                                status: "active".to_string(),
-                                agent_id: Some(agent_id),
-                            };
-                            tokio::spawn(async move {
-                                if let Ok(mut stream) = ipc::try_connect().await {
-                                    let _ = clust_ipc::send_message(&mut stream, &msg).await;
-                                    let _ =
-                                        clust_ipc::recv_message::<HubMessage>(&mut stream).await;
-                                }
-                            });
-                        }
-                    }
-                    let label = branch_name.as_deref().unwrap_or("batch task");
-                    status_message = Some(StatusMessage {
-                        text: format!("Task agent started: {label}"),
-                        level: StatusLevel::Success,
-                        created: Instant::now(),
-                    });
-                }
-                AgentStartResult::BatchTaskFailed {
-                    batch_id,
-                    task_index,
-                    message,
-                } => {
-                    if let Some(batch) = tasks_state.batch_by_id_mut(batch_id) {
-                        if let Some(task) = batch.tasks.get_mut(task_index) {
-                            task.status = tasks::TaskStatus::Idle;
-                        }
-                    }
-                    status_message = Some(StatusMessage {
-                        text: message,
-                        level: StatusLevel::Error,
-                        created: Instant::now(),
-                    });
-                }
-                AgentStartResult::BatchQueued {
-                    local_batch_idx,
-                    hub_batch_id,
-                    scheduled_at,
-                } => {
-                    if let Some(batch) = tasks_state.batches.get_mut(local_batch_idx) {
-                        batch.status = tasks::BatchStatus::Queued {
-                            scheduled_at: scheduled_at.clone(),
-                            batch_id: hub_batch_id.clone(),
-                        };
-                        batch.hub_batch_id = Some(hub_batch_id);
-                    }
-                    let countdown = crate::timer_modal::format_countdown(&scheduled_at);
-                    status_message = Some(StatusMessage {
-                        text: format!("Task queued \u{2014} starts {countdown}"),
-                        level: StatusLevel::Success,
-                        created: Instant::now(),
-                    });
-                }
-                AgentStartResult::BatchRegistered {
-                    local_batch_idx,
-                    hub_batch_id,
-                } => {
-                    if let Some(batch) = tasks_state.batches.get_mut(local_batch_idx) {
-                        batch.hub_batch_id = Some(hub_batch_id);
-                    }
-                }
-                AgentStartResult::ImportComplete {
-                    batch_count,
-                    task_count,
-                    unresolved,
-                } => {
-                    let mut text = format!(
-                        "Imported {} batch{} with {} task{}",
-                        batch_count,
-                        if batch_count == 1 { "" } else { "es" },
-                        task_count,
-                        if task_count == 1 { "" } else { "s" },
-                    );
-                    if !unresolved.is_empty() {
-                        text.push_str(&format!(" (unresolved deps: {})", unresolved.join(", ")));
-                    }
-                    status_message = Some(StatusMessage {
-                        text,
-                        level: if unresolved.is_empty() {
-                            StatusLevel::Success
-                        } else {
-                            StatusLevel::Info
-                        },
                         created: Instant::now(),
                     });
                 }
@@ -1206,60 +1016,6 @@ pub fn run(hub_name: &str) -> io::Result<()> {
             if in_focus_mode {
                 focus_mode_state.update_compare_branches(&repos);
             }
-        }
-
-        // Check for batch task agents that have exited (no longer in agents list)
-        if agents_refreshed {
-            let active_ids: std::collections::HashSet<&str> =
-                agents.iter().map(|a| a.id.as_str()).collect();
-            let mut exited: Vec<String> = Vec::new();
-            for batch in &tasks_state.batches {
-                for task in &batch.tasks {
-                    if task.status == tasks::TaskStatus::Active {
-                        if let Some(ref aid) = task.agent_id {
-                            if !active_ids.contains(aid.as_str()) {
-                                exited.push(aid.clone());
-                            }
-                        }
-                    }
-                }
-            }
-            for agent_id in exited {
-                // Find task index before mark_agent_done modifies it
-                let task_info: Option<(String, usize)> = tasks_state.batches.iter().find_map(|b| {
-                    b.tasks.iter().enumerate().find_map(|(idx, t)| {
-                        if t.agent_id.as_deref() == Some(agent_id.as_str()) {
-                            b.hub_batch_id.as_ref().map(|hid| (hid.clone(), idx))
-                        } else {
-                            None
-                        }
-                    })
-                });
-                if let Some(start_info) = tasks_state.mark_agent_done(&agent_id) {
-                    spawn_batch_tasks(&tasks_state, &start_info, hub_name, agent_start_tx.clone());
-                }
-                // Sync done status to hub
-                if let Some((hub_batch_id, task_index)) = task_info {
-                    let msg = CliMessage::UpdateBatchTask {
-                        batch_id: hub_batch_id,
-                        task_index,
-                        status: "done".to_string(),
-                        agent_id: Some(agent_id),
-                    };
-                    tokio::spawn(async move {
-                        if let Ok(mut stream) = ipc::try_connect().await {
-                            let _ = clust_ipc::send_message(&mut stream, &msg).await;
-                            let _ = clust_ipc::recv_message::<HubMessage>(&mut stream).await;
-                        }
-                    });
-                }
-            }
-        }
-
-        // Sync all batch statuses and per-task state from hub
-        if agents_refreshed && !tasks_state.batches.is_empty() {
-            let hub_batches = fetch_queued_batches();
-            tasks_state.sync_from_hub(&hub_batches);
         }
 
         // Build display_repos: real repos + synthetic "No Repository" for unlinked agents
@@ -1371,13 +1127,6 @@ pub fn run(hub_name: &str) -> io::Result<()> {
 
         let mut click_map = ClickMap::default();
         let show_modal = create_modal.is_some()
-            || schedule_modal.is_some()
-            || create_batch_modal.is_some()
-            || import_batch_modal.is_some()
-            || add_task_modal.is_some()
-            || batch_deps_modal.is_some()
-            || edit_field_modal.is_some()
-            || timer_modal.is_some()
             || detached_modal.is_some()
             || repo_modal.is_some();
         let show_search = search_modal.is_some();
@@ -1437,7 +1186,6 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                         render_divider(frame, divider_area);
                         let (scoped_ids, empty) =
                             scoped_agent_ids(&agents, &display_repos, &selection);
-                        let batch_map = tasks_state.batch_agent_map();
                         window_view::render(
                             frame,
                             right_area,
@@ -1445,11 +1193,9 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                             &scoped_ids,
                             empty,
                             &repo_colors,
-                            &batch_map,
                         );
                     }
                     ActiveTab::Overview => {
-                        let batch_map = tasks_state.batch_agent_map();
                         overview::render_overview(
                             frame,
                             content_area,
@@ -1457,19 +1203,6 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                             &mut click_map,
                             &repo_colors,
                             &repos,
-                            &batch_map,
-                        );
-                    }
-                    ActiveTab::Tasks => {
-                        let terminal_previews =
-                            build_task_terminal_previews(&tasks_state, &overview_state);
-                        tasks::render_tasks(
-                            frame,
-                            content_area,
-                            &mut tasks_state,
-                            &mut click_map,
-                            &repo_colors,
-                            &terminal_previews,
                         );
                     }
                 }
@@ -1539,7 +1272,6 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                     ActiveMenu::WorktreeCleanup { ref menu, .. } => menu,
                     ActiveMenu::EditorPicker { ref menu, .. } => menu,
                     ActiveMenu::EditorRemember { ref menu, .. } => menu,
-                    ActiveMenu::BatchCleanup { ref menu, .. } => menu,
                 };
                 let (modal_rect, inner_rect) = menu.render(frame, content_area);
                 click_map.menu_modal_rect = modal_rect;
@@ -1552,27 +1284,6 @@ pub fn run(hub_name: &str) -> io::Result<()> {
 
             if show_modal {
                 if let Some(ref modal) = create_modal {
-                    modal.render(frame, content_area);
-                }
-                if let Some(ref modal) = schedule_modal {
-                    modal.render(frame, content_area);
-                }
-                if let Some(ref modal) = create_batch_modal {
-                    modal.render(frame, content_area);
-                }
-                if let Some(ref modal) = import_batch_modal {
-                    modal.render(frame, content_area);
-                }
-                if let Some(ref modal) = add_task_modal {
-                    modal.render(frame, content_area);
-                }
-                if let Some(ref modal) = batch_deps_modal {
-                    modal.render(frame, content_area);
-                }
-                if let Some(ref modal) = edit_field_modal {
-                    modal.render(frame, content_area);
-                }
-                if let Some(ref modal) = timer_modal {
                     modal.render(frame, content_area);
                 }
                 if let Some(ref modal) = detached_modal {
@@ -1664,18 +1375,6 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                     overview_state.force_resize_all();
                                 }
                             }
-                            KeyCode::Char('3') => {
-                                active_menu = None;
-                                if in_focus_mode {
-                                    if let Some((aid, cache)) = focus_mode_state.detach() {
-                                        overview_state.store_agent_terminals(aid, cache);
-                                    } else {
-                                        // See note above: preserve any existing cache.
-                                    }
-                                    in_focus_mode = false;
-                                }
-                                active_tab = ActiveTab::Tasks;
-                            }
                             _ => {}
                         }
                     // Clone progress modal: block all input, Esc dismisses when done
@@ -1712,9 +1411,6 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                 menu.handle_key(key.code)
                             }
                             ActiveMenu::EditorRemember { ref mut menu, .. } => {
-                                menu.handle_key(key.code)
-                            }
-                            ActiveMenu::BatchCleanup { ref mut menu, .. } => {
                                 menu.handle_key(key.code)
                             }
                         };
@@ -2908,174 +2604,6 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                             _ => {} // Just this time
                                         }
                                     }
-                                    ActiveMenu::BatchCleanup {
-                                        batch_idx,
-                                        hub_batch_id,
-                                        repo_path,
-                                        branch_names,
-                                        agent_ids,
-                                        ..
-                                    } => {
-                                        match idx {
-                                            0 => {
-                                                // Cancel — do nothing, batch survives
-                                            }
-                                            1 => {
-                                                // Don't clean up — remove batch only
-                                                if let Some(ref bid) = hub_batch_id {
-                                                    let bid = bid.clone();
-                                                    tokio::spawn(async move {
-                                                        if let Ok(mut stream) =
-                                                            ipc::try_connect().await
-                                                        {
-                                                            let msg = CliMessage::CancelQueuedBatch {
-                                                                batch_id: bid,
-                                                                cleanup_mode: clust_ipc::BatchCleanupMode::NoCleanup,
-                                                            };
-                                                            let _ = clust_ipc::send_message(
-                                                                &mut stream,
-                                                                &msg,
-                                                            )
-                                                            .await;
-                                                        }
-                                                    });
-                                                }
-                                                tasks_state.remove_batch(batch_idx);
-                                                invalidate_batch_origin_if(
-                                                    &mut focus_mode_state,
-                                                    batch_idx,
-                                                );
-                                                status_message = Some(StatusMessage {
-                                                    text: "Task removed".to_string(),
-                                                    level: StatusLevel::Info,
-                                                    created: Instant::now(),
-                                                });
-                                            }
-                                            2 => {
-                                                // Stop agents
-                                                if let Some(ref bid) = hub_batch_id {
-                                                    let bid = bid.clone();
-                                                    tokio::spawn(async move {
-                                                        if let Ok(mut stream) =
-                                                            ipc::try_connect().await
-                                                        {
-                                                            let msg = CliMessage::CancelQueuedBatch {
-                                                                batch_id: bid,
-                                                                cleanup_mode: clust_ipc::BatchCleanupMode::StopAgents,
-                                                            };
-                                                            let _ = clust_ipc::send_message(
-                                                                &mut stream,
-                                                                &msg,
-                                                            )
-                                                            .await;
-                                                        }
-                                                    });
-                                                } else {
-                                                    // Local batch — stop agents directly
-                                                    for aid in &agent_ids {
-                                                        let aid = aid.clone();
-                                                        tokio::spawn(async move {
-                                                            if let Ok(mut stream) =
-                                                                ipc::try_connect().await
-                                                            {
-                                                                let msg = CliMessage::StopAgent {
-                                                                    id: aid,
-                                                                };
-                                                                let _ = clust_ipc::send_message(
-                                                                    &mut stream,
-                                                                    &msg,
-                                                                )
-                                                                .await;
-                                                            }
-                                                        });
-                                                    }
-                                                }
-                                                tasks_state.remove_batch(batch_idx);
-                                                invalidate_batch_origin_if(
-                                                    &mut focus_mode_state,
-                                                    batch_idx,
-                                                );
-                                                last_agent_fetch =
-                                                    Instant::now() - Duration::from_secs(10);
-                                                status_message = Some(StatusMessage {
-                                                    text: "Task removed, agents stopped"
-                                                        .to_string(),
-                                                    level: StatusLevel::Info,
-                                                    created: Instant::now(),
-                                                });
-                                            }
-                                            3 => {
-                                                // Stop agents and remove branches
-                                                if let Some(ref bid) = hub_batch_id {
-                                                    let bid = bid.clone();
-                                                    tokio::spawn(async move {
-                                                        if let Ok(mut stream) =
-                                                            ipc::try_connect().await
-                                                        {
-                                                            let msg = CliMessage::CancelQueuedBatch {
-                                                                batch_id: bid,
-                                                                cleanup_mode: clust_ipc::BatchCleanupMode::StopAgentsAndRemoveBranches,
-                                                            };
-                                                            let _ = clust_ipc::send_message(
-                                                                &mut stream,
-                                                                &msg,
-                                                            )
-                                                            .await;
-                                                        }
-                                                    });
-                                                } else {
-                                                    // Local batch — stop agents + remove worktrees/branches
-                                                    for aid in &agent_ids {
-                                                        let aid = aid.clone();
-                                                        tokio::spawn(async move {
-                                                            if let Ok(mut stream) =
-                                                                ipc::try_connect().await
-                                                            {
-                                                                let msg = CliMessage::StopAgent {
-                                                                    id: aid,
-                                                                };
-                                                                let _ = clust_ipc::send_message(
-                                                                    &mut stream,
-                                                                    &msg,
-                                                                )
-                                                                .await;
-                                                            }
-                                                        });
-                                                    }
-                                                    for branch in &branch_names {
-                                                        remove_worktree_ipc(
-                                                            &repo_path, branch, true, true,
-                                                        );
-                                                    }
-                                                }
-                                                tasks_state.remove_batch(batch_idx);
-                                                invalidate_batch_origin_if(
-                                                    &mut focus_mode_state,
-                                                    batch_idx,
-                                                );
-                                                last_agent_fetch =
-                                                    Instant::now() - Duration::from_secs(10);
-                                                last_repo_fetch =
-                                                    Instant::now() - Duration::from_secs(10);
-                                                // Mark batch agent panels as already cleaned up so the
-                                                // worktree-removal modal won't fire when they exit.
-                                                for panel in overview_state.panels.iter_mut() {
-                                                    if agent_ids.contains(&panel.id) {
-                                                        panel.worktree_cleanup_shown = true;
-                                                    }
-                                                }
-                                                pending_worktree_cleanups.retain(|c| {
-                                                    !branch_names.contains(&c.branch_name)
-                                                });
-                                                status_message = Some(StatusMessage {
-                                                    text: "Task removed, agents stopped, branches cleaned up".to_string(),
-                                                    level: StatusLevel::Info,
-                                                    created: Instant::now(),
-                                                });
-                                            }
-                                            _ => {}
-                                        }
-                                    }
                                 }
                             }
                             MenuResult::Dismissed => {
@@ -3183,478 +2711,6 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                             ModalResult::Pending => {}
                         }
                     // Schedule task modal takes priority over all other input
-                    } else if let Some(ref mut modal) = schedule_modal {
-                        use crate::schedule_task_modal::{
-                            KindOutput, ModalResult as SchedResult,
-                        };
-                        match modal.handle_key(key) {
-                            SchedResult::Cancelled => {
-                                schedule_modal = None;
-                            }
-                            SchedResult::Completed(out) => {
-                                schedule_modal = None;
-                                handle_schedule_modal_complete(
-                                    out,
-                                    &mut tasks_state,
-                                    hub_name,
-                                    &agent_start_tx,
-                                );
-                                active_tab = ActiveTab::Tasks;
-                            }
-                            SchedResult::Pending => {}
-                        }
-                        let _ = KindOutput::Unscheduled; // keep import live
-                    // Create-batch modal takes priority over all other input
-                    } else if let Some(ref mut modal) = create_batch_modal {
-                        match modal.handle_key(key) {
-                            BatchModalResult::Cancelled => {
-                                create_batch_modal = None;
-                            }
-                            BatchModalResult::Completed(output) => {
-                                create_batch_modal = None;
-                                let launch_mode_str = match output.launch_mode {
-                                    tasks::LaunchMode::Manual => "manual",
-                                    tasks::LaunchMode::Auto => "auto",
-                                };
-                                let reg_msg = CliMessage::RegisterBatch {
-                                    repo_path: output.repo_path.clone(),
-                                    target_branch: output.branch_name.clone(),
-                                    title: output.title.clone().unwrap_or_else(|| {
-                                        format!("Batch {}", tasks_state.batches.len() + 1)
-                                    }),
-                                    max_concurrent: output.max_concurrent,
-                                    prompt_prefix: None,
-                                    prompt_suffix: None,
-                                    plan_mode: false,
-                                    allow_bypass: false,
-                                    agent_binary: None,
-                                    hub: hub_name.to_string(),
-                                    launch_mode: launch_mode_str.to_string(),
-                                    tasks: vec![],
-                                    depends_on: vec![],
-                                };
-                                let batch_idx = tasks_state.add_batch(output);
-                                // Register with hub asynchronously
-                                let tx = agent_start_tx.clone();
-                                tokio::spawn(async move {
-                                    if let Ok(mut stream) = ipc::try_connect().await {
-                                        if let Ok(()) =
-                                            clust_ipc::send_message(&mut stream, &reg_msg).await
-                                        {
-                                            if let Ok(HubMessage::BatchRegistered { batch_id }) =
-                                                clust_ipc::recv_message::<HubMessage>(&mut stream)
-                                                    .await
-                                            {
-                                                let _ = tx
-                                                    .send(AgentStartResult::BatchRegistered {
-                                                        local_batch_idx: batch_idx,
-                                                        hub_batch_id: batch_id,
-                                                    })
-                                                    .await;
-                                            }
-                                        }
-                                    }
-                                });
-                                active_tab = ActiveTab::Tasks;
-                            }
-                            BatchModalResult::Pending => {}
-                        }
-                    // Import-batch modal takes priority over all other input
-                    } else if let Some(ref mut modal) = import_batch_modal {
-                        match modal.handle_key(key) {
-                            ImportBatchResult::Cancelled => {
-                                import_batch_modal = None;
-                            }
-                            ImportBatchResult::Completed(output) => {
-                                import_batch_modal = None;
-                                let batch_count = output.batches.len();
-                                let total_task_count: usize =
-                                    output.batches.iter().map(|b| b.tasks.len()).sum();
-
-                                // Step 1: synchronously add every batch to
-                                // tasks_state so the TUI shows them immediately.
-                                // hub_batch_id is filled in later as each
-                                // BatchRegistered comes back through the channel.
-                                let mut to_register: Vec<(
-                                    usize,
-                                    crate::import_batch_modal::BatchJson,
-                                )> = Vec::with_capacity(batch_count);
-                                for batch_json in output.batches {
-                                    let launch_mode = crate::import_batch_modal::parse_launch_mode(
-                                        batch_json.launch_mode.as_deref(),
-                                    );
-                                    let batch_output =
-                                        crate::create_batch_modal::BatchModalOutput {
-                                            repo_path: output.repo_path.clone(),
-                                            repo_name: output.repo_name.clone(),
-                                            branch_name: output.branch_name.clone(),
-                                            title: batch_json.title.clone(),
-                                            max_concurrent: batch_json.max_concurrent,
-                                            launch_mode,
-                                        };
-                                    let batch_idx = tasks_state.add_batch(batch_output);
-                                    if let Some(ref prefix) = batch_json.prefix {
-                                        tasks_state.set_prompt_prefix(batch_idx, prefix.clone());
-                                    }
-                                    if let Some(ref suffix) = batch_json.suffix {
-                                        tasks_state.set_prompt_suffix(batch_idx, suffix.clone());
-                                    }
-                                    if batch_json.plan_mode {
-                                        tasks_state.toggle_plan_mode(batch_idx);
-                                    }
-                                    if batch_json.allow_bypass {
-                                        tasks_state.toggle_allow_bypass(batch_idx);
-                                    }
-                                    for task in &batch_json.tasks {
-                                        tasks_state.add_task(
-                                            batch_idx,
-                                            task.branch.clone(),
-                                            task.prompt.clone(),
-                                            task.use_prefix,
-                                            task.use_suffix,
-                                            task.plan_mode,
-                                            task.exit_when_done,
-                                        );
-                                    }
-                                    to_register.push((batch_idx, batch_json));
-                                }
-
-                                // Seed the title→hub_id map with batches that
-                                // were already registered before this import.
-                                let pre_existing: Vec<(String, String)> = tasks_state
-                                    .batches
-                                    .iter()
-                                    .filter_map(|b| {
-                                        b.hub_batch_id
-                                            .as_ref()
-                                            .map(|h| (b.title.clone(), h.clone()))
-                                    })
-                                    .collect();
-
-                                let tx = agent_start_tx.clone();
-                                let hub_name_owned = hub_name.to_string();
-                                let repo_path_owned = output.repo_path.clone();
-                                let target_branch_owned = output.branch_name.clone();
-
-                                // Step 2: process batches sequentially. Each
-                                // batch's depends_on is resolved against the
-                                // map *built so far*, so backward references
-                                // within a single import file work.
-                                tokio::spawn(async move {
-                                    use std::collections::HashMap;
-                                    let mut title_to_hub: HashMap<String, String> =
-                                        pre_existing.into_iter().collect();
-                                    let mut unresolved: Vec<String> = Vec::new();
-
-                                    for (local_idx, batch_json) in to_register {
-                                        let launch_mode_str =
-                                            match crate::import_batch_modal::parse_launch_mode(
-                                                batch_json.launch_mode.as_deref(),
-                                            ) {
-                                                tasks::LaunchMode::Manual => "manual",
-                                                tasks::LaunchMode::Auto => "auto",
-                                            };
-
-                                        let mut resolved_deps: Vec<String> = Vec::new();
-                                        for dep in &batch_json.depends_on {
-                                            match title_to_hub.get(dep) {
-                                                Some(h) => resolved_deps.push(h.clone()),
-                                                None => unresolved.push(dep.clone()),
-                                            }
-                                        }
-
-                                        let title = batch_json
-                                            .title
-                                            .clone()
-                                            .unwrap_or_else(|| format!("Batch {}", local_idx + 1));
-
-                                        let ipc_tasks: Vec<clust_ipc::QueuedTask> = batch_json
-                                            .tasks
-                                            .iter()
-                                            .map(|t| clust_ipc::QueuedTask {
-                                                branch_name: t.branch.clone(),
-                                                prompt: t.prompt.clone(),
-                                                use_prefix: t.use_prefix,
-                                                use_suffix: t.use_suffix,
-                                                plan_mode: t.plan_mode,
-                                                exit_when_done: t.exit_when_done,
-                                            })
-                                            .collect();
-
-                                        let reg_msg = CliMessage::RegisterBatch {
-                                            repo_path: repo_path_owned.clone(),
-                                            target_branch: target_branch_owned.clone(),
-                                            title: title.clone(),
-                                            max_concurrent: batch_json.max_concurrent,
-                                            prompt_prefix: batch_json.prefix.clone(),
-                                            prompt_suffix: batch_json.suffix.clone(),
-                                            plan_mode: batch_json.plan_mode,
-                                            allow_bypass: batch_json.allow_bypass,
-                                            agent_binary: None,
-                                            hub: hub_name_owned.clone(),
-                                            launch_mode: launch_mode_str.to_string(),
-                                            tasks: ipc_tasks,
-                                            depends_on: resolved_deps,
-                                        };
-
-                                        if let Ok(mut stream) = ipc::try_connect().await {
-                                            if clust_ipc::send_message(&mut stream, &reg_msg)
-                                                .await
-                                                .is_ok()
-                                            {
-                                                if let Ok(HubMessage::BatchRegistered {
-                                                    batch_id,
-                                                }) = clust_ipc::recv_message::<HubMessage>(
-                                                    &mut stream,
-                                                )
-                                                .await
-                                                {
-                                                    title_to_hub.insert(title, batch_id.clone());
-                                                    let _ = tx
-                                                        .send(AgentStartResult::BatchRegistered {
-                                                            local_batch_idx: local_idx,
-                                                            hub_batch_id: batch_id,
-                                                        })
-                                                        .await;
-                                                }
-                                            }
-                                        }
-                                    }
-
-                                    let _ = tx
-                                        .send(AgentStartResult::ImportComplete {
-                                            batch_count,
-                                            task_count: total_task_count,
-                                            unresolved,
-                                        })
-                                        .await;
-                                });
-
-                                active_tab = ActiveTab::Tasks;
-                                status_message = Some(StatusMessage {
-                                    text: format!(
-                                        "Importing {} batch{}\u{2026}",
-                                        batch_count,
-                                        if batch_count == 1 { "" } else { "es" }
-                                    ),
-                                    level: StatusLevel::Info,
-                                    created: Instant::now(),
-                                });
-                            }
-                            ImportBatchResult::Pending => {}
-                        }
-                    // Add-task modal takes priority over all other input
-                    } else if let Some(ref mut modal) = add_task_modal {
-                        match modal.handle_key(key) {
-                            AddTaskResult::Cancelled => {
-                                add_task_modal = None;
-                            }
-                            AddTaskResult::Completed(output) => {
-                                add_task_modal = None;
-                                // Send to hub if batch is registered
-                                if let Some(batch) = tasks_state.batches.get(output.batch_idx) {
-                                    if let Some(ref hub_id) = batch.hub_batch_id {
-                                        let msg = CliMessage::AddBatchTask {
-                                            batch_id: hub_id.clone(),
-                                            branch_name: output.branch_name.clone(),
-                                            prompt: output.prompt.clone(),
-                                        };
-                                        tokio::spawn(async move {
-                                            if let Ok(mut stream) = ipc::try_connect().await {
-                                                let _ = clust_ipc::send_message(&mut stream, &msg)
-                                                    .await;
-                                                let _ = clust_ipc::recv_message::<HubMessage>(
-                                                    &mut stream,
-                                                )
-                                                .await;
-                                            }
-                                        });
-                                    }
-                                }
-                                tasks_state.add_task(
-                                    output.batch_idx,
-                                    output.branch_name,
-                                    output.prompt,
-                                    output.use_prefix,
-                                    output.use_suffix,
-                                    output.plan_mode,
-                                    output.exit_when_done,
-                                );
-                            }
-                            AddTaskResult::Pending => {}
-                        }
-                    // Batch-deps modal takes priority over all other input
-                    } else if let Some(ref mut modal) = batch_deps_modal {
-                        match modal.handle_key(key.code) {
-                            BatchDepsResult::Cancelled => {
-                                batch_deps_modal = None;
-                            }
-                            BatchDepsResult::Completed(deps) => {
-                                let bidx = modal.batch_idx();
-                                batch_deps_modal = None;
-                                if let Some(batch) = tasks_state.batches.get_mut(bidx) {
-                                    batch.depends_on = deps.clone();
-                                    if let Some(ref hub_id) = batch.hub_batch_id {
-                                        let msg = CliMessage::UpdateBatchDependencies {
-                                            batch_id: hub_id.clone(),
-                                            depends_on: deps,
-                                        };
-                                        tokio::spawn(async move {
-                                            if let Ok(mut stream) = ipc::try_connect().await {
-                                                let _ = clust_ipc::send_message(&mut stream, &msg)
-                                                    .await;
-                                                let _ = clust_ipc::recv_message::<HubMessage>(
-                                                    &mut stream,
-                                                )
-                                                .await;
-                                            }
-                                        });
-                                    }
-                                }
-                            }
-                            BatchDepsResult::Pending => {}
-                        }
-                    // Edit-field modal takes priority over all other input
-                    } else if let Some(ref mut modal) = edit_field_modal {
-                        match modal.handle_key(key) {
-                            EditFieldResult::Cancelled => {
-                                edit_field_modal = None;
-                                edit_field_target = None;
-                            }
-                            EditFieldResult::Completed(value) => {
-                                if let Some((batch_idx, is_suffix)) = edit_field_target.take() {
-                                    if is_suffix {
-                                        tasks_state.set_prompt_suffix(batch_idx, value);
-                                    } else {
-                                        tasks_state.set_prompt_prefix(batch_idx, value);
-                                    }
-                                    sync_batch_config_to_hub(&tasks_state, batch_idx);
-                                }
-                                edit_field_modal = None;
-                            }
-                            EditFieldResult::Pending => {}
-                        }
-                    // Timer modal takes priority over all other input
-                    } else if let Some(ref mut modal) = timer_modal {
-                        match modal.handle_key(key) {
-                            TimerResult::Cancelled => {
-                                timer_modal = None;
-                                timer_modal_batch_idx = None;
-                            }
-                            TimerResult::Completed(scheduled_at) => {
-                                if let Some(batch_idx) = timer_modal_batch_idx.take() {
-                                    if let Some(batch) = tasks_state.batches.get(batch_idx) {
-                                        // Send QueueBatch to hub
-                                        let ipc_tasks: Vec<clust_ipc::QueuedTask> = batch
-                                            .tasks
-                                            .iter()
-                                            .map(|t| clust_ipc::QueuedTask {
-                                                branch_name: t.branch_name.clone(),
-                                                prompt: t.prompt.clone(),
-                                                use_prefix: t.use_prefix,
-                                                use_suffix: t.use_suffix,
-                                                plan_mode: t.plan_mode,
-                                                exit_when_done: t.exit_when_done,
-                                            })
-                                            .collect();
-                                        let msg = CliMessage::QueueBatch {
-                                            repo_path: batch.repo_path.clone(),
-                                            target_branch: batch.branch_name.clone(),
-                                            title: batch.title.clone(),
-                                            max_concurrent: batch.max_concurrent,
-                                            prompt_prefix: batch.prompt_prefix.clone(),
-                                            prompt_suffix: batch.prompt_suffix.clone(),
-                                            plan_mode: batch.plan_mode,
-                                            allow_bypass: batch.allow_bypass,
-                                            agent_binary: None,
-                                            hub: hub_name.to_string(),
-                                            tasks: ipc_tasks,
-                                            scheduled_at: scheduled_at.clone(),
-                                        };
-                                        // Delete old hub batch if registered
-                                        let old_hub_id = batch.hub_batch_id.clone();
-                                        let tx = agent_start_tx.clone();
-                                        let sched = scheduled_at.clone();
-                                        let bidx = batch_idx;
-                                        tokio::spawn(async move {
-                                            if let Ok(mut stream) = ipc::try_connect().await {
-                                                // Delete old registration first
-                                                if let Some(old_id) = old_hub_id {
-                                                    let del = CliMessage::DeleteBatch {
-                                                        batch_id: old_id,
-                                                    };
-                                                    let _ =
-                                                        clust_ipc::send_message(&mut stream, &del)
-                                                            .await;
-                                                    let _ = clust_ipc::recv_message::<HubMessage>(
-                                                        &mut stream,
-                                                    )
-                                                    .await;
-                                                    // Need a fresh connection for the next message
-                                                    drop(stream);
-                                                    let Ok(mut stream) = ipc::try_connect().await
-                                                    else {
-                                                        return;
-                                                    };
-                                                    if let Ok(()) =
-                                                        clust_ipc::send_message(&mut stream, &msg)
-                                                            .await
-                                                    {
-                                                        if let Ok(HubMessage::BatchQueued {
-                                                            batch_id,
-                                                            ..
-                                                        }) =
-                                                            clust_ipc::recv_message::<HubMessage>(
-                                                                &mut stream,
-                                                            )
-                                                            .await
-                                                        {
-                                                            let _ = tx
-                                                                .send(
-                                                                    AgentStartResult::BatchQueued {
-                                                                        local_batch_idx: bidx,
-                                                                        hub_batch_id: batch_id,
-                                                                        scheduled_at: sched,
-                                                                    },
-                                                                )
-                                                                .await;
-                                                        }
-                                                    }
-                                                } else {
-                                                    if let Ok(()) =
-                                                        clust_ipc::send_message(&mut stream, &msg)
-                                                            .await
-                                                    {
-                                                        if let Ok(HubMessage::BatchQueued {
-                                                            batch_id,
-                                                            ..
-                                                        }) =
-                                                            clust_ipc::recv_message::<HubMessage>(
-                                                                &mut stream,
-                                                            )
-                                                            .await
-                                                        {
-                                                            let _ = tx
-                                                                .send(
-                                                                    AgentStartResult::BatchQueued {
-                                                                        local_batch_idx: bidx,
-                                                                        hub_batch_id: batch_id,
-                                                                        scheduled_at: sched,
-                                                                    },
-                                                                )
-                                                                .await;
-                                                        }
-                                                    }
-                                                }
-                                            }
-                                        });
-                                    }
-                                }
-                                timer_modal = None;
-                            }
-                            TimerResult::Pending => {}
-                        }
-                    // Search-agent modal takes priority over all other input
                     } else if let Some(ref mut modal) = search_modal {
                         match modal.handle_key(key) {
                             SearchResult::Cancelled => {
@@ -3961,105 +3017,6 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                             level: StatusLevel::Success,
                             created: Instant::now(),
                         });
-                    } else if key.code == KeyCode::Char('t')
-                        && key.modifiers.contains(KeyModifiers::ALT)
-                    {
-                        // Global shortcut: Alt+T opens the Schedule task modal.
-                        if !repos.is_empty() {
-                            let parents: Vec<crate::schedule_task_modal::ParentChoice> =
-                                tasks_state
-                                    .batches
-                                    .iter()
-                                    .filter_map(|b| {
-                                        b.hub_batch_id.as_ref().map(|hub_id| {
-                                            crate::schedule_task_modal::ParentChoice {
-                                                batch_id: hub_id.clone(),
-                                                title: b.title.clone(),
-                                                branch_name: b
-                                                    .tasks
-                                                    .first()
-                                                    .map(|t| t.branch_name.clone())
-                                                    .unwrap_or_else(|| b.branch_name.clone()),
-                                                repo_path: b.repo_path.clone(),
-                                                repo_name: b.repo_name.clone(),
-                                            }
-                                        })
-                                    })
-                                    .collect();
-                            schedule_modal = Some(
-                                crate::schedule_task_modal::ScheduleTaskModal::new(
-                                    repos.clone(),
-                                    parents,
-                                ),
-                            );
-                            show_help = false;
-                        }
-                    } else if key.code == KeyCode::Char('p')
-                        && key.modifiers.contains(KeyModifiers::ALT)
-                        && active_tab == ActiveTab::Tasks
-                    {
-                        // Alt+P: toggle plan_mode (per-task if task focused, batch-level otherwise)
-                        if let TasksFocus::BatchCard(batch_idx) = tasks_state.focus {
-                            if let Some(task_idx) = tasks_state.focused_task {
-                                tasks_state.toggle_task_plan_mode(batch_idx, task_idx);
-                            } else {
-                                tasks_state.toggle_plan_mode(batch_idx);
-                                sync_batch_config_to_hub(&tasks_state, batch_idx);
-                            }
-                        }
-                    } else if key.code == KeyCode::Char('a')
-                        && key.modifiers.contains(KeyModifiers::ALT)
-                        && active_tab == ActiveTab::Tasks
-                    {
-                        // Alt+A: toggle per-task prefix (remapped from Alt+P)
-                        if let TasksFocus::BatchCard(batch_idx) = tasks_state.focus {
-                            if let Some(task_idx) = tasks_state.focused_task {
-                                tasks_state.toggle_task_use_prefix(batch_idx, task_idx);
-                            }
-                        }
-                    } else if key.code == KeyCode::Char('s')
-                        && key.modifiers.contains(KeyModifiers::ALT)
-                        && active_tab == ActiveTab::Tasks
-                    {
-                        // Alt+S: start a single task (manual mode) or toggle per-task suffix
-                        if let TasksFocus::BatchCard(batch_idx) = tasks_state.focus {
-                            if let Some(task_idx) = tasks_state.focused_task {
-                                // If the task is idle in a manual-mode batch, start it;
-                                // otherwise toggle suffix.
-                                let can_start =
-                                    tasks_state.batches.get(batch_idx).is_some_and(|b| {
-                                        b.launch_mode == tasks::LaunchMode::Manual
-                                            && b.tasks.get(task_idx).is_some_and(|t| {
-                                                t.status == tasks::TaskStatus::Idle
-                                            })
-                                    });
-                                if can_start {
-                                    if let Some(start_info) =
-                                        tasks_state.start_single_task(batch_idx, task_idx)
-                                    {
-                                        spawn_batch_tasks(
-                                            &tasks_state,
-                                            &start_info,
-                                            hub_name,
-                                            agent_start_tx.clone(),
-                                        );
-                                    }
-                                } else {
-                                    tasks_state.toggle_task_use_suffix(batch_idx, task_idx);
-                                }
-                            } else {
-                                let mod_key = if cfg!(target_os = "macos") {
-                                    "Opt"
-                                } else {
-                                    "Alt"
-                                };
-                                status_message = Some(StatusMessage {
-                                    text: format!("Select a task first (\u{2191}/\u{2193} to navigate), then {mod_key}+S to start"),
-                                    level: StatusLevel::Error,
-                                    created: Instant::now(),
-                                });
-                            }
-                        }
                     } else
                     // Focus mode: behavior depends on which side has focus
                     if in_focus_mode && focus_mode_state.is_active() {
@@ -4069,18 +3026,8 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                             if shift {
                                 match key.code {
                                     KeyCode::Up => {
-                                        // Exit focus mode — return to batch screen if opened from one
-                                        if let Some(origin) = focus_mode_state.batch_origin.take() {
-                                            // Clamp the batch_idx in case the batch was removed
-                                            // while we were in focus mode. If it's now out of
-                                            // range, drop the restore and fall back to default.
-                                            if origin.batch_idx < tasks_state.batches.len() {
-                                                active_tab = ActiveTab::Tasks;
-                                                tasks_state.focus =
-                                                    tasks::TasksFocus::BatchCard(origin.batch_idx);
-                                                tasks_state.focused_task = Some(origin.task_idx);
-                                            }
-                                        } else if active_tab == ActiveTab::Overview
+                                        // Exit focus mode
+                                        if active_tab == ActiveTab::Overview
                                             && overview_state.initialized
                                         {
                                             overview_state.force_resize_all();
@@ -4269,17 +3216,8 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                             if shift {
                                 match key.code {
                                     KeyCode::Up => {
-                                        // Exit focus mode — return to batch screen if opened from one
-                                        if let Some(origin) = focus_mode_state.batch_origin.take() {
-                                            // Clamp the batch_idx in case the batch was removed
-                                            // while we were in focus mode.
-                                            if origin.batch_idx < tasks_state.batches.len() {
-                                                active_tab = ActiveTab::Tasks;
-                                                tasks_state.focus =
-                                                    tasks::TasksFocus::BatchCard(origin.batch_idx);
-                                                tasks_state.focused_task = Some(origin.task_idx);
-                                            }
-                                        } else if active_tab == ActiveTab::Overview
+                                        // Exit focus mode
+                                        if active_tab == ActiveTab::Overview
                                             && overview_state.initialized
                                         {
                                             overview_state.force_resize_all();
@@ -4558,283 +3496,6 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                     _ => {}
                                 }
                             }
-                            // Tasks tab navigation
-                            _ if active_tab == ActiveTab::Tasks => {
-                                let shift = key.modifiers.contains(KeyModifiers::SHIFT);
-                                match key.code {
-                                    KeyCode::Left if shift => {
-                                        tasks_state.focus_prev_card();
-                                        // Auto-scroll to keep focused batch visible
-                                        if let TasksFocus::BatchCard(idx) = tasks_state.focus {
-                                            if idx < tasks_state.scroll_offset {
-                                                tasks_state.scroll_offset = idx;
-                                            }
-                                        }
-                                    }
-                                    KeyCode::Right if shift => {
-                                        tasks_state.focused_task = None;
-                                        tasks_state.focus_next_card();
-                                        // Auto-scroll to keep focused batch visible
-                                        if let TasksFocus::BatchCard(idx) = tasks_state.focus {
-                                            let visible = tasks_state
-                                                .visible_batch_count(last_content_area.width);
-                                            if visible > 0
-                                                && idx >= tasks_state.scroll_offset + visible
-                                            {
-                                                tasks_state.scroll_offset = idx + 1 - visible;
-                                            }
-                                        }
-                                    }
-                                    KeyCode::Down if shift => {
-                                        // Open focused active task in focus mode
-                                        if let Some((batch_idx, task_idx, agent_id, batch_title)) =
-                                            tasks_state.focused_active_agent()
-                                        {
-                                            let aid = agent_id.to_string();
-                                            let btitle = batch_title.to_string();
-                                            if let Some(agent) = agents.iter().find(|a| a.id == aid)
-                                            {
-                                                let fm_cols = (last_content_area.width * 40 / 100)
-                                                    .saturating_sub(2)
-                                                    .max(1);
-                                                let fm_rows = last_content_area
-                                                    .height
-                                                    .saturating_sub(3)
-                                                    .max(1);
-                                                let existing_terminals =
-                                                    overview_state.take_agent_terminals(&aid);
-                                                focus_mode_state.open_agent(
-                                                    &aid,
-                                                    &agent.agent_binary,
-                                                    fm_cols,
-                                                    fm_rows,
-                                                    &agent.working_dir,
-                                                    agent.repo_path.as_deref(),
-                                                    agent.branch_name.as_deref(),
-                                                    agent.is_worktree,
-                                                    existing_terminals,
-                                                );
-                                                focus_mode_state.batch_origin =
-                                                    Some(overview::BatchOrigin {
-                                                        batch_title: btitle,
-                                                        batch_idx,
-                                                        task_idx,
-                                                    });
-                                                in_focus_mode = true;
-                                            }
-                                        }
-                                    }
-                                    KeyCode::Left => {
-                                        tasks_state.scroll_left();
-                                    }
-                                    KeyCode::Right => {
-                                        tasks_state.scroll_right(last_content_area.width);
-                                    }
-                                    KeyCode::Down => match tasks_state.focus {
-                                        TasksFocus::BatchList => tasks_state.focus_first_card(),
-                                        TasksFocus::BatchCard(_) => tasks_state.focus_task_down(),
-                                    },
-                                    KeyCode::Up => {
-                                        if tasks_state.focused_task.is_some() {
-                                            tasks_state.focus_task_up();
-                                        } else {
-                                            tasks_state.focus = TasksFocus::BatchList;
-                                        }
-                                    }
-                                    KeyCode::Delete | KeyCode::Backspace => {
-                                        if let TasksFocus::BatchCard(idx) = tasks_state.focus {
-                                            if let Some(batch) = tasks_state.batches.get(idx) {
-                                                let hub_batch_id = batch.hub_batch_id.clone();
-                                                let rp = batch.repo_path.clone();
-                                                let bnames: Vec<String> = batch
-                                                    .tasks
-                                                    .iter()
-                                                    .map(|t| t.branch_name.clone())
-                                                    .collect();
-                                                let aids: Vec<String> = batch
-                                                    .tasks
-                                                    .iter()
-                                                    .filter_map(|t| t.agent_id.clone())
-                                                    .collect();
-                                                active_menu = Some(ActiveMenu::BatchCleanup {
-                                                    batch_idx: idx,
-                                                    hub_batch_id,
-                                                    repo_path: rp,
-                                                    branch_names: bnames,
-                                                    agent_ids: aids,
-                                                    menu: ContextMenu::new(
-                                                        "Delete Batch",
-                                                        vec![
-                                                            "Cancel".to_string(),
-                                                            "Don't clean up".to_string(),
-                                                            "Stop agents".to_string(),
-                                                            "Stop agents and remove branches"
-                                                                .to_string(),
-                                                        ],
-                                                    )
-                                                    .with_description(
-                                                        "Choose cleanup action for this batch:"
-                                                            .to_string(),
-                                                    ),
-                                                });
-                                            }
-                                        }
-                                    }
-                                    KeyCode::Char('m') => {
-                                        if let TasksFocus::BatchCard(idx) = tasks_state.focus {
-                                            tasks_state.toggle_plan_mode(idx);
-                                            sync_batch_config_to_hub(&tasks_state, idx);
-                                        }
-                                    }
-                                    KeyCode::Char('b') => {
-                                        if let TasksFocus::BatchCard(idx) = tasks_state.focus {
-                                            tasks_state.toggle_allow_bypass(idx);
-                                            sync_batch_config_to_hub(&tasks_state, idx);
-                                        }
-                                    }
-                                    KeyCode::Char(' ') => {
-                                        if let TasksFocus::BatchCard(idx) = tasks_state.focus {
-                                            // If queued, cancel the queue via hub IPC
-                                            let is_queued =
-                                                tasks_state.batches.get(idx).and_then(|b| {
-                                                    if let tasks::BatchStatus::Queued {
-                                                        batch_id,
-                                                        ..
-                                                    } = &b.status
-                                                    {
-                                                        Some(batch_id.clone())
-                                                    } else {
-                                                        None
-                                                    }
-                                                });
-
-                                            if let Some(hub_batch_id) = is_queued {
-                                                // Cancel the queued batch timer, keep batch as idle
-                                                let bid = hub_batch_id.clone();
-                                                tokio::spawn(async move {
-                                                    if let Ok(mut stream) = ipc::try_connect().await
-                                                    {
-                                                        let msg = CliMessage::CancelQueuedBatch { batch_id: bid, cleanup_mode: clust_ipc::BatchCleanupMode::StopAgents };
-                                                        let _ = clust_ipc::send_message(
-                                                            &mut stream,
-                                                            &msg,
-                                                        )
-                                                        .await;
-                                                        let _ =
-                                                            clust_ipc::recv_message::<HubMessage>(
-                                                                &mut stream,
-                                                            )
-                                                            .await;
-                                                    }
-                                                });
-                                                // Revert local status to Idle
-                                                if let Some(batch) =
-                                                    tasks_state.batches.get_mut(idx)
-                                                {
-                                                    batch.status = tasks::BatchStatus::Idle;
-                                                }
-                                                status_message = Some(StatusMessage {
-                                                    text: "Queued batch cancelled".to_string(),
-                                                    level: StatusLevel::Info,
-                                                    created: Instant::now(),
-                                                });
-                                            } else {
-                                                if let Some(batch) = tasks_state.batches.get(idx) {
-                                                    if batch.launch_mode
-                                                        == tasks::LaunchMode::Manual
-                                                    {
-                                                        let mod_key = if cfg!(target_os = "macos") {
-                                                            "Opt"
-                                                        } else {
-                                                            "Alt"
-                                                        };
-                                                        status_message = Some(StatusMessage {
-                                                            text: format!("Manual batch \u{2014} use {mod_key}+S on a task to start it"),
-                                                            level: StatusLevel::Error,
-                                                            created: Instant::now(),
-                                                        });
-                                                    }
-                                                }
-                                                if let Some(start_info) =
-                                                    tasks_state.toggle_batch_status(idx)
-                                                {
-                                                    // Sync status to hub
-                                                    if let Some(batch) =
-                                                        tasks_state.batches.get(idx)
-                                                    {
-                                                        sync_batch_status_to_hub(batch);
-                                                    }
-                                                    spawn_batch_tasks(
-                                                        &tasks_state,
-                                                        &start_info,
-                                                        hub_name,
-                                                        agent_start_tx.clone(),
-                                                    );
-                                                } else if let Some(batch) =
-                                                    tasks_state.batches.get(idx)
-                                                {
-                                                    // toggle returned None but status may have changed (Active -> Idle)
-                                                    sync_batch_status_to_hub(batch);
-                                                }
-                                            }
-                                        }
-                                    }
-                                    KeyCode::Char('d') => {
-                                        if let TasksFocus::BatchCard(idx) = tasks_state.focus {
-                                            if let Some(batch) = tasks_state.batches.get(idx) {
-                                                if let Some(ref hub_id) = batch.hub_batch_id {
-                                                    let msg = CliMessage::RemoveDoneBatchTasks {
-                                                        batch_id: hub_id.clone(),
-                                                    };
-                                                    tokio::spawn(async move {
-                                                        if let Ok(mut stream) =
-                                                            ipc::try_connect().await
-                                                        {
-                                                            let _ = clust_ipc::send_message(
-                                                                &mut stream,
-                                                                &msg,
-                                                            )
-                                                            .await;
-                                                            let _ = clust_ipc::recv_message::<
-                                                                HubMessage,
-                                                            >(
-                                                                &mut stream
-                                                            )
-                                                            .await;
-                                                        }
-                                                    });
-                                                }
-                                            }
-                                            tasks_state.remove_done_tasks(idx);
-                                        }
-                                    }
-                                    KeyCode::Char('t') => {
-                                        if let TasksFocus::BatchCard(idx) = tasks_state.focus {
-                                            if let Some(batch) = tasks_state.batches.get(idx) {
-                                                if batch.status == tasks::BatchStatus::Active {
-                                                    status_message = Some(StatusMessage {
-                                                        text: "Cannot edit the time of an active task".to_string(),
-                                                        level: StatusLevel::Error,
-                                                        created: Instant::now(),
-                                                    });
-                                                } else if batch.tasks.is_empty() {
-                                                    status_message = Some(StatusMessage {
-                                                        text: "Task has no payload \u{2014} unexpected, please re-create it".to_string(),
-                                                        level: StatusLevel::Error,
-                                                        created: Instant::now(),
-                                                    });
-                                                } else {
-                                                    timer_modal =
-                                                        Some(TimerModal::new(batch.title.clone()));
-                                                    timer_modal_batch_idx = Some(idx);
-                                                    show_help = false;
-                                                }
-                                            }
-                                        }
-                                    }
-                                    _ => {}
-                                }
-                            }
                             // Repositories tab navigation
                             _ if active_tab == ActiveTab::Repositories => {
                                 match key.code {
@@ -5027,16 +3688,6 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                 Event::Paste(ref text) => {
                     if let Some(ref mut modal) = create_modal {
                         modal.handle_paste(text);
-                    } else if let Some(ref mut modal) = schedule_modal {
-                        modal.handle_paste(text);
-                    } else if let Some(ref mut modal) = create_batch_modal {
-                        modal.handle_paste(text);
-                    } else if let Some(ref mut modal) = import_batch_modal {
-                        modal.handle_paste(text);
-                    } else if let Some(ref mut modal) = add_task_modal {
-                        modal.handle_paste(text);
-                    } else if let Some(ref mut modal) = edit_field_modal {
-                        modal.handle_paste(text);
                     } else if let Some(ref mut modal) = search_modal {
                         modal.handle_paste(text);
                     } else if let Some(ref mut modal) = detached_modal {
@@ -5160,7 +3811,6 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                     ActiveMenu::WorktreeCleanup { menu, .. } => menu.items.len(),
                                     ActiveMenu::EditorPicker { menu, .. } => menu.items.len(),
                                     ActiveMenu::EditorRemember { menu, .. } => menu.items.len(),
-                                    ActiveMenu::BatchCleanup { menu, .. } => menu.items.len(),
                                 }
                             } else {
                                 0
@@ -5191,9 +3841,6 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                             menu.selected_idx = idx
                                         }
                                         ActiveMenu::EditorRemember { menu, .. } => {
-                                            menu.selected_idx = idx
-                                        }
-                                        ActiveMenu::BatchCleanup { menu, .. } => {
                                             menu.selected_idx = idx
                                         }
                                     }
@@ -6363,154 +5010,6 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                         }
                                         _ => {}
                                     },
-                                    ActiveMenu::BatchCleanup {
-                                        batch_idx,
-                                        hub_batch_id,
-                                        repo_path,
-                                        branch_names,
-                                        agent_ids,
-                                        ..
-                                    } => {
-                                        match idx {
-                                            0 => {} // Cancel
-                                            1 => {
-                                                if let Some(ref bid) = hub_batch_id {
-                                                    let bid = bid.clone();
-                                                    tokio::spawn(async move {
-                                                        if let Ok(mut stream) =
-                                                            ipc::try_connect().await
-                                                        {
-                                                            let msg = CliMessage::CancelQueuedBatch { batch_id: bid, cleanup_mode: clust_ipc::BatchCleanupMode::NoCleanup };
-                                                            let _ = clust_ipc::send_message(
-                                                                &mut stream,
-                                                                &msg,
-                                                            )
-                                                            .await;
-                                                        }
-                                                    });
-                                                }
-                                                tasks_state.remove_batch(batch_idx);
-                                                invalidate_batch_origin_if(
-                                                    &mut focus_mode_state,
-                                                    batch_idx,
-                                                );
-                                                status_message = Some(StatusMessage {
-                                                    text: "Task removed".to_string(),
-                                                    level: StatusLevel::Info,
-                                                    created: Instant::now(),
-                                                });
-                                            }
-                                            2 => {
-                                                if let Some(ref bid) = hub_batch_id {
-                                                    let bid = bid.clone();
-                                                    tokio::spawn(async move {
-                                                        if let Ok(mut stream) =
-                                                            ipc::try_connect().await
-                                                        {
-                                                            let msg = CliMessage::CancelQueuedBatch { batch_id: bid, cleanup_mode: clust_ipc::BatchCleanupMode::StopAgents };
-                                                            let _ = clust_ipc::send_message(
-                                                                &mut stream,
-                                                                &msg,
-                                                            )
-                                                            .await;
-                                                        }
-                                                    });
-                                                } else {
-                                                    for aid in &agent_ids {
-                                                        let aid = aid.clone();
-                                                        tokio::spawn(async move {
-                                                            if let Ok(mut stream) =
-                                                                ipc::try_connect().await
-                                                            {
-                                                                let msg = CliMessage::StopAgent {
-                                                                    id: aid,
-                                                                };
-                                                                let _ = clust_ipc::send_message(
-                                                                    &mut stream,
-                                                                    &msg,
-                                                                )
-                                                                .await;
-                                                            }
-                                                        });
-                                                    }
-                                                }
-                                                tasks_state.remove_batch(batch_idx);
-                                                invalidate_batch_origin_if(
-                                                    &mut focus_mode_state,
-                                                    batch_idx,
-                                                );
-                                                last_agent_fetch =
-                                                    Instant::now() - Duration::from_secs(10);
-                                                status_message = Some(StatusMessage {
-                                                    text: "Task removed, agents stopped"
-                                                        .to_string(),
-                                                    level: StatusLevel::Info,
-                                                    created: Instant::now(),
-                                                });
-                                            }
-                                            3 => {
-                                                if let Some(ref bid) = hub_batch_id {
-                                                    let bid = bid.clone();
-                                                    tokio::spawn(async move {
-                                                        if let Ok(mut stream) =
-                                                            ipc::try_connect().await
-                                                        {
-                                                            let msg = CliMessage::CancelQueuedBatch { batch_id: bid, cleanup_mode: clust_ipc::BatchCleanupMode::StopAgentsAndRemoveBranches };
-                                                            let _ = clust_ipc::send_message(
-                                                                &mut stream,
-                                                                &msg,
-                                                            )
-                                                            .await;
-                                                        }
-                                                    });
-                                                } else {
-                                                    for aid in &agent_ids {
-                                                        let aid = aid.clone();
-                                                        tokio::spawn(async move {
-                                                            if let Ok(mut stream) =
-                                                                ipc::try_connect().await
-                                                            {
-                                                                let msg = CliMessage::StopAgent {
-                                                                    id: aid,
-                                                                };
-                                                                let _ = clust_ipc::send_message(
-                                                                    &mut stream,
-                                                                    &msg,
-                                                                )
-                                                                .await;
-                                                            }
-                                                        });
-                                                    }
-                                                    for branch in &branch_names {
-                                                        remove_worktree_ipc(
-                                                            &repo_path, branch, true, true,
-                                                        );
-                                                    }
-                                                }
-                                                tasks_state.remove_batch(batch_idx);
-                                                invalidate_batch_origin_if(
-                                                    &mut focus_mode_state,
-                                                    batch_idx,
-                                                );
-                                                last_agent_fetch =
-                                                    Instant::now() - Duration::from_secs(10);
-                                                last_repo_fetch =
-                                                    Instant::now() - Duration::from_secs(10);
-                                                // Mark batch agent panels as already cleaned up so the
-                                                // worktree-removal modal won't fire when they exit.
-                                                for panel in overview_state.panels.iter_mut() {
-                                                    if agent_ids.contains(&panel.id) {
-                                                        panel.worktree_cleanup_shown = true;
-                                                    }
-                                                }
-                                                pending_worktree_cleanups.retain(|c| {
-                                                    !branch_names.contains(&c.branch_name)
-                                                });
-                                                status_message = Some(StatusMessage { text: "Task removed, agents stopped, branches cleaned up".to_string(), level: StatusLevel::Info, created: Instant::now() });
-                                            }
-                                            _ => {}
-                                        }
-                                    }
                                 }
                             }
                         } else if !click_map.menu_modal_rect.contains(pos) {
@@ -6520,16 +5019,7 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                     } else if in_focus_mode {
                         // Focus mode click handling
                         if click_map.focus_back_button.contains(pos) {
-                            if let Some(origin) = focus_mode_state.batch_origin.take() {
-                                // Clamp the batch_idx in case the batch was removed
-                                // while we were in focus mode.
-                                if origin.batch_idx < tasks_state.batches.len() {
-                                    active_tab = ActiveTab::Tasks;
-                                    tasks_state.focus =
-                                        tasks::TasksFocus::BatchCard(origin.batch_idx);
-                                    tasks_state.focused_task = Some(origin.task_idx);
-                                }
-                            } else if active_tab == ActiveTab::Overview
+                            if active_tab == ActiveTab::Overview
                                 && overview_state.initialized
                             {
                                 overview_state.force_resize_all();
@@ -6671,15 +5161,6 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                     overview_state.focus = overview::OverviewFocus::Terminal(*idx);
                                 }
                             }
-                            ActiveTab::Tasks => {
-                                if let Some((_, batch_idx)) = click_map
-                                    .tasks_batch_cards
-                                    .iter()
-                                    .find(|(r, _)| r.contains(pos))
-                                {
-                                    tasks_state.focus = TasksFocus::BatchCard(*batch_idx);
-                                }
-                            }
                         }
                     }
                 }
@@ -6699,8 +5180,7 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                             | ActiveMenu::ConfirmAction { menu, .. }
                             | ActiveMenu::WorktreeCleanup { menu, .. }
                             | ActiveMenu::EditorPicker { menu, .. }
-                            | ActiveMenu::EditorRemember { menu, .. }
-                            | ActiveMenu::BatchCleanup { menu, .. } => {
+                            | ActiveMenu::EditorRemember { menu, .. } => {
                                 menu.selected_idx = menu.selected_idx.saturating_sub(1);
                             }
                         }
@@ -6765,8 +5245,7 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                             | ActiveMenu::ConfirmAction { menu, .. }
                             | ActiveMenu::WorktreeCleanup { menu, .. }
                             | ActiveMenu::EditorPicker { menu, .. }
-                            | ActiveMenu::EditorRemember { menu, .. }
-                            | ActiveMenu::BatchCleanup { menu, .. } => {
+                            | ActiveMenu::EditorRemember { menu, .. } => {
                                 if !menu.items.is_empty() {
                                     menu.selected_idx =
                                         (menu.selected_idx + 1).min(menu.items.len() - 1);
@@ -6893,11 +5372,7 @@ fn find_url_at_click(
 // ---------------------------------------------------------------------------
 
 fn render_tab_bar(frame: &mut Frame, area: Rect, active_tab: ActiveTab, click_map: &mut ClickMap) {
-    let tabs = [
-        ActiveTab::Repositories,
-        ActiveTab::Overview,
-        ActiveTab::Tasks,
-    ];
+    let tabs = [ActiveTab::Repositories, ActiveTab::Overview];
     let mut spans = Vec::new();
     let mut cursor_x = area.x;
 
@@ -6984,12 +5459,7 @@ fn render_focus_back_bar(
             .bg(theme::R_BG_RAISED)
             .add_modifier(Modifier::BOLD),
     ));
-    let back_target = if state.batch_origin.is_some() {
-        ActiveTab::Tasks.label()
-    } else {
-        origin_tab.label()
-    };
-    let back_label = format!("  Back to {}", back_target);
+    let back_label = format!("  Back to {}", origin_tab.label());
     spans.push(Span::styled(
         &back_label,
         Style::default()
@@ -7010,22 +5480,6 @@ fn render_focus_back_bar(
     };
     cursor_x += back_width;
     let _ = cursor_x; // suppress unused warning
-
-    // Batch badge (when opened from a batch task)
-    if let Some(ref origin) = state.batch_origin {
-        spans.push(Span::styled("  ", bg));
-        spans.push(Span::styled(
-            format!(" {} ", origin.batch_title),
-            Style::default()
-                .fg(theme::R_BG_BASE)
-                .bg(theme::R_INFO)
-                .add_modifier(Modifier::BOLD),
-        ));
-        spans.push(Span::styled(
-            format!(" task {}", origin.task_idx + 1),
-            Style::default().fg(theme::R_INFO).bg(theme::R_BG_RAISED),
-        ));
-    }
 
     // Center: agent info
     if let Some(panel) = &state.panel {
@@ -7615,43 +6069,6 @@ pub(crate) fn render_logo(frame: &mut Frame, area: Rect) {
     frame.render_widget(paragraph, horz_area);
 }
 
-fn build_task_terminal_previews(
-    tasks_state: &tasks::TasksState,
-    overview_state: &overview::OverviewState,
-) -> tasks::TerminalPreviewMap {
-    let mut map = HashMap::new();
-    if !tasks::SHOW_TERMINAL_PREVIEW {
-        return map;
-    }
-    for batch in &tasks_state.batches {
-        for task in &batch.tasks {
-            if task.status != tasks::TaskStatus::Active {
-                continue;
-            }
-            let Some(ref agent_id) = task.agent_id else {
-                continue;
-            };
-            let Some(panel) = overview_state.panels.iter().find(|p| p.id == *agent_id) else {
-                continue;
-            };
-            let all_lines = panel.vterm.to_ratatui_lines();
-            let preview: Vec<_> = all_lines
-                .into_iter()
-                .rev()
-                .filter(|l| l.width() > 0)
-                .take(tasks::TASK_TERMINAL_PREVIEW_LINES)
-                .collect::<Vec<_>>()
-                .into_iter()
-                .rev()
-                .collect();
-            if !preview.is_empty() {
-                map.insert(agent_id.clone(), preview);
-            }
-        }
-    }
-    map
-}
-
 fn state_to_agent_info(
     state: &overview::FocusModeState,
     repo_colors: &HashMap<String, String>,
@@ -7777,7 +6194,6 @@ fn render_status_bar(
         let color = match msg.level {
             StatusLevel::Error => theme::R_ERROR,
             StatusLevel::Success => theme::R_SUCCESS,
-            StatusLevel::Info => theme::R_INFO,
         };
         left_spans.extend([
             Span::styled("  ", Style::default().bg(theme::R_BG_RAISED)),
@@ -7813,8 +6229,6 @@ fn render_status_bar(
                     format!("Shift+\u{2193} enter terminal  Shift+\u{2190}/\u{2192} scroll  {mod_key}+R new agent  q quit  ? keys")
                 }
             }
-        } else if active_tab == ActiveTab::Tasks {
-            format!("{mod_key}+T new batch  {mod_key}+I import  \u{2190}/\u{2192} navigate  Space toggle  Enter add task  c copy JSON  p prefix  s suffix  Del remove  q quit  ? keys")
         } else {
             format!("{mod_key}+N new repo  {mod_key}+R new agent  {mod_key}+V open editor  q quit  Q stop+quit  ? keys")
         };
@@ -7913,7 +6327,6 @@ fn render_help_overlay(frame: &mut Frame, area: Rect, active_tab: ActiveTab, in_
     ));
     lines.push(binding_line("Alt+B", "Toggle bypass permissions"));
     lines.push(binding_line("Alt+P", "Toggle plan mode (in modals)"));
-    lines.push(binding_line("Alt+T", "Schedule a task"));
 
     // -- Repositories --
     if active_tab == ActiveTab::Repositories {
@@ -7940,21 +6353,6 @@ fn render_help_overlay(frame: &mut Frame, area: Rect, active_tab: ActiveTab, in_
         lines.push(binding_line("Shift+\u{2193}", "Enter focus mode"));
         lines.push(binding_line("Shift+\u{2190}/\u{2192}", "Switch agent"));
         lines.push(binding_line("PgUp / PgDn", "Scroll terminal"));
-    }
-
-    // -- Schedule --
-    if active_tab == ActiveTab::Tasks {
-        lines.push(Line::from(""));
-        lines.push(header_line("Schedule"));
-        lines.push(binding_line("Shift+\u{2190}/\u{2192}", "Switch task"));
-        lines.push(binding_line("\u{2190} / \u{2192}", "Scroll viewport"));
-        lines.push(binding_line("Shift+\u{2193}", "Enter focus mode (active only)"));
-        lines.push(binding_line("Space", "Toggle task status"));
-        lines.push(binding_line("Alt+S", "Start selected task (manual)"));
-        lines.push(binding_line("T", "Edit / set scheduled time"));
-        lines.push(binding_line("Alt+P", "Toggle plan mode"));
-        lines.push(binding_line("Alt+B", "Toggle bypass"));
-        lines.push(binding_line("Del / Backspace", "Remove task"));
     }
 
     // -- Focus Mode --
@@ -8014,15 +6412,9 @@ fn fetch_agents() -> Vec<AgentInfo> {
         let Ok(mut stream) = ipc::try_connect().await else {
             return vec![];
         };
-        if clust_ipc::send_message(
-            &mut stream,
-            &CliMessage::ListAgents {
-                hub: None,
-                batch: None,
-            },
-        )
-        .await
-        .is_err()
+        if clust_ipc::send_message(&mut stream, &CliMessage::ListAgents { hub: None })
+            .await
+            .is_err()
         {
             return vec![];
         }
@@ -8031,227 +6423,6 @@ fn fetch_agents() -> Vec<AgentInfo> {
             _ => vec![],
         }
     })
-}
-
-fn fetch_queued_batches() -> Vec<clust_ipc::QueuedBatchInfo> {
-    block_on_async(async {
-        let Ok(mut stream) = ipc::try_connect().await else {
-            return vec![];
-        };
-        if clust_ipc::send_message(&mut stream, &CliMessage::ListQueuedBatches)
-            .await
-            .is_err()
-        {
-            return vec![];
-        }
-        match clust_ipc::recv_message::<HubMessage>(&mut stream).await {
-            Ok(HubMessage::QueuedBatchList { batches }) => batches,
-            _ => vec![],
-        }
-    })
-}
-
-/// Send batch config (prefix, suffix, plan_mode, allow_bypass) to hub.
-fn sync_batch_config_to_hub(tasks_state: &tasks::TasksState, batch_idx: usize) {
-    if let Some(batch) = tasks_state.batches.get(batch_idx) {
-        if let Some(ref hub_id) = batch.hub_batch_id {
-            let msg = CliMessage::UpdateBatchConfig {
-                batch_id: hub_id.clone(),
-                prompt_prefix: batch.prompt_prefix.clone(),
-                prompt_suffix: batch.prompt_suffix.clone(),
-                plan_mode: batch.plan_mode,
-                allow_bypass: batch.allow_bypass,
-            };
-            tokio::spawn(async move {
-                if let Ok(mut stream) = ipc::try_connect().await {
-                    let _ = clust_ipc::send_message(&mut stream, &msg).await;
-                    let _ = clust_ipc::recv_message::<HubMessage>(&mut stream).await;
-                }
-            });
-        }
-    }
-}
-
-/// Handle the completion of the Schedule task modal (Opt+T).
-///
-/// Each "scheduled task" is implemented as a single-task batch. The schedule
-/// kind selects how the hub should behave:
-/// - Scheduled  → QueueBatch with `scheduled_at` (timer fires)
-/// - Dependent  → RegisterBatch with `depends_on=[parent]`, target_branch
-///   set to the parent's branch so the worktree bases off it
-/// - Unscheduled → RegisterBatch with `launch_mode=manual` (never auto-starts)
-fn handle_schedule_modal_complete(
-    out: crate::schedule_task_modal::ModalOutput,
-    tasks_state: &mut tasks::TasksState,
-    hub_name: &str,
-    agent_start_tx: &tokio::sync::mpsc::Sender<AgentStartResult>,
-) {
-    use crate::create_batch_modal::BatchModalOutput;
-    use crate::schedule_task_modal::KindOutput;
-
-    let title = out.new_branch.clone();
-    let launch_mode = match out.kind {
-        KindOutput::Unscheduled => tasks::LaunchMode::Manual,
-        _ => tasks::LaunchMode::Auto,
-    };
-
-    // Add the local single-task batch immediately so the UI shows it.
-    let batch_idx = tasks_state.add_batch(BatchModalOutput {
-        repo_path: out.repo_path.clone(),
-        repo_name: out.repo_name.clone(),
-        branch_name: out.target_branch.clone(),
-        title: Some(title.clone()),
-        max_concurrent: Some(1),
-        launch_mode,
-    });
-    tasks_state.add_task(
-        batch_idx,
-        out.new_branch.clone(),
-        out.prompt.clone(),
-        true,
-        true,
-        out.plan_mode,
-        false,
-    );
-
-    let task = clust_ipc::QueuedTask {
-        branch_name: out.new_branch.clone(),
-        prompt: out.prompt.clone(),
-        use_prefix: true,
-        use_suffix: true,
-        plan_mode: out.plan_mode,
-        exit_when_done: false,
-    };
-
-    let hub = hub_name.to_string();
-    let tx = agent_start_tx.clone();
-    let repo_path = out.repo_path.clone();
-    let target_branch = out.target_branch.clone();
-
-    match out.kind {
-        KindOutput::Scheduled { scheduled_at } => {
-            let msg = CliMessage::QueueBatch {
-                repo_path,
-                target_branch,
-                title,
-                max_concurrent: Some(1),
-                prompt_prefix: None,
-                prompt_suffix: None,
-                plan_mode: out.plan_mode,
-                allow_bypass: false,
-                agent_binary: None,
-                hub,
-                tasks: vec![task],
-                scheduled_at,
-            };
-            tokio::spawn(async move {
-                if let Ok(mut stream) = ipc::try_connect().await {
-                    if clust_ipc::send_message(&mut stream, &msg).await.is_ok() {
-                        if let Ok(HubMessage::BatchQueued {
-                            batch_id,
-                            scheduled_at,
-                        }) = clust_ipc::recv_message::<HubMessage>(&mut stream).await
-                        {
-                            let _ = tx
-                                .send(AgentStartResult::BatchQueued {
-                                    local_batch_idx: batch_idx,
-                                    hub_batch_id: batch_id,
-                                    scheduled_at,
-                                })
-                                .await;
-                        }
-                    }
-                }
-            });
-        }
-        KindOutput::Dependent { parent_batch_id } => {
-            let msg = CliMessage::RegisterBatch {
-                repo_path,
-                target_branch,
-                title,
-                max_concurrent: Some(1),
-                prompt_prefix: None,
-                prompt_suffix: None,
-                plan_mode: out.plan_mode,
-                allow_bypass: false,
-                agent_binary: None,
-                hub,
-                launch_mode: "auto".to_string(),
-                tasks: vec![task],
-                depends_on: vec![parent_batch_id],
-            };
-            tokio::spawn(async move {
-                if let Ok(mut stream) = ipc::try_connect().await {
-                    if clust_ipc::send_message(&mut stream, &msg).await.is_ok() {
-                        if let Ok(HubMessage::BatchRegistered { batch_id }) =
-                            clust_ipc::recv_message::<HubMessage>(&mut stream).await
-                        {
-                            let _ = tx
-                                .send(AgentStartResult::BatchRegistered {
-                                    local_batch_idx: batch_idx,
-                                    hub_batch_id: batch_id,
-                                })
-                                .await;
-                        }
-                    }
-                }
-            });
-        }
-        KindOutput::Unscheduled => {
-            let msg = CliMessage::RegisterBatch {
-                repo_path,
-                target_branch,
-                title,
-                max_concurrent: Some(1),
-                prompt_prefix: None,
-                prompt_suffix: None,
-                plan_mode: out.plan_mode,
-                allow_bypass: false,
-                agent_binary: None,
-                hub,
-                launch_mode: "manual".to_string(),
-                tasks: vec![task],
-                depends_on: vec![],
-            };
-            tokio::spawn(async move {
-                if let Ok(mut stream) = ipc::try_connect().await {
-                    if clust_ipc::send_message(&mut stream, &msg).await.is_ok() {
-                        if let Ok(HubMessage::BatchRegistered { batch_id }) =
-                            clust_ipc::recv_message::<HubMessage>(&mut stream).await
-                        {
-                            let _ = tx
-                                .send(AgentStartResult::BatchRegistered {
-                                    local_batch_idx: batch_idx,
-                                    hub_batch_id: batch_id,
-                                })
-                                .await;
-                        }
-                    }
-                }
-            });
-        }
-    }
-}
-
-/// Send batch status change to hub.
-fn sync_batch_status_to_hub(batch: &tasks::BatchInfo) {
-    if let Some(ref hub_id) = batch.hub_batch_id {
-        let status = match &batch.status {
-            tasks::BatchStatus::Idle => "idle",
-            tasks::BatchStatus::Active => "running",
-            tasks::BatchStatus::Queued { .. } => "scheduled",
-        };
-        let msg = CliMessage::UpdateBatchStatus {
-            batch_id: hub_id.clone(),
-            status: status.to_string(),
-        };
-        tokio::spawn(async move {
-            if let Ok(mut stream) = ipc::try_connect().await {
-                let _ = clust_ipc::send_message(&mut stream, &msg).await;
-                let _ = clust_ipc::recv_message::<HubMessage>(&mut stream).await;
-            }
-        });
-    }
 }
 
 fn fetch_repos() -> Vec<RepoInfo> {
@@ -8440,20 +6611,6 @@ fn remove_worktree_ipc(repo_path: &str, branch_name: &str, delete_branch: bool, 
         .await;
         let _ = clust_ipc::recv_message::<HubMessage>(&mut stream).await;
     });
-}
-
-/// Clear `focus_mode_state.batch_origin` if it still references the batch
-/// at `removed_batch_idx`. Call next to every `tasks_state.remove_batch`
-/// to avoid restoring focus onto a now-invalid batch index when leaving
-/// focus mode.
-fn invalidate_batch_origin_if(state: &mut overview::FocusModeState, removed_batch_idx: usize) {
-    if state
-        .batch_origin
-        .as_ref()
-        .is_some_and(|o| o.batch_idx == removed_batch_idx)
-    {
-        state.batch_origin = None;
-    }
 }
 
 /// Pop the first pending worktree cleanup and return the corresponding `ActiveMenu`, if any.
@@ -9051,7 +7208,6 @@ fn resolve_editor_target(
             }
             (None, None)
         }
-        ActiveTab::Tasks => (None, None),
     }
 }
 
@@ -9159,137 +7315,6 @@ fn trigger_open_in_editor(
 
 /// Spawn batch task agents for each entry in `start_info.tasks_to_start`.
 /// Prompts are built using the batch's prefix/suffix via `build_prompt`.
-fn spawn_batch_tasks(
-    tasks_state: &tasks::TasksState,
-    start_info: &tasks::BatchStartInfo,
-    hub_name: &str,
-    agent_start_tx: tokio::sync::mpsc::Sender<AgentStartResult>,
-) {
-    let batch = match tasks_state
-        .batches
-        .iter()
-        .find(|b| b.id == start_info.batch_id)
-    {
-        Some(b) => b,
-        None => return,
-    };
-    let task_configs: Vec<_> = start_info
-        .tasks_to_start
-        .iter()
-        .map(|(idx, _, raw_prompt)| {
-            let (use_prefix, use_suffix, task_plan_mode) = batch
-                .tasks
-                .get(*idx)
-                .map(|t| (t.use_prefix, t.use_suffix, t.plan_mode))
-                .unwrap_or((true, true, batch.plan_mode));
-            (
-                batch.build_prompt(raw_prompt, use_prefix, use_suffix),
-                task_plan_mode,
-            )
-        })
-        .collect();
-    let batch_allow_bypass = batch.allow_bypass;
-    let hub = hub_name.to_string();
-    let (cols, rows) = crossterm::terminal::size().unwrap_or((80, 24));
-    for ((task_index, new_branch, _), (full_prompt, task_plan_mode)) in
-        start_info.tasks_to_start.iter().zip(task_configs)
-    {
-        let tx = agent_start_tx.clone();
-        let hub = hub.clone();
-        let rp = start_info.repo_path.clone();
-        let tb = start_info.target_branch.clone();
-        let batch_id = start_info.batch_id;
-        let task_index = *task_index;
-        let new_branch = new_branch.clone();
-        tokio::spawn(async move {
-            let mut stream = match ipc::try_connect().await {
-                Ok(s) => s,
-                Err(e) => {
-                    let _ = tx
-                        .send(AgentStartResult::BatchTaskFailed {
-                            batch_id,
-                            task_index,
-                            message: format!("Agent create failed: hub connect error: {e}"),
-                        })
-                        .await;
-                    return;
-                }
-            };
-            let msg = CliMessage::CreateWorktreeAgent {
-                repo_path: rp,
-                target_branch: Some(tb),
-                new_branch: Some(new_branch),
-                prompt: Some(full_prompt),
-                agent_binary: None,
-                cols,
-                rows: rows.saturating_sub(2).max(1),
-                accept_edits: false,
-                plan_mode: task_plan_mode,
-                allow_bypass: batch_allow_bypass,
-                hub,
-            };
-            if let Err(e) = clust_ipc::send_message(&mut stream, &msg).await {
-                let _ = tx
-                    .send(AgentStartResult::BatchTaskFailed {
-                        batch_id,
-                        task_index,
-                        message: format!("Agent create failed: send error: {e}"),
-                    })
-                    .await;
-                return;
-            }
-            match clust_ipc::recv_message::<HubMessage>(&mut stream).await {
-                Ok(HubMessage::WorktreeAgentStarted {
-                    id,
-                    agent_binary,
-                    working_dir,
-                    repo_path,
-                    branch_name,
-                }) => {
-                    let _ = tx
-                        .send(AgentStartResult::BatchTaskStarted {
-                            batch_id,
-                            task_index,
-                            agent_id: id,
-                            agent_binary,
-                            working_dir,
-                            repo_path,
-                            branch_name,
-                        })
-                        .await;
-                }
-                Ok(HubMessage::Error { message }) => {
-                    let _ = tx
-                        .send(AgentStartResult::BatchTaskFailed {
-                            batch_id,
-                            task_index,
-                            message: format!("Agent create failed: {message}"),
-                        })
-                        .await;
-                }
-                Ok(_) => {
-                    let _ = tx
-                        .send(AgentStartResult::BatchTaskFailed {
-                            batch_id,
-                            task_index,
-                            message: "Agent create failed: unexpected hub response".to_string(),
-                        })
-                        .await;
-                }
-                Err(e) => {
-                    let _ = tx
-                        .send(AgentStartResult::BatchTaskFailed {
-                            batch_id,
-                            task_index,
-                            message: format!("Agent create failed: recv error: {e}"),
-                        })
-                        .await;
-                }
-            }
-        });
-    }
-}
-
 /// Run an async future from the synchronous UI loop.
 /// Requires the multi-thread tokio scheduler (`#[tokio::main]`).
 fn block_on_async<F: std::future::Future>(f: F) -> F::Output {
@@ -9710,8 +7735,6 @@ mod tests {
             repo_path: None,
             branch_name: None,
             is_worktree: false,
-            batch_id: None,
-            batch_title: None,
         }
     }
 
@@ -9863,23 +7886,20 @@ mod tests {
     fn active_tab_next_cycles() {
         let tab = ActiveTab::Repositories;
         assert_eq!(tab.next(), ActiveTab::Overview);
-        assert_eq!(tab.next().next(), ActiveTab::Tasks);
-        assert_eq!(tab.next().next().next(), ActiveTab::Repositories);
+        assert_eq!(tab.next().next(), ActiveTab::Repositories);
     }
 
     #[test]
     fn active_tab_prev_cycles() {
         let tab = ActiveTab::Repositories;
-        assert_eq!(tab.prev(), ActiveTab::Tasks);
-        assert_eq!(tab.prev().prev(), ActiveTab::Overview);
-        assert_eq!(tab.prev().prev().prev(), ActiveTab::Repositories);
+        assert_eq!(tab.prev(), ActiveTab::Overview);
+        assert_eq!(tab.prev().prev(), ActiveTab::Repositories);
     }
 
     #[test]
     fn active_tab_labels() {
         assert_eq!(ActiveTab::Repositories.label(), "Repositories");
         assert_eq!(ActiveTab::Overview.label(), "Overview");
-        assert_eq!(ActiveTab::Tasks.label(), "Schedule");
     }
 
     #[test]

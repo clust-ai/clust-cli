@@ -21,7 +21,7 @@ pub const DEFAULT_HUB: &str = "default_hub";
 /// because the CLI bounces an outdated hub via `connect_to_hub`. See
 /// `validate_client_version` for a helper hubs may use to reject mismatched
 /// clients explicitly.
-pub const PROTOCOL_VERSION: u32 = 7;
+pub const PROTOCOL_VERSION: u32 = 8;
 
 /// Maximum size of a single IPC message payload.
 ///
@@ -46,17 +46,6 @@ pub fn validate_client_version(client: u32) -> Result<(), &'static str> {
     } else {
         Err("protocol version mismatch")
     }
-}
-
-/// Cleanup mode when cancelling/deleting a batch.
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
-pub enum BatchCleanupMode {
-    /// Remove the batch record but don't stop agents or remove worktrees.
-    NoCleanup,
-    /// Stop all agents associated with this batch.
-    StopAgents,
-    /// Stop agents and remove their worktrees + local branches.
-    StopAgentsAndRemoveBranches,
 }
 
 /// Messages sent from CLI to Hub.
@@ -90,7 +79,6 @@ pub enum CliMessage {
     },
     ListAgents {
         hub: Option<String>,
-        batch: Option<String>,
     },
     StopHub,
     StopAgent {
@@ -235,82 +223,6 @@ pub enum CliMessage {
     StopTerminal {
         id: String,
     },
-    // Queued batch management
-    QueueBatch {
-        repo_path: String,
-        target_branch: String,
-        title: String,
-        max_concurrent: Option<usize>,
-        prompt_prefix: Option<String>,
-        prompt_suffix: Option<String>,
-        plan_mode: bool,
-        allow_bypass: bool,
-        agent_binary: Option<String>,
-        hub: String,
-        tasks: Vec<QueuedTask>,
-        scheduled_at: String,
-    },
-    CancelQueuedBatch {
-        batch_id: String,
-        cleanup_mode: BatchCleanupMode,
-    },
-    ListQueuedBatches,
-    /// Register a batch with the hub for persistence (status = idle, no timer).
-    RegisterBatch {
-        repo_path: String,
-        target_branch: String,
-        title: String,
-        max_concurrent: Option<usize>,
-        prompt_prefix: Option<String>,
-        prompt_suffix: Option<String>,
-        plan_mode: bool,
-        allow_bypass: bool,
-        agent_binary: Option<String>,
-        hub: String,
-        launch_mode: String,
-        tasks: Vec<QueuedTask>,
-        #[serde(default)]
-        depends_on: Vec<String>,
-    },
-    /// Update the dependency list of a batch.
-    UpdateBatchDependencies {
-        batch_id: String,
-        depends_on: Vec<String>,
-    },
-    /// Add a task to a registered batch.
-    AddBatchTask {
-        batch_id: String,
-        branch_name: String,
-        prompt: String,
-    },
-    /// Update the status and/or agent_id of a task within a batch.
-    UpdateBatchTask {
-        batch_id: String,
-        task_index: usize,
-        status: String,
-        agent_id: Option<String>,
-    },
-    /// Update batch configuration fields.
-    UpdateBatchConfig {
-        batch_id: String,
-        prompt_prefix: Option<String>,
-        prompt_suffix: Option<String>,
-        plan_mode: bool,
-        allow_bypass: bool,
-    },
-    /// Update the top-level status of a batch.
-    UpdateBatchStatus {
-        batch_id: String,
-        status: String,
-    },
-    /// Remove completed tasks from a batch.
-    RemoveDoneBatchTasks {
-        batch_id: String,
-    },
-    /// Delete a batch entirely.
-    DeleteBatch {
-        batch_id: String,
-    },
 }
 
 /// Info about a running agent, returned in AgentList.
@@ -325,8 +237,6 @@ pub struct AgentInfo {
     pub repo_path: Option<String>,
     pub branch_name: Option<String>,
     pub is_worktree: bool,
-    pub batch_id: Option<String>,
-    pub batch_title: Option<String>,
 }
 
 /// Info about a registered repository, returned in RepoList.
@@ -359,66 +269,6 @@ pub struct WorktreeEntry {
     pub is_main: bool,
     pub is_dirty: bool,
     pub active_agents: Vec<AgentInfo>,
-}
-
-fn default_true() -> bool {
-    true
-}
-
-/// A single task within a queued batch.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct QueuedTask {
-    pub branch_name: String,
-    pub prompt: String,
-    #[serde(default = "default_true")]
-    pub use_prefix: bool,
-    #[serde(default = "default_true")]
-    pub use_suffix: bool,
-    #[serde(default)]
-    pub plan_mode: bool,
-    #[serde(default)]
-    pub exit_when_done: bool,
-}
-
-/// Per-task detail within a batch, returned in QueuedBatchList.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct QueuedBatchTaskInfo {
-    pub branch_name: String,
-    pub prompt: String,
-    pub status: String,
-    pub agent_id: Option<String>,
-    #[serde(default = "default_true")]
-    pub use_prefix: bool,
-    #[serde(default = "default_true")]
-    pub use_suffix: bool,
-    #[serde(default)]
-    pub plan_mode: bool,
-    #[serde(default)]
-    pub exit_when_done: bool,
-}
-
-/// Full info about a batch, returned in QueuedBatchList.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct QueuedBatchInfo {
-    pub batch_id: String,
-    pub title: String,
-    pub repo_path: String,
-    pub target_branch: String,
-    pub scheduled_at: Option<String>,
-    pub status: String,
-    pub task_count: usize,
-    pub tasks_done: usize,
-    pub tasks_active: usize,
-    pub tasks: Vec<QueuedBatchTaskInfo>,
-    pub launch_mode: String,
-    pub max_concurrent: Option<usize>,
-    pub prompt_prefix: Option<String>,
-    pub prompt_suffix: Option<String>,
-    pub plan_mode: bool,
-    pub allow_bypass: bool,
-    pub agent_binary: Option<String>,
-    #[serde(default)]
-    pub depends_on: Vec<String>,
 }
 
 /// Messages sent from Hub to CLI.
@@ -583,21 +433,6 @@ pub enum HubMessage {
     },
     TerminalStopped {
         id: String,
-    },
-    // Queued batch responses
-    BatchQueued {
-        batch_id: String,
-        scheduled_at: String,
-    },
-    BatchCancelled {
-        batch_id: String,
-    },
-    QueuedBatchList {
-        batches: Vec<QueuedBatchInfo>,
-    },
-    /// Batch registered for persistence (response to RegisterBatch).
-    BatchRegistered {
-        batch_id: String,
     },
 }
 
@@ -789,18 +624,13 @@ mod tests {
 
     #[tokio::test]
     async fn cli_list_agents_no_filter() {
-        assert_cli_round_trip(CliMessage::ListAgents {
-            hub: None,
-            batch: None,
-        })
-        .await;
+        assert_cli_round_trip(CliMessage::ListAgents { hub: None }).await;
     }
 
     #[tokio::test]
     async fn cli_list_agents_with_hub_filter() {
         assert_cli_round_trip(CliMessage::ListAgents {
             hub: Some("my_feature".into()),
-            batch: None,
         })
         .await;
     }
@@ -894,8 +724,6 @@ mod tests {
                     repo_path: Some("/tmp/project".into()),
                     branch_name: Some("main".into()),
                     is_worktree: false,
-                    batch_id: None,
-                    batch_title: None,
                 },
                 AgentInfo {
                     id: "bbb222".into(),
@@ -907,8 +735,6 @@ mod tests {
                     repo_path: None,
                     branch_name: None,
                     is_worktree: false,
-                    batch_id: None,
-                    batch_title: None,
                 },
             ],
         })
@@ -961,10 +787,7 @@ mod tests {
         let (mut a, mut b) = UnixStream::pair().unwrap();
 
         let msgs = vec![
-            CliMessage::ListAgents {
-                hub: None,
-                batch: None,
-            },
+            CliMessage::ListAgents { hub: None },
             CliMessage::StopHub,
             CliMessage::SetDefault {
                 agent_binary: "claude".into(),
@@ -1474,8 +1297,6 @@ mod tests {
                         repo_path: Some("/home/user/project".into()),
                         branch_name: Some("feature/auth".into()),
                         is_worktree: true,
-                        batch_id: None,
-                        batch_title: None,
                     }],
                 },
             ],

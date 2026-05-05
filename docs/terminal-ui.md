@@ -89,13 +89,12 @@ The dashboard has a top tab bar, two content panels separated by a vertical divi
 
 #### Tab Bar
 
-A 1-row bar at the top of the terminal with three tabs:
+A 1-row bar at the top of the terminal with two tabs:
 
 | Tab | Description |
 |-----|-------------|
 | `Repositories` | Two-panel view with repo tree and agent cards (default) |
 | `Overview` | Multi-agent terminal overview with horizontal panels |
-| `Schedule` | Per-task scheduling with horizontal task cards (replaces Batches) |
 
 The active tab is highlighted with the accent color. A `Tab/Shift+Tab` hint is shown to the right of the tabs. Focus mode is not a tab -- it is an overlay state entered explicitly from either tab (see Focus Mode section below). When focus mode is active, the tab bar is replaced by a back-bar header.
 
@@ -131,12 +130,12 @@ A multi-agent terminal overview that displays all active agents side-by-side wit
 
 **Layout:**
 
-- **Filter bar (1 row):** A single-line bar at the top that groups agents by repository. The left section shows repo chips -- each repo has a colored `●` dot (using the repo's assigned color) followed by the repo name. The cursor position is indicated with `R_BG_ACTIVE` background on the chip. A `│` separator divides the left and right sections. The right section shows all agent branch indicators colored by their repo's assigned color. Visible agents use inverse video styling (repo color background, primary text foreground); off-screen agents use the repo color as foreground; collapsed repo agents use `R_TEXT_DISABLED`. Agents without a repository are grouped under a synthetic "Other" chip using the accent color. Clicking a repo chip toggles collapse/expand -- collapsed repos have dimmed dots and `R_TEXT_DISABLED` text, and their agent panels are filtered out of the viewport. Clicking an individual branch indicator focuses that agent's terminal panel. When no repos exist, the bar is rendered as an empty 1-row area. Background changes based on focus (`R_BG_OVERLAY` when focused, `R_BG_RAISED` when unfocused). Panels are ordered by repo group (matching repo registration order), then by batch group (non-batch agents first, then batch agents grouped by batch_id and ordered by task_index), then by creation time (`started_at`) so newly-spawned agents are appended at the end of their group via `compute_sorted_indices()`. Batch agent indicators in the right section are preceded by a bold batch name label (e.g., "Batch 1:") in `R_INFO` color, inserted when entering a new batch group.
+- **Filter bar (1 row):** A single-line bar at the top that groups agents by repository. The left section shows repo chips -- each repo has a colored `●` dot (using the repo's assigned color) followed by the repo name. The cursor position is indicated with `R_BG_ACTIVE` background on the chip. A `│` separator divides the left and right sections. The right section shows all agent branch indicators colored by their repo's assigned color. Visible agents use inverse video styling (repo color background, primary text foreground); off-screen agents use the repo color as foreground; collapsed repo agents use `R_TEXT_DISABLED`. Agents without a repository are grouped under a synthetic "Other" chip using the accent color. Clicking a repo chip toggles collapse/expand -- collapsed repos have dimmed dots and `R_TEXT_DISABLED` text, and their agent panels are filtered out of the viewport. Clicking an individual branch indicator focuses that agent's terminal panel. When no repos exist, the bar is rendered as an empty 1-row area. Background changes based on focus (`R_BG_OVERLAY` when focused, `R_BG_RAISED` when unfocused). Panels are ordered by repo group (matching repo registration order), then by creation time (`started_at`) so newly-spawned agents are appended at the end of their group via `compute_sorted_indices()`.
 - **Agent panels (horizontal):** Dynamically sized columns distributed evenly across the available width. The number of visible panels is determined by how many fit at the minimum width of 60 columns. Panels use ratio-based constraints so they fill the screen evenly (1 panel = half screen, 2 panels = half each, 3 panels = one-third each, etc.). A single panel never exceeds half the screen width. When more agents exist than fit on screen, horizontal scrolling is enabled with `◀ N` / `N ▶` indicators.
-- Each panel has **box-drawing borders** (top, bottom, left, right). When a panel's agent is associated with a repository, the border color uses the repo's assigned color (bright when focused, dimmed to 60% brightness when unfocused via `dim_color()`). Panels without a repo fall back to accent blue when focused and subtle gray when unfocused. Batch agent panels display a **batch title in the top border** showing the batch name in bold `R_INFO` color followed by the task position (e.g., "Batch 1 2/5") in `R_TEXT_TERTIARY` color.
+- Each panel has **box-drawing borders** (top, bottom, left, right). When a panel's agent is associated with a repository, the border color uses the repo's assigned color (bright when focused, dimmed to 60% brightness when unfocused via `dim_color()`). Panels without a repo fall back to accent blue when focused and subtle gray when unfocused.
 - The **focused panel** displays a centered `Shift+↓ focus` hint in its bottom border (rendered via `Block::title_bottom()`). The shortcut text uses the bright accent color and the label uses secondary text color. This hint only appears when a terminal panel is focused in overview mode (not in focus mode).
 - Inside the border, a **header row** shows agent ID (accent-colored), separator, agent binary name, optional repo/branch info, and status indicator (`●` green for running, `[exited]` red for exited). When the agent has a `repo_path`, the repo name (extracted from the path's last component) is displayed in the repo's assigned color, followed by `/branch_name` in tertiary text color (e.g., `myrepo/main`). When the agent has no `repo_path` but has a `branch_name`, the branch is shown alone in tertiary text color. Both are preceded by a `·` separator. The branch name is sourced from `AgentInfo.branch_name` and updates on each sync cycle (every 2 seconds).
-- The **terminal area** below the header renders the agent's PTY output using a `vt100`-backed terminal emulator (`TerminalEmulator`) with full ANSI support (cursor movement, SGR colors/styles, erase operations, scroll regions, line wrapping, alternate screen buffer). The terminal emulator gets the inner width (total panel width minus 2 border columns). All agent panels (including batch agents) render terminal content in overview mode. The batches tab has its own separate rendering in `tasks/mod.rs` with `SHOW_TERMINAL_PREVIEW = false`.
+- The **terminal area** below the header renders the agent's PTY output using a `vt100`-backed terminal emulator (`TerminalEmulator`) with full ANSI support (cursor movement, SGR colors/styles, erase operations, scroll regions, line wrapping, alternate screen buffer). The terminal emulator gets the inner width (total panel width minus 2 border columns).
 
 **Focus modes:**
 
@@ -175,92 +174,6 @@ A multi-agent terminal overview that displays all active agents side-by-side wit
 - Each panel has a `panel_scroll_offset` for scrolling through the combined scrollback + live grid. When scrolled, a `↑N` indicator appears in the panel header.
 - On exit, all connections are detached and background tasks are aborted.
 
-#### Schedule Tab
-
-The Schedule tab displays planned and running tasks as horizontal cards. Each card represents a single scheduled task; pressing `Opt+T` opens the schedule task modal where the user picks one of three schedule kinds:
-
-- **Schedule** — start the task at a specific time. Time is entered in the same format as the timer modal (`2h`, `30m`, `1h30m`, or `16:00`). Sends `QueueBatch` IPC.
-- **Dependent** — start the task automatically when another scheduled task finishes. The user picks a parent task by branch name (the parent's branch may not exist yet). The dependent task's source branch is set to the parent's branch, so its worktree is based off the parent's output. Sends `RegisterBatch` IPC with `depends_on=[parent_id]` and `launch_mode="auto"`.
-- **Unscheduled** — never auto-start; the user starts it manually. Sends `RegisterBatch` IPC with `launch_mode="manual"`.
-
-Internally each scheduled task is implemented as a single-task batch so the existing hub timer, dependency, and persistence machinery continues to apply. The user no longer interacts with batches as a parent container.
-
-**Layout:**
-
-- **Options bar (1 row):** Shows the task count (e.g., "3 tasks") and hints `Opt+T schedule`, `Space toggle`, `T edit time`, `Opt+S start`, `Shift+↓ focus`, and `d clear done`. The bar uses `R_BG_RAISED` background.
-- **Task cards (horizontal):** Dynamically sized columns distributed evenly across the available width (minimum card width 40 columns). When more tasks exist than fit on screen, horizontal scrolling is available via `Left`/`Right`, and `Shift+Left`/`Shift+Right` switches between task cards with auto-scrolling.
-
-Each task card has:
-- **Box-drawing borders** using the repo's assigned color (bright when focused, dimmed via `dim_color()` when not). Cards without a repo fall back to accent blue / tertiary text.
-- **Title** showing the task's branch name in the border.
-- **Card body** when the task is inactive: Repo, "Based" (source branch), and a kind line that shows one of:
-    - `Active` (green bold) — task is running
-    - `Scheduled HH:MM (Xh Ym)` (info color, live countdown) — queued for a scheduled time
-    - `Depends on <parent title>` (info color) — waiting for a parent task to complete
-    - `Unscheduled` — manual launch mode, idle
-    - `Pending` — registered but no schedule yet (idle/auto)
-
-  An additional `Flags PLAN BYPASS` line appears only when those flags are set.
-
-- **Terminal preview** when the task is active: the latest lines of the agent's terminal output are rendered inside the card via `TASK_TERMINAL_PREVIEW_LINES` (default 12), making active task cards look similar to Overview panels. Preview data is extracted from the corresponding `AgentPanel` via the task's `agent_id` field. The preview is gated behind the `SHOW_TERMINAL_PREVIEW` constant in `tasks/mod.rs` (default `true`).
-
-- Focused cards use `R_BG_SURFACE` background; unfocused cards use `R_BG_BASE`.
-
-**Empty state:** "No scheduled tasks — press Opt+T to schedule one".
-
-**Keyboard shortcuts (Schedule tab):**
-
-| Shortcut | Action |
-|----------|--------|
-| `Shift+Left` / `Shift+Right` | Switch between task cards |
-| `Left` / `Right` | Scroll the task viewport |
-| `Down` / `Up` | Navigate within a focused card (e.g. into the active task box) |
-| `Shift+↓` | Open the focused active task in focus mode. Inactive tasks cannot be focused. Exiting focus mode returns to the Schedule tab with the same task selected. |
-| `Space` | Toggle the focused task between Idle and Active (Auto-mode). If queued, cancels the queue via `CancelQueuedBatch` IPC and reverts to Idle. |
-| `T` | Open the timer modal to set or change the scheduled time for the focused task. Refused for active tasks. |
-| `Opt+S` (macOS) / `Alt+S` | Start the focused task immediately when it's idle and unscheduled (manual launch mode). |
-| `Delete` / `Backspace` | Remove the focused task (with optional cleanup mode) |
-| `d` | Remove tasks in `Done` state from the card |
-
-**State management:**
-
-- `TasksState` manages the batch list, focus state, task-level focus, scroll offset, task scroll offset, and ID generation.
-- `TasksFocus` enum tracks whether the batch list or a specific card is focused.
-- `focused_task: Option<usize>` tracks which task within a focused batch card has task-level focus. `None` means no task is focused; `Some(i)` means task at index `i` is focused. Reset when navigating between batch cards.
-- `task_scroll_offset: usize` tracks the vertical scroll position of task boxes within the focused batch card. Reset to 0 when switching between batch cards. The rendering logic auto-scrolls to keep the focused task visible.
-- `focused_active_agent()` returns `(batch_idx, task_idx, agent_id, batch_title)` for the currently focused task if it is Active and has an `agent_id`. Used by the `Shift+↓` handler to open the task in focus mode.
-- `BatchInfo` stores: id, hub_batch_id (the hub-side identifier for persistence), title, repo_path, repo_name, branch_name, max_concurrent, launch_mode (`LaunchMode`), prompt_prefix, prompt_suffix, tasks (list of `TaskEntry`), status (`BatchStatus`: Idle or Active), plan_mode (bool), allow_bypass (bool), and depends_on (list of hub batch IDs). On startup, the CLI calls `load_from_hub()` to reconstruct batch state from hub-persisted data. All mutations are synced to the hub in real time via `RegisterBatch`, `AddBatchTask`, `UpdateBatchTask`, `UpdateBatchConfig`, `UpdateBatchStatus`, `UpdateBatchDependencies`, `RemoveDoneBatchTasks`, and `DeleteBatch` IPC messages.
-- `LaunchMode` enum: `Auto` (default, batches use concurrency-based toggling) and `Manual` (tasks are started individually).
-- `TaskEntry` stores: branch_name, prompt, status (`TaskStatus`: Idle, Active, or Done), an optional `agent_id` (set when the task's agent is started, linking it to its `AgentPanel` in `OverviewState`), `use_prefix` (bool, default true), `use_suffix` (bool, default true), `plan_mode` (bool, default false, overrides batch-level plan mode when true), and `exit_when_done` (bool, default false; when true the hub injects a Stop hook so the agent process exits at the first natural pause and the existing PTY-exit-as-Done flow marks the task Done) for a single task within a batch.
-- `BatchAgentInfo` stores: batch_title, batch_id, task_index, and task_count for an agent that belongs to a batch. Built by `TasksState::batch_agent_map()` which returns a `HashMap<String, BatchAgentInfo>` mapping agent IDs to their batch membership info. Used by the overview tab for sorting, filter bar labels, and panel border titles.
-- `TerminalPreviewMap` (type alias for `HashMap<String, Vec<Line>>`) maps agent IDs to their last N terminal output lines, built by `build_task_terminal_previews()` in `ui.rs` each render frame.
-- `SHOW_TERMINAL_PREVIEW` constant (default `true`) gates whether terminal output previews are shown in active task cards. When enabled, active task cards render a 12-line terminal preview making them look similar to Overview panels.
-- `TASK_TERMINAL_PREVIEW_LINES` constant (default `12`) controls how many terminal output lines are shown in the preview.
-- `BatchStatus` enum: `Idle` (default, gray/disabled text), `Active` (green bold text), and `Queued { scheduled_at: String, batch_id: String }` (info color with live countdown). Queued batches display a formatted countdown (e.g., "Queued 16:00 (1h 30m)") that updates each render frame via `timer_modal::format_countdown()`.
-- `TaskStatus` enum: `Idle` (gray/disabled text), `Active` (green bold text), and `Done` (amber/warning text).
-- `add_task()` adds a `TaskEntry` (with `Idle` status and the given `use_prefix`/`use_suffix`/`plan_mode` flags) to a specific batch by index.
-- `toggle_task_use_prefix()` / `toggle_task_use_suffix()` toggle the per-task prefix/suffix flags on a specific task within a batch.
-- `toggle_task_plan_mode()` toggles the per-task plan mode flag on a specific task within a batch.
-- `remove_done_tasks()` removes all tasks with `Done` status from a batch by index (retains only non-Done tasks).
-- `toggle_plan_mode()` toggles plan mode on a batch by index.
-- `toggle_allow_bypass()` toggles allow bypass on a batch by index.
-- `set_prompt_prefix()` / `set_prompt_suffix()` update the prompt prefix/suffix for a batch (empty string clears to `None`).
-- `BatchInfo::build_prompt(task_prompt, use_prefix, use_suffix)` combines the batch prefix (if `use_prefix` is true), task prompt, and batch suffix (if `use_suffix` is true) into a single string (joined with double newlines). Used by the agent spawner when starting batch tasks, respecting per-task prefix/suffix flags.
-- `toggle_batch_status()` toggles a batch between Idle and Active. Returns `None` for Manual-mode batches. When transitioning an Auto-mode batch to Active, returns a `BatchStartInfo` containing the tasks to start (up to `max_concurrent` minus already-active tasks). Only Idle tasks are started. Each task's individual `plan_mode` flag (or the batch default if the task does not override) and the batch's `allow_bypass` settings are passed through to the `CreateWorktreeAgent` IPC message for each spawned agent.
-- `start_single_task()` starts a single task by index within a Manual-mode batch. Returns `None` if the batch is not Manual-mode or the task is not Idle. Returns a `BatchStartInfo` with exactly one task to start.
-- `focus_task_down()` / `focus_task_up()` navigate task-level focus within a focused batch card. Down enters task focus from None to first task; Up from the first task exits task focus back to None.
-- `batch_by_id_mut()` finds a batch by its unique id for updating task statuses after agent start results.
-- `mark_agent_done(agent_id)` finds the task associated with the given agent_id, marks it as Done, and if the batch is still Active with Idle tasks remaining, returns a `BatchStartInfo` describing the next task(s) to start (respecting `max_concurrent`).
-- `BatchStartInfo` struct carries batch_id, repo_path, target_branch, and a list of (task_index, branch_name, prompt) tuples for tasks that need agents started.
-- `spawn_batch_tasks()` is a shared helper function that spawns `CreateWorktreeAgent` IPC requests for each task in a `BatchStartInfo`, used by both Auto-mode toggling and Manual-mode single-task starting.
-- Auto-naming: when no title is provided, batches are named sequentially ("Batch 1", "Batch 2", etc.).
-- Click support: clicking a batch card focuses it via the `tasks_batch_cards` click map.
-- Agent exit detection: on each agent list refresh, the main UI loop checks if any Active batch task agents have disappeared from the hub's agent list. For each exited agent, `mark_agent_done()` is called which marks the task as Done and returns the next Idle tasks to start (if any). This provides automatic task progression within a batch.
-- `spawn_batch_tasks()` is a helper function that spawns worktree agents for each entry in a `BatchStartInfo`. It builds full prompts using the batch's prefix/suffix via `build_prompt()`, respecting each task's `use_prefix` and `use_suffix` flags, and resolves the per-task `plan_mode` (falling back to the batch default). It then spawns a tokio task per entry that sends `CreateWorktreeAgent` IPC to the hub with the resolved plan_mode. Results are sent back via the `agent_start_tx` channel. This function is used both when toggling a batch to Active and when auto-starting next tasks after agent exit.
-- `load_from_hub()` reconstructs batch state from hub-persisted data on CLI startup. Called once during initialization, it queries `ListQueuedBatches` and rebuilds each batch's `BatchInfo` including tasks, status, launch mode, configuration, and dependencies (`depends_on`). This ensures batches survive CLI restarts.
-- `sync_from_hub()` is called on each hub sync tick to update per-task statuses (idle/active/done) and agent IDs from the hub's authoritative state. This ensures task status changes triggered by the batch timer (e.g., scheduled batch auto-start, task advancement) are reflected in the CLI without requiring the CLI to poll for individual events.
-- `batch_idx_by_hub_id()` finds a batch index by its hub-side ID, used for correlating hub sync data back to local batch state.
-
 ### Auto-connect
 
 On startup, `clust ui` automatically connects to the hub daemon, starting it if not already running. The bottom status bar shows connection status.
@@ -282,7 +195,7 @@ On startup, `clust ui` automatically connects to the hub daemon, starting it if 
 
 **Status messages:** Temporary status messages override the keybinding hints area. Messages are displayed for 5 seconds before auto-dismissing, after which the keybinding hints reappear. Two severity levels exist: `Error` (displayed in `R_ERROR` color) and `Success` (displayed in `R_SUCCESS` color). Status messages are used to surface feedback from async operations such as agent creation, branch pulls, and remote branch checkout -- both success confirmations (e.g., "Agent started on feature-branch", "Pulled main: Already up to date.", "Checked out feature-branch") and error details (e.g., "Agent create failed: hub connect error: ...", "Pull failed: ...", "Checkout failed: ..."). The `StatusMessage` struct tracks the message text, level, and creation `Instant` for auto-dismissal timing. Status messages are delivered from background tokio tasks to the main event loop via a dedicated `mpsc` channel (`status_tx` / `status_rx`), separate from the `AgentStartResult` channel used for agent creation results.
 
-**Keybinding hints (when no status message is active):** Context-aware hints: on Repositories tab shows `q quit`, `Q stop+quit`, navigation hints; on Overview tab shows focus-dependent hints (e.g., `Shift+↓ enter terminal` or `Shift+↑ options`); on Batches tab shows `Opt+T new batch`, `Left/Right navigate`, `Up/Down tasks`, `Shift+↓ focus`, `Space toggle`, `Opt+S start task`, `B bypass`, `Enter add task`, `p prefix`, `s suffix`, `d clear done`, `Del remove`, `q quit`, `? keys`; in focus mode shows `Shift+←/→ switch panel`, `Shift+↑ exit`.
+**Keybinding hints (when no status message is active):** Context-aware hints: on Repositories tab shows `q quit`, `Q stop+quit`, navigation hints; on Overview tab shows focus-dependent hints (e.g., `Shift+↓ enter terminal` or `Shift+↑ options`); in focus mode shows `Shift+←/→ switch panel`, `Shift+↑ exit`.
 
 ### Keyboard Shortcuts
 
@@ -303,11 +216,9 @@ On startup, `clust ui` automatically connects to the hub daemon, starting it if 
 | `Opt+F` (macOS) / `Alt+F` | Open the search-agent modal (only when agents are running) |
 | `Opt+B` (macOS) / `Alt+B` | Toggle bypass permissions (global, persisted in SQLite) |
 | `Opt+N` (macOS) / `Alt+N` | Open the add-repository modal |
-| `Opt+T` (macOS) / `Alt+T` | Open the schedule task modal (only when repos are registered) |
 | `Opt+V` (macOS) / `Alt+V` | Open in editor (see Editor Integration below) |
 | `Cmd+1` | Switch to Repositories tab (dismisses context menus, exits focus mode) |
 | `Cmd+2` | Switch to Overview tab (dismisses context menus, exits focus mode) |
-| `Cmd+3` | Switch to Schedule tab (dismisses context menus, exits focus mode) |
 
 **Repositories tab:**
 
@@ -340,7 +251,6 @@ Context menus appear as centered modal overlays. They support arrow key navigati
 - **Remote branch context menu:** Appears on Enter when a remote branch is selected. Contains: "Checkout & Track Locally" (shown first; checks out the remote branch as a local tracking branch via `CheckoutRemoteBranch` IPC using `git checkout --track`), "Start Agent (checkout)" (creates a worktree from the remote branch and starts an agent), "Create Worktree" (checks out the remote branch as a worktree), and "Delete Remote Branch" (deletes the remote branch via `DeleteRemoteBranch` IPC).
 - **Color picker:** Shows the 10 available repo colors (red, orange, yellow, lime, green, teal, blue, purple, pink, coral) with colored `●` indicators. Selecting a color sends a `SetRepoColor` IPC message to the hub.
 - **Worktree cleanup dialog:** Appears after stopping agents that were running in worktrees. Shows the worktree branch name (with a dirty indicator if the worktree has uncommitted changes) and offers three options: "Keep" (leave the worktree as-is), "Discard worktree" (remove the worktree via `RemoveWorktree` IPC with force), "Discard worktree + branch" (remove both worktree and local branch). When multiple worktrees need cleanup, dialogs are shown sequentially. Dismissing a cleanup dialog (Esc) advances to the next pending cleanup. This dialog is triggered from four contexts: (1) "Stop All Agents" in the repo context menu, (2) "Stop Agents" in the local branch context menu, (3) immediately when an agent exits in focus mode (if the agent was running in a worktree), (4) immediately when an agent exits in overview mode (if the agent was running in a worktree). In overview mode, the top-of-frame check iterates all panels, collecting pending cleanups for any exited worktree agents, and pops the first cleanup modal; subsequent ones chain via existing `pop_worktree_cleanup_menu` calls. A `worktree_cleanup_shown` flag on each `AgentPanel` prevents the dialog from being shown more than once per agent.
-- **Batch cleanup dialog:** Appears when pressing `Delete`/`Backspace` on a focused batch card in the Batches tab. A `BatchCleanup` context menu titled "Delete Batch" with the description "Choose cleanup action for this batch:" and four options: "Cancel" (dismiss without deleting), "Don't clean up" (remove the batch record only, without stopping agents or cleaning up worktrees; sends `CancelQueuedBatch` with `NoCleanup` mode for queued batches), "Stop agents" (stop all agents associated with the batch, then remove it; sends `CancelQueuedBatch` with `StopAgents` mode for queued batches, or stops agents directly via `StopAgent` IPC for local batches), "Stop agents and remove branches" (stop agents, remove worktrees, delete local branches, then remove the batch; sends `CancelQueuedBatch` with `StopAgentsAndRemoveBranches` mode for queued batches, or stops agents and removes worktrees/branches directly for local batches). The `BatchCleanup` variant stores `batch_idx`, `hub_batch_id` (for queued batches), `repo_path`, `branch_names`, and `agent_ids` for use by the selected cleanup action. Both keyboard and mouse selection paths are supported. When the "Stop agents and remove branches" option is selected, all matching `AgentPanel`s are immediately marked with `worktree_cleanup_shown = true` and any already-queued entries in `pending_worktree_cleanups` for those branches are drained. This prevents the worktree cleanup dialog from firing when agents exit asynchronously after the batch cleanup has already removed their worktrees and branches.
 - **Agent picker:** Appears on Enter when a branch has multiple active agents. Lists agent IDs for selection; selecting one opens focus mode.
 
 **Overview tab (Options Bar focused):**
@@ -371,9 +281,8 @@ Focus mode is an overlay state (tracked by an `in_focus_mode` boolean), not a ta
 
 **Back-bar header:**
 
-When focus mode is active, the 1-row tab bar is replaced by a back-bar that shows: `<- Shift+↑  Back to [tab name]  [batch badge]  agent-id . binary . repo/branch  Shift+←/→ panels`. The left side shows the exit hint and origin tab name (shows "Back to Batches" when `batch_origin` is set, regardless of the originating tab); the center shows the agent identity followed by the repo name (in the repo's assigned color) and branch name; the right side shows keyboard hints. When the agent has no `repo_path` (non-repository agent), the keyboard hints on the right side of the back-bar are hidden.
+When focus mode is active, the 1-row tab bar is replaced by a back-bar that shows: `<- Shift+↑  Back to [tab name]  agent-id . binary . repo/branch  Shift+←/→ panels`. The left side shows the exit hint and origin tab name; the center shows the agent identity followed by the repo name (in the repo's assigned color) and branch name; the right side shows keyboard hints. When the agent has no `repo_path` (non-repository agent), the keyboard hints on the right side of the back-bar are hidden.
 
-When the agent was opened from a batch task (`batch_origin` is set), a batch badge is displayed between the back label and the agent identity. The badge shows the batch title in reverse-video styling (`R_BG_BASE` foreground on `R_INFO` background, bold) followed by the task number in `R_INFO` foreground on `R_BG_RAISED` background (e.g., ` My Batch  task 3`).
 
 ```
 ┌─────────────────────────────────────────────────────┐
@@ -465,16 +374,14 @@ The focus view has a concept of which side (left or right) has keyboard focus. T
 **Entry points:**
 
 - **From Overview tab:** While in terminal focus, press `Shift+↓` to open the focused agent in focus mode. The `in_focus_mode` flag is set to `true`.
-- **From Batches tab:** While a batch card is focused and the focused task is Active with an `agent_id`, press `Shift+↓` to open the task's agent in focus mode. The `in_focus_mode` flag is set to `true` and `batch_origin` is set on `FocusModeState` with the batch title, batch index, and task index.
 
 The agent's `working_dir`, `repo_path`, and `branch_name` are passed to `open_agent()` to determine the git repository for the diff viewer and to display repo/branch identity in the back-bar and status bar.
 
-**Exit:** Press `Shift+↑` from either panel to exit focus mode and return to the originating tab. When `batch_origin` is set (i.e., the agent was opened from a batch task), exiting navigates to the Batches tab and restores the batch card and task focus to the original positions instead of returning to the originating tab. Clicking the back button in the back-bar also respects `batch_origin` in the same way. The `in_focus_mode` flag is set back to `false`. When the right panel is focused, `Esc` is forwarded to the agent process (e.g., to dismiss an agent's own UI element). If the focused agent exits while in focus mode and was running in a worktree, the cleanup dialog is shown immediately (without waiting for the user to exit focus mode). A `worktree_cleanup_shown` flag prevents the dialog from appearing again when focus mode is later exited.
+**Exit:** Press `Shift+↑` from either panel to exit focus mode and return to the originating tab. The `in_focus_mode` flag is set back to `false`. When the right panel is focused, `Esc` is forwarded to the agent process (e.g., to dismiss an agent's own UI element). If the focused agent exits while in focus mode and was running in a worktree, the cleanup dialog is shown immediately (without waiting for the user to exit focus mode). A `worktree_cleanup_shown` flag prevents the dialog from appearing again when focus mode is later exited.
 
 **Implementation:**
 
-- `FocusModeState` manages a single `AgentPanel` with its own IPC background task, output channel, and `TerminalEmulator`. It also manages an optional `TerminalPanel` for the Terminal tab, with its own IPC background task, output channel, and `TerminalEmulator`. It also tracks `branch_name` (in addition to `working_dir` and `repo_path`) to support worktree cleanup dialogs when exiting focus mode. The `batch_origin: Option<BatchOrigin>` field stores metadata about the batch the agent was opened from (batch title, batch index, task index). When set, exit behavior navigates to the Batches tab and restores batch/task focus. The field is cleared on `open_agent()` and `shutdown()`. PR detection state is managed via `pr_info: Option<PrInfo>`, a one-shot `mpsc` channel (`pr_detection_tx`/`pr_detection_rx`), and an optional `JoinHandle` for the detection task. The `pr_info` field is cleared on `open_agent()` (when switching agents) and `close_panel()` (on exit).
-- `BatchOrigin` struct (defined in `overview/mod.rs`) holds `batch_title: String`, `batch_idx: usize`, and `task_idx: usize`.
+- `FocusModeState` manages a single `AgentPanel` with its own IPC background task, output channel, and `TerminalEmulator`. It also manages an optional `TerminalPanel` for the Terminal tab, with its own IPC background task, output channel, and `TerminalEmulator`. It also tracks `branch_name` (in addition to `working_dir` and `repo_path`) to support worktree cleanup dialogs when exiting focus mode. PR detection state is managed via `pr_info: Option<PrInfo>`, a one-shot `mpsc` channel (`pr_detection_tx`/`pr_detection_rx`), and an optional `JoinHandle` for the detection task. The `pr_info` field is cleared on `open_agent()` (when switching agents) and `close_panel()` (on exit).
 - The panel dimensions are calculated as 40% of the content area width (minus borders) by the content area height (minus header).
 - `FocusSide` enum tracks which panel has keyboard focus (`Left` or `Right`).
 - `LeftPanelTab` enum tracks the active tab in the left panel (`Changes`, `Compare`, `Terminal`) with `next()` and `prev()` for cycling in both directions.
@@ -484,7 +391,7 @@ The agent's `working_dir`, `repo_path`, and `branch_name` are passed to `open_ag
 - `drain_pr_events()` is called each frame in the main event loop to process the one-shot PR detection result. When a PR is detected, it stores the `PrInfo`, resolves the base branch, auto-configures the compare picker, and optionally switches to the Compare tab.
 - `parse_unified_diff()` parses raw `git diff HEAD` output into structured `DiffLine` entries with kind (FileHeader, HunkHeader, Context, Add, Delete, FileMetadata, Separator), content, line numbers, and file index. Separator lines are automatically inserted between files during parsing.
 - On terminal resize, the focus mode panel is resized via `TerminalEmulator::resize()` (preserving scrollback history) and the hub is notified via `ResizeAgent`. On `FocusGained` events, dimensions are also re-sent unconditionally to account for PTY resizes by other clients while the window was unfocused.
-- Focus mode is orthogonal to tab cycling -- `Tab` / `Shift+Tab` cycles between `Repositories`, `Overview`, and `Batches` (3 tabs). Focus mode is only entered explicitly via the entry points above.
+- Focus mode is orthogonal to tab cycling -- `Tab` / `Shift+Tab` cycles between `Repositories` and `Overview`. Focus mode is only entered explicitly via the entry points above.
 - State is tracked by an `in_focus_mode: bool` flag rather than a `previous_tab` option. The `ActiveTab` enum no longer has a `FocusMode` variant.
 - On user-initiated exit (returning to a tab via `Shift+↑` or back-bar click), `FocusModeState::detach()` is called: the agent panel connection is detached, the diff task is stopped via the watch channel and aborted, diff state is cleared, the PR detection task is aborted and `pr_info` is cleared, and the terminal panel is taken (kept alive) so the caller can stash it on `OverviewState::agent_terminals`. On full app shutdown (or when the agent has been pruned), `close_panel()` is used instead, which performs the same teardown plus closes the terminal session (sends `DetachTerminal` and aborts the terminal background task).
 
@@ -554,7 +461,6 @@ The `?` key toggles a keyboard shortcut overlay rendered as a centered modal (44
 - **Global section (always shown):** `q / Esc×2`, `Q`, `Ctrl+C`, `Tab`, `Shift+Tab`, `?`, `F2`, `Alt+M`, `Alt+E`, `Alt+D`, `Alt+F`, `Alt+N`, `Alt+V`, `Alt+B`, `Alt+P`, `Alt+T`, `Alt+I`, `Cmd+1`, `Cmd+2`.
 - **Repositories section (shown when Repositories tab is active):** `↑/↓` navigate items, `←/→` navigate tree, `Shift+↑/↓` jump prev/next repo, `Enter` open menu, `Space` collapse/expand.
 - **Overview section (shown when Overview tab is active):** `Shift+←/→` scroll panels, `Shift+↓` enter terminal, plus an "In terminal:" sub-context label followed by `Shift+↑` back to options bar, `Shift+↓` enter focus mode, `Shift+←/→` switch agent, `PgUp/PgDn` scroll terminal.
-- **Batches section (shown when Batches tab is active):** `Shift+←/→` switch batch (with auto-scroll), `←/→` scroll viewport, `↑/↓` navigate tasks within a batch, `Shift+↓` open active task in focus mode, `Space` toggle batch status (or cancel queued), `Alt+S` start selected task (manual), `Enter` add task to batch, `p` edit prompt prefix, `s` edit prompt suffix, `c` copy batch JSON to clipboard, `Alt+P` toggle plan mode, `Alt+A` toggle task prefix, `Alt+S` toggle task suffix / start, `Del/Backspace` open batch cleanup modal.
 - **Focus Mode section (shown when in focus mode):** `Shift+↑` exit, `Shift+←/→` switch panel, `Shift+PgUp/PgDn` scroll terminal, plus a "Left panel:" sub-context label followed by `Tab` cycle tabs, `Shift+Tab` prev tab (used in Terminal tab since Tab is forwarded to the shell), `↑/↓` move cursor, `v` toggle selection, `Enter` send selection, `Esc` cancel selection.
 
 Key names are displayed in accent color (left-aligned, 16 chars wide); descriptions use primary text color. Section headers use secondary text color with bold modifier. Sub-context labels use tertiary text color and are indented.
@@ -582,7 +488,7 @@ A multi-step modal for creating new agents on git worktrees, opened globally wit
 
 **Plan mode toggle:** `Alt+P` toggles plan mode on/off within the modal (available in all steps). When bypass permissions is globally enabled, plan mode starts ON automatically. A status bar at the bottom of the modal shows the current plan mode state ("PLAN" in warning/bold when enabled, "Normal" in disabled text) with an `Alt+P toggle plan mode` hint.
 
-**Completion:** On completing step 4, the modal sends a `CreateWorktreeAgent` IPC message to the hub with `plan_mode` set according to the toggle state. The hub creates the worktree (via the existing `add_worktree()` logic), spawns an agent in it, and returns `WorktreeAgentStarted`. The behavior depends on the active tab: when on the **Overview tab**, the TUI stays in overview mode and selects the newly created agent's panel after the next agent sync (via `pending_overview_select` and `OverviewState::select_agent_by_id()`); when on the **Repositories tab**, the TUI opens the new agent in focus mode as before. On success, a status bar message confirms the agent started (e.g., "Agent started on feature-branch"). On failure (hub connection error, send error, unexpected response, or hub-reported error), the error is surfaced as a status bar error message instead of being lost to stderr. The `AgentStartResult` enum has `Started`, `Failed(String)`, `BatchTaskStarted`, and `BatchTaskFailed` variants to communicate the outcome from background tokio tasks to the main event loop. Batch variants include `batch_id` and `task_index` for updating task statuses. The agent start channel uses a buffer size of 16 (to handle concurrent batch task starts) and is drained in a `while let Ok(result)` loop instead of processing a single result per tick.
+**Completion:** On completing step 4, the modal sends a `CreateWorktreeAgent` IPC message to the hub with `plan_mode` set according to the toggle state. The hub creates the worktree (via the existing `add_worktree()` logic), spawns an agent in it, and returns `WorktreeAgentStarted`. The behavior depends on the active tab: when on the **Overview tab**, the TUI stays in overview mode and selects the newly created agent's panel after the next agent sync (via `pending_overview_select` and `OverviewState::select_agent_by_id()`); when on the **Repositories tab**, the TUI opens the new agent in focus mode as before. On success, a status bar message confirms the agent started (e.g., "Agent started on feature-branch"). On failure (hub connection error, send error, unexpected response, or hub-reported error), the error is surfaced as a status bar error message instead of being lost to stderr. The `AgentStartResult` enum has `Started` and `Failed(String)` variants to communicate the outcome from background tokio tasks to the main event loop.
 
 **Rendering:** The modal is rendered as a centered overlay (60 columns wide, 60% of terminal height) with a titled border, input field with visible cursor, and a scrollable list with fuzzy-matched results. The selected item is indicated with a `>` prefix and bold text. In the prompt step (4/4), the input area expands to fill remaining modal space and text wraps within the field (`.wrap(Wrap { trim: false })`) with automatic scrolling to keep the cursor visible.
 
@@ -657,199 +563,6 @@ A multi-step wizard modal for creating new repositories or cloning existing ones
 
 **Rendering:** The modal is rendered as a centered overlay (60 columns wide, 60% of terminal height) with the same visual style as the Detached Agent Modal. The action selection step shows numbered options. The directory step shows the current base path above the input field. The URL and name steps show text input fields.
 
-### Create Batch Modal
-
-A multi-step modal for creating prompt batch definitions, opened globally with `Opt+T` (macOS) / `Alt+T`. The modal is only available when at least one repository is registered. The modal guides the user through up to 5 sequential steps (the concurrency step is skipped when Manual launch mode is selected):
-
-| Step | Title | Description |
-|------|-------|-------------|
-| 1/5 | Select repository | Choose from registered repos. Fuzzy search filters by name and path. |
-| 2/5 | Select branch | Choose a local branch from the selected repo. Fuzzy search filters by name. Shows HEAD, worktree, and active agent indicators. Skipped if the repo has no local branches. |
-| 3/5 | Batch name | Enter a name for the batch. Optional -- press Enter for auto-name (e.g., "Batch 1", "Batch 2"). |
-| 4/5 | Select launch mode | Choose between Auto (default) and Manual launch modes. Auto proceeds to the concurrency step; Manual skips it and completes immediately. |
-| 5/5 | Max concurrent agents | Set the maximum number of concurrent agents. Use Up/Down arrows or type a digit to set. Down from 1 or 0 sets unlimited (shown as infinity symbol). Only shown for Auto launch mode. |
-
-**Navigation (steps 1-3):**
-- `Up` / `Down` -- move selection in list steps
-- `Enter` -- confirm selection / advance to next step
-- `Esc` -- go back to previous step, or cancel from step 1
-- Type to filter -- fuzzy matching via `fuzzy-matcher` (SkimV2 algorithm)
-- `Left` / `Right` -- move cursor within the input field
-- `Backspace` -- delete character before cursor
-
-**Navigation (step 4 -- launch mode):**
-- `Up` / `Down` -- toggle between Auto and Manual
-- `Enter` -- confirm selection. Auto advances to the concurrency step; Manual completes the modal immediately.
-- `Esc` -- go back to the title step (restoring previously entered title)
-
-**Navigation (step 5 -- concurrency):**
-- `Up` / `Right` -- increase concurrency by 1
-- `Down` / `Left` -- decrease concurrency by 1 (to minimum of unlimited)
-- Type a digit -- set concurrency value directly (appends digit)
-- `Backspace` -- remove last digit
-- `Enter` -- confirm and complete the modal
-- `Esc` -- go back to the launch mode step
-
-**Completion:** On completing the final step, the modal outputs a `BatchModalOutput` containing the selected repo path, repo name, branch name, optional title, optional max concurrent value, and launch mode. The batch is added to `TasksState`, registered with the hub daemon via a `RegisterBatch` IPC message, and the active tab switches to the Batches tab. The hub responds asynchronously with `BatchRegistered` containing the `hub_batch_id`.
-
-**Rendering:** The modal is rendered as a centered overlay (60 columns wide, 60% of terminal height) with a titled border, input field with visible cursor, and a scrollable list with fuzzy-matched results. The selected item is indicated with a `>` prefix and bold text. In the launch mode step, two options ("Auto" and "Manual") are displayed with descriptions, using a `>` prefix for the selected option. In the concurrency step, the input shows the current value (or infinity symbol for unlimited) with arrow hint text below.
-
-### Add Task Modal
-
-A 2-step modal for adding a task to an existing batch, opened by pressing `Enter` when a batch card is focused on the Batches tab.
-
-| Step | Title | Description |
-|------|-------|-------------|
-| 1/2 | Branch name | Enter the branch name for the task. Required. |
-| 2/2 | Task prompt | Enter the prompt for the agent. Required. |
-
-**Navigation:**
-- `Enter` -- confirm input and advance to next step (step 1) or complete the modal (step 2)
-- `Esc` -- cancel the modal from step 1, or go back to step 1 from step 2 (restoring previously entered branch name)
-- `Left` / `Right` -- move cursor within the input field
-- `Backspace` -- delete character before cursor
-- `Alt+P` -- toggle per-task plan mode (applies in both steps; inherits from batch plan_mode on open)
-- `Alt+S` -- toggle per-task suffix (applies in both steps)
-- `Alt+X` -- toggle per-task "Exit when done" (applies in both steps; only shown when the agent binary supports the Stop hook, currently `claude` only)
-
-**Completion:** On completing step 2, the modal outputs an `AddTaskOutput` containing the batch index, branch name, prompt, `use_prefix`, `use_suffix`, `plan_mode`, and `exit_when_done`. A `TaskEntry` is added to the corresponding batch via `TasksState::add_task()`.
-
-**Rendering:** The modal is rendered as a centered overlay (60 columns wide, 60% of terminal height) with a titled border showing the step number and batch title. The title for step 1 shows "Step 1/2 -- Branch name (batch title)" and step 2 shows "Step 2/2 -- Task prompt (batch title)". A hint line above the input provides navigation guidance. In step 2, the previously entered branch name is shown below the input as context. The prompt input uses word-wrap with scrolling support. A status bar at the bottom of the modal shows a plan mode indicator ("PLAN" in warning/bold when enabled, "Normal" in disabled text), followed by prefix/suffix toggle indicators (checkmark when applied, cross when skipped), and -- when the agent supports the Stop hook -- an `EXIT` pill (warning/bold when enabled, disabled text otherwise). The hint includes `Alt+P/S/X toggle` (with `X` only when supported). The modal receives `has_prefix`, `has_suffix`, `batch_plan_mode`, and `supports_exit_when_done` flags from the batch to initialize the plan mode state, gate the Exit-when-done toggle, and color the indicators appropriately (green when applied and the batch has a prefix/suffix, disabled color otherwise).
-
-### Edit Field Modal
-
-A reusable single-field text editor modal for editing a text value. Currently used for editing batch prompt prefix (`p` key) and prompt suffix (`s` key) when a batch card is focused on the Batches tab.
-
-**Navigation:**
-- `Enter` -- save the current value and close the modal (empty input clears the field)
-- `Esc` -- cancel and close the modal without saving
-- `Left` / `Right` -- move cursor within the input field
-- `Backspace` -- delete character before cursor
-
-**Completion:** On pressing Enter, the modal outputs the trimmed input string. The caller applies it via `TasksState::set_prompt_prefix()` or `TasksState::set_prompt_suffix()`. An empty string clears the field to `None`.
-
-**Rendering:** The modal is rendered as a centered overlay (60 columns wide, 60% of terminal height) with a titled border showing the field context (e.g., "Edit Prefix -- My Batch"). A hint line above the input provides navigation guidance. The input field uses multi-line word-wrap with scrolling support. The modal is pre-filled with the current value when opened.
-
-### Timer Modal
-
-A single-field modal for setting a scheduled start time on a batch, opened by pressing `t` when a batch card is focused on the Batches tab. Only available for Auto-mode Idle batches.
-
-**Input formats:**
-- **Duration**: `2h`, `30m`, `1h30m`, `45s`, or a bare number treated as minutes (e.g., `90` = 90 minutes)
-- **Absolute time**: `16:00`, `9:30` (24-hour format; if the time has passed today, schedules for tomorrow)
-
-**Navigation:**
-- `Enter` -- set the timer and close the modal. Sends a `QueueBatch` IPC message to the hub with the batch definition and all its tasks. The batch status changes to `Queued` with a live countdown.
-- `Esc` -- cancel and close the modal without setting a timer
-- `Left` / `Right` -- move cursor within the input field
-- `Backspace` -- delete character before cursor
-
-**Live preview:** As the user types, the modal parses the input and shows a green preview line (e.g., "Starts at 16:00 (in 1h 30m)") or a hint message if the input is not yet valid.
-
-**Rendering:** The modal is rendered as a centered overlay (60 columns wide, 8 rows tall) with a titled border showing "Set Timer -- {batch title}". A hint line explains the accepted formats. The input field shows a `>` prompt with a visible cursor. Below the input, a preview line shows the parsed result in green (`R_SUCCESS`) or an error hint in tertiary text.
-
-**Implementation:** `timer_modal.rs` contains the `TimerModal` struct, `TimerResult` enum (`Pending`, `Cancelled`, `Completed(rfc3339)`), duration/time parsing helpers, and the `format_countdown()` function used by the batch card renderer.
-
-### Import Batch Modal
-
-A 3-step modal for importing batch definitions from JSON files, opened globally with `Opt+I` (macOS) / `Alt+I`. The modal is only available when at least one repository is registered.
-
-| Step | Title | Description |
-|------|-------|-------------|
-| 1/3 | Select batch JSON file | A file browser starting in `~/Downloads`. Shows directories and `.json` files. Hidden files (starting with `.`) are excluded. Fuzzy search filters by filename. |
-| 2/3 | Select repository | Choose from registered repos. Fuzzy search filters by name and path. Same pattern as Create Batch Modal. |
-| 3/3 | Select branch | Choose a local branch from the selected repo. Fuzzy search filters by name. Same pattern as Create Batch Modal. |
-
-**File browser navigation:**
-- `Tab` or `Enter` on a directory -- enter that directory
-- `Enter` on a `.json` file -- parse and validate the file, then advance to step 2
-- `Backspace` (when input is empty) -- navigate to the parent directory
-- `Esc` -- cancel the modal (from step 1) or go back to the previous step (from steps 2/3)
-- Type to fuzzy-filter the file list
-
-**JSON validation:** The selected file is parsed using `serde_json` as a list of `BatchJson` objects (`Vec<BatchJson>`). A single `BatchJson` object (not wrapped in an array) is also accepted for backward compatibility. Validation errors (malformed JSON, missing required fields) and files with zero tasks across all batches are rejected with an error message displayed below the file list.
-
-**JSON schema (`BatchJson` / `TaskJson`):**
-
-The import file is a JSON array of batch objects. Each batch object has:
-- `title` (string, optional) -- batch name, falls back to auto-naming
-- `prefix` (string, optional) -- prompt prefix prepended to every task
-- `suffix` (string, optional) -- prompt suffix appended to every task
-- `launch_mode` (string, optional) -- `"auto"` (default) or `"manual"`
-- `max_concurrent` (number, optional) -- max concurrent agents, null = unlimited
-- `plan_mode` (bool, default false) -- start agents in plan mode
-- `allow_bypass` (bool, default false) -- allow agents to bypass permission prompts
-- `depends_on` (array of strings, optional) -- titles of other batches this batch depends on; resolved to hub IDs during import. Batches auto-start when all dependency batches complete.
-- `tasks` (array, required) -- list of task objects with `branch` (string, required), `prompt` (string, required), `use_prefix` (bool, default true), `use_suffix` (bool, default true), `plan_mode` (bool, default false), and `exit_when_done` (bool, default false; only honored for agents whose `KnownAgent.supports_stop_hook` is true)
-
-Example JSON (list format):
-```json
-[
-  {
-    "title": "Refactor auth",
-    "prefix": "Follow the project style guide.",
-    "launch_mode": "auto",
-    "max_concurrent": 3,
-    "tasks": [
-      {
-        "branch": "refactor/login",
-        "prompt": "Refactor the login handler to use the new auth service."
-      },
-      {
-        "branch": "refactor/signup",
-        "prompt": "Refactor the signup handler to use the new auth service.",
-        "use_prefix": false
-      }
-    ]
-  },
-  {
-    "title": "Integration tests",
-    "depends_on": ["Refactor auth"],
-    "tasks": [
-      {
-        "branch": "test/auth-integration",
-        "prompt": "Write integration tests for the new auth service.",
-        "plan_mode": true
-      }
-    ]
-  }
-]
-```
-
-A single batch object (not wrapped in an array) is also accepted for backward compatibility:
-```json
-{
-  "title": "Refactor auth",
-  "tasks": [
-    { "branch": "refactor/login", "prompt": "Refactor the login handler." }
-  ]
-}
-```
-
-**Copy to clipboard:** Pressing `c` while a batch card is focused copies the batch as JSON in list format (a single-element array matching the import schema) to the system clipboard. The export includes `depends_on` titles (resolved from hub IDs) and per-task `plan_mode`, `use_prefix`, `use_suffix` fields when they differ from their defaults. Uses `pbcopy` on macOS and `xclip`/`xsel` on Linux.
-
-**Completion:** On selecting a branch in step 3, the modal outputs an `ImportBatchOutput` containing the parsed list of `BatchJson` objects, repo path, repo name, and branch name. Each batch in the list is created with all tasks pre-populated, per-task `use_prefix`/`use_suffix`/`plan_mode` values from the JSON are passed through (defaulting to `true`/`true`/`false` respectively), plan_mode and allow_bypass toggled as specified, and the active tab switches to the Batches tab. If any batch has `depends_on` entries, they are resolved from batch titles to hub batch IDs by matching against existing batches (including other batches from the same import). Each batch is registered with the hub daemon via a `RegisterBatch` IPC message (with tasks passed inline as `Vec<QueuedTask>`, including resolved dependencies), mirroring the create-batch flow. The hub responds with `BatchRegistered` containing the `hub_batch_id`, which is stored asynchronously to enable subsequent hub communication (status updates, task spawning). A success status message shows the imported task count, plus any unresolved dependency titles.
-
-**Rendering:** The modal is rendered as a centered overlay (60 columns wide, 60% of terminal height) with a titled border showing the current step and description. The file browser step shows the base path above the input field, with a scrollable list of directories (with `/` suffix) and `.json` files below. Parse errors are displayed in `R_ERROR` color at the bottom. Steps 2 and 3 follow the same rendering pattern as the Create Batch Modal.
-
-**Implementation:** `import_batch_modal.rs` contains the `ImportBatchModal` struct, `ImportBatchResult` enum (`Pending`, `Cancelled`, `Completed(Box<ImportBatchOutput>)`), and the `BatchJson`/`TaskJson` serde structs. `ImportBatchOutput` contains `batches: Vec<BatchJson>` for multi-batch import support. The `parse_launch_mode()` helper converts the optional launch mode string to a `LaunchMode` enum value.
-
-### Batch Dependencies Modal
-
-A multi-select modal for configuring batch-to-batch dependencies, opened by pressing `Shift+D` when a batch card is focused on the Batches tab. Lists all other batches as selectable items.
-
-**Navigation:**
-- `Up` / `Down` -- navigate the list of available batches
-- `Space` -- toggle the highlighted batch as a dependency (blocked if it would create a circular dependency)
-- `Enter` -- confirm the selection and update the batch's `depends_on` list via `UpdateBatchDependencies` IPC
-- `Esc` -- cancel without changes
-
-**Circular dependency prevention:** Before toggling a dependency on, the modal performs a DFS cycle check. Starting from the candidate batch, it follows `depends_on` chains. If the current batch is reachable from the candidate, the toggle is blocked (no-op). This prevents the user from creating dependency cycles.
-
-**Rendering:** The modal is rendered as a centered overlay sized to fit its content. Each batch is shown as a `[x]` / `[ ]` checkbox with the batch title. The selected item has a highlighted background. A hint line shows "Space toggle  Enter confirm  Esc cancel". When no other batches exist, an empty state message "No other batches available" is displayed.
-
-**Implementation:** `batch_deps_modal.rs` contains the `BatchDepsModal` struct, `BatchDepsResult` enum (`Pending`, `Cancelled`, `Completed(Vec<String>)`), and the `would_create_cycle()` method for DFS-based cycle detection.
-
 ### Clone Progress Modal
 
 A centered overlay that shows real-time progress during a git clone operation. Displayed automatically when a clone is initiated from the add-repository modal.
@@ -863,7 +576,7 @@ A centered overlay that shows real-time progress during a git clone operation. D
 
 ### Text Input and Paste Handling
 
-All modal text inputs (Create Agent, Create Batch, Import Batch, Add Task, Edit Field, Timer, Search Agent, Detached Agent, Add Repository, and the Branch Picker in focus mode) track cursor position as a **byte offset** into the UTF-8 `String`, not a character index. This ensures correct behavior when the input contains multi-byte UTF-8 characters (e.g., em-dash, en-dash, accented characters):
+All modal text inputs (Create Agent, Search Agent, Detached Agent, Add Repository, and the Branch Picker in focus mode) track cursor position as a **byte offset** into the UTF-8 `String`, not a character index. This ensures correct behavior when the input contains multi-byte UTF-8 characters (e.g., em-dash, en-dash, accented characters):
 
 - **Insert:** advances `cursor_pos` by `c.len_utf8()`
 - **Backspace / Left arrow:** retreats `cursor_pos` to the previous character boundary via `char_indices().next_back()`
@@ -896,7 +609,6 @@ GUI editors (Generic, JetBrains) are opened directly via their binary. Terminal 
 | Repositories tab (worktree branch selected) | Worktree directory |
 | Repositories tab (non-worktree local branch selected) | Worktree is created on-demand for the branch, then opened |
 | Overview tab (terminal focused) | Agent's working directory |
-| Batches tab | No target (editor shortcut is a no-op) |
 
 **Discoverability:** Every surface where the shortcut is meaningful exposes it visibly:
 
@@ -943,7 +655,6 @@ A `ClickMap` struct is populated during each render pass and consumed during mou
 - `focus_left_tabs` -- Focus mode left panel tab regions mapped to `LeftPanelTab` values
 - `overview_content_areas` -- Overview tab terminal content areas (inner area excluding borders/header) mapped to global panel indices, used for Cmd+click URL detection
 - `focus_right_content_area` -- Focus mode right panel terminal content area (inner area excluding borders/header), used for Cmd+click URL detection
-- `tasks_batch_cards` -- Batches tab batch card regions mapped to batch indices (click to focus batch card)
 
 #### Mouse Click Behavior
 
@@ -970,12 +681,6 @@ The right panel is view-only — clicks in it have no effect. To interact with a
 | Repo group block | Toggle collapse/expand for that repo (collapsed repos hide their agent indicators and filter their panels out of the viewport) |
 | Agent indicator (within repo block) | Focus that agent's terminal panel (`OverviewFocus::Terminal(idx)`) |
 | Agent panel | Focus that terminal panel (`OverviewFocus::Terminal(idx)`) |
-
-**Batches tab:**
-
-| Click Target | Action |
-|--------------|--------|
-| Batch card | Focus that batch card (`TasksFocus::BatchCard(idx)`) |
 
 **Focus mode:**
 

@@ -53,7 +53,7 @@ pub fn open_or_create_at(path: &std::path::Path) -> Result<Connection, String> {
 }
 
 /// Highest schema version this binary knows how to produce.
-const LATEST_SCHEMA_VERSION: i64 = 10;
+const LATEST_SCHEMA_VERSION: i64 = 11;
 
 /// Read the current `schema_version` value (0 if no rows).
 fn read_schema_version(conn: &Connection) -> Result<i64, String> {
@@ -138,6 +138,9 @@ fn run_migrations(conn: &Connection) -> Result<(), String> {
         if current_version < 10 {
             migrate_v10(conn)?;
         }
+        if current_version < 11 {
+            migrate_v11(conn)?;
+        }
         Ok(())
     })();
 
@@ -216,405 +219,52 @@ fn migrate_v4(conn: &Connection) -> Result<(), String> {
     Ok(())
 }
 
-/// Migration v5: create queued_batches and queued_batch_tasks tables.
+// v5-v10 originally created and evolved the batch/schedule tables. The schedule
+// system has been removed; these migrations are kept as version-bump stubs so
+// existing databases still advance through the version sequence and the
+// `concurrent_open_or_create_runs_migrations_once` test still observes a
+// `schema_version` row count equal to LATEST_SCHEMA_VERSION on a fresh DB.
+// Migration v11 below drops the orphaned batch tables on existing v10 DBs.
+
 fn migrate_v5(conn: &Connection) -> Result<(), String> {
-    conn.execute_batch(
-        "CREATE TABLE IF NOT EXISTS queued_batches (
-            id              TEXT PRIMARY KEY,
-            title           TEXT NOT NULL,
-            repo_path       TEXT NOT NULL,
-            target_branch   TEXT NOT NULL,
-            max_concurrent  INTEGER,
-            prompt_prefix   TEXT,
-            prompt_suffix   TEXT,
-            plan_mode       INTEGER NOT NULL DEFAULT 0,
-            allow_bypass    INTEGER NOT NULL DEFAULT 0,
-            agent_binary    TEXT,
-            hub             TEXT NOT NULL,
-            scheduled_at    TEXT NOT NULL,
-            status          TEXT NOT NULL DEFAULT 'scheduled',
-            created_at      TEXT NOT NULL
-        );
-        CREATE TABLE IF NOT EXISTS queued_batch_tasks (
-            id          INTEGER PRIMARY KEY AUTOINCREMENT,
-            batch_id    TEXT NOT NULL REFERENCES queued_batches(id) ON DELETE CASCADE,
-            task_index  INTEGER NOT NULL,
-            branch_name TEXT NOT NULL,
-            prompt      TEXT NOT NULL,
-            status      TEXT NOT NULL DEFAULT 'idle',
-            agent_id    TEXT,
-            UNIQUE(batch_id, task_index)
-        );
-        INSERT INTO schema_version (version) VALUES (5);",
-    )
-    .map_err(|e| format!("migration v5 failed: {e}"))
+    conn.execute_batch("INSERT INTO schema_version (version) VALUES (5);")
+        .map_err(|e| format!("migration v5 failed: {e}"))
 }
 
-/// Migration v6: add per-task prefix/suffix flags to queued_batch_tasks.
 fn migrate_v6(conn: &Connection) -> Result<(), String> {
-    conn.execute_batch(
-        "ALTER TABLE queued_batch_tasks ADD COLUMN use_prefix INTEGER NOT NULL DEFAULT 1;
-         ALTER TABLE queued_batch_tasks ADD COLUMN use_suffix INTEGER NOT NULL DEFAULT 1;
-         INSERT INTO schema_version (version) VALUES (6);",
-    )
-    .map_err(|e| format!("migration v6 failed: {e}"))
+    conn.execute_batch("INSERT INTO schema_version (version) VALUES (6);")
+        .map_err(|e| format!("migration v6 failed: {e}"))
 }
 
-/// Migration v7: add launch_mode column and allow nullable scheduled_at for idle batches.
 fn migrate_v7(conn: &Connection) -> Result<(), String> {
-    conn.execute_batch(
-        "ALTER TABLE queued_batches ADD COLUMN launch_mode TEXT NOT NULL DEFAULT 'auto';
-         INSERT INTO schema_version (version) VALUES (7);",
-    )
-    .map_err(|e| format!("migration v7 failed: {e}"))
+    conn.execute_batch("INSERT INTO schema_version (version) VALUES (7);")
+        .map_err(|e| format!("migration v7 failed: {e}"))
 }
 
-/// Migration v8: add depends_on column for batch-to-batch dependencies.
 fn migrate_v8(conn: &Connection) -> Result<(), String> {
-    conn.execute_batch(
-        "ALTER TABLE queued_batches ADD COLUMN depends_on TEXT NOT NULL DEFAULT '[]';
-         INSERT INTO schema_version (version) VALUES (8);",
-    )
-    .map_err(|e| format!("migration v8 failed: {e}"))
+    conn.execute_batch("INSERT INTO schema_version (version) VALUES (8);")
+        .map_err(|e| format!("migration v8 failed: {e}"))
 }
 
-/// Migration v9: add per-task plan_mode flag to queued_batch_tasks.
 fn migrate_v9(conn: &Connection) -> Result<(), String> {
-    conn.execute_batch(
-        "ALTER TABLE queued_batch_tasks ADD COLUMN plan_mode INTEGER NOT NULL DEFAULT 0;
-         INSERT INTO schema_version (version) VALUES (9);",
-    )
-    .map_err(|e| format!("migration v9 failed: {e}"))
+    conn.execute_batch("INSERT INTO schema_version (version) VALUES (9);")
+        .map_err(|e| format!("migration v9 failed: {e}"))
 }
 
-/// Migration v10: add per-task exit_when_done flag to queued_batch_tasks.
 fn migrate_v10(conn: &Connection) -> Result<(), String> {
+    conn.execute_batch("INSERT INTO schema_version (version) VALUES (10);")
+        .map_err(|e| format!("migration v10 failed: {e}"))
+}
+
+/// Migration v11: drop the orphaned queued_batches and queued_batch_tasks
+/// tables left behind by the removed schedule system.
+fn migrate_v11(conn: &Connection) -> Result<(), String> {
     conn.execute_batch(
-        "ALTER TABLE queued_batch_tasks ADD COLUMN exit_when_done INTEGER NOT NULL DEFAULT 0;
-         INSERT INTO schema_version (version) VALUES (10);",
+        "DROP TABLE IF EXISTS queued_batch_tasks;
+         DROP TABLE IF EXISTS queued_batches;
+         INSERT INTO schema_version (version) VALUES (11);",
     )
-    .map_err(|e| format!("migration v10 failed: {e}"))
-}
-
-// ---------------------------------------------------------------------------
-// Queued batch CRUD
-// ---------------------------------------------------------------------------
-
-/// A row from the queued_batches table.
-pub struct QueuedBatchRow {
-    pub id: String,
-    pub title: String,
-    pub repo_path: String,
-    pub target_branch: String,
-    pub max_concurrent: Option<usize>,
-    pub prompt_prefix: Option<String>,
-    pub prompt_suffix: Option<String>,
-    pub plan_mode: bool,
-    pub allow_bypass: bool,
-    pub agent_binary: Option<String>,
-    pub hub: String,
-    pub scheduled_at: Option<String>,
-    pub status: String,
-    pub launch_mode: String,
-    pub depends_on: String,
-}
-
-/// A row from the queued_batch_tasks table.
-pub struct QueuedBatchTaskRow {
-    pub task_index: usize,
-    pub branch_name: String,
-    pub prompt: String,
-    pub status: String,
-    pub agent_id: Option<String>,
-    pub use_prefix: bool,
-    pub use_suffix: bool,
-    pub plan_mode: bool,
-    pub exit_when_done: bool,
-}
-
-/// Insert a new queued batch and its tasks.
-///
-/// Each task tuple is `(branch_name, prompt, use_prefix, use_suffix, plan_mode, exit_when_done)`.
-pub fn insert_queued_batch(
-    conn: &Connection,
-    batch: &QueuedBatchRow,
-    tasks: &[(String, String, bool, bool, bool, bool)],
-) -> Result<(), String> {
-    conn.execute(
-        "INSERT INTO queued_batches (id, title, repo_path, target_branch, max_concurrent,
-         prompt_prefix, prompt_suffix, plan_mode, allow_bypass, agent_binary, hub,
-         scheduled_at, status, created_at, launch_mode, depends_on)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
-        rusqlite::params![
-            batch.id,
-            batch.title,
-            batch.repo_path,
-            batch.target_branch,
-            batch.max_concurrent.map(|v| v as i64),
-            batch.prompt_prefix,
-            batch.prompt_suffix,
-            batch.plan_mode as i32,
-            batch.allow_bypass as i32,
-            batch.agent_binary,
-            batch.hub,
-            batch.scheduled_at,
-            batch.status,
-            chrono::Utc::now().to_rfc3339(),
-            batch.launch_mode,
-            batch.depends_on,
-        ],
-    )
-    .map_err(|e| format!("failed to insert queued batch: {e}"))?;
-
-    for (i, (branch_name, prompt, use_prefix, use_suffix, plan_mode, exit_when_done)) in
-        tasks.iter().enumerate()
-    {
-        conn.execute(
-            "INSERT INTO queued_batch_tasks (batch_id, task_index, branch_name, prompt, status, use_prefix, use_suffix, plan_mode, exit_when_done)
-             VALUES (?1, ?2, ?3, ?4, 'idle', ?5, ?6, ?7, ?8)",
-            rusqlite::params![
-                batch.id,
-                i as i64,
-                branch_name,
-                prompt,
-                *use_prefix as i32,
-                *use_suffix as i32,
-                *plan_mode as i32,
-                *exit_when_done as i32,
-            ],
-        )
-        .map_err(|e| format!("failed to insert queued batch task: {e}"))?;
-    }
-    Ok(())
-}
-
-/// Load all non-completed queued batches with their tasks.
-pub fn load_queued_batches(
-    conn: &Connection,
-) -> Result<Vec<(QueuedBatchRow, Vec<QueuedBatchTaskRow>)>, String> {
-    let mut stmt = conn
-        .prepare(
-            "SELECT id, title, repo_path, target_branch, max_concurrent,
-                    prompt_prefix, prompt_suffix, plan_mode, allow_bypass,
-                    agent_binary, hub, scheduled_at, status, launch_mode, depends_on
-             FROM queued_batches
-             WHERE status IN ('idle', 'scheduled', 'running')
-             ORDER BY rowid",
-        )
-        .map_err(|e| format!("failed to prepare queued batch query: {e}"))?;
-
-    let batches: Vec<QueuedBatchRow> = stmt
-        .query_map([], |row| {
-            Ok(QueuedBatchRow {
-                id: row.get(0)?,
-                title: row.get(1)?,
-                repo_path: row.get(2)?,
-                target_branch: row.get(3)?,
-                max_concurrent: row.get::<_, Option<i64>>(4)?.map(|v| v as usize),
-                prompt_prefix: row.get(5)?,
-                prompt_suffix: row.get(6)?,
-                plan_mode: row.get::<_, i32>(7)? != 0,
-                allow_bypass: row.get::<_, i32>(8)? != 0,
-                agent_binary: row.get(9)?,
-                hub: row.get(10)?,
-                scheduled_at: row.get(11)?,
-                status: row.get(12)?,
-                launch_mode: row
-                    .get::<_, Option<String>>(13)?
-                    .unwrap_or_else(|| "auto".to_string()),
-                depends_on: row
-                    .get::<_, Option<String>>(14)?
-                    .unwrap_or_else(|| "[]".to_string()),
-            })
-        })
-        .map_err(|e| format!("failed to query queued batches: {e}"))?
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(|e| format!("failed to collect queued batches: {e}"))?;
-
-    let mut result = Vec::new();
-    for batch in batches {
-        let tasks = load_batch_tasks(conn, &batch.id)?;
-        result.push((batch, tasks));
-    }
-    Ok(result)
-}
-
-/// Load tasks for a specific batch.
-fn load_batch_tasks(conn: &Connection, batch_id: &str) -> Result<Vec<QueuedBatchTaskRow>, String> {
-    let mut stmt = conn
-        .prepare(
-            "SELECT task_index, branch_name, prompt, status, agent_id, use_prefix, use_suffix, plan_mode, exit_when_done
-             FROM queued_batch_tasks
-             WHERE batch_id = ?1
-             ORDER BY task_index",
-        )
-        .map_err(|e| format!("failed to prepare task query: {e}"))?;
-
-    let rows: Vec<QueuedBatchTaskRow> = stmt
-        .query_map([batch_id], |row| {
-            Ok(QueuedBatchTaskRow {
-                task_index: row.get::<_, i64>(0)? as usize,
-                branch_name: row.get(1)?,
-                prompt: row.get(2)?,
-                status: row.get(3)?,
-                agent_id: row.get(4)?,
-                use_prefix: row.get::<_, i32>(5)? != 0,
-                use_suffix: row.get::<_, i32>(6)? != 0,
-                plan_mode: row.get::<_, i32>(7)? != 0,
-                exit_when_done: row.get::<_, i32>(8)? != 0,
-            })
-        })
-        .map_err(|e| format!("failed to query tasks: {e}"))?
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(|e| format!("failed to collect tasks: {e}"))?;
-    Ok(rows)
-}
-
-/// Update the status of a queued batch.
-pub fn update_batch_status(conn: &Connection, id: &str, status: &str) -> Result<(), String> {
-    conn.execute(
-        "UPDATE queued_batches SET status = ?1 WHERE id = ?2",
-        rusqlite::params![status, id],
-    )
-    .map_err(|e| format!("failed to update batch status: {e}"))?;
-    Ok(())
-}
-
-/// Update a task's status and agent_id within a queued batch.
-pub fn update_task_status(
-    conn: &Connection,
-    batch_id: &str,
-    task_index: usize,
-    status: &str,
-    agent_id: Option<&str>,
-) -> Result<(), String> {
-    conn.execute(
-        "UPDATE queued_batch_tasks SET status = ?1, agent_id = ?2
-         WHERE batch_id = ?3 AND task_index = ?4",
-        rusqlite::params![status, agent_id, batch_id, task_index as i64],
-    )
-    .map_err(|e| format!("failed to update task status: {e}"))?;
-    Ok(())
-}
-
-/// Add a task to an existing batch. Returns the assigned task_index.
-///
-/// Caller must pass the in-memory defaults for `plan_mode`, `use_prefix`,
-/// `use_suffix`, and `exit_when_done` so they survive a hub restart — without
-/// this, all four reset to the column defaults on reload (plan_mode=0,
-/// prefix/suffix=1, exit_when_done=0).
-#[allow(clippy::too_many_arguments)]
-pub fn add_batch_task(
-    conn: &Connection,
-    batch_id: &str,
-    branch_name: &str,
-    prompt: &str,
-    plan_mode: bool,
-    use_prefix: bool,
-    use_suffix: bool,
-    exit_when_done: bool,
-) -> Result<usize, String> {
-    let max_index: i64 = conn
-        .query_row(
-            "SELECT COALESCE(MAX(task_index), -1) FROM queued_batch_tasks WHERE batch_id = ?1",
-            [batch_id],
-            |row| row.get(0),
-        )
-        .map_err(|e| format!("failed to query max task index: {e}"))?;
-    let new_index = (max_index + 1) as usize;
-    conn.execute(
-        "INSERT INTO queued_batch_tasks
-            (batch_id, task_index, branch_name, prompt, status, plan_mode, use_prefix, use_suffix, exit_when_done)
-         VALUES (?1, ?2, ?3, ?4, 'idle', ?5, ?6, ?7, ?8)",
-        rusqlite::params![
-            batch_id,
-            new_index as i64,
-            branch_name,
-            prompt,
-            plan_mode as i32,
-            use_prefix as i32,
-            use_suffix as i32,
-            exit_when_done as i32,
-        ],
-    )
-    .map_err(|e| format!("failed to insert batch task: {e}"))?;
-    Ok(new_index)
-}
-
-/// Update batch configuration fields.
-pub fn update_batch_config(
-    conn: &Connection,
-    id: &str,
-    prompt_prefix: Option<&str>,
-    prompt_suffix: Option<&str>,
-    plan_mode: bool,
-    allow_bypass: bool,
-) -> Result<(), String> {
-    conn.execute(
-        "UPDATE queued_batches SET prompt_prefix = ?1, prompt_suffix = ?2,
-         plan_mode = ?3, allow_bypass = ?4 WHERE id = ?5",
-        rusqlite::params![
-            prompt_prefix,
-            prompt_suffix,
-            plan_mode as i32,
-            allow_bypass as i32,
-            id
-        ],
-    )
-    .map_err(|e| format!("failed to update batch config: {e}"))?;
-    Ok(())
-}
-
-/// Update the depends_on list of a batch.
-pub fn update_batch_depends_on(
-    conn: &Connection,
-    id: &str,
-    depends_on: &[String],
-) -> Result<(), String> {
-    let json = serde_json::to_string(depends_on)
-        .map_err(|e| format!("failed to serialize depends_on: {e}"))?;
-    conn.execute(
-        "UPDATE queued_batches SET depends_on = ?1 WHERE id = ?2",
-        rusqlite::params![json, id],
-    )
-    .map_err(|e| format!("failed to update batch depends_on: {e}"))?;
-    Ok(())
-}
-
-/// Remove done tasks from a batch, re-index remaining tasks.
-pub fn remove_done_batch_tasks(conn: &Connection, batch_id: &str) -> Result<(), String> {
-    conn.execute(
-        "DELETE FROM queued_batch_tasks WHERE batch_id = ?1 AND status = 'done'",
-        [batch_id],
-    )
-    .map_err(|e| format!("failed to remove done tasks: {e}"))?;
-    // Re-index remaining tasks
-    let mut stmt = conn
-        .prepare("SELECT id FROM queued_batch_tasks WHERE batch_id = ?1 ORDER BY task_index")
-        .map_err(|e| format!("failed to prepare re-index query: {e}"))?;
-    let ids: Vec<i64> = stmt
-        .query_map([batch_id], |row| row.get(0))
-        .map_err(|e| format!("re-index query failed: {e}"))?
-        .filter_map(|r| r.ok())
-        .collect();
-    for (new_idx, row_id) in ids.iter().enumerate() {
-        conn.execute(
-            "UPDATE queued_batch_tasks SET task_index = ?1 WHERE id = ?2",
-            rusqlite::params![new_idx as i64, row_id],
-        )
-        .map_err(|e| format!("re-index update failed: {e}"))?;
-    }
-    Ok(())
-}
-
-/// Delete a queued batch and its tasks (cascade).
-pub fn delete_queued_batch(conn: &Connection, id: &str) -> Result<(), String> {
-    // Delete tasks first (SQLite foreign key cascade may not be enabled)
-    conn.execute("DELETE FROM queued_batch_tasks WHERE batch_id = ?1", [id])
-        .map_err(|e| format!("failed to delete batch tasks: {e}"))?;
-    conn.execute("DELETE FROM queued_batches WHERE id = ?1", [id])
-        .map_err(|e| format!("failed to delete batch: {e}"))?;
-    Ok(())
+    .map_err(|e| format!("migration v11 failed: {e}"))
 }
 
 /// Available colors for repository identification.

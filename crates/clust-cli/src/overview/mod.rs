@@ -20,7 +20,7 @@ use fuzzy_matcher::FuzzyMatcher;
 use clust_ipc::{AgentInfo, BranchInfo, CliMessage, HubMessage, RepoInfo};
 
 use crate::{
-    ipc, syntax, tasks::BatchAgentInfo, terminal_emulator::TerminalEmulator, theme, ui::ClickMap,
+    ipc, syntax, terminal_emulator::TerminalEmulator, theme, ui::ClickMap,
 };
 
 /// Minimum width in columns for a single agent panel.
@@ -592,15 +592,10 @@ impl OverviewState {
         }
     }
 
-    /// Compute panel indices sorted by repo group order, then batch group,
-    /// then creation time (newly-spawned agents appear at the end of their group).
-    /// Batch agents are grouped together by batch, ordered by task index.
-    /// Panels whose repo is collapsed are excluded from the result.
-    pub fn compute_sorted_indices(
-        &mut self,
-        repos: &[RepoInfo],
-        batch_map: &HashMap<String, BatchAgentInfo>,
-    ) {
+    /// Compute panel indices sorted by repo group order, then creation time
+    /// (newly-spawned agents appear at the end of their group). Panels whose
+    /// repo is collapsed are excluded from the result.
+    pub fn compute_sorted_indices(&mut self, repos: &[RepoInfo]) {
         let repo_order: HashMap<&str, usize> = repos
             .iter()
             .enumerate()
@@ -632,21 +627,8 @@ impl OverviewState {
                 .and_then(|rp| repo_order.get(rp).copied())
                 .unwrap_or(usize::MAX);
 
-            let batch_a = batch_map.get(&pa.id);
-            let batch_b = batch_map.get(&pb.id);
-
-            // Non-batch agents (0) sort before batch agents (1) within same repo.
-            // Batch agents are grouped by batch_id, then ordered by task_index.
-            let group_a = batch_a
-                .map(|b| (1usize, b.batch_id, b.task_index))
-                .unwrap_or((0, 0, 0));
-            let group_b = batch_b
-                .map(|b| (1usize, b.batch_id, b.task_index))
-                .unwrap_or((0, 0, 0));
-
             order_a
                 .cmp(&order_b)
-                .then_with(|| group_a.cmp(&group_b))
                 .then_with(|| pa.started_at.cmp(&pb.started_at))
                 .then_with(|| pa.id.cmp(&pb.id))
         });
@@ -1084,14 +1066,13 @@ pub fn render_overview(
     click_map: &mut ClickMap,
     repo_colors: &HashMap<String, String>,
     repos: &[RepoInfo],
-    batch_map: &HashMap<String, BatchAgentInfo>,
 ) {
     // Split into filter bar (1 row) + panels area
     let [options_area, panels_area] =
         Layout::vertical([Constraint::Length(1), Constraint::Min(0)]).areas(area);
 
     // 1. Compute sorted+filtered panel indices (populates state.sorted_indices)
-    state.compute_sorted_indices(repos, batch_map);
+    state.compute_sorted_indices(repos);
 
     // 2. Compute scroll range within sorted indices
     let sorted_len = state.sorted_indices.len();
@@ -1125,7 +1106,6 @@ pub fn render_overview(
         &visible_indices,
         state.filter_cursor,
         click_map,
-        batch_map,
     );
 
     // 5. Render panels
@@ -1153,7 +1133,6 @@ pub fn render_overview(
             .as_ref()
             .and_then(|rp| repo_colors.get(rp.as_str()))
             .map(|cn| theme::repo_color(cn));
-        let batch_info = batch_map.get(&panel.id);
         if let Some(content_area) = render_agent_panel(
             frame,
             panel_areas[i],
@@ -1161,7 +1140,6 @@ pub fn render_overview(
             is_focused,
             false,
             panel_color,
-            batch_info,
         ) {
             click_map
                 .overview_content_areas
@@ -1220,7 +1198,6 @@ fn render_options_bar(
     visible_indices: &HashSet<usize>,
     filter_cursor: usize,
     click_map: &mut ClickMap,
-    batch_map: &HashMap<String, BatchAgentInfo>,
 ) {
     let bar_bg = if focused {
         theme::R_BG_OVERLAY
@@ -1355,7 +1332,7 @@ fn render_options_bar(
         .map(|(i, r)| (r.path.as_str(), i))
         .collect();
 
-    // Collect all agents with their global indices, sorted by repo order then batch group
+    // Collect all agents with their global indices, sorted by repo order
     let mut all_agents: Vec<(usize, &AgentPanel)> = panels.iter().enumerate().collect();
     all_agents.sort_by(|&(_, a), &(_, b)| {
         let order_a = a
@@ -1369,46 +1346,15 @@ fn render_options_bar(
             .and_then(|rp| repo_order.get(rp).copied())
             .unwrap_or(usize::MAX);
 
-        let ba = batch_map.get(&a.id);
-        let bb = batch_map.get(&b.id);
-        let group_a = ba
-            .map(|bi| (1usize, bi.batch_id, bi.task_index))
-            .unwrap_or((0, 0, 0));
-        let group_b = bb
-            .map(|bi| (1usize, bi.batch_id, bi.task_index))
-            .unwrap_or((0, 0, 0));
-
         order_a
             .cmp(&order_b)
-            .then_with(|| group_a.cmp(&group_b))
             .then_with(|| a.branch_name.cmp(&b.branch_name))
             .then_with(|| a.id.cmp(&b.id))
     });
 
-    let mut last_batch_id: Option<usize> = None;
-
     for &(global_idx, panel) in &all_agents {
         let branch = panel.branch_name.as_deref().unwrap_or(&panel.id);
         let is_visible = visible_indices.contains(&global_idx);
-        let cur_batch = batch_map.get(&panel.id);
-
-        // Insert batch label when entering a new batch group
-        let cur_bid = cur_batch.map(|b| b.batch_id);
-        if cur_bid != last_batch_id {
-            if let Some(bi) = cur_batch {
-                let label = format!(" {}:", bi.batch_title);
-                let label_width = label.len() as u16;
-                spans.push(Span::styled(
-                    label,
-                    Style::default()
-                        .fg(theme::R_INFO)
-                        .bg(bar_bg)
-                        .add_modifier(Modifier::BOLD),
-                ));
-                x += label_width;
-            }
-        }
-        last_batch_id = cur_bid;
 
         let repo_color = panel
             .repo_path
@@ -1476,7 +1422,6 @@ pub(crate) fn render_agent_panel(
     focused: bool,
     in_focus_mode: bool,
     repo_color: Option<Color>,
-    batch_info: Option<&BatchAgentInfo>,
 ) -> Option<Rect> {
     if area.height < 3 {
         return None;
@@ -1494,22 +1439,6 @@ pub(crate) fn render_agent_panel(
         .borders(Borders::ALL)
         .border_style(Style::default().fg(border_color))
         .style(Style::default().bg(theme::R_BG_BASE));
-
-    // Show batch title in top border for batch agents
-    if let Some(bi) = batch_info {
-        block = block.title_top(Line::from(vec![
-            Span::styled(
-                format!(" {} ", bi.batch_title),
-                Style::default()
-                    .fg(theme::R_INFO)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(
-                format!("{}/{} ", bi.task_index + 1, bi.task_count),
-                Style::default().fg(theme::R_TEXT_TERTIARY),
-            ),
-        ]));
-    }
 
     if focused && !in_focus_mode {
         block = block.title_bottom(
@@ -1883,14 +1812,6 @@ impl BranchPicker {
     }
 }
 
-/// Metadata about the batch a focus-mode agent belongs to.
-#[derive(Clone, Debug)]
-pub struct BatchOrigin {
-    pub batch_title: String,
-    pub batch_idx: usize,
-    pub task_idx: usize,
-}
-
 /// State for the single-agent focus mode view.
 pub struct FocusModeState {
     pub panel: Option<AgentPanel>,
@@ -1898,8 +1819,6 @@ pub struct FocusModeState {
     output_tx: mpsc::Sender<AgentOutputEvent>,
     panel_cols: u16,
     panel_rows: u16,
-    /// Set when the agent was opened from a batch task.
-    pub batch_origin: Option<BatchOrigin>,
     // Left panel state
     pub focus_side: FocusSide,
     pub left_tab: LeftPanelTab,
@@ -1960,7 +1879,6 @@ impl FocusModeState {
             output_tx,
             panel_cols: 80,
             panel_rows: 24,
-            batch_origin: None,
             focus_side: FocusSide::Right,
             left_tab: LeftPanelTab::Changes,
             diff: None,
@@ -2021,7 +1939,6 @@ impl FocusModeState {
 
         self.panel_cols = cols;
         self.panel_rows = rows;
-        self.batch_origin = None;
         self.focus_side = FocusSide::Right;
         self.left_tab = LeftPanelTab::Changes;
         self.diff = None;
@@ -2772,7 +2689,6 @@ pub fn render_focus_mode(
                 right_focused,
                 true,
                 panel_color,
-                None,
             ) {
                 click_map.focus_right_content_area = content_area;
             }
