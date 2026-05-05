@@ -61,6 +61,10 @@ pub struct TaskJson {
     /// Whether this task starts in plan mode. Defaults to batch-level plan_mode if omitted.
     #[serde(default)]
     pub plan_mode: bool,
+    /// When true, the agent terminates itself at its first natural stopping
+    /// point so the task auto-completes. Defaults to `false`.
+    #[serde(default)]
+    pub exit_when_done: bool,
 }
 
 fn default_true() -> bool {

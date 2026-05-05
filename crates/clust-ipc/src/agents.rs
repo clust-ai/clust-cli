@@ -15,6 +15,9 @@ pub struct KnownAgent {
     /// CLI args to append to allow bypass-permissions after exiting plan mode.
     /// `None` means this agent does not support the feature.
     pub allow_bypass_args: Option<&'static [&'static str]>,
+    /// Whether this agent supports an "exit when done" Stop hook injected via
+    /// a per-spawn settings file passed with `--settings <path>`.
+    pub supports_stop_hook: bool,
     /// Whether this agent has been tested with clust.
     pub tested: bool,
 }
@@ -28,6 +31,7 @@ pub const KNOWN_AGENTS: &[KnownAgent] = &[
         bypass_permissions_args: Some(&["--dangerously-skip-permissions"]),
         plan_mode_args: Some(&["--permission-mode", "plan"]),
         allow_bypass_args: Some(&["--allow-dangerously-skip-permissions"]),
+        supports_stop_hook: true,
         tested: true,
     },
     KnownAgent {
@@ -37,6 +41,7 @@ pub const KNOWN_AGENTS: &[KnownAgent] = &[
         bypass_permissions_args: None,
         plan_mode_args: None,
         allow_bypass_args: None,
+        supports_stop_hook: false,
         tested: false,
     },
     KnownAgent {
@@ -46,6 +51,7 @@ pub const KNOWN_AGENTS: &[KnownAgent] = &[
         bypass_permissions_args: None,
         plan_mode_args: None,
         allow_bypass_args: None,
+        supports_stop_hook: false,
         tested: false,
     },
     KnownAgent {
@@ -55,6 +61,7 @@ pub const KNOWN_AGENTS: &[KnownAgent] = &[
         bypass_permissions_args: None,
         plan_mode_args: None,
         allow_bypass_args: None,
+        supports_stop_hook: false,
         tested: false,
     },
 ];
@@ -93,6 +100,16 @@ pub fn allow_bypass_args_for(binary: &str) -> Option<&'static [&'static str]> {
         .iter()
         .find(|a| a.binary == binary)
         .and_then(|a| a.allow_bypass_args)
+}
+
+/// Whether the given agent binary supports the per-spawn Stop hook injection
+/// that powers "exit when done". Unknown binaries default to `false`.
+pub fn supports_stop_hook(binary: &str) -> bool {
+    KNOWN_AGENTS
+        .iter()
+        .find(|a| a.binary == binary)
+        .map(|a| a.supports_stop_hook)
+        .unwrap_or(false)
 }
 
 #[cfg(test)]
@@ -196,5 +213,15 @@ mod tests {
             .collect();
         assert!(tested.contains(&"claude"));
         assert_eq!(tested.len(), 1);
+    }
+
+    #[test]
+    fn supports_stop_hook_only_for_claude() {
+        assert!(supports_stop_hook("claude"));
+        assert!(!supports_stop_hook("opencode"));
+        assert!(!supports_stop_hook("aider"));
+        assert!(!supports_stop_hook("codex"));
+        assert!(!supports_stop_hook("unknown-binary"));
+        assert!(!supports_stop_hook(""));
     }
 }

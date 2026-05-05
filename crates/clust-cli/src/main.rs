@@ -75,6 +75,15 @@ async fn main() {
         .clone()
         .unwrap_or_else(|| clust_ipc::DEFAULT_HUB.into());
 
+    // Hidden subcommand: clust internal stop-hook
+    // Invoked by the per-spawn settings file the hub writes when "exit when done"
+    // is enabled on a task. Sends SIGTERM to the parent (the agent process) and
+    // exits, letting the hub's existing process-exit-as-Done flow run.
+    if let Some(cli::Commands::Internal(cli::InternalCommands::StopHook)) = args.command {
+        handle_internal_stop_hook();
+        return;
+    }
+
     // Subcommand: ui (also triggered by `clust .`)
     if matches!(args.command, Some(cli::Commands::Ui)) || args.prompt.as_deref() == Some(".") {
         if let Err(e) = ui::run(&hub_name) {
@@ -1973,6 +1982,24 @@ fn read_custom_agent() -> DefaultPickerResult {
             }
             _ => {}
         }
+    }
+}
+
+/// Handler for `clust internal stop-hook`.
+///
+/// Invoked by the Stop-hook settings file the hub injects when a task has
+/// "exit when done" enabled. Claude runs this as a child of the agent process
+/// after producing its final response, so PPID is the agent's PID. SIGTERM lets
+/// the agent exit cleanly; the PTY reader then transitions the task to Done.
+///
+/// macOS + Linux only — Windows is out of scope for the first pass.
+fn handle_internal_stop_hook() {
+    // SAFETY: getppid is always safe; it returns the parent pid.
+    let ppid = unsafe { libc::getppid() };
+    if ppid > 1 {
+        // SAFETY: kill(2) with SIGTERM is safe; ignore the result — if the
+        // parent already exited we have nothing to do.
+        unsafe { libc::kill(ppid, libc::SIGTERM) };
     }
 }
 

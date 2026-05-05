@@ -133,6 +133,9 @@ pub struct AgentEntry {
     pub branch_name: Option<String>,
     /// Whether the agent's working_dir is a git worktree checkout.
     pub is_worktree: bool,
+    /// Path to the per-spawn settings file (Stop hook for "exit when done").
+    /// Removed when the agent process exits.
+    pub settings_path: Option<std::path::PathBuf>,
 }
 
 impl AgentEntry {
@@ -211,6 +214,10 @@ pub struct SpawnAgentParams {
     pub repo_path: Option<String>,
     pub branch_name: Option<String>,
     pub is_worktree: bool,
+    /// When true and the resolved agent binary advertises a Stop hook, the hub
+    /// writes a per-spawn settings file and passes `--settings <path>` so the
+    /// agent terminates itself at its first natural stopping point.
+    pub exit_when_done: bool,
 }
 
 /// Spawn a new agent process inside a PTY.
@@ -271,6 +278,25 @@ pub fn spawn_agent(
             }
         }
     }
+
+    let settings_path = if params.exit_when_done
+        && clust_ipc::agents::supports_stop_hook(&binary)
+    {
+        match write_exit_when_done_settings(&id) {
+            Ok(path) => {
+                cmd.arg("--settings");
+                cmd.arg(&path);
+                Some(path)
+            }
+            Err(e) => {
+                eprintln!("[hub] exit-when-done settings injection failed for agent {id}: {e}");
+                None
+            }
+        }
+    } else {
+        None
+    };
+
     cmd.cwd(&params.working_dir);
 
     let child = pair
@@ -328,10 +354,52 @@ pub fn spawn_agent(
         repo_path: params.repo_path,
         branch_name: params.branch_name,
         is_worktree: params.is_worktree,
+        settings_path,
     };
 
     state.agents.insert(id.clone(), entry);
     Ok((id, binary_name))
+}
+
+/// Write a per-agent settings file that registers a `Stop` hook firing
+/// `clust internal stop-hook`, which terminates the parent agent process so
+/// the task transitions to Done as soon as the model finishes responding.
+///
+/// The file lives at `<clust_dir>/agents/<agent_id>/settings.json` and is
+/// passed to the agent via `--settings <path>`. It is removed when the agent
+/// exits (see the PTY reader's cleanup path).
+fn write_exit_when_done_settings(agent_id: &str) -> Result<std::path::PathBuf, String> {
+    let dir = clust_ipc::clust_dir().join("agents").join(agent_id);
+    std::fs::create_dir_all(&dir)
+        .map_err(|e| format!("failed to create agent settings dir: {e}"))?;
+    let path = dir.join("settings.json");
+    let cmd = stop_hook_command()?;
+    let json = format!(
+        "{{\"hooks\":{{\"Stop\":[{{\"hooks\":[{{\"type\":\"command\",\"command\":\"{}\"}}]}}]}}}}",
+        cmd.replace('\\', "\\\\").replace('"', "\\\"")
+    );
+    std::fs::write(&path, json)
+        .map_err(|e| format!("failed to write agent settings file: {e}"))?;
+    Ok(path)
+}
+
+/// Resolve the absolute command string the agent's Stop hook should invoke.
+/// Prefers a `clust` binary sitting next to the running `clust-hub` so users
+/// who installed both into `~/.clust/bin/` get the expected behavior even when
+/// the hook runs without inheriting `PATH`.
+fn stop_hook_command() -> Result<String, String> {
+    let exe = std::env::current_exe()
+        .map_err(|e| format!("failed to resolve current_exe: {e}"))?;
+    let dir = exe
+        .parent()
+        .ok_or_else(|| "current_exe has no parent dir".to_string())?;
+    let candidate = dir.join("clust");
+    let cli = if candidate.exists() {
+        candidate
+    } else {
+        std::path::PathBuf::from("clust")
+    };
+    Ok(format!("{} internal stop-hook", cli.display()))
 }
 
 /// Background task that reads from the PTY master and broadcasts output.
@@ -380,16 +448,24 @@ fn spawn_pty_reader(
         // servers, etc.) don't linger after the agent dies.
         let handle = tokio::runtime::Handle::current();
         handle.block_on(async {
-            let terminal_ids: Vec<String> = {
+            let (terminal_ids, settings_path) = {
                 let mut hub = state.lock().await;
-                hub.agents.remove(&agent_id);
+                let removed = hub.agents.remove(&agent_id);
                 crate::batch::on_agent_exited(&mut hub, &agent_id);
-                hub.terminals
+                let tids: Vec<String> = hub
+                    .terminals
                     .values()
                     .filter(|t| t.agent_id.as_deref() == Some(agent_id.as_str()))
                     .map(|t| t.id.clone())
-                    .collect()
+                    .collect();
+                (tids, removed.and_then(|a| a.settings_path))
             };
+            if let Some(path) = settings_path {
+                let _ = std::fs::remove_file(&path);
+                if let Some(parent) = path.parent() {
+                    let _ = std::fs::remove_dir(parent);
+                }
+            }
             for tid in terminal_ids {
                 let state = state.clone();
                 tokio::spawn(async move {
@@ -789,6 +865,7 @@ mod tests {
                     repo_path: None,
                     branch_name: None,
                     is_worktree: false,
+                    settings_path: None,
                 },
             );
         }

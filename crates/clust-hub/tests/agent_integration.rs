@@ -31,6 +31,7 @@ async fn spawn_agent_echo_produces_output() {
                 repo_path: None,
                 branch_name: None,
                 is_worktree: false,
+                exit_when_done: false,
             },
             state.clone(),
         )
@@ -105,6 +106,7 @@ async fn spawn_agent_cat_receives_input_and_echoes() {
                 repo_path: None,
                 branch_name: None,
                 is_worktree: false,
+                exit_when_done: false,
             },
             state.clone(),
         )
@@ -190,6 +192,7 @@ async fn multiple_subscribers_receive_same_output() {
                 repo_path: None,
                 branch_name: None,
                 is_worktree: false,
+                exit_when_done: false,
             },
             state.clone(),
         )
@@ -274,6 +277,7 @@ async fn attached_count_tracks_subscribers() {
                 repo_path: None,
                 branch_name: None,
                 is_worktree: false,
+                exit_when_done: false,
             },
             state.clone(),
         )
@@ -326,6 +330,7 @@ async fn stop_agent_terminates_running_process() {
                 repo_path: None,
                 branch_name: None,
                 is_worktree: false,
+                exit_when_done: false,
             },
             state.clone(),
         )
@@ -399,6 +404,7 @@ async fn resize_agent_pty() {
                 repo_path: None,
                 branch_name: None,
                 is_worktree: false,
+                exit_when_done: false,
             },
             state.clone(),
         )
@@ -449,6 +455,7 @@ async fn spawn_agent_stores_custom_hub_name() {
                 repo_path: None,
                 branch_name: None,
                 is_worktree: false,
+                exit_when_done: false,
             },
             state.clone(),
         )
@@ -495,6 +502,7 @@ async fn agents_in_different_hubs_are_separated() {
                 repo_path: None,
                 branch_name: None,
                 is_worktree: false,
+                exit_when_done: false,
             },
             state.clone(),
         )
@@ -518,6 +526,7 @@ async fn agents_in_different_hubs_are_separated() {
                 repo_path: None,
                 branch_name: None,
                 is_worktree: false,
+                exit_when_done: false,
             },
             state.clone(),
         )
