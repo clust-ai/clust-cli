@@ -143,6 +143,7 @@ impl CreateAgentModal {
                 if self.selected_idx > 0 {
                     self.selected_idx -= 1;
                 }
+                self.clamp_selected_idx();
                 ModalResult::Pending
             }
             KeyCode::Down => {
@@ -150,6 +151,7 @@ impl CreateAgentModal {
                 if self.selected_idx < max {
                     self.selected_idx += 1;
                 }
+                self.clamp_selected_idx();
                 ModalResult::Pending
             }
             KeyCode::Backspace => {
@@ -162,6 +164,7 @@ impl CreateAgentModal {
                     self.input.remove(self.cursor_pos);
                     self.selected_idx = 0;
                 }
+                self.clamp_selected_idx();
                 ModalResult::Pending
             }
             KeyCode::Left => {
@@ -197,9 +200,23 @@ impl CreateAgentModal {
                 self.input.insert(self.cursor_pos, c);
                 self.cursor_pos += c.len_utf8();
                 self.selected_idx = 0;
+                self.clamp_selected_idx();
                 ModalResult::Pending
             }
             _ => ModalResult::Pending,
+        }
+    }
+
+    /// Clamp `selected_idx` so it can never exceed the current filtered list
+    /// length. Call this whenever `input` changes (filter shrinks/grows) or
+    /// after navigation. Without this, typing into the filter to empty the
+    /// list and then backspacing leaves `selected_idx` past the end.
+    fn clamp_selected_idx(&mut self) {
+        let len = self.filtered_count();
+        if len == 0 {
+            self.selected_idx = 0;
+        } else {
+            self.selected_idx = self.selected_idx.min(len - 1);
         }
     }
 
@@ -272,6 +289,7 @@ impl CreateAgentModal {
             self.cursor_pos += c.len_utf8();
         }
         self.selected_idx = 0;
+        self.clamp_selected_idx();
     }
 
     fn reset_input(&mut self) {

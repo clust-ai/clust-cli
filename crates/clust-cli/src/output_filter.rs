@@ -186,9 +186,22 @@ impl OutputFilter for EscapeSequenceAssembler {
         let mut combined = std::mem::take(&mut self.pending);
         combined.extend_from_slice(data);
 
-        // Safety valve: if buffer is too large, flush everything and reset
+        // Safety valve: if the buffer has grown past `MAX_PENDING` we are
+        // dealing with a pathologically long sequence (or garbage). Rather
+        // than dump everything to stdout (which would paint partial-escape
+        // garbage), degrade gracefully: emit everything up to the last
+        // `0x1b` and re-buffer the trailing partial. If there is no `0x1b`
+        // at all, emit the entire buffer.
         if combined.len() > MAX_PENDING {
-            return combined;
+            match combined.iter().rposition(|&b| b == 0x1b) {
+                Some(last_esc) => {
+                    self.pending = combined[last_esc..].to_vec();
+                    return combined[..last_esc].to_vec();
+                }
+                None => {
+                    return combined;
+                }
+            }
         }
 
         // Parse from Ground — pending bytes are always the start of an
@@ -425,11 +438,31 @@ mod tests {
     }
 
     #[test]
-    fn safety_valve_flushes_on_overflow() {
+    fn safety_valve_drops_only_trailing_partial_on_overflow() {
+        // Pre-bug-fix behaviour was to dump the entire buffer (including any
+        // trailing partial escape) to stdout on overflow, painting garbage
+        // in the user's terminal. The new contract: re-buffer the trailing
+        // partial and only emit complete bytes before it.
         let mut asm = EscapeSequenceAssembler::new();
         let mut big = Vec::new();
+        big.extend_from_slice(b"safe-prefix");
         big.extend_from_slice(b"\x1b]0;");
         big.extend(vec![b'X'; MAX_PENDING + 100]);
+        let output = asm.filter(&big);
+        // Everything before the trailing ESC is safe and emitted.
+        assert_eq!(output, b"safe-prefix");
+        // The trailing partial-OSC sequence is buffered as pending.
+        assert!(asm.pending.starts_with(b"\x1b]0;"));
+        assert!(asm.pending.len() > MAX_PENDING);
+    }
+
+    #[test]
+    fn safety_valve_dumps_when_no_trailing_esc() {
+        // If the overflowing buffer contains no ESC at all (it's just very
+        // long ground-state text), there's nothing partial to protect, so
+        // we still emit everything.
+        let mut asm = EscapeSequenceAssembler::new();
+        let big = vec![b'a'; MAX_PENDING + 100];
         let output = asm.filter(&big);
         assert_eq!(output.len(), big.len());
         assert!(asm.pending.is_empty());

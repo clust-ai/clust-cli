@@ -66,6 +66,7 @@ impl SearchModal {
                 if self.selected_idx > 0 {
                     self.selected_idx -= 1;
                 }
+                self.clamp_selected_idx();
                 SearchResult::Pending
             }
             KeyCode::Down => {
@@ -73,6 +74,7 @@ impl SearchModal {
                 if self.selected_idx < max {
                     self.selected_idx += 1;
                 }
+                self.clamp_selected_idx();
                 SearchResult::Pending
             }
             KeyCode::Backspace => {
@@ -85,6 +87,7 @@ impl SearchModal {
                     self.input.remove(self.cursor_pos);
                     self.selected_idx = 0;
                 }
+                self.clamp_selected_idx();
                 SearchResult::Pending
             }
             KeyCode::Left => {
@@ -116,6 +119,7 @@ impl SearchModal {
                 self.input.insert(self.cursor_pos, c);
                 self.cursor_pos += c.len_utf8();
                 self.selected_idx = 0;
+                self.clamp_selected_idx();
                 SearchResult::Pending
             }
             _ => SearchResult::Pending,
@@ -131,6 +135,20 @@ impl SearchModal {
             self.cursor_pos += c.len_utf8();
         }
         self.selected_idx = 0;
+        self.clamp_selected_idx();
+    }
+
+    /// Clamp `selected_idx` so it can never exceed the current filtered list
+    /// length. Call this whenever `input` changes (filter shrinks/grows) or
+    /// after navigation. Without this, typing into the filter to empty the
+    /// list and then backspacing leaves `selected_idx` past the end.
+    fn clamp_selected_idx(&mut self) {
+        let len = self.filtered_agents().len();
+        if len == 0 {
+            self.selected_idx = 0;
+        } else {
+            self.selected_idx = self.selected_idx.min(len - 1);
+        }
     }
 
     // -----------------------------------------------------------------------

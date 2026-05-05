@@ -1,8 +1,17 @@
+use unicode_normalization::UnicodeNormalization;
+
+/// Fallback branch name used whenever sanitization produces an invalid or
+/// rejected result. Centralised so all rejection paths return the same value.
+const FALLBACK: &str = "branch";
+
 /// Sanitize arbitrary user input into a valid git branch name that is also
 /// safe for use as a filesystem directory name.
 ///
 /// Transformations applied (in order):
+/// - NFC-normalize the input (so visually identical inputs compare equal)
 /// - Trim whitespace
+/// - Reject inputs that look like ref paths (`refs/heads/…`, `refs/remotes/…`)
+/// - Reject inputs containing reflog form `@{`
 /// - Spaces → `-`
 /// - `/` and `\` → `__`
 /// - Git-invalid chars (`~ ^ : ? * [ ] { }`) → `-`
@@ -14,15 +23,31 @@
 /// - Leading/trailing `.`, `-`, `_` stripped
 /// - Trailing `.lock` stripped
 /// - Bare `@` → `"at"`
-/// - Empty result → `"branch"`
+/// - After all rules, anything starting with `.` or with the literal directory
+///   form of `refs__heads__`/`refs__remotes__` is rejected
+/// - Empty / rejected result → `"branch"`
 pub fn sanitize_branch_name(input: &str) -> String {
-    let mut s = String::with_capacity(input.len());
+    // Step 0: NFC-normalize so e.g. precomposed and decomposed forms collapse.
+    let normalized: String = input.nfc().collect();
 
     // Step 1: trim
-    let trimmed = input.trim();
+    let trimmed = normalized.trim();
     if trimmed.is_empty() {
-        return "branch".to_string();
+        return FALLBACK.to_string();
     }
+
+    // Pre-sanitization rejections — these protect against users typing the
+    // literal git ref form, which would silently land on disk as a working
+    // branch name and confuse refspec resolution.
+    if trimmed.starts_with("refs/heads/") || trimmed.starts_with("refs/remotes/") {
+        return FALLBACK.to_string();
+    }
+    // Reflog form `name@{n}` is never a legal branch name.
+    if trimmed.contains("@{") {
+        return FALLBACK.to_string();
+    }
+
+    let mut s = String::with_capacity(trimmed.len());
 
     // Steps 2-5: character-level replacements
     for ch in trimmed.chars() {
@@ -73,7 +98,23 @@ pub fn sanitize_branch_name(input: &str) -> String {
         return "at".to_string();
     }
     if s.is_empty() {
-        return "branch".to_string();
+        return FALLBACK.to_string();
+    }
+
+    // Post-sanitization rejections.
+    //
+    // Git refuses ref components that begin with a `.`. Our trim above strips
+    // leading `.`s, so a leading `.` here means the rule was bypassed by some
+    // composition we did not anticipate — be conservative and reject.
+    if s.starts_with('.') {
+        return FALLBACK.to_string();
+    }
+    // The `/` → `__` replacement means a ref-path input (already rejected
+    // above) cannot reach this point, but a user typing the directory form
+    // literally (`refs__heads__main`) should still be rejected: the on-disk
+    // form would shadow the actual ref namespace.
+    if s.starts_with("refs__heads__") || s.starts_with("refs__remotes__") {
+        return FALLBACK.to_string();
     }
 
     s
@@ -193,9 +234,8 @@ mod tests {
 
     #[test]
     fn at_brace_replaced() {
-        // `{` is already replaced by char-level step, so `@{` won't appear,
-        // but verify the output is clean
-        assert_eq!(sanitize_branch_name("test@{0}"), "test@-0");
+        // `@{` is a reflog form — reject outright rather than mangling it.
+        assert_eq!(sanitize_branch_name("test@{0}"), "branch");
     }
 
     // ── .lock suffix ────────────────────────────────────────────────
@@ -291,5 +331,78 @@ mod tests {
             let twice = sanitize_branch_name(&once);
             assert_eq!(once, twice, "not idempotent for input: {input:?}");
         }
+    }
+
+    // ── Rejection: refs paths ───────────────────────────────────────
+
+    #[test]
+    fn rejects_refs_heads_input() {
+        assert_eq!(sanitize_branch_name("refs/heads/main"), "branch");
+    }
+
+    #[test]
+    fn rejects_refs_remotes_input() {
+        assert_eq!(sanitize_branch_name("refs/remotes/origin/main"), "branch");
+    }
+
+    #[test]
+    fn rejects_refs_heads_with_extra_path() {
+        assert_eq!(sanitize_branch_name("refs/heads/feature/auth"), "branch");
+    }
+
+    #[test]
+    fn rejects_refs_heads_underscore_form() {
+        // Even if the user types the directory form directly, reject it so
+        // the on-disk worktree namespace can't be shadowed.
+        assert_eq!(sanitize_branch_name("refs__heads__main"), "branch");
+    }
+
+    #[test]
+    fn rejects_refs_remotes_underscore_form() {
+        assert_eq!(sanitize_branch_name("refs__remotes__origin"), "branch");
+    }
+
+    #[test]
+    fn allows_branch_named_refs() {
+        // A bare component named "refs" without the heads/remotes suffix is
+        // legal (uncommon but not malicious).
+        assert_eq!(sanitize_branch_name("refs"), "refs");
+    }
+
+    // ── Rejection: reflog form ─────────────────────────────────────
+
+    #[test]
+    fn rejects_reflog_form() {
+        assert_eq!(sanitize_branch_name("HEAD@{0}"), "branch");
+    }
+
+    #[test]
+    fn rejects_reflog_form_with_text() {
+        assert_eq!(sanitize_branch_name("main@{yesterday}"), "branch");
+    }
+
+    // ── Rejection: leading dot survives ─────────────────────────────
+
+    #[test]
+    fn rejects_only_dots_after_sanitize() {
+        // `..foo` would have leading dots stripped to `foo`, which is fine.
+        // The leading-dot rejection guards against future regressions.
+        assert_eq!(sanitize_branch_name("..foo"), "foo");
+    }
+
+    // ── NFC normalization ───────────────────────────────────────────
+
+    #[test]
+    fn nfc_normalizes_combining_form() {
+        // "é" can be encoded as a single codepoint (U+00E9, NFC) or as
+        // "e" + combining acute (U+0065 U+0301, NFD). Both should produce
+        // the same sanitized output (NFC form).
+        let nfc = "caf\u{00e9}"; // café (precomposed)
+        let nfd = "cafe\u{0301}"; // café (decomposed)
+        assert_eq!(sanitize_branch_name(nfc), sanitize_branch_name(nfd));
+        // And the result should be in NFC (single codepoint).
+        let result = sanitize_branch_name(nfd);
+        assert!(result.contains('\u{00e9}'));
+        assert!(!result.contains('\u{0301}'));
     }
 }

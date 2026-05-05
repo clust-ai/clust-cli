@@ -65,9 +65,29 @@ pub enum AgentOutputEvent {
 
 /// Events received from terminal connection tasks.
 pub enum TerminalOutputEvent {
-    Output { id: String, data: Vec<u8> },
-    Exited { id: String },
-    ConnectionLost { id: String },
+    /// Sent once, immediately after the hub acknowledges `StartTerminal`. Lets
+    /// the owning panel learn its id before any output arrives so click rects
+    /// and id-routed output never race.
+    Started {
+        id: String,
+    },
+    Output {
+        id: String,
+        data: Vec<u8>,
+    },
+    Exited {
+        id: String,
+    },
+    ConnectionLost {
+        id: String,
+    },
+    /// The connection task could not start (e.g., hub rejected the request or
+    /// the socket was unreachable). Surfaced to the UI as a transient status
+    /// line. The `id` is empty when the failure occurred before the hub
+    /// acknowledged the terminal.
+    SpawnFailed {
+        message: String,
+    },
 }
 
 /// A terminal shell panel in focus mode.
@@ -88,9 +108,19 @@ impl TerminalPanel {
     /// Drain pending output events into the panel's vterm. Should be called
     /// every main-loop tick whether or not focus mode is currently displaying
     /// this panel.
-    pub fn drain_events(&mut self) {
+    ///
+    /// Returns a `SpawnFailed` message string if the connection task reported
+    /// a spawn failure during this drain, so the caller can surface it on the
+    /// status line.
+    pub fn drain_events(&mut self) -> Option<String> {
+        let mut spawn_failure: Option<String> = None;
         while let Ok(event) = self.event_rx.try_recv() {
             match event {
+                TerminalOutputEvent::Started { id } => {
+                    if self.id.is_empty() {
+                        self.id = id;
+                    }
+                }
                 TerminalOutputEvent::Output { id, data } => {
                     if self.id.is_empty() || self.id == id {
                         if self.id.is_empty() {
@@ -104,8 +134,13 @@ impl TerminalPanel {
                         self.exited = true;
                     }
                 }
+                TerminalOutputEvent::SpawnFailed { message } => {
+                    self.exited = true;
+                    spawn_failure = Some(message);
+                }
             }
         }
+        spawn_failure
     }
 }
 
@@ -127,11 +162,16 @@ impl AgentTerminalCache {
 
     /// Drain events for every cached panel so backgrounded shells keep
     /// accumulating scrollback while focus mode is closed or while the user is
-    /// looking at a sibling terminal.
-    pub fn drain_events(&mut self) {
+    /// looking at a sibling terminal. Returns the most recent spawn-failure
+    /// message, if any, so the UI can surface it.
+    pub fn drain_events(&mut self) -> Option<String> {
+        let mut last_failure: Option<String> = None;
         for panel in &mut self.panels {
-            panel.drain_events();
+            if let Some(msg) = panel.drain_events() {
+                last_failure = Some(msg);
+            }
         }
+        last_failure
     }
 }
 
@@ -856,9 +896,11 @@ async fn terminal_connection_task(
 ) {
     let stream = match ipc::try_connect().await {
         Ok(s) => s,
-        Err(_) => {
+        Err(e) => {
             let _ = event_tx
-                .send(TerminalOutputEvent::ConnectionLost { id: String::new() })
+                .send(TerminalOutputEvent::SpawnFailed {
+                    message: format!("hub unreachable ({})", e),
+                })
                 .await;
             return;
         }
@@ -867,7 +909,7 @@ async fn terminal_connection_task(
     let (mut reader, mut writer) = stream.into_split();
 
     // Send StartTerminal
-    if clust_ipc::send_message_write(
+    if let Err(e) = clust_ipc::send_message_write(
         &mut writer,
         &CliMessage::StartTerminal {
             working_dir,
@@ -877,10 +919,11 @@ async fn terminal_connection_task(
         },
     )
     .await
-    .is_err()
     {
         let _ = event_tx
-            .send(TerminalOutputEvent::ConnectionLost { id: String::new() })
+            .send(TerminalOutputEvent::SpawnFailed {
+                message: format!("send StartTerminal failed ({})", e),
+            })
             .await;
         return;
     }
@@ -888,13 +931,31 @@ async fn terminal_connection_task(
     // Read response
     let terminal_id = match clust_ipc::recv_message_read::<HubMessage>(&mut reader).await {
         Ok(HubMessage::TerminalStarted { id }) => id,
-        _ => {
+        Ok(other) => {
             let _ = event_tx
-                .send(TerminalOutputEvent::ConnectionLost { id: String::new() })
+                .send(TerminalOutputEvent::SpawnFailed {
+                    message: format!("hub rejected start (got {:?})", other),
+                })
+                .await;
+            return;
+        }
+        Err(e) => {
+            let _ = event_tx
+                .send(TerminalOutputEvent::SpawnFailed {
+                    message: format!("hub closed before reply ({})", e),
+                })
                 .await;
             return;
         }
     };
+
+    // Inform the panel of its id immediately so click rects, switches and
+    // id-routed output don't race against the first output frame.
+    let _ = event_tx
+        .send(TerminalOutputEvent::Started {
+            id: terminal_id.clone(),
+        })
+        .await;
 
     // Consume replay data
     loop {
@@ -1779,12 +1840,8 @@ impl BranchPicker {
                 false
             }
             KeyCode::Right => {
-                if self.cursor_pos < self.input.len() {
-                    self.cursor_pos += self.input[self.cursor_pos..]
-                        .chars()
-                        .next()
-                        .unwrap()
-                        .len_utf8();
+                if let Some(ch) = self.input[self.cursor_pos..].chars().next() {
+                    self.cursor_pos += ch.len_utf8();
                 }
                 false
             }
@@ -1793,6 +1850,13 @@ impl BranchPicker {
     }
 
     pub fn handle_paste(&mut self, text: &str) {
+        // `cursor_pos` is a byte offset into `self.input` (consistent with
+        // `String::insert`, which also takes a byte index). Iterating over
+        // `chars()` yields a `char` per Unicode scalar value, and advancing the
+        // cursor by `c.len_utf8()` after `String::insert(byte_idx, c)` keeps
+        // the offset on a valid char boundary. Multi-codepoint grapheme
+        // clusters (e.g., emoji + variation selector) are inserted scalar by
+        // scalar, which is acceptable here.
         for c in text.chars() {
             if c == '\n' || c == '\r' {
                 continue;
@@ -1877,6 +1941,11 @@ pub struct FocusModeState {
     pub terminal_input_focused: bool,
     terminal_cols: u16,
     terminal_rows: u16,
+    /// Transient one-line message displayed at the bottom of the terminal
+    /// content area. Set when a terminal connection task reports a spawn
+    /// failure; cleared when the user dismisses or successfully spawns a new
+    /// terminal.
+    pub terminal_status_message: Option<String>,
 }
 
 impl FocusModeState {
@@ -1925,6 +1994,7 @@ impl FocusModeState {
             terminal_input_focused: false,
             terminal_cols: 80,
             terminal_rows: 24,
+            terminal_status_message: None,
         }
     }
 
@@ -2212,6 +2282,8 @@ impl FocusModeState {
             handle.abort();
         }
         self.pr_info = None;
+        // Clear any transient terminal status banner.
+        self.terminal_status_message = None;
     }
 
     /// Stop the branch compare diff background task.
@@ -2254,6 +2326,10 @@ impl FocusModeState {
             task_handle: handle,
         });
         self.current_terminal_idx = self.terminal_panels.len() - 1;
+        // Clear any stale spawn-failure banner — the user just asked for a
+        // fresh attempt. If this attempt also fails, drain_terminal_events
+        // will repopulate the message.
+        self.terminal_status_message = None;
     }
 
     /// Add a new terminal session for the currently-open agent. No-op if no
@@ -2335,9 +2411,14 @@ impl FocusModeState {
     /// backgrounded shells keep accumulating scrollback. Cached panels in
     /// `OverviewState::agent_terminals` drain their own events via
     /// `OverviewState::drain_cached_terminal_events`.
+    ///
+    /// Any spawn-failure message reported by a connection task is surfaced
+    /// onto `terminal_status_message` so the UI can show a one-line notice.
     pub fn drain_terminal_events(&mut self) {
         for panel in &mut self.terminal_panels {
-            panel.drain_events();
+            if let Some(msg) = panel.drain_events() {
+                self.terminal_status_message = Some(format!("Failed to spawn terminal: {}", msg));
+            }
         }
     }
 
@@ -2781,12 +2862,24 @@ fn render_terminal_tab(
     let panel_focused = state.focus_side == FocusSide::Left;
     let in_type_mode = state.terminal_input_focused;
 
-    // Split into label strip (1 row) + content.
+    // Split into label strip (1 row) + content + optional status row.
     if area.height < 1 {
         return;
     }
-    let [label_area, content_area] =
-        Layout::vertical([Constraint::Length(1), Constraint::Min(0)]).areas(area);
+    let has_status = state.terminal_status_message.is_some() && area.height >= 3;
+    let (label_area, content_area, status_area) = if has_status {
+        let [label_area, content_area, status_area] = Layout::vertical([
+            Constraint::Length(1),
+            Constraint::Min(0),
+            Constraint::Length(1),
+        ])
+        .areas(area);
+        (label_area, content_area, Some(status_area))
+    } else {
+        let [label_area, content_area] =
+            Layout::vertical([Constraint::Length(1), Constraint::Min(0)]).areas(area);
+        (label_area, content_area, None)
+    };
 
     render_terminal_label_strip(
         frame,
@@ -2796,6 +2889,17 @@ fn render_terminal_tab(
         panel_focused,
         click_map,
     );
+
+    // Paint the status line first (if any), so subsequent early returns from
+    // the content-area branches don't skip it.
+    if let (Some(area), Some(msg)) = (status_area, state.terminal_status_message.as_deref()) {
+        let status_line = Paragraph::new(Line::from(Span::styled(
+            format!(" {} ", msg),
+            Style::default().fg(theme::R_ERROR).bg(theme::R_BG_SURFACE),
+        )))
+        .style(Style::default().bg(theme::R_BG_SURFACE));
+        frame.render_widget(status_line, area);
+    }
 
     click_map.focus_terminal_content_area = content_area;
 
@@ -2864,6 +2968,17 @@ fn render_terminal_label_strip(
     let mut spans: Vec<Span> = Vec::new();
     let mut cursor_x = area.x;
 
+    // Reserve room for the right-aligned [+] button so labels never crowd it.
+    let plus_label = " + ";
+    let plus_width = plus_label.chars().count() as u16;
+    let area_end = area.x.saturating_add(area.width);
+    // Stop registering label rects once the next one would overflow into the
+    // [+] reservation. We always leave room for the [+] (3 cols) plus a single
+    // ellipsis cell, so widths below 4 truncate everything.
+    let labels_budget_end = area_end.saturating_sub(plus_width);
+
+    let mut truncated = false;
+
     for (idx, panel) in panels.iter().enumerate() {
         let is_active = idx == current_idx;
         let label = if panel.exited {
@@ -2886,32 +3001,55 @@ fn render_terminal_label_strip(
             Style::default().fg(fg).bg(bg)
         };
         let label_width = label.chars().count() as u16;
-        click_map.focus_terminal_labels.push((
-            Rect {
-                x: cursor_x,
-                y: area.y,
-                width: label_width,
-                height: 1,
-            },
-            idx,
-        ));
+
+        // If this label would extend past the reserved budget, stop adding
+        // labels and show a one-cell ellipsis instead. Click rects beyond the
+        // visible region must not be registered or clicks land on hidden cells.
+        if cursor_x.saturating_add(label_width) > labels_budget_end {
+            truncated = true;
+            break;
+        }
+
+        // Render the visual label even when the panel id is empty, but skip
+        // the click rect so the user can't switch into a panel that hasn't
+        // received its hub-assigned id yet.
+        if !panel.id.is_empty() {
+            click_map.focus_terminal_labels.push((
+                Rect {
+                    x: cursor_x,
+                    y: area.y,
+                    width: label_width,
+                    height: 1,
+                },
+                idx,
+            ));
+        }
         spans.push(Span::styled(label, style));
         cursor_x += label_width;
 
-        // separator between labels (small gap)
-        if idx + 1 < panels.len() {
+        // separator between labels (small gap), only if both the separator
+        // and at least one more cell of label can still fit.
+        if idx + 1 < panels.len() && cursor_x < labels_budget_end {
             spans.push(Span::styled(" ", Style::default().bg(theme::R_BG_SURFACE)));
             cursor_x += 1;
         }
     }
 
-    // Spacer up to the right-aligned [+] button
-    let plus_label = " + ";
-    let plus_width = plus_label.chars().count() as u16;
-    let used: u16 = spans.iter().map(|s| s.content.chars().count() as u16).sum();
-    let total_avail = area.width;
-    if used + plus_width <= total_avail {
-        let gap = total_avail - used - plus_width;
+    if truncated && cursor_x < labels_budget_end {
+        spans.push(Span::styled(
+            "…",
+            Style::default()
+                .fg(theme::R_TEXT_TERTIARY)
+                .bg(theme::R_BG_SURFACE),
+        ));
+        cursor_x += 1;
+    }
+
+    // Spacer up to the right-aligned [+] button. Only emit the [+] (and its
+    // click rect) if it fits inside `area.width`.
+    let plus_fits = cursor_x.saturating_add(plus_width) <= area_end;
+    if plus_fits {
+        let gap = area_end - cursor_x - plus_width;
         if gap > 0 {
             spans.push(Span::styled(
                 " ".repeat(gap as usize),
@@ -2919,18 +3057,22 @@ fn render_terminal_label_strip(
             ));
             cursor_x += gap;
         }
+        let plus_style = Style::default()
+            .fg(theme::R_TEXT_SECONDARY)
+            .bg(theme::R_BG_RAISED)
+            .add_modifier(Modifier::BOLD);
+        spans.push(Span::styled(plus_label, plus_style));
+        click_map.focus_terminal_new_button = Rect {
+            x: cursor_x,
+            y: area.y,
+            width: plus_width,
+            height: 1,
+        };
+    } else {
+        // No room for [+] — leave the click rect empty so misclicks don't
+        // land on a hidden button.
+        click_map.focus_terminal_new_button = Rect::default();
     }
-    let plus_style = Style::default()
-        .fg(theme::R_TEXT_SECONDARY)
-        .bg(theme::R_BG_RAISED)
-        .add_modifier(Modifier::BOLD);
-    spans.push(Span::styled(plus_label, plus_style));
-    click_map.focus_terminal_new_button = Rect {
-        x: cursor_x,
-        y: area.y,
-        width: plus_width,
-        height: 1,
-    };
 
     let para = Paragraph::new(Line::from(spans)).style(Style::default().bg(theme::R_BG_SURFACE));
     frame.render_widget(para, area);
@@ -3079,8 +3221,12 @@ fn render_left_tab_bar(
 /// Split a list of styled spans into rows of at most `max_width` characters.
 /// Preserves styles across wrap boundaries by splitting individual spans as needed.
 fn wrap_spans(spans: Vec<Span<'static>>, max_width: usize) -> Vec<Vec<Span<'static>>> {
+    // When the available width is zero (e.g., the diff body is narrower than
+    // the gutter) there is no room to render content. Return a single empty
+    // row so callers iterate exactly once and do not enter a non-progressing
+    // wrap loop.
     if max_width == 0 {
-        return vec![spans];
+        return vec![Vec::new()];
     }
 
     let mut rows: Vec<Vec<Span<'static>>> = Vec::new();
@@ -3093,8 +3239,18 @@ fn wrap_spans(spans: Vec<Span<'static>>, max_width: usize) -> Vec<Vec<Span<'stat
         let mut remaining = full;
 
         while !remaining.is_empty() {
-            let budget = max_width - current_width;
+            let budget = max_width.saturating_sub(current_width);
             let take_chars = remaining.chars().count().min(budget);
+
+            if take_chars == 0 {
+                // No budget on the current row — flush it and start fresh on
+                // the next pass. Without this guard `byte_end` would resolve
+                // to 0 and `remaining` would never advance.
+                rows.push(std::mem::take(&mut current_row));
+                current_width = 0;
+                continue;
+            }
+
             let byte_end = remaining
                 .char_indices()
                 .nth(take_chars)
@@ -3624,4 +3780,118 @@ fn render_picker_branch_list(frame: &mut Frame, area: Rect, picker: &BranchPicke
         Paragraph::new(all_lines).style(Style::default().bg(theme::R_BG_BASE)),
         area,
     );
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crossterm::event::{KeyEvent, KeyEventKind, KeyEventState, KeyModifiers};
+
+    fn make_key(code: KeyCode) -> KeyEvent {
+        KeyEvent {
+            code,
+            modifiers: KeyModifiers::NONE,
+            kind: KeyEventKind::Press,
+            state: KeyEventState::NONE,
+        }
+    }
+
+    /// Repro for the panic at the end of an ASCII input — `KeyCode::Right`
+    /// previously called `.unwrap()` on `chars().next()` after only a
+    /// byte-position guard, which exploded when `cursor_pos == input.len()`.
+    #[test]
+    fn branch_picker_right_at_end_does_not_panic() {
+        let mut picker = BranchPicker::new();
+        picker.enter_search();
+        picker.handle_key(make_key(KeyCode::Char('a')));
+        picker.handle_key(make_key(KeyCode::Char('b')));
+        // cursor_pos == input.len() (== 2). Right should be a no-op.
+        let cursor_before = picker.cursor_pos;
+        picker.handle_key(make_key(KeyCode::Right));
+        assert_eq!(picker.cursor_pos, cursor_before);
+        assert_eq!(picker.input, "ab");
+    }
+
+    /// Multi-byte chars in the input must not corrupt `cursor_pos`. Walk Left
+    /// then Right across an emoji and verify we always land on a char
+    /// boundary (i.e., the `String` slicing in subsequent operations is
+    /// valid).
+    #[test]
+    fn branch_picker_left_right_handles_multibyte() {
+        let mut picker = BranchPicker::new();
+        picker.enter_search();
+        // 'a' (1 byte) + 'é' (2 bytes) + 'a' (1 byte) = 4-byte string.
+        for c in "aéa".chars() {
+            picker.handle_key(make_key(KeyCode::Char(c)));
+        }
+        assert_eq!(picker.cursor_pos, picker.input.len());
+        // Walk left across all chars.
+        picker.handle_key(make_key(KeyCode::Left));
+        picker.handle_key(make_key(KeyCode::Left));
+        picker.handle_key(make_key(KeyCode::Left));
+        assert_eq!(picker.cursor_pos, 0);
+        // Now walk right across all chars.
+        picker.handle_key(make_key(KeyCode::Right));
+        picker.handle_key(make_key(KeyCode::Right));
+        picker.handle_key(make_key(KeyCode::Right));
+        assert_eq!(picker.cursor_pos, picker.input.len());
+        // One more right past the end is a no-op (no panic).
+        picker.handle_key(make_key(KeyCode::Right));
+        assert_eq!(picker.cursor_pos, picker.input.len());
+    }
+
+    /// Pasting multi-byte text places the cursor on a valid char boundary
+    /// after each scalar value. `String::insert` would panic on a non-boundary
+    /// byte index, so the absence of a panic here exercises the invariant.
+    #[test]
+    fn branch_picker_paste_multibyte_keeps_cursor_valid() {
+        let mut picker = BranchPicker::new();
+        picker.enter_search();
+        picker.handle_paste("aé");
+        // Cursor is at byte len after paste.
+        assert_eq!(picker.cursor_pos, picker.input.len());
+        // Inserting at the cursor must succeed (i.e., cursor is on a boundary).
+        picker.input.insert(picker.cursor_pos, 'z');
+    }
+
+    /// `wrap_spans` must not loop forever when `max_width == 0` (e.g., when
+    /// the diff body is narrower than the gutter width).
+    #[test]
+    fn wrap_spans_max_width_zero_returns_one_empty_row() {
+        let spans = vec![Span::raw("hello world")];
+        let rows = wrap_spans(spans, 0);
+        assert_eq!(rows.len(), 1);
+        assert!(rows[0].is_empty());
+    }
+
+    /// Sanity: ordinary wrapping still produces multiple rows.
+    #[test]
+    fn wrap_spans_wraps_long_input() {
+        let spans = vec![Span::raw("abcdefghij")];
+        let rows = wrap_spans(spans, 3);
+        let joined: Vec<String> = rows
+            .iter()
+            .map(|row| row.iter().map(|s| s.content.to_string()).collect())
+            .collect();
+        assert_eq!(joined, vec!["abc", "def", "ghi", "j"]);
+    }
+
+    /// Multi-byte spans must wrap on char boundaries (no panic from
+    /// `split_at` landing in the middle of a UTF-8 sequence).
+    #[test]
+    fn wrap_spans_handles_multibyte() {
+        let spans = vec![Span::raw("aébécédéf")];
+        let rows = wrap_spans(spans, 2);
+        // Just verify the joined output equals the input — no chars lost,
+        // no panic on multi-byte boundaries.
+        let joined: String = rows
+            .iter()
+            .flat_map(|row| row.iter().map(|s| s.content.to_string()))
+            .collect();
+        assert_eq!(joined, "aébécédéf");
+    }
 }

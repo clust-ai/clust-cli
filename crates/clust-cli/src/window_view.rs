@@ -19,6 +19,13 @@ use crate::tasks::BatchAgentInfo;
 use crate::theme;
 use crate::ui::render_logo;
 
+/// Minimum cell size below which we render an ellipsis placeholder instead of
+/// a full panel. A panel needs at least 1 cell of inner content plus 2 cols
+/// for borders and 3 rows for borders + header; below this the vterm thrashes
+/// against a 1×1 size and the output is unreadable anyway.
+const MIN_CELL_W: u16 = 6;
+const MIN_CELL_H: u16 = 4;
+
 /// What to show when there are no agents to render in the grid.
 #[derive(Clone, Copy)]
 pub enum EmptyKind<'a> {
@@ -52,11 +59,9 @@ pub fn render(
     if scoped_ids.is_empty() {
         match empty {
             EmptyKind::Logo => render_logo(frame, area),
-            EmptyKind::NoAgentsFor(label) => render_centered_message(
-                frame,
-                area,
-                &format!("No agents running for {label}"),
-            ),
+            EmptyKind::NoAgentsFor(label) => {
+                render_centered_message(frame, area, &format!("No agents running for {label}"))
+            }
             EmptyKind::NoDetached => render_centered_message(frame, area, "No detached agents"),
         }
         return;
@@ -65,6 +70,15 @@ pub fn render(
     let cells = window_layout(area, scoped_ids.len());
 
     for (cell, id) in cells.iter().zip(scoped_ids.iter()) {
+        // If the cell is too small to host a usable panel, skip the resize
+        // (don't shrink the vterm to 1×1) and paint a single-character "…"
+        // placeholder instead. The full panel would just thrash and render
+        // unreadable garbage.
+        if cell.width < MIN_CELL_W || cell.height < MIN_CELL_H {
+            render_too_small_placeholder(frame, *cell);
+            continue;
+        }
+
         // Find the panel by id. If a sync hasn't caught up yet, skip the cell.
         let panel_idx = match overview_state.panels.iter().position(|p| &p.id == id) {
             Some(i) => i,
@@ -105,10 +119,27 @@ pub fn render(
     }
 }
 
+/// Paint a single-character "…" placeholder centered in `area`. Used when a
+/// cell is too small (below MIN_CELL_W × MIN_CELL_H) to host an agent panel.
+fn render_too_small_placeholder(frame: &mut Frame, area: Rect) {
+    if area.width == 0 || area.height == 0 {
+        return;
+    }
+    let line = Line::from(Span::styled(
+        "\u{2026}",
+        Style::default()
+            .fg(theme::R_TEXT_TERTIARY)
+            .bg(theme::R_BG_BASE),
+    ));
+    frame.render_widget(Paragraph::new(line), area);
+}
+
 fn render_centered_message(frame: &mut Frame, area: Rect, msg: &str) {
     let line = Line::from(Span::styled(
         msg.to_string(),
-        Style::default().fg(theme::R_TEXT_TERTIARY).bg(theme::R_BG_BASE),
+        Style::default()
+            .fg(theme::R_TEXT_TERTIARY)
+            .bg(theme::R_BG_BASE),
     ));
     let [vert] = Layout::vertical([Constraint::Length(1)])
         .flex(Flex::Center)
@@ -118,7 +149,6 @@ fn render_centered_message(frame: &mut Frame, area: Rect, msg: &str) {
         .areas(vert);
     frame.render_widget(Paragraph::new(line), horiz);
 }
-
 
 /// Lay out `n` agent cells inside `rect`.
 ///
@@ -133,33 +163,24 @@ pub fn window_layout(rect: Rect, n: usize) -> Vec<Rect> {
         0 => Vec::new(),
         1 => vec![rect],
         2 => {
-            let [left, right] =
-                Layout::horizontal([Constraint::Ratio(1, 2); 2]).areas(rect);
+            let [left, right] = Layout::horizontal([Constraint::Ratio(1, 2); 2]).areas(rect);
             vec![left, right]
         }
         3 => {
-            let [top, bottom] =
-                Layout::vertical([Constraint::Ratio(1, 2); 2]).areas(rect);
-            let [tl, tr] =
-                Layout::horizontal([Constraint::Ratio(1, 2); 2]).areas(top);
+            let [top, bottom] = Layout::vertical([Constraint::Ratio(1, 2); 2]).areas(rect);
+            let [tl, tr] = Layout::horizontal([Constraint::Ratio(1, 2); 2]).areas(top);
             vec![tl, tr, bottom]
         }
         4 => {
-            let [top, bottom] =
-                Layout::vertical([Constraint::Ratio(1, 2); 2]).areas(rect);
-            let [tl, tr] =
-                Layout::horizontal([Constraint::Ratio(1, 2); 2]).areas(top);
-            let [bl, br] =
-                Layout::horizontal([Constraint::Ratio(1, 2); 2]).areas(bottom);
+            let [top, bottom] = Layout::vertical([Constraint::Ratio(1, 2); 2]).areas(rect);
+            let [tl, tr] = Layout::horizontal([Constraint::Ratio(1, 2); 2]).areas(top);
+            let [bl, br] = Layout::horizontal([Constraint::Ratio(1, 2); 2]).areas(bottom);
             vec![tl, tr, bl, br]
         }
         _ => {
-            let [top, bottom] =
-                Layout::vertical([Constraint::Ratio(1, 2); 2]).areas(rect);
-            let [tl, tr] =
-                Layout::horizontal([Constraint::Ratio(1, 2); 2]).areas(top);
-            let [bl, br] =
-                Layout::horizontal([Constraint::Ratio(1, 2); 2]).areas(bottom);
+            let [top, bottom] = Layout::vertical([Constraint::Ratio(1, 2); 2]).areas(rect);
+            let [tl, tr] = Layout::horizontal([Constraint::Ratio(1, 2); 2]).areas(top);
+            let [bl, br] = Layout::horizontal([Constraint::Ratio(1, 2); 2]).areas(bottom);
             let counts = distribute(n, 4);
             [tl, tr, bl, br]
                 .into_iter()

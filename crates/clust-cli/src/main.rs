@@ -28,7 +28,7 @@ mod window_view;
 mod worktree;
 
 use clap::Parser;
-use std::io::{self, Write};
+use std::io::{self, IsTerminal, Write};
 
 use clust_ipc::{CliMessage, HubMessage};
 use format::{format_attached, format_repo_display, format_started};
@@ -159,9 +159,23 @@ async fn main() {
         println!();
         if id_or_empty.is_empty() {
             // No ID → stop the hub
-            // Query agents BEFORE stopping to collect worktree info
-            let all_agents = ipc::fetch_agent_list().await;
-            let cleanups = worktree::collect_worktree_cleanups(&all_agents, &all_agents);
+            // Query agents BEFORE stopping to collect worktree info. If the
+            // hub fetch fails, we cannot offer the cleanup prompt (we don't
+            // know which worktrees to clean up), but we MUST surface that to
+            // the user rather than silently skipping the prompt.
+            let cleanups = match ipc::try_fetch_agent_list().await {
+                Ok(all_agents) => worktree::collect_worktree_cleanups(&all_agents, &all_agents),
+                Err(_) => {
+                    eprintln!(
+                        "  {}⚠{} {}could not query hub for running agents; worktree cleanup prompt skipped{}",
+                        theme::WARNING,
+                        theme::RESET,
+                        theme::TEXT_SECONDARY,
+                        theme::RESET,
+                    );
+                    Vec::new()
+                }
+            };
 
             let spinner = spin("stopping clust hub");
             // Count unique hubs for pluralization
@@ -188,14 +202,29 @@ async fn main() {
             worktree::prompt_worktree_cleanup(&cleanups);
         } else {
             // ID provided → stop specific agent
-            // Query agents BEFORE stopping to collect worktree info
-            let all_agents = ipc::fetch_agent_list().await;
-            let stopped: Vec<_> = all_agents
-                .iter()
-                .filter(|a| a.id == *id_or_empty)
-                .cloned()
-                .collect();
-            let cleanups = worktree::collect_worktree_cleanups(&stopped, &all_agents);
+            // Query agents BEFORE stopping to collect worktree info. If the
+            // hub fetch fails, surface the warning rather than silently
+            // skipping the cleanup prompt.
+            let cleanups = match ipc::try_fetch_agent_list().await {
+                Ok(all_agents) => {
+                    let stopped: Vec<_> = all_agents
+                        .iter()
+                        .filter(|a| a.id == *id_or_empty)
+                        .cloned()
+                        .collect();
+                    worktree::collect_worktree_cleanups(&stopped, &all_agents)
+                }
+                Err(_) => {
+                    eprintln!(
+                        "  {}⚠{} {}could not query hub for running agents; worktree cleanup prompt skipped{}",
+                        theme::WARNING,
+                        theme::RESET,
+                        theme::TEXT_SECONDARY,
+                        theme::RESET,
+                    );
+                    Vec::new()
+                }
+            };
 
             let spinner = spin(&format!("stopping agent {id_or_empty}"));
             match ipc::try_connect().await {
@@ -821,6 +850,26 @@ impl Drop for RawModeGuard {
     }
 }
 
+/// Returns true if both stdin and stdout are TTYs.
+///
+/// Interactive selectors require a TTY for raw-mode keyboard input and cursor
+/// control. When this returns false, callers should bail out instead of
+/// calling `enable_raw_mode()`.
+fn stdio_is_tty() -> bool {
+    io::stdin().is_terminal() && io::stdout().is_terminal()
+}
+
+/// Print an "interactive mode requires a TTY" error to stderr.
+fn print_tty_required_error() {
+    eprintln!(
+        "\n  {}✘{} {}interactive mode requires a TTY{}\n",
+        theme::ERROR,
+        theme::RESET,
+        theme::TEXT_PRIMARY,
+        theme::RESET,
+    );
+}
+
 /// Interactive agent selector.
 async fn handle_select(hub: Option<String>, batch: Option<String>) {
     // Fetch agent list (hub might not be running)
@@ -861,6 +910,11 @@ async fn handle_select(hub: Option<String>, batch: Option<String>) {
 
 fn run_selector(agents: &[clust_ipc::AgentInfo]) -> SelectAction {
     use crossterm::event::{self, Event, KeyCode, KeyEventKind};
+
+    if !stdio_is_tty() {
+        print_tty_required_error();
+        return SelectAction::Cancel;
+    }
 
     let item_count = 2 + agents.len(); // cancel + agents + new agent
     let mut selected: usize = 0;
@@ -1314,27 +1368,43 @@ async fn handle_repo_stop() {
         .map(|p| p.to_string_lossy().into_owned())
         .unwrap_or_else(|_| ".".into());
 
-    // Query agents BEFORE stopping to collect worktree info
-    let all_agents = ipc::fetch_agent_list().await;
-    // Identify which agents belong to this repo (match by repo_path prefix)
-    let repo_root = all_agents
-        .iter()
-        .find(|a| {
-            a.repo_path
-                .as_ref()
-                .is_some_and(|rp| working_dir.starts_with(rp.as_str()))
-        })
-        .and_then(|a| a.repo_path.clone());
-    let stopped: Vec<_> = if let Some(ref root) = repo_root {
-        all_agents
-            .iter()
-            .filter(|a| a.repo_path.as_deref() == Some(root.as_str()))
-            .cloned()
-            .collect()
-    } else {
-        vec![]
+    // Query agents BEFORE stopping to collect worktree info. If the hub fetch
+    // fails, we cannot show the cleanup prompt (we don't know what worktrees
+    // are involved), but we MUST surface the warning rather than skipping
+    // silently.
+    let cleanups = match ipc::try_fetch_agent_list().await {
+        Ok(all_agents) => {
+            // Identify which agents belong to this repo (match by repo_path prefix)
+            let repo_root = all_agents
+                .iter()
+                .find(|a| {
+                    a.repo_path
+                        .as_ref()
+                        .is_some_and(|rp| working_dir.starts_with(rp.as_str()))
+                })
+                .and_then(|a| a.repo_path.clone());
+            let stopped: Vec<_> = if let Some(ref root) = repo_root {
+                all_agents
+                    .iter()
+                    .filter(|a| a.repo_path.as_deref() == Some(root.as_str()))
+                    .cloned()
+                    .collect()
+            } else {
+                vec![]
+            };
+            worktree::collect_worktree_cleanups(&stopped, &all_agents)
+        }
+        Err(_) => {
+            eprintln!(
+                "  {}⚠{} {}could not query hub for running agents; worktree cleanup prompt skipped{}",
+                theme::WARNING,
+                theme::RESET,
+                theme::TEXT_SECONDARY,
+                theme::RESET,
+            );
+            Vec::new()
+        }
     };
-    let cleanups = worktree::collect_worktree_cleanups(&stopped, &all_agents);
 
     let spinner = spin("stopping repo agents");
     let mut stream = match ipc::connect_to_hub().await {
@@ -1770,6 +1840,11 @@ fn run_default_selector(
 ) -> DefaultPickerResult {
     use crossterm::event::{self, Event, KeyCode, KeyEventKind};
 
+    if !stdio_is_tty() {
+        print_tty_required_error();
+        return DefaultPickerResult::Cancel;
+    }
+
     // Items: cancel + installed agents + custom
     let item_count = 2 + installed.len();
     let mut selected: usize = 1; // Start on first agent, not cancel
@@ -1929,6 +2004,11 @@ fn render_default_selector(
 /// Read a custom agent command from the user in raw mode.
 fn read_custom_agent() -> DefaultPickerResult {
     use crossterm::event::{self, Event, KeyCode, KeyEventKind};
+
+    if !stdio_is_tty() {
+        print_tty_required_error();
+        return DefaultPickerResult::Cancel;
+    }
 
     let mut stdout = io::stdout();
     let mut buf = String::new();

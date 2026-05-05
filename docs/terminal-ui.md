@@ -64,8 +64,11 @@ The bar uses a distinct background color (e.g., muted gray/blue) to visually sep
 
 1. User presses `Ctrl+Q`
 2. CLI sends `DetachAgent { id }` to hub
-3. CLI exits raw mode, restores terminal
-4. CLI exits cleanly (agent continues in hub)
+3. CLI **aborts** the output streaming task (so it does not keep writing to stdout while we tear down the alternate screen)
+4. CLI exits raw mode, restores terminal
+5. CLI exits cleanly (agent continues in hub)
+
+The attached session uses an `AltScreenGuard` RAII wrapper around the alternate-screen + raw-mode setup. If raw mode fails to engage after the alternate screen is entered, the guard restores the main screen on drop so the user's shell never inherits a broken terminal state. The guard also fires on panic, abnormal exit, and detach.
 
 ### Background Mode (`-b`)
 
