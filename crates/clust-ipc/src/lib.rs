@@ -344,6 +344,8 @@ pub struct QueuedTask {
     pub use_suffix: bool,
     #[serde(default)]
     pub plan_mode: bool,
+    #[serde(default)]
+    pub exit_when_done: bool,
 }
 
 /// Per-task detail within a batch, returned in QueuedBatchList.
@@ -359,6 +361,8 @@ pub struct QueuedBatchTaskInfo {
     pub use_suffix: bool,
     #[serde(default)]
     pub plan_mode: bool,
+    #[serde(default)]
+    pub exit_when_done: bool,
 }
 
 /// Full info about a batch, returned in QueuedBatchList.

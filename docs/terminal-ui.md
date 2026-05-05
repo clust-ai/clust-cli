@@ -122,7 +122,7 @@ A multi-agent terminal overview that displays all active agents side-by-side wit
 ││                    │││                │││         ││
 │└──── Shift+↓ focus──┘│└────────────────┘│└─────────┘│
 ├──────────────────────┴──────────────────┴───────────┤
-│ ● connected  Shift+↓ enter terminal  ...    v0.0.22 │
+│ ● connected  Shift+↓ enter terminal  ...    v0.0.23 │
 └─────────────────────────────────────────────────────┘
 ```
 
@@ -230,7 +230,7 @@ Each batch card has:
 - `focused_active_agent()` returns `(batch_idx, task_idx, agent_id, batch_title)` for the currently focused task if it is Active and has an `agent_id`. Used by the `Shift+↓` handler to open the task in focus mode.
 - `BatchInfo` stores: id, hub_batch_id (the hub-side identifier for persistence), title, repo_path, repo_name, branch_name, max_concurrent, launch_mode (`LaunchMode`), prompt_prefix, prompt_suffix, tasks (list of `TaskEntry`), status (`BatchStatus`: Idle or Active), plan_mode (bool), allow_bypass (bool), and depends_on (list of hub batch IDs). On startup, the CLI calls `load_from_hub()` to reconstruct batch state from hub-persisted data. All mutations are synced to the hub in real time via `RegisterBatch`, `AddBatchTask`, `UpdateBatchTask`, `UpdateBatchConfig`, `UpdateBatchStatus`, `UpdateBatchDependencies`, `RemoveDoneBatchTasks`, and `DeleteBatch` IPC messages.
 - `LaunchMode` enum: `Auto` (default, batches use concurrency-based toggling) and `Manual` (tasks are started individually).
-- `TaskEntry` stores: branch_name, prompt, status (`TaskStatus`: Idle, Active, or Done), an optional `agent_id` (set when the task's agent is started, linking it to its `AgentPanel` in `OverviewState`), `use_prefix` (bool, default true), `use_suffix` (bool, default true), and `plan_mode` (bool, default false, overrides batch-level plan mode when true) for a single task within a batch.
+- `TaskEntry` stores: branch_name, prompt, status (`TaskStatus`: Idle, Active, or Done), an optional `agent_id` (set when the task's agent is started, linking it to its `AgentPanel` in `OverviewState`), `use_prefix` (bool, default true), `use_suffix` (bool, default true), `plan_mode` (bool, default false, overrides batch-level plan mode when true), and `exit_when_done` (bool, default false; when true the hub injects a Stop hook so the agent process exits at the first natural pause and the existing PTY-exit-as-Done flow marks the task Done) for a single task within a batch.
 - `BatchAgentInfo` stores: batch_title, batch_id, task_index, and task_count for an agent that belongs to a batch. Built by `TasksState::batch_agent_map()` which returns a `HashMap<String, BatchAgentInfo>` mapping agent IDs to their batch membership info. Used by the overview tab for sorting, filter bar labels, and panel border titles.
 - `TerminalPreviewMap` (type alias for `HashMap<String, Vec<Line>>`) maps agent IDs to their last N terminal output lines, built by `build_task_terminal_previews()` in `ui.rs` each render frame.
 - `SHOW_TERMINAL_PREVIEW` constant (default `false`) gates whether terminal output previews are shown in active task boxes.
@@ -267,7 +267,7 @@ On startup, `clust ui` automatically connects to the hub daemon, starting it if 
 ### Bottom Status Bar
 
 ```
-● connected  q to quit  Q to quit and stop hub  ↑↓←→ navigate  Shift+←→ panels                           v0.0.22
+● connected  q to quit  Q to quit and stop hub  ↑↓←→ navigate  Shift+←→ panels                           v0.0.23
 ```
 
 | Section | Description |
@@ -277,7 +277,7 @@ On startup, `clust ui` automatically connects to the hub daemon, starting it if 
 | BYPASS indicator | When bypass-permissions is enabled globally, shows `BYPASS` in a distinct color. Hidden when disabled. |
 | Focused agent | When an agent has keyboard focus (in Overview terminal focus or focus mode), shows the repo name in the repo's assigned color followed by `/branch` in secondary text color |
 | Status message / Shortcuts | Either a temporary status message or context-aware keybinding hints (see below) |
-| Version | Right-aligned, e.g. `v0.0.22` |
+| Version | Right-aligned, e.g. `v0.0.23` |
 
 **Status messages:** Temporary status messages override the keybinding hints area. Messages are displayed for 5 seconds before auto-dismissing, after which the keybinding hints reappear. Two severity levels exist: `Error` (displayed in `R_ERROR` color) and `Success` (displayed in `R_SUCCESS` color). Status messages are used to surface feedback from async operations such as agent creation, branch pulls, and remote branch checkout -- both success confirmations (e.g., "Agent started on feature-branch", "Pulled main: Already up to date.", "Checked out feature-branch") and error details (e.g., "Agent create failed: hub connect error: ...", "Pull failed: ...", "Checkout failed: ..."). The `StatusMessage` struct tracks the message text, level, and creation `Instant` for auto-dismissal timing. Status messages are delivered from background tokio tasks to the main event loop via a dedicated `mpsc` channel (`status_tx` / `status_rx`), separate from the `AgentStartResult` channel used for agent creation results.
 
@@ -386,7 +386,7 @@ When the agent was opened from a batch task (`batch_origin` is set), a batch bad
 │      3      3│  let x = 1;   ││                    ││
 │                               │└────────────────────┘│
 ├─────────────────────────────────────────────────────┤
-│ ● connected  Shift+←/→ switch panel  ...     v0.0.22│
+│ ● connected  Shift+←/→ switch panel  ...     v0.0.23│
 └─────────────────────────────────────────────────────┘
 ```
 
@@ -710,10 +710,11 @@ A 2-step modal for adding a task to an existing batch, opened by pressing `Enter
 - `Backspace` -- delete character before cursor
 - `Alt+P` -- toggle per-task plan mode (applies in both steps; inherits from batch plan_mode on open)
 - `Alt+S` -- toggle per-task suffix (applies in both steps)
+- `Alt+X` -- toggle per-task "Exit when done" (applies in both steps; only shown when the agent binary supports the Stop hook, currently `claude` only)
 
-**Completion:** On completing step 2, the modal outputs an `AddTaskOutput` containing the batch index, branch name, prompt, `use_prefix`, `use_suffix`, and `plan_mode`. A `TaskEntry` is added to the corresponding batch via `TasksState::add_task()`.
+**Completion:** On completing step 2, the modal outputs an `AddTaskOutput` containing the batch index, branch name, prompt, `use_prefix`, `use_suffix`, `plan_mode`, and `exit_when_done`. A `TaskEntry` is added to the corresponding batch via `TasksState::add_task()`.
 
-**Rendering:** The modal is rendered as a centered overlay (60 columns wide, 60% of terminal height) with a titled border showing the step number and batch title. The title for step 1 shows "Step 1/2 -- Branch name (batch title)" and step 2 shows "Step 2/2 -- Task prompt (batch title)". A hint line above the input provides navigation guidance. In step 2, the previously entered branch name is shown below the input as context. The prompt input uses word-wrap with scrolling support. A status bar at the bottom of the modal shows a plan mode indicator ("PLAN" in warning/bold when enabled, "Normal" in disabled text), followed by prefix/suffix toggle indicators (checkmark when applied, cross when skipped) with an `Alt+P/S toggle` hint. The modal receives `has_prefix`, `has_suffix`, and `batch_plan_mode` flags from the batch to initialize the plan mode state and color the indicators appropriately (green when applied and the batch has a prefix/suffix, disabled color otherwise).
+**Rendering:** The modal is rendered as a centered overlay (60 columns wide, 60% of terminal height) with a titled border showing the step number and batch title. The title for step 1 shows "Step 1/2 -- Branch name (batch title)" and step 2 shows "Step 2/2 -- Task prompt (batch title)". A hint line above the input provides navigation guidance. In step 2, the previously entered branch name is shown below the input as context. The prompt input uses word-wrap with scrolling support. A status bar at the bottom of the modal shows a plan mode indicator ("PLAN" in warning/bold when enabled, "Normal" in disabled text), followed by prefix/suffix toggle indicators (checkmark when applied, cross when skipped), and -- when the agent supports the Stop hook -- an `EXIT` pill (warning/bold when enabled, disabled text otherwise). The hint includes `Alt+P/S/X toggle` (with `X` only when supported). The modal receives `has_prefix`, `has_suffix`, `batch_plan_mode`, and `supports_exit_when_done` flags from the batch to initialize the plan mode state, gate the Exit-when-done toggle, and color the indicators appropriately (green when applied and the batch has a prefix/suffix, disabled color otherwise).
 
 ### Edit Field Modal
 
@@ -779,7 +780,7 @@ The import file is a JSON array of batch objects. Each batch object has:
 - `plan_mode` (bool, default false) -- start agents in plan mode
 - `allow_bypass` (bool, default false) -- allow agents to bypass permission prompts
 - `depends_on` (array of strings, optional) -- titles of other batches this batch depends on; resolved to hub IDs during import. Batches auto-start when all dependency batches complete.
-- `tasks` (array, required) -- list of task objects with `branch` (string, required), `prompt` (string, required), `use_prefix` (bool, default true), `use_suffix` (bool, default true), and `plan_mode` (bool, default false)
+- `tasks` (array, required) -- list of task objects with `branch` (string, required), `prompt` (string, required), `use_prefix` (bool, default true), `use_suffix` (bool, default true), `plan_mode` (bool, default false), and `exit_when_done` (bool, default false; only honored for agents whose `KnownAgent.supports_stop_hook` is true)
 
 Example JSON (list format):
 ```json

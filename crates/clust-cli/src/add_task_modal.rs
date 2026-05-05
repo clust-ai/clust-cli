@@ -32,6 +32,7 @@ pub struct AddTaskOutput {
     pub use_prefix: bool,
     pub use_suffix: bool,
     pub plan_mode: bool,
+    pub exit_when_done: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -51,6 +52,10 @@ pub struct AddTaskModal {
     has_prefix: bool,
     has_suffix: bool,
     plan_mode: bool,
+    exit_when_done: bool,
+    /// Whether the batch's agent binary supports the auto-exit Stop hook.
+    /// When `false`, the toggle is hidden and the flag stays at `false`.
+    supports_exit_when_done: bool,
 }
 
 impl AddTaskModal {
@@ -60,6 +65,7 @@ impl AddTaskModal {
         has_prefix: bool,
         has_suffix: bool,
         batch_plan_mode: bool,
+        supports_exit_when_done: bool,
     ) -> Self {
         Self {
             step: AddTaskStep::EnterBranch,
@@ -73,6 +79,8 @@ impl AddTaskModal {
             has_prefix,
             has_suffix,
             plan_mode: batch_plan_mode,
+            exit_when_done: false,
+            supports_exit_when_done,
         }
     }
 
@@ -131,6 +139,9 @@ impl AddTaskModal {
                         'p' => self.plan_mode = !self.plan_mode,
                         'a' => self.use_prefix = !self.use_prefix,
                         's' => self.use_suffix = !self.use_suffix,
+                        'x' if self.supports_exit_when_done => {
+                            self.exit_when_done = !self.exit_when_done;
+                        }
                         _ => {}
                     }
                     return AddTaskResult::Pending;
@@ -171,6 +182,7 @@ impl AddTaskModal {
                     use_prefix: self.use_prefix,
                     use_suffix: self.use_suffix,
                     plan_mode: self.plan_mode,
+                    exit_when_done: self.exit_when_done,
                 })
             }
         }
@@ -340,8 +352,28 @@ impl AddTaskModal {
             ));
         }
 
+        if self.supports_exit_when_done {
+            spans.push(Span::styled("  ", Style::default()));
+            if self.exit_when_done {
+                spans.push(Span::styled(
+                    "\u{2713} Exit",
+                    Style::default().fg(theme::R_SUCCESS),
+                ));
+            } else {
+                spans.push(Span::styled(
+                    "\u{2717} Exit",
+                    Style::default().fg(theme::R_TEXT_DISABLED),
+                ));
+            }
+        }
+
+        let hint = if self.supports_exit_when_done {
+            format!("  {mod_key}+P plan  {mod_key}+A/S pfx/sfx  {mod_key}+X exit")
+        } else {
+            format!("  {mod_key}+P plan  {mod_key}+A/S pfx/sfx")
+        };
         spans.push(Span::styled(
-            format!("  {mod_key}+P plan  {mod_key}+A/S pfx/sfx"),
+            hint,
             Style::default().fg(theme::R_TEXT_DISABLED),
         ));
 

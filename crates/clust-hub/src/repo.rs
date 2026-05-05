@@ -1089,6 +1089,7 @@ mod tests {
             repo_path: repo_path.map(|s| s.to_string()),
             branch_name: branch_name.map(|s| s.to_string()),
             is_worktree,
+            settings_path: None,
         }
     }
 

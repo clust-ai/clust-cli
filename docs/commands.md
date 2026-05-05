@@ -229,6 +229,14 @@ clust repo [OPTIONS]
 | `-r` | `--remove` | Remove a repository from clust tracking. Stops all agents first. Prompts for confirmation. |
 | `-s` | `--stop` | Stop all agents running on the current repository (keeps repo tracked). Prompts for worktree cleanup if stopped agents were in worktrees. |
 
+### `clust internal` (hidden)
+
+Internal subcommands used by clust itself. Hidden from `clust --help` but still callable explicitly.
+
+| Subcommand | Description |
+|------------|-------------|
+| `stop-hook` | Sends `SIGTERM` to the parent process. Used as the Claude `Stop` hook command for tasks with the per-task "Exit when done" flag enabled. Not intended for direct user invocation -- running it manually will terminate whichever process spawned the shell. |
+
 ---
 
 ## Usage Examples

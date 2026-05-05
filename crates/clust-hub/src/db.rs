@@ -68,6 +68,9 @@ fn run_migrations(conn: &Connection) -> Result<(), String> {
     if current_version < 9 {
         migrate_v9(conn)?;
     }
+    if current_version < 10 {
+        migrate_v10(conn)?;
+    }
 
     Ok(())
 }
@@ -206,6 +209,15 @@ fn migrate_v9(conn: &Connection) -> Result<(), String> {
     .map_err(|e| format!("migration v9 failed: {e}"))
 }
 
+/// Migration v10: add per-task exit_when_done flag to queued_batch_tasks.
+fn migrate_v10(conn: &Connection) -> Result<(), String> {
+    conn.execute_batch(
+        "ALTER TABLE queued_batch_tasks ADD COLUMN exit_when_done INTEGER NOT NULL DEFAULT 0;
+         INSERT INTO schema_version (version) VALUES (10);",
+    )
+    .map_err(|e| format!("migration v10 failed: {e}"))
+}
+
 // ---------------------------------------------------------------------------
 // Queued batch CRUD
 // ---------------------------------------------------------------------------
@@ -239,13 +251,16 @@ pub struct QueuedBatchTaskRow {
     pub use_prefix: bool,
     pub use_suffix: bool,
     pub plan_mode: bool,
+    pub exit_when_done: bool,
 }
 
 /// Insert a new queued batch and its tasks.
+///
+/// Each task tuple is `(branch_name, prompt, use_prefix, use_suffix, plan_mode, exit_when_done)`.
 pub fn insert_queued_batch(
     conn: &Connection,
     batch: &QueuedBatchRow,
-    tasks: &[(String, String, bool, bool, bool)],
+    tasks: &[(String, String, bool, bool, bool, bool)],
 ) -> Result<(), String> {
     conn.execute(
         "INSERT INTO queued_batches (id, title, repo_path, target_branch, max_concurrent,
@@ -273,11 +288,22 @@ pub fn insert_queued_batch(
     )
     .map_err(|e| format!("failed to insert queued batch: {e}"))?;
 
-    for (i, (branch_name, prompt, use_prefix, use_suffix, plan_mode)) in tasks.iter().enumerate() {
+    for (i, (branch_name, prompt, use_prefix, use_suffix, plan_mode, exit_when_done)) in
+        tasks.iter().enumerate()
+    {
         conn.execute(
-            "INSERT INTO queued_batch_tasks (batch_id, task_index, branch_name, prompt, status, use_prefix, use_suffix, plan_mode)
-             VALUES (?1, ?2, ?3, ?4, 'idle', ?5, ?6, ?7)",
-            rusqlite::params![batch.id, i as i64, branch_name, prompt, *use_prefix as i32, *use_suffix as i32, *plan_mode as i32],
+            "INSERT INTO queued_batch_tasks (batch_id, task_index, branch_name, prompt, status, use_prefix, use_suffix, plan_mode, exit_when_done)
+             VALUES (?1, ?2, ?3, ?4, 'idle', ?5, ?6, ?7, ?8)",
+            rusqlite::params![
+                batch.id,
+                i as i64,
+                branch_name,
+                prompt,
+                *use_prefix as i32,
+                *use_suffix as i32,
+                *plan_mode as i32,
+                *exit_when_done as i32,
+            ],
         )
         .map_err(|e| format!("failed to insert queued batch task: {e}"))?;
     }
@@ -340,7 +366,7 @@ fn load_batch_tasks(
 ) -> Result<Vec<QueuedBatchTaskRow>, String> {
     let mut stmt = conn
         .prepare(
-            "SELECT task_index, branch_name, prompt, status, agent_id, use_prefix, use_suffix, plan_mode
+            "SELECT task_index, branch_name, prompt, status, agent_id, use_prefix, use_suffix, plan_mode, exit_when_done
              FROM queued_batch_tasks
              WHERE batch_id = ?1
              ORDER BY task_index",
@@ -358,6 +384,7 @@ fn load_batch_tasks(
                 use_prefix: row.get::<_, i32>(5)? != 0,
                 use_suffix: row.get::<_, i32>(6)? != 0,
                 plan_mode: row.get::<_, i32>(7)? != 0,
+                exit_when_done: row.get::<_, i32>(8)? != 0,
             })
         })
         .map_err(|e| format!("failed to query tasks: {e}"))?
@@ -395,9 +422,11 @@ pub fn update_task_status(
 
 /// Add a task to an existing batch. Returns the assigned task_index.
 ///
-/// Caller must pass the in-memory defaults for `plan_mode`, `use_prefix`, and
-/// `use_suffix` so they survive a hub restart — without this, all three reset
-/// to the column defaults on reload (plan_mode=0, prefix/suffix=1).
+/// Caller must pass the in-memory defaults for `plan_mode`, `use_prefix`,
+/// `use_suffix`, and `exit_when_done` so they survive a hub restart — without
+/// this, all four reset to the column defaults on reload (plan_mode=0,
+/// prefix/suffix=1, exit_when_done=0).
+#[allow(clippy::too_many_arguments)]
 pub fn add_batch_task(
     conn: &Connection,
     batch_id: &str,
@@ -406,6 +435,7 @@ pub fn add_batch_task(
     plan_mode: bool,
     use_prefix: bool,
     use_suffix: bool,
+    exit_when_done: bool,
 ) -> Result<usize, String> {
     let max_index: i64 = conn
         .query_row(
@@ -417,8 +447,8 @@ pub fn add_batch_task(
     let new_index = (max_index + 1) as usize;
     conn.execute(
         "INSERT INTO queued_batch_tasks
-            (batch_id, task_index, branch_name, prompt, status, plan_mode, use_prefix, use_suffix)
-         VALUES (?1, ?2, ?3, ?4, 'idle', ?5, ?6, ?7)",
+            (batch_id, task_index, branch_name, prompt, status, plan_mode, use_prefix, use_suffix, exit_when_done)
+         VALUES (?1, ?2, ?3, ?4, 'idle', ?5, ?6, ?7, ?8)",
         rusqlite::params![
             batch_id,
             new_index as i64,
@@ -427,6 +457,7 @@ pub fn add_batch_task(
             plan_mode as i32,
             use_prefix as i32,
             use_suffix as i32,
+            exit_when_done as i32,
         ],
     )
     .map_err(|e| format!("failed to insert batch task: {e}"))?;

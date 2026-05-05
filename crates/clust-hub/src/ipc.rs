@@ -147,6 +147,7 @@ async fn handle_connection(
                         repo_path,
                         branch_name,
                         is_worktree,
+                        exit_when_done: false,
                     },
                     state.clone(),
                 )
@@ -1142,6 +1143,7 @@ async fn handle_connection(
                     hub: &hub,
                     cols,
                     rows,
+                    exit_when_done: false,
                 },
             )
             .await
@@ -1842,6 +1844,7 @@ async fn handle_connection(
                             use_prefix: t.use_prefix,
                             use_suffix: t.use_suffix,
                             plan_mode: t.plan_mode,
+                            exit_when_done: t.exit_when_done,
                         })
                         .collect();
 
@@ -1865,9 +1868,16 @@ async fn handle_connection(
                     };
 
                     // Persist to database
-                    let task_data: Vec<(String, String, bool, bool, bool)> = tasks
+                    let task_data: Vec<(String, String, bool, bool, bool, bool)> = tasks
                         .iter()
-                        .map(|t| (t.branch_name.clone(), t.prompt.clone(), t.use_prefix, t.use_suffix, t.plan_mode))
+                        .map(|t| (
+                            t.branch_name.clone(),
+                            t.prompt.clone(),
+                            t.use_prefix,
+                            t.use_suffix,
+                            t.plan_mode,
+                            t.exit_when_done,
+                        ))
                         .collect();
                     {
                         let hub_state = state.lock().await;
@@ -2036,6 +2046,7 @@ async fn handle_connection(
                                 use_prefix: t.use_prefix,
                                 use_suffix: t.use_suffix,
                                 plan_mode: t.plan_mode,
+                                exit_when_done: t.exit_when_done,
                             })
                             .collect(),
                         launch_mode: b.launch_mode.clone(),
@@ -2101,6 +2112,7 @@ async fn handle_connection(
                     use_prefix: t.use_prefix,
                     use_suffix: t.use_suffix,
                     plan_mode: t.plan_mode,
+                    exit_when_done: t.exit_when_done,
                 })
                 .collect();
 
@@ -2124,9 +2136,16 @@ async fn handle_connection(
             };
 
             // Persist to database
-            let task_data: Vec<(String, String, bool, bool, bool)> = tasks
+            let task_data: Vec<(String, String, bool, bool, bool, bool)> = tasks
                 .iter()
-                .map(|t| (t.branch_name.clone(), t.prompt.clone(), t.use_prefix, t.use_suffix, t.plan_mode))
+                .map(|t| (
+                    t.branch_name.clone(),
+                    t.prompt.clone(),
+                    t.use_prefix,
+                    t.use_suffix,
+                    t.plan_mode,
+                    t.exit_when_done,
+                ))
                 .collect();
             {
                 let hub_state = state.lock().await;
@@ -2196,6 +2215,7 @@ async fn handle_connection(
                         use_prefix: true,
                         use_suffix: true,
                         plan_mode: task_plan_mode,
+                        exit_when_done: false,
                     });
                     if let Some(ref db) = hub_state.db {
                         let _ = crate::db::add_batch_task(
@@ -2206,6 +2226,7 @@ async fn handle_connection(
                             task_plan_mode,
                             true,
                             true,
+                            false,
                         );
                     }
                     Ok(())
