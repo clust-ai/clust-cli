@@ -42,6 +42,9 @@ async fn request_response_over_real_socket() {
             repo_path: None,
             branch_name: None,
             is_worktree: false,
+            auto_exit: false,
+            plan_mode: false,
+            prompt: None,
         }],
     };
     send_message(&mut server_stream, &response).await.unwrap();

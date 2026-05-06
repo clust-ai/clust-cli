@@ -221,7 +221,7 @@ When the hub receives a `CreateWorktreeAgent` message (sent from the TUI create-
    - If `new_branch` is provided, create a new worktree with that branch (using `target_branch` as the base branch if specified).
    - If `new_branch` is not provided, check out the `target_branch` as a worktree.
    - If worktree creation fails because the branch is already checked out, the raw git error is replaced with a user-friendly message suggesting to use "Start Agent (in place)" from the context menu or to create a new branch.
-2. Spawn an agent in the new worktree directory (same logic as `StartAgent`).
+2. Spawn an agent in the new worktree directory (same logic as `StartAgent`). The `auto_exit` field on the request is forwarded to the spawn helper as `SpawnAgentParams.exit_when_done`; when true and the resolved agent supports a Stop hook, the spawned settings file is wired so the agent terminates itself at its first natural stopping point. This mirrors the per-task `auto_exit` flag on scheduled tasks so a manually-spawned `Opt+E` agent can also act as a dependency in a scheduled chain.
 3. Return `WorktreeAgentStarted { id, agent_binary, working_dir, repo_path, branch_name }` to the CLI.
 
 This combines worktree creation and agent spawning into a single atomic operation, used by the `Opt+E` / `Alt+E` modal in the TUI.
