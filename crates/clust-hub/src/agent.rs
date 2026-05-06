@@ -110,6 +110,15 @@ pub struct AgentEntry {
     /// Path to the per-spawn settings file (Stop hook for "exit when done").
     /// Removed when the agent process exits.
     pub settings_path: Option<std::path::PathBuf>,
+    /// Spawn-time `auto_exit` flag. Surfaced via `ListAgents` so the schedule
+    /// modal can render the matching status pill, and used to populate a
+    /// shadow `scheduled_tasks` row when the agent is selected as a dep.
+    pub auto_exit: bool,
+    /// Spawn-time `plan_mode` flag. Same purpose as `auto_exit`.
+    pub plan_mode: bool,
+    /// The prompt the agent was started with, if any. Snapshotted at spawn so
+    /// shadow scheduled-task rows carry a meaningful prompt for display.
+    pub prompt: Option<String>,
 }
 
 impl AgentEntry {
@@ -327,6 +336,9 @@ pub fn spawn_agent(
         branch_name: params.branch_name,
         is_worktree: params.is_worktree,
         settings_path,
+        auto_exit: params.exit_when_done,
+        plan_mode: params.plan_mode,
+        prompt: params.prompt,
     };
 
     state.agents.insert(id.clone(), entry);
@@ -971,6 +983,9 @@ mod tests {
                     branch_name: None,
                     is_worktree: false,
                     settings_path: None,
+                    auto_exit: false,
+                    plan_mode: false,
+                    prompt: None,
                 },
             );
         }

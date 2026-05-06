@@ -450,6 +450,79 @@ pub fn insert_scheduled_task(
     Ok(id)
 }
 
+/// Find an `active` scheduled task currently linked to `agent_id`. Used to
+/// deduplicate shadow rows: when an Opt+E worktree agent is selected as a
+/// dependency in the schedule modal, callers should reuse the existing row
+/// rather than insert a second one.
+pub fn find_scheduled_task_by_agent_id(
+    conn: &Connection,
+    agent_id: &str,
+) -> Result<Option<String>, String> {
+    conn.query_row(
+        "SELECT id FROM scheduled_tasks WHERE agent_id = ?1 AND status = 'active'",
+        [agent_id],
+        |row| row.get::<_, String>(0),
+    )
+    .map(Some)
+    .or_else(|e| match e {
+        rusqlite::Error::QueryReturnedNoRows => Ok(None),
+        other => Err(format!("failed to look up scheduled task by agent: {other}")),
+    })
+}
+
+/// Insert a shadow scheduled-task row for an already-running worktree agent
+/// (typically spawned via Opt+E and selected as a dep in the schedule modal).
+///
+/// Differs from `insert_scheduled_task`: this one bypasses the normal
+/// `inactive → active` transition by writing `status='active'` and
+/// `agent_id=<the running agent>` in a single statement, so the new row
+/// shows up in the Schedule tab immediately and the existing
+/// `mark_scheduled_task_complete_by_agent` exit-hook flips it to `Complete`
+/// when the agent finishes.
+///
+/// Schedule kind is forced to `unscheduled` since the agent didn't fire from
+/// a schedule. Returns the generated task id.
+pub fn insert_active_shadow_task(
+    conn: &Connection,
+    spec: NewScheduledTask,
+    agent_id: &str,
+) -> Result<String, String> {
+    let id = generate_scheduled_task_id(conn)?;
+    let now = chrono::Utc::now().to_rfc3339();
+    conn.execute(
+        "INSERT INTO scheduled_tasks (
+            id, repo_path, base_branch, new_branch, branch_name,
+            prompt, plan_mode, auto_exit, schedule_kind, start_at,
+            status, agent_id, agent_binary, created_at, completed_at
+        ) VALUES (
+            ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 'unscheduled', NULL,
+            'active', ?9, ?10, ?11, NULL
+        )",
+        params![
+            id,
+            spec.repo_path,
+            spec.base_branch,
+            spec.new_branch,
+            spec.branch_name,
+            spec.prompt,
+            i64::from(spec.plan_mode),
+            i64::from(spec.auto_exit),
+            agent_id,
+            spec.agent_binary,
+            now,
+        ],
+    )
+    .map_err(|e| {
+        let s = e.to_string();
+        if s.contains("UNIQUE constraint failed") && s.contains("branch_name") {
+            format!("branch '{}' is already scheduled", spec.branch_name)
+        } else {
+            format!("failed to insert shadow scheduled task: {e}")
+        }
+    })?;
+    Ok(id)
+}
+
 /// Read a row from `scheduled_tasks` plus its dependency edges into a wire-ready
 /// `ScheduledTaskInfo`. Returns `Ok(None)` if the id is not present.
 pub fn get_scheduled_task(

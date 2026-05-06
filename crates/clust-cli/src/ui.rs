@@ -1779,6 +1779,7 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                                             plan_mode: bp,
                                                             allow_bypass: bp,
                                                             hub,
+                                                            auto_exit: false,
                                                         };
                                                         if let Err(e) = clust_ipc::send_message(
                                                             &mut stream,
@@ -2317,6 +2318,7 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                                                     plan_mode: bp,
                                                                     allow_bypass: bp,
                                                                     hub,
+                                                                    auto_exit: false,
                                                                 };
                                                             if let Err(e) = clust_ipc::send_message(
                                                                 &mut stream,
@@ -2554,6 +2556,7 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                                             plan_mode: bp,
                                                             allow_bypass: bp,
                                                             hub,
+                                                            auto_exit: false,
                                                         };
                                                         if let Err(e) = clust_ipc::send_message(
                                                             &mut stream,
@@ -2726,6 +2729,7 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                 let hub = hub_name.to_string();
                                 let bp = bypass_permissions;
                                 let plan = output.plan_mode;
+                                let auto_exit = output.auto_exit;
                                 let (cols, rows) = crossterm::terminal::size().unwrap_or((80, 24));
                                 tokio::spawn(async move {
                                     let mut stream = match ipc::try_connect().await {
@@ -2751,6 +2755,7 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                         plan_mode: plan,
                                         allow_bypass: bp,
                                         hub,
+                                        auto_exit,
                                     };
                                     if let Err(e) = clust_ipc::send_message(&mut stream, &msg).await
                                     {
@@ -2828,6 +2833,7 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                         auto_exit: out.auto_exit,
                                         agent_binary: None,
                                         schedule: out.schedule,
+                                        extra_agent_deps: out.extra_agent_deps,
                                     };
                                     match ipc::send_one_shot(msg).await {
                                         Ok(HubMessage::ScheduledTaskCreated { info }) => {
@@ -3111,10 +3117,17 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                     } else if key.code == KeyCode::Char('s')
                         && key.modifiers.contains(KeyModifiers::ALT)
                     {
-                        // Global shortcut: Alt+S opens schedule-task modal
+                        // Global shortcut: Alt+S opens schedule-task modal.
+                        // Hand the modal both the scheduled-task snapshot and
+                        // the running-agent list so the dep picker can offer
+                        // already-running Opt+E agents alongside scheduled
+                        // tasks.
                         if !repos.is_empty() && schedule_modal.is_none() {
-                            let modal =
-                                ScheduleTaskModal::new(repos.clone(), scheduled_tasks.clone());
+                            let modal = ScheduleTaskModal::new(
+                                repos.clone(),
+                                scheduled_tasks.clone(),
+                                agents.clone(),
+                            );
                             schedule_modal = Some(modal);
                             show_help = false;
                         }
@@ -4317,6 +4330,7 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                                             plan_mode: bp,
                                                             allow_bypass: bp,
                                                             hub,
+                                                            auto_exit: false,
                                                         };
                                                         if let Err(e) = clust_ipc::send_message(
                                                             &mut stream,
@@ -4855,6 +4869,7 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                                                     plan_mode: bp,
                                                                     allow_bypass: bp,
                                                                     hub,
+                                                                    auto_exit: false,
                                                                 };
                                                             if let Err(e) = clust_ipc::send_message(
                                                                 &mut stream,
@@ -5092,6 +5107,7 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                                             plan_mode: bp,
                                                             allow_bypass: bp,
                                                             hub,
+                                                            auto_exit: false,
                                                         };
                                                         if let Err(e) = clust_ipc::send_message(
                                                             &mut stream,
@@ -8125,6 +8141,9 @@ mod tests {
             repo_path: None,
             branch_name: None,
             is_worktree: false,
+            auto_exit: false,
+            plan_mode: false,
+            prompt: None,
         }
     }
 
