@@ -529,12 +529,18 @@ fn spawn_pty_reader(
 
         // Remove agent from shared state and cascade-kill any terminals this
         // agent spawned so long-lived processes (dev servers, etc.) don't
-        // linger after the agent dies.
+        // linger after the agent dies. If the agent fulfilled a scheduled
+        // task, mark it Complete in the same lock window so dependents start
+        // getting unblocked immediately on the next scheduler tick.
         let handle = tokio::runtime::Handle::current();
         handle.block_on(async {
             let (terminal_ids, settings_path) = {
                 let mut hub = state.lock().await;
                 let removed = hub.agents.remove(&agent_id);
+                if let Some(ref conn) = hub.db {
+                    let _ =
+                        crate::db::mark_scheduled_task_complete_by_agent(conn, &agent_id);
+                }
                 let tids: Vec<String> = hub
                     .terminals
                     .values()

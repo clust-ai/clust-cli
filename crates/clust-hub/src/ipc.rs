@@ -22,12 +22,30 @@ async fn run(shutdown_signal: Arc<dyn ShutdownSignal>, state: SharedHubState) ->
     let dir = clust_ipc::clust_dir();
     tokio::fs::create_dir_all(&dir).await?;
 
-    // Initialize SQLite database (creates tables on first run)
+    // Initialize SQLite database (creates tables on first run). Once the DB
+    // is open, run scheduler-recovery so any task that was `active` when the
+    // hub last died is rewritten to `aborted` (its agent process is gone).
     {
         let mut hub = state.lock().await;
         if let Err(e) = hub.init_db() {
             eprintln!("database init failed: {e}");
         }
+        if let Some(ref conn) = hub.db {
+            match crate::db::recover_active_scheduled_tasks(conn) {
+                Ok(0) => {}
+                Ok(n) => eprintln!("[hub] recovered {n} active scheduled task(s) → aborted"),
+                Err(e) => eprintln!("[hub] failed to recover active scheduled tasks: {e}"),
+            }
+        }
+    }
+
+    // Spawn the per-task scheduler. Lives for the rest of the hub process and
+    // is the sole writer that flips Inactive → Active for time- and dep-driven
+    // tasks. Manual `StartScheduledTaskNow` / `RestartScheduledTask` paths use
+    // the same helper but bypass the polling delay.
+    {
+        let scheduler_state = state.clone();
+        tokio::spawn(crate::scheduler::run_scheduler(scheduler_state));
     }
 
     // Ensure .clust/worktrees is in the global git exclude file
@@ -1779,6 +1797,484 @@ async fn handle_connection(
             }
         }
 
+        // -----------------------------------------------------------------
+        // Scheduled task handlers
+        // -----------------------------------------------------------------
+        CliMessage::CreateScheduledTask {
+            repo_path,
+            base_branch,
+            new_branch,
+            prompt,
+            plan_mode,
+            auto_exit,
+            agent_binary,
+            schedule,
+        } => {
+            // Resolve which agent binary the spawn will use, falling back to
+            // the hub's configured default. We persist the resolution rather
+            // than the user's None, so a later config change can't accidentally
+            // re-target an old task.
+            let resolved_binary = {
+                let hub = state.lock().await;
+                match agent::resolve_agent_binary(agent_binary, &hub.default_agent) {
+                    Ok(b) => b,
+                    Err(e) => {
+                        clust_ipc::send_message_write(
+                            &mut writer,
+                            &HubMessage::Error { message: e },
+                        )
+                        .await?;
+                        return Ok(());
+                    }
+                }
+            };
+            // Reject empty prompts at the IPC boundary as well as the modal,
+            // so a hand-crafted client can't bypass it.
+            if prompt.trim().is_empty() {
+                clust_ipc::send_message_write(
+                    &mut writer,
+                    &HubMessage::Error {
+                        message: "scheduled task prompt must not be empty".into(),
+                    },
+                )
+                .await?;
+                return Ok(());
+            }
+            // Compute the resolved branch_name (sanitized when creating new).
+            let branch_name = match new_branch.as_deref() {
+                Some(name) => clust_ipc::branch::sanitize_branch_name(name),
+                None => match base_branch.as_deref() {
+                    Some(name) => name.to_string(),
+                    None => {
+                        clust_ipc::send_message_write(
+                            &mut writer,
+                            &HubMessage::Error {
+                                message: "either base_branch or new_branch must be provided"
+                                    .into(),
+                            },
+                        )
+                        .await?;
+                        return Ok(());
+                    }
+                },
+            };
+
+            let mut hub = state.lock().await;
+            let conn_present = hub.db.is_some();
+            if !conn_present {
+                clust_ipc::send_message_write(
+                    &mut writer,
+                    &HubMessage::Error {
+                        message: "database unavailable".into(),
+                    },
+                )
+                .await?;
+                return Ok(());
+            }
+            let conn = hub.db.as_mut().unwrap();
+            let result = crate::db::insert_scheduled_task(
+                conn,
+                crate::db::NewScheduledTask {
+                    repo_path: repo_path.clone(),
+                    base_branch: base_branch.clone(),
+                    new_branch: new_branch.clone(),
+                    branch_name,
+                    prompt,
+                    plan_mode,
+                    auto_exit,
+                    agent_binary: resolved_binary,
+                    schedule,
+                },
+            );
+            match result {
+                Ok(id) => {
+                    let lookup = repo_name_lookup_from(hub.db.as_ref());
+                    let info = crate::db::get_scheduled_task(
+                        hub.db.as_ref().unwrap(),
+                        &id,
+                        &lookup,
+                    )
+                    .ok()
+                    .flatten();
+                    drop(hub);
+                    if let Some(info) = info {
+                        clust_ipc::send_message_write(
+                            &mut writer,
+                            &HubMessage::ScheduledTaskCreated { info },
+                        )
+                        .await?;
+                    } else {
+                        clust_ipc::send_message_write(&mut writer, &HubMessage::Ok).await?;
+                    }
+                }
+                Err(e) => {
+                    clust_ipc::send_message_write(
+                        &mut writer,
+                        &HubMessage::Error { message: e },
+                    )
+                    .await?;
+                }
+            }
+        }
+        CliMessage::ListScheduledTasks => {
+            let hub = state.lock().await;
+            let tasks = if let Some(ref conn) = hub.db {
+                let lookup = repo_name_lookup_from(Some(conn));
+                crate::db::list_scheduled_tasks(conn, &lookup).unwrap_or_default()
+            } else {
+                Vec::new()
+            };
+            drop(hub);
+            clust_ipc::send_message_write(
+                &mut writer,
+                &HubMessage::ScheduledTaskList { tasks },
+            )
+            .await?;
+        }
+        CliMessage::UpdateScheduledTaskPrompt { id, prompt } => {
+            // Reject empty prompts here too — the modal also enforces this but
+            // a stale or hand-crafted client could otherwise blank a row.
+            if prompt.trim().is_empty() {
+                clust_ipc::send_message_write(
+                    &mut writer,
+                    &HubMessage::Error {
+                        message: "prompt must not be empty".into(),
+                    },
+                )
+                .await?;
+                return Ok(());
+            }
+            let hub = state.lock().await;
+            if let Some(ref conn) = hub.db {
+                if let Err(e) = crate::db::update_scheduled_task_prompt(conn, &id, &prompt) {
+                    clust_ipc::send_message_write(
+                        &mut writer,
+                        &HubMessage::Error { message: e },
+                    )
+                    .await?;
+                    return Ok(());
+                }
+                let lookup = repo_name_lookup_from(Some(conn));
+                let info = crate::db::get_scheduled_task(conn, &id, &lookup)
+                    .ok()
+                    .flatten();
+                drop(hub);
+                if let Some(info) = info {
+                    clust_ipc::send_message_write(
+                        &mut writer,
+                        &HubMessage::ScheduledTaskUpdated { info },
+                    )
+                    .await?;
+                } else {
+                    clust_ipc::send_message_write(&mut writer, &HubMessage::Ok).await?;
+                }
+            } else {
+                clust_ipc::send_message_write(
+                    &mut writer,
+                    &HubMessage::Error {
+                        message: "database unavailable".into(),
+                    },
+                )
+                .await?;
+            }
+        }
+        CliMessage::SetScheduledTaskPlanMode { id, plan_mode } => {
+            let hub = state.lock().await;
+            if let Some(ref conn) = hub.db {
+                if let Err(e) = crate::db::update_scheduled_task_plan_mode(conn, &id, plan_mode) {
+                    clust_ipc::send_message_write(
+                        &mut writer,
+                        &HubMessage::Error { message: e },
+                    )
+                    .await?;
+                    return Ok(());
+                }
+                let lookup = repo_name_lookup_from(Some(conn));
+                let info = crate::db::get_scheduled_task(conn, &id, &lookup)
+                    .ok()
+                    .flatten();
+                drop(hub);
+                if let Some(info) = info {
+                    clust_ipc::send_message_write(
+                        &mut writer,
+                        &HubMessage::ScheduledTaskUpdated { info },
+                    )
+                    .await?;
+                } else {
+                    clust_ipc::send_message_write(&mut writer, &HubMessage::Ok).await?;
+                }
+            } else {
+                clust_ipc::send_message_write(
+                    &mut writer,
+                    &HubMessage::Error {
+                        message: "database unavailable".into(),
+                    },
+                )
+                .await?;
+            }
+        }
+        CliMessage::SetScheduledTaskAutoExit { id, auto_exit } => {
+            let hub = state.lock().await;
+            if let Some(ref conn) = hub.db {
+                if let Err(e) = crate::db::update_scheduled_task_auto_exit(conn, &id, auto_exit) {
+                    clust_ipc::send_message_write(
+                        &mut writer,
+                        &HubMessage::Error { message: e },
+                    )
+                    .await?;
+                    return Ok(());
+                }
+                let lookup = repo_name_lookup_from(Some(conn));
+                let info = crate::db::get_scheduled_task(conn, &id, &lookup)
+                    .ok()
+                    .flatten();
+                drop(hub);
+                if let Some(info) = info {
+                    clust_ipc::send_message_write(
+                        &mut writer,
+                        &HubMessage::ScheduledTaskUpdated { info },
+                    )
+                    .await?;
+                } else {
+                    clust_ipc::send_message_write(&mut writer, &HubMessage::Ok).await?;
+                }
+            } else {
+                clust_ipc::send_message_write(
+                    &mut writer,
+                    &HubMessage::Error {
+                        message: "database unavailable".into(),
+                    },
+                )
+                .await?;
+            }
+        }
+        CliMessage::DeleteScheduledTask { id } => {
+            // If the task is currently Active, also stop the agent. Otherwise
+            // a "delete" leaves a zombie agent attached to a row that no
+            // longer exists.
+            let agent_to_stop: Option<String> = {
+                let hub = state.lock().await;
+                hub.db.as_ref().and_then(|conn| {
+                    let lookup = repo_name_lookup_from(Some(conn));
+                    crate::db::get_scheduled_task(conn, &id, &lookup)
+                        .ok()
+                        .flatten()
+                        .filter(|t| t.status == clust_ipc::ScheduledTaskStatus::Active)
+                        .and_then(|t| t.agent_id)
+                })
+            };
+            if let Some(aid) = agent_to_stop {
+                let _ = agent::stop_agent(&state, &aid).await;
+            }
+            let hub = state.lock().await;
+            if let Some(ref conn) = hub.db {
+                if let Err(e) = crate::db::delete_scheduled_task(conn, &id) {
+                    clust_ipc::send_message_write(
+                        &mut writer,
+                        &HubMessage::Error { message: e },
+                    )
+                    .await?;
+                    return Ok(());
+                }
+            }
+            drop(hub);
+            clust_ipc::send_message_write(
+                &mut writer,
+                &HubMessage::ScheduledTaskDeleted { id },
+            )
+            .await?;
+        }
+        CliMessage::DeleteScheduledTasksByStatus { status } => {
+            let hub = state.lock().await;
+            let count = if let Some(ref conn) = hub.db {
+                crate::db::delete_scheduled_tasks_with_status(conn, status).unwrap_or(0)
+            } else {
+                0
+            };
+            drop(hub);
+            clust_ipc::send_message_write(
+                &mut writer,
+                &HubMessage::ScheduledTasksCleared { count },
+            )
+            .await?;
+        }
+        CliMessage::StartScheduledTaskNow { id } => {
+            // Same code path as the auto-trigger so manually started tasks
+            // reach Active through identical bookkeeping.
+            let task = {
+                let hub = state.lock().await;
+                hub.db.as_ref().and_then(|conn| {
+                    let lookup = repo_name_lookup_from(Some(conn));
+                    crate::db::get_scheduled_task(conn, &id, &lookup)
+                        .ok()
+                        .flatten()
+                })
+            };
+            let Some(task) = task else {
+                clust_ipc::send_message_write(
+                    &mut writer,
+                    &HubMessage::Error {
+                        message: format!("scheduled task {id} not found"),
+                    },
+                )
+                .await?;
+                return Ok(());
+            };
+            if task.status != clust_ipc::ScheduledTaskStatus::Inactive {
+                clust_ipc::send_message_write(
+                    &mut writer,
+                    &HubMessage::Error {
+                        message: format!(
+                            "task {id} is {:?}, not Inactive",
+                            task.status
+                        ),
+                    },
+                )
+                .await?;
+                return Ok(());
+            }
+            match crate::scheduler::fire_scheduled_task(&state, &task).await {
+                Ok(_agent_id) => {
+                    let info = {
+                        let hub = state.lock().await;
+                        hub.db.as_ref().and_then(|conn| {
+                            let lookup = repo_name_lookup_from(Some(conn));
+                            crate::db::get_scheduled_task(conn, &id, &lookup)
+                                .ok()
+                                .flatten()
+                        })
+                    };
+                    if let Some(info) = info {
+                        clust_ipc::send_message_write(
+                            &mut writer,
+                            &HubMessage::ScheduledTaskUpdated { info },
+                        )
+                        .await?;
+                    } else {
+                        clust_ipc::send_message_write(&mut writer, &HubMessage::Ok).await?;
+                    }
+                }
+                Err(e) => {
+                    let _ = {
+                        let hub = state.lock().await;
+                        hub.db
+                            .as_ref()
+                            .map(|conn| crate::db::mark_scheduled_task_aborted(conn, &id))
+                    };
+                    clust_ipc::send_message_write(
+                        &mut writer,
+                        &HubMessage::Error { message: e },
+                    )
+                    .await?;
+                }
+            }
+        }
+        CliMessage::RestartScheduledTask { id, clean } => {
+            let task = {
+                let hub = state.lock().await;
+                hub.db.as_ref().and_then(|conn| {
+                    let lookup = repo_name_lookup_from(Some(conn));
+                    crate::db::get_scheduled_task(conn, &id, &lookup)
+                        .ok()
+                        .flatten()
+                })
+            };
+            let Some(task) = task else {
+                clust_ipc::send_message_write(
+                    &mut writer,
+                    &HubMessage::Error {
+                        message: format!("scheduled task {id} not found"),
+                    },
+                )
+                .await?;
+                return Ok(());
+            };
+            if task.status != clust_ipc::ScheduledTaskStatus::Aborted {
+                clust_ipc::send_message_write(
+                    &mut writer,
+                    &HubMessage::Error {
+                        message: "restart only valid for Aborted tasks".into(),
+                    },
+                )
+                .await?;
+                return Ok(());
+            }
+            if clean {
+                if let Err(e) = crate::scheduler::clean_worktree_for_task(&task).await {
+                    clust_ipc::send_message_write(
+                        &mut writer,
+                        &HubMessage::Error {
+                            message: format!("clean failed: {e}"),
+                        },
+                    )
+                    .await?;
+                    return Ok(());
+                }
+            }
+            // Reset to Inactive so fire_scheduled_task can take it; this also
+            // preserves existing agent_id history for diagnostics until the
+            // new spawn succeeds.
+            {
+                let hub = state.lock().await;
+                if let Some(ref conn) = hub.db {
+                    let _ = conn.execute(
+                        "UPDATE scheduled_tasks SET status='inactive', agent_id=NULL WHERE id=?1",
+                        [&id],
+                    );
+                }
+            }
+            // Re-read the task in its now-Inactive state before firing, so the
+            // helper sees the right status.
+            let refreshed = {
+                let hub = state.lock().await;
+                hub.db.as_ref().and_then(|conn| {
+                    let lookup = repo_name_lookup_from(Some(conn));
+                    crate::db::get_scheduled_task(conn, &id, &lookup)
+                        .ok()
+                        .flatten()
+                })
+            };
+            let Some(refreshed) = refreshed else {
+                clust_ipc::send_message_write(&mut writer, &HubMessage::Ok).await?;
+                return Ok(());
+            };
+            match crate::scheduler::fire_scheduled_task(&state, &refreshed).await {
+                Ok(_agent_id) => {
+                    let info = {
+                        let hub = state.lock().await;
+                        hub.db.as_ref().and_then(|conn| {
+                            let lookup = repo_name_lookup_from(Some(conn));
+                            crate::db::get_scheduled_task(conn, &id, &lookup)
+                                .ok()
+                                .flatten()
+                        })
+                    };
+                    if let Some(info) = info {
+                        clust_ipc::send_message_write(
+                            &mut writer,
+                            &HubMessage::ScheduledTaskUpdated { info },
+                        )
+                        .await?;
+                    } else {
+                        clust_ipc::send_message_write(&mut writer, &HubMessage::Ok).await?;
+                    }
+                }
+                Err(e) => {
+                    let _ = {
+                        let hub = state.lock().await;
+                        hub.db
+                            .as_ref()
+                            .map(|conn| crate::db::mark_scheduled_task_aborted(conn, &id))
+                    };
+                    clust_ipc::send_message_write(
+                        &mut writer,
+                        &HubMessage::Error { message: e },
+                    )
+                    .await?;
+                }
+            }
+        }
+
         _ => {
             clust_ipc::send_message_write(
                 &mut writer,
@@ -1791,6 +2287,31 @@ async fn handle_connection(
     }
 
     Ok(())
+}
+
+/// Build a repo-path → display-name closure from the registered-repos table.
+/// Falls back to the directory's basename for unregistered paths so the UI
+/// always has *something* to render.
+fn repo_name_lookup_from(
+    conn: Option<&rusqlite::Connection>,
+) -> impl Fn(&str) -> String {
+    use std::collections::HashMap;
+    let mut map: HashMap<String, String> = HashMap::new();
+    if let Some(conn) = conn {
+        if let Ok(repos) = crate::db::list_repos(conn) {
+            for (path, name, _, _) in repos {
+                map.insert(path, name);
+            }
+        }
+    }
+    move |path: &str| {
+        map.get(path).cloned().unwrap_or_else(|| {
+            std::path::Path::new(path)
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_else(|| path.to_string())
+        })
+    }
 }
 
 /// Handle a bidirectional streaming session for an attached client.

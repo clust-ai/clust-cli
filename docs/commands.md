@@ -369,6 +369,7 @@ These shortcuts are active in the `clust ui` dashboard. They are displayed in th
 | `F2` | Toggle mouse capture (allows text selection and link clicking when off) |
 | `Opt+M` (macOS) / `Alt+M` | Temporarily disable mouse capture for 5 seconds (mouse passthrough) |
 | `Opt+E` (macOS) / `Alt+E` | Open the create-agent modal (multi-step builder for creating agents on worktrees) |
+| `Opt+S` (macOS) / `Alt+S` | Open the schedule-task modal (Time / Depend / Unscheduled) |
 | `Opt+D` (macOS) / `Alt+D` | Open the detached agent modal (start agent in any directory) |
 | `Opt+F` (macOS) / `Alt+F` | Open the search-agent modal (only when agents are running) |
 | `Opt+B` (macOS) / `Alt+B` | Toggle bypass permissions (global, persisted) |
@@ -376,6 +377,7 @@ These shortcuts are active in the `clust ui` dashboard. They are displayed in th
 | `Opt+V` (macOS) / `Alt+V` | Open in editor (see Editor Integration in terminal-ui.md) |
 | `Cmd+1` | Switch to Repositories tab (dismisses context menus, exits focus mode) |
 | `Cmd+2` | Switch to Overview tab (dismisses context menus, exits focus mode) |
+| `Cmd+3` | Switch to Schedule tab (dismisses context menus, exits focus mode) |
 
 **Repositories tab:**
 
@@ -460,3 +462,21 @@ The Terminal tab supports multiple shells per agent shown as a label strip (`[1]
 | All other keys | Forwarded to the active terminal's shell PTY |
 
 All Terminal-tab shells are killed automatically when the owning agent exits, its worktree is removed, or its branch is deleted — no orphan processes left behind.
+
+**Schedule tab:**
+
+The Schedule tab shows every persistent scheduled task as a vertical column. Inactive columns show the prompt and schedule info; Active columns embed the live agent terminal; Complete columns shrink to a checkmark; Aborted columns show the prompt and a restart hint.
+
+| Shortcut | Action |
+|----------|--------|
+| `Shift+←` / `Shift+→` | Focus previous / next task column |
+| `Shift+↓` | (Active task only) enter focus mode on the running agent |
+| `↑` / `↓` | Scroll the prompt body of the focused Inactive/Aborted column |
+| `e` | Edit prompt (Inactive/Aborted only) — opens an inline modal |
+| `p` | Toggle plan mode for the focused Inactive/Aborted task |
+| `x` | Toggle Auto-Exit for the focused Inactive/Aborted task |
+| `s` | Start the focused Inactive task right now |
+| `r` | Restart the focused Aborted task in place |
+| `R` (Shift+R) | Restart the focused Aborted task after `git reset --hard HEAD && git clean -fdx` in the worktree |
+| `d` / `Delete` | Delete the focused task (confirmation modal; if Active, the agent is stopped first) |
+| `Shift+C` | Open the "Clear all completed tasks?" confirmation |

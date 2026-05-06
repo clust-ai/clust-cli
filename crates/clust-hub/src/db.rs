@@ -1,6 +1,7 @@
 use std::path::PathBuf;
 
-use rusqlite::Connection;
+use clust_ipc::{ScheduleKind, ScheduledTaskInfo, ScheduledTaskStatus};
+use rusqlite::{params, Connection};
 
 /// A row from the repos table: (path, name, color, editor).
 pub type RepoRow = (String, String, Option<String>, Option<String>);
@@ -53,7 +54,7 @@ pub fn open_or_create_at(path: &std::path::Path) -> Result<Connection, String> {
 }
 
 /// Highest schema version this binary knows how to produce.
-const LATEST_SCHEMA_VERSION: i64 = 11;
+const LATEST_SCHEMA_VERSION: i64 = 12;
 
 /// Read the current `schema_version` value (0 if no rows).
 fn read_schema_version(conn: &Connection) -> Result<i64, String> {
@@ -140,6 +141,9 @@ fn run_migrations(conn: &Connection) -> Result<(), String> {
         }
         if current_version < 11 {
             migrate_v11(conn)?;
+        }
+        if current_version < 12 {
+            migrate_v12(conn)?;
         }
         Ok(())
     })();
@@ -265,6 +269,460 @@ fn migrate_v11(conn: &Connection) -> Result<(), String> {
          INSERT INTO schema_version (version) VALUES (11);",
     )
     .map_err(|e| format!("migration v11 failed: {e}"))
+}
+
+/// Migration v12: introduce the per-task scheduling system.
+///
+/// `scheduled_tasks` persists everything the hub needs to reconstruct a task
+/// across restarts: which repo + branch to spawn into, the prompt, plan/auto-exit
+/// flags, and the schedule kind (time / depend / unscheduled). Dependencies are
+/// edges in the `scheduled_task_deps` table.
+///
+/// Branch uniqueness is enforced only among non-`complete` tasks via a partial
+/// unique index, so a branch can be re-scheduled after its previous task
+/// finished. The user can also delete completed tasks to free a branch sooner.
+fn migrate_v12(conn: &Connection) -> Result<(), String> {
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS scheduled_tasks (
+            id            TEXT PRIMARY KEY,
+            repo_path     TEXT NOT NULL,
+            base_branch   TEXT,
+            new_branch    TEXT,
+            branch_name   TEXT NOT NULL,
+            prompt        TEXT NOT NULL,
+            plan_mode     INTEGER NOT NULL DEFAULT 0,
+            auto_exit     INTEGER NOT NULL DEFAULT 0,
+            schedule_kind TEXT NOT NULL,
+            start_at      TEXT,
+            status        TEXT NOT NULL,
+            agent_id      TEXT,
+            agent_binary  TEXT NOT NULL,
+            created_at    TEXT NOT NULL,
+            completed_at  TEXT
+        );
+        CREATE UNIQUE INDEX IF NOT EXISTS uq_scheduled_tasks_active_branch
+            ON scheduled_tasks(branch_name)
+            WHERE status != 'complete';
+        CREATE TABLE IF NOT EXISTS scheduled_task_deps (
+            task_id       TEXT NOT NULL,
+            depends_on_id TEXT NOT NULL,
+            PRIMARY KEY (task_id, depends_on_id),
+            FOREIGN KEY (task_id) REFERENCES scheduled_tasks(id) ON DELETE CASCADE
+        );
+        INSERT INTO schema_version (version) VALUES (12);",
+    )
+    .map_err(|e| format!("migration v12 failed: {e}"))
+}
+
+// ---------------------------------------------------------------------------
+// Scheduled task helpers
+// ---------------------------------------------------------------------------
+
+/// Rewrite any tasks left in `active` state from a previous hub run to
+/// `aborted`, since their agent processes died with the hub. Called on every
+/// boot, after migrations. Idempotent: a hub that was shut down cleanly will
+/// have no `active` rows and this is a no-op.
+pub fn recover_active_scheduled_tasks(conn: &Connection) -> Result<usize, String> {
+    let n = conn
+        .execute(
+            "UPDATE scheduled_tasks SET status='aborted' WHERE status='active'",
+            [],
+        )
+        .map_err(|e| format!("failed to recover active scheduled tasks: {e}"))?;
+    Ok(n)
+}
+
+/// Generate a unique 8-char hex ID for a scheduled task.
+pub fn generate_scheduled_task_id(conn: &Connection) -> Result<String, String> {
+    use rand::Rng;
+    let mut rng = rand::thread_rng();
+    for _ in 0..1024 {
+        let bytes: [u8; 4] = rng.gen();
+        let id = format!(
+            "{:02x}{:02x}{:02x}{:02x}",
+            bytes[0], bytes[1], bytes[2], bytes[3]
+        );
+        let exists: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM scheduled_tasks WHERE id = ?1",
+                [&id],
+                |row| row.get(0),
+            )
+            .map_err(|e| format!("failed to check scheduled task id: {e}"))?;
+        if exists == 0 {
+            return Ok(id);
+        }
+    }
+    Err("could not generate unique scheduled task id after 1024 attempts".into())
+}
+
+/// True if `branch_name` is already in use by a non-completed scheduled task.
+pub fn branch_in_use(conn: &Connection, branch_name: &str) -> Result<bool, String> {
+    let count: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM scheduled_tasks
+             WHERE branch_name = ?1 AND status != 'complete'",
+            [branch_name],
+            |row| row.get(0),
+        )
+        .map_err(|e| format!("failed to check branch_in_use: {e}"))?;
+    Ok(count > 0)
+}
+
+/// Specification for a brand-new scheduled task to insert.
+pub struct NewScheduledTask {
+    pub repo_path: String,
+    pub base_branch: Option<String>,
+    pub new_branch: Option<String>,
+    pub branch_name: String,
+    pub prompt: String,
+    pub plan_mode: bool,
+    pub auto_exit: bool,
+    pub agent_binary: String,
+    pub schedule: ScheduleKind,
+}
+
+/// Insert a new scheduled task in `inactive` state. Returns the generated id.
+///
+/// Inserts the row and (for `Depend` schedules) the dependency edges in a
+/// single transaction so a half-inserted task with no edges can never appear.
+/// Returns `Err` if `branch_name` collides with an existing non-completed task
+/// (the partial unique index guarantees this).
+pub fn insert_scheduled_task(
+    conn: &mut Connection,
+    spec: NewScheduledTask,
+) -> Result<String, String> {
+    let id = generate_scheduled_task_id(conn)?;
+    let now = chrono::Utc::now().to_rfc3339();
+    let (kind, start_at, deps): (&str, Option<String>, Vec<String>) = match &spec.schedule {
+        ScheduleKind::Time { start_at } => ("time", Some(start_at.clone()), Vec::new()),
+        ScheduleKind::Depend { depends_on_ids } => ("depend", None, depends_on_ids.clone()),
+        ScheduleKind::Unscheduled => ("unscheduled", None, Vec::new()),
+    };
+
+    let tx = conn
+        .transaction()
+        .map_err(|e| format!("failed to begin task insert tx: {e}"))?;
+    tx.execute(
+        "INSERT INTO scheduled_tasks (
+            id, repo_path, base_branch, new_branch, branch_name,
+            prompt, plan_mode, auto_exit, schedule_kind, start_at,
+            status, agent_id, agent_binary, created_at, completed_at
+        ) VALUES (
+            ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10,
+            'inactive', NULL, ?11, ?12, NULL
+        )",
+        params![
+            id,
+            spec.repo_path,
+            spec.base_branch,
+            spec.new_branch,
+            spec.branch_name,
+            spec.prompt,
+            i64::from(spec.plan_mode),
+            i64::from(spec.auto_exit),
+            kind,
+            start_at,
+            spec.agent_binary,
+            now,
+        ],
+    )
+    .map_err(|e| {
+        // SQLite's partial-unique-index violation surfaces as
+        // "UNIQUE constraint failed: scheduled_tasks.branch_name". Surface a
+        // friendlier message so the modal can show it inline.
+        let s = e.to_string();
+        if s.contains("UNIQUE constraint failed") && s.contains("branch_name") {
+            format!("branch '{}' is already scheduled", spec.branch_name)
+        } else {
+            format!("failed to insert scheduled task: {e}")
+        }
+    })?;
+    for dep in &deps {
+        tx.execute(
+            "INSERT INTO scheduled_task_deps (task_id, depends_on_id) VALUES (?1, ?2)",
+            params![id, dep],
+        )
+        .map_err(|e| format!("failed to insert task dependency: {e}"))?;
+    }
+    tx.commit()
+        .map_err(|e| format!("failed to commit task insert tx: {e}"))?;
+    Ok(id)
+}
+
+/// Read a row from `scheduled_tasks` plus its dependency edges into a wire-ready
+/// `ScheduledTaskInfo`. Returns `Ok(None)` if the id is not present.
+pub fn get_scheduled_task(
+    conn: &Connection,
+    id: &str,
+    repo_name_lookup: &dyn Fn(&str) -> String,
+) -> Result<Option<ScheduledTaskInfo>, String> {
+    let row = conn
+        .query_row(
+            "SELECT id, repo_path, branch_name, prompt, plan_mode, auto_exit,
+                    schedule_kind, start_at, status, agent_id, agent_binary,
+                    created_at, completed_at
+             FROM scheduled_tasks WHERE id = ?1",
+            [id],
+            row_to_partial,
+        )
+        .ok();
+    let Some(partial) = row else { return Ok(None) };
+    let info = hydrate(conn, partial, repo_name_lookup)?;
+    Ok(Some(info))
+}
+
+/// List every scheduled task. `repo_name_lookup` resolves a repo path to its
+/// display name so the returned wire info carries both. Sorted oldest first.
+pub fn list_scheduled_tasks(
+    conn: &Connection,
+    repo_name_lookup: &dyn Fn(&str) -> String,
+) -> Result<Vec<ScheduledTaskInfo>, String> {
+    let mut stmt = conn
+        .prepare(
+            "SELECT id, repo_path, branch_name, prompt, plan_mode, auto_exit,
+                    schedule_kind, start_at, status, agent_id, agent_binary,
+                    created_at, completed_at
+             FROM scheduled_tasks ORDER BY created_at ASC, id ASC",
+        )
+        .map_err(|e| format!("failed to prepare list_scheduled_tasks: {e}"))?;
+    let rows = stmt
+        .query_map([], row_to_partial)
+        .map_err(|e| format!("failed to query scheduled_tasks: {e}"))?;
+    let mut out = Vec::new();
+    for row in rows {
+        let partial = row.map_err(|e| format!("failed to read row: {e}"))?;
+        out.push(hydrate(conn, partial, repo_name_lookup)?);
+    }
+    Ok(out)
+}
+
+/// Return the dependency ids for a single task.
+pub fn list_task_deps(conn: &Connection, task_id: &str) -> Result<Vec<String>, String> {
+    let mut stmt = conn
+        .prepare(
+            "SELECT depends_on_id FROM scheduled_task_deps WHERE task_id = ?1
+             ORDER BY depends_on_id",
+        )
+        .map_err(|e| format!("failed to prepare list_task_deps: {e}"))?;
+    let rows = stmt
+        .query_map([task_id], |row| row.get::<_, String>(0))
+        .map_err(|e| format!("failed to query deps: {e}"))?;
+    rows.collect::<Result<Vec<_>, _>>()
+        .map_err(|e| format!("failed to read dep row: {e}"))
+}
+
+pub fn update_scheduled_task_prompt(
+    conn: &Connection,
+    id: &str,
+    prompt: &str,
+) -> Result<(), String> {
+    conn.execute(
+        "UPDATE scheduled_tasks SET prompt = ?1 WHERE id = ?2",
+        params![prompt, id],
+    )
+    .map_err(|e| format!("failed to update task prompt: {e}"))?;
+    Ok(())
+}
+
+pub fn update_scheduled_task_plan_mode(
+    conn: &Connection,
+    id: &str,
+    plan_mode: bool,
+) -> Result<(), String> {
+    conn.execute(
+        "UPDATE scheduled_tasks SET plan_mode = ?1 WHERE id = ?2",
+        params![i64::from(plan_mode), id],
+    )
+    .map_err(|e| format!("failed to update task plan_mode: {e}"))?;
+    Ok(())
+}
+
+pub fn update_scheduled_task_auto_exit(
+    conn: &Connection,
+    id: &str,
+    auto_exit: bool,
+) -> Result<(), String> {
+    conn.execute(
+        "UPDATE scheduled_tasks SET auto_exit = ?1 WHERE id = ?2",
+        params![i64::from(auto_exit), id],
+    )
+    .map_err(|e| format!("failed to update task auto_exit: {e}"))?;
+    Ok(())
+}
+
+/// Mark a task `active` and remember which agent is fulfilling it. Used by both
+/// the auto-trigger loop and manual start-now / restart paths.
+pub fn mark_scheduled_task_active(
+    conn: &Connection,
+    id: &str,
+    agent_id: &str,
+) -> Result<(), String> {
+    conn.execute(
+        "UPDATE scheduled_tasks SET status='active', agent_id=?1, completed_at=NULL
+         WHERE id = ?2",
+        params![agent_id, id],
+    )
+    .map_err(|e| format!("failed to mark task active: {e}"))?;
+    Ok(())
+}
+
+/// Mark a task `complete` and record when it finished. Called from the
+/// agent-exit hook in the hub.
+pub fn mark_scheduled_task_complete(conn: &Connection, id: &str) -> Result<(), String> {
+    let now = chrono::Utc::now().to_rfc3339();
+    conn.execute(
+        "UPDATE scheduled_tasks SET status='complete', completed_at=?1 WHERE id = ?2",
+        params![now, id],
+    )
+    .map_err(|e| format!("failed to mark task complete: {e}"))?;
+    Ok(())
+}
+
+/// Look up the scheduled task currently fulfilled by `agent_id` (only `active`
+/// tasks match — older Complete rows referencing a re-used agent id never do)
+/// and mark it Complete. Returns `Ok(true)` if a row was updated.
+///
+/// Hot path called from the PTY reader's exit branch under the hub lock, so
+/// the underlying SQL is one round-trip and matches `agent_id` directly rather
+/// than reading and re-writing.
+pub fn mark_scheduled_task_complete_by_agent(
+    conn: &Connection,
+    agent_id: &str,
+) -> Result<bool, String> {
+    let now = chrono::Utc::now().to_rfc3339();
+    let n = conn
+        .execute(
+            "UPDATE scheduled_tasks
+             SET status='complete', completed_at=?1
+             WHERE agent_id=?2 AND status='active'",
+            params![now, agent_id],
+        )
+        .map_err(|e| format!("failed to complete task by agent: {e}"))?;
+    Ok(n > 0)
+}
+
+/// Mark a task `aborted`. Called when the hub fails to spawn the agent for a
+/// task that was about to start, so the user can manually restart later.
+pub fn mark_scheduled_task_aborted(conn: &Connection, id: &str) -> Result<(), String> {
+    conn.execute(
+        "UPDATE scheduled_tasks SET status='aborted' WHERE id = ?1",
+        [id],
+    )
+    .map_err(|e| format!("failed to mark task aborted: {e}"))?;
+    Ok(())
+}
+
+pub fn delete_scheduled_task(conn: &Connection, id: &str) -> Result<(), String> {
+    conn.execute("DELETE FROM scheduled_tasks WHERE id = ?1", [id])
+        .map_err(|e| format!("failed to delete scheduled task: {e}"))?;
+    Ok(())
+}
+
+pub fn delete_scheduled_tasks_with_status(
+    conn: &Connection,
+    status: ScheduledTaskStatus,
+) -> Result<usize, String> {
+    let n = conn
+        .execute(
+            "DELETE FROM scheduled_tasks WHERE status = ?1",
+            [status.as_str()],
+        )
+        .map_err(|e| format!("failed to delete scheduled tasks by status: {e}"))?;
+    Ok(n)
+}
+
+/// Snapshot of `agent_id → scheduled_task_id` rebuilt from the DB on hub
+/// startup so the PTY-reader exit hook can detect "this agent fulfils a task"
+/// in O(1) without re-querying.
+pub fn agent_id_to_task_id_map(conn: &Connection) -> Result<Vec<(String, String)>, String> {
+    let mut stmt = conn
+        .prepare(
+            "SELECT agent_id, id FROM scheduled_tasks
+             WHERE agent_id IS NOT NULL AND status = 'active'",
+        )
+        .map_err(|e| format!("failed to prepare agent map query: {e}"))?;
+    let rows = stmt
+        .query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })
+        .map_err(|e| format!("failed to query agent map: {e}"))?;
+    rows.collect::<Result<Vec<_>, _>>()
+        .map_err(|e| format!("failed to read agent map: {e}"))
+}
+
+// ---------------------------------------------------------------------------
+// Internal helpers for the scheduled_tasks reads above
+// ---------------------------------------------------------------------------
+
+/// Intermediate row representation. `schedule_kind` and `start_at` are kept raw
+/// because composing the final `ScheduleKind` requires a follow-up dependency
+/// query for the `Depend` variant, which we issue once in `hydrate`.
+struct PartialTask {
+    id: String,
+    repo_path: String,
+    branch_name: String,
+    prompt: String,
+    plan_mode: bool,
+    auto_exit: bool,
+    schedule_kind: String,
+    start_at: Option<String>,
+    status: String,
+    agent_id: Option<String>,
+    agent_binary: String,
+    created_at: String,
+    completed_at: Option<String>,
+}
+
+fn row_to_partial(row: &rusqlite::Row<'_>) -> rusqlite::Result<PartialTask> {
+    Ok(PartialTask {
+        id: row.get(0)?,
+        repo_path: row.get(1)?,
+        branch_name: row.get(2)?,
+        prompt: row.get(3)?,
+        plan_mode: row.get::<_, i64>(4)? != 0,
+        auto_exit: row.get::<_, i64>(5)? != 0,
+        schedule_kind: row.get(6)?,
+        start_at: row.get(7)?,
+        status: row.get(8)?,
+        agent_id: row.get(9)?,
+        agent_binary: row.get(10)?,
+        created_at: row.get(11)?,
+        completed_at: row.get(12)?,
+    })
+}
+
+fn hydrate(
+    conn: &Connection,
+    p: PartialTask,
+    repo_name_lookup: &dyn Fn(&str) -> String,
+) -> Result<ScheduledTaskInfo, String> {
+    let schedule = match p.schedule_kind.as_str() {
+        "time" => ScheduleKind::Time {
+            start_at: p.start_at.unwrap_or_default(),
+        },
+        "depend" => ScheduleKind::Depend {
+            depends_on_ids: list_task_deps(conn, &p.id)?,
+        },
+        _ => ScheduleKind::Unscheduled,
+    };
+    let status = ScheduledTaskStatus::parse_str(&p.status).unwrap_or(ScheduledTaskStatus::Inactive);
+    let repo_name = repo_name_lookup(&p.repo_path);
+    Ok(ScheduledTaskInfo {
+        id: p.id,
+        repo_path: p.repo_path,
+        repo_name,
+        branch_name: p.branch_name,
+        prompt: p.prompt,
+        plan_mode: p.plan_mode,
+        auto_exit: p.auto_exit,
+        agent_binary: p.agent_binary,
+        schedule,
+        status,
+        agent_id: p.agent_id,
+        created_at: p.created_at,
+        completed_at: p.completed_at,
+    })
 }
 
 /// Available colors for repository identification.
@@ -803,6 +1261,312 @@ mod tests {
             .query_row("SELECT COUNT(*) FROM schema_version", [], |r| r.get(0))
             .unwrap();
         assert_eq!(row_count, super::LATEST_SCHEMA_VERSION);
+    }
+
+    // ── Scheduled task tests ────────────────────────────────────
+
+    fn dummy_repo_name(_path: &str) -> String {
+        "test-repo".to_string()
+    }
+
+    #[test]
+    fn fresh_db_has_scheduled_tables() {
+        let conn = in_memory_db();
+        let count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM scheduled_tasks", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(count, 0);
+        let count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM scheduled_task_deps", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(count, 0);
+    }
+
+    #[test]
+    fn insert_and_list_scheduled_task() {
+        let mut conn = in_memory_db();
+        let id = insert_scheduled_task(
+            &mut conn,
+            NewScheduledTask {
+                repo_path: "/repo".into(),
+                base_branch: Some("main".into()),
+                new_branch: Some("feature/x".into()),
+                branch_name: "feature/x".into(),
+                prompt: "do thing".into(),
+                plan_mode: false,
+                auto_exit: true,
+                agent_binary: "claude".into(),
+                schedule: ScheduleKind::Unscheduled,
+            },
+        )
+        .unwrap();
+        assert_eq!(id.len(), 8);
+        let tasks = list_scheduled_tasks(&conn, &dummy_repo_name).unwrap();
+        assert_eq!(tasks.len(), 1);
+        assert_eq!(tasks[0].id, id);
+        assert_eq!(tasks[0].branch_name, "feature/x");
+        assert!(tasks[0].auto_exit);
+        assert_eq!(tasks[0].status, ScheduledTaskStatus::Inactive);
+        assert_eq!(tasks[0].repo_name, "test-repo");
+    }
+
+    #[test]
+    fn branch_uniqueness_blocks_duplicate_inactive() {
+        let mut conn = in_memory_db();
+        let _ = insert_scheduled_task(
+            &mut conn,
+            NewScheduledTask {
+                repo_path: "/repo".into(),
+                base_branch: None,
+                new_branch: None,
+                branch_name: "main".into(),
+                prompt: "first".into(),
+                plan_mode: false,
+                auto_exit: false,
+                agent_binary: "claude".into(),
+                schedule: ScheduleKind::Unscheduled,
+            },
+        )
+        .unwrap();
+        let err = insert_scheduled_task(
+            &mut conn,
+            NewScheduledTask {
+                repo_path: "/repo".into(),
+                base_branch: None,
+                new_branch: None,
+                branch_name: "main".into(),
+                prompt: "second".into(),
+                plan_mode: false,
+                auto_exit: false,
+                agent_binary: "claude".into(),
+                schedule: ScheduleKind::Unscheduled,
+            },
+        )
+        .unwrap_err();
+        assert!(err.contains("already scheduled"), "got: {err}");
+    }
+
+    #[test]
+    fn branch_can_be_reused_after_complete() {
+        let mut conn = in_memory_db();
+        let id = insert_scheduled_task(
+            &mut conn,
+            NewScheduledTask {
+                repo_path: "/repo".into(),
+                base_branch: None,
+                new_branch: None,
+                branch_name: "main".into(),
+                prompt: "first".into(),
+                plan_mode: false,
+                auto_exit: false,
+                agent_binary: "claude".into(),
+                schedule: ScheduleKind::Unscheduled,
+            },
+        )
+        .unwrap();
+        mark_scheduled_task_complete(&conn, &id).unwrap();
+        // Now another task should be insertable on the same branch.
+        insert_scheduled_task(
+            &mut conn,
+            NewScheduledTask {
+                repo_path: "/repo".into(),
+                base_branch: None,
+                new_branch: None,
+                branch_name: "main".into(),
+                prompt: "second".into(),
+                plan_mode: false,
+                auto_exit: false,
+                agent_binary: "claude".into(),
+                schedule: ScheduleKind::Unscheduled,
+            },
+        )
+        .unwrap();
+        assert!(branch_in_use(&conn, "main").unwrap());
+    }
+
+    #[test]
+    fn aborted_blocks_branch_reuse() {
+        // Same branch must stay blocked while a previous task is Aborted —
+        // the user might still want to restart it.
+        let mut conn = in_memory_db();
+        let id = insert_scheduled_task(
+            &mut conn,
+            NewScheduledTask {
+                repo_path: "/repo".into(),
+                base_branch: None,
+                new_branch: None,
+                branch_name: "main".into(),
+                prompt: "first".into(),
+                plan_mode: false,
+                auto_exit: false,
+                agent_binary: "claude".into(),
+                schedule: ScheduleKind::Unscheduled,
+            },
+        )
+        .unwrap();
+        mark_scheduled_task_aborted(&conn, &id).unwrap();
+        let err = insert_scheduled_task(
+            &mut conn,
+            NewScheduledTask {
+                repo_path: "/repo".into(),
+                base_branch: None,
+                new_branch: None,
+                branch_name: "main".into(),
+                prompt: "second".into(),
+                plan_mode: false,
+                auto_exit: false,
+                agent_binary: "claude".into(),
+                schedule: ScheduleKind::Unscheduled,
+            },
+        )
+        .unwrap_err();
+        assert!(err.contains("already scheduled"));
+    }
+
+    #[test]
+    fn depend_inserts_edges() {
+        let mut conn = in_memory_db();
+        let upstream = insert_scheduled_task(
+            &mut conn,
+            NewScheduledTask {
+                repo_path: "/repo".into(),
+                base_branch: None,
+                new_branch: None,
+                branch_name: "upstream".into(),
+                prompt: "first".into(),
+                plan_mode: false,
+                auto_exit: true,
+                agent_binary: "claude".into(),
+                schedule: ScheduleKind::Unscheduled,
+            },
+        )
+        .unwrap();
+        let downstream = insert_scheduled_task(
+            &mut conn,
+            NewScheduledTask {
+                repo_path: "/repo".into(),
+                base_branch: None,
+                new_branch: None,
+                branch_name: "downstream".into(),
+                prompt: "second".into(),
+                plan_mode: false,
+                auto_exit: false,
+                agent_binary: "claude".into(),
+                schedule: ScheduleKind::Depend {
+                    depends_on_ids: vec![upstream.clone()],
+                },
+            },
+        )
+        .unwrap();
+        let deps = list_task_deps(&conn, &downstream).unwrap();
+        assert_eq!(deps, vec![upstream]);
+    }
+
+    #[test]
+    fn recover_active_rewrites_to_aborted() {
+        let mut conn = in_memory_db();
+        let id = insert_scheduled_task(
+            &mut conn,
+            NewScheduledTask {
+                repo_path: "/repo".into(),
+                base_branch: None,
+                new_branch: None,
+                branch_name: "main".into(),
+                prompt: "first".into(),
+                plan_mode: false,
+                auto_exit: false,
+                agent_binary: "claude".into(),
+                schedule: ScheduleKind::Unscheduled,
+            },
+        )
+        .unwrap();
+        mark_scheduled_task_active(&conn, &id, "fakeagent").unwrap();
+        let n = recover_active_scheduled_tasks(&conn).unwrap();
+        assert_eq!(n, 1);
+        let task = get_scheduled_task(&conn, &id, &dummy_repo_name).unwrap().unwrap();
+        assert_eq!(task.status, ScheduledTaskStatus::Aborted);
+    }
+
+    #[test]
+    fn delete_completed_only() {
+        let mut conn = in_memory_db();
+        let a = insert_scheduled_task(
+            &mut conn,
+            NewScheduledTask {
+                repo_path: "/repo".into(),
+                base_branch: None,
+                new_branch: None,
+                branch_name: "a".into(),
+                prompt: "p".into(),
+                plan_mode: false,
+                auto_exit: false,
+                agent_binary: "claude".into(),
+                schedule: ScheduleKind::Unscheduled,
+            },
+        )
+        .unwrap();
+        mark_scheduled_task_complete(&conn, &a).unwrap();
+        let _b = insert_scheduled_task(
+            &mut conn,
+            NewScheduledTask {
+                repo_path: "/repo".into(),
+                base_branch: None,
+                new_branch: None,
+                branch_name: "b".into(),
+                prompt: "p".into(),
+                plan_mode: false,
+                auto_exit: false,
+                agent_binary: "claude".into(),
+                schedule: ScheduleKind::Unscheduled,
+            },
+        )
+        .unwrap();
+        let n = delete_scheduled_tasks_with_status(&conn, ScheduledTaskStatus::Complete).unwrap();
+        assert_eq!(n, 1);
+        let tasks = list_scheduled_tasks(&conn, &dummy_repo_name).unwrap();
+        assert_eq!(tasks.len(), 1);
+        assert_eq!(tasks[0].branch_name, "b");
+    }
+
+    #[test]
+    fn agent_id_to_task_id_only_active() {
+        let mut conn = in_memory_db();
+        let active_task = insert_scheduled_task(
+            &mut conn,
+            NewScheduledTask {
+                repo_path: "/repo".into(),
+                base_branch: None,
+                new_branch: None,
+                branch_name: "a".into(),
+                prompt: "p".into(),
+                plan_mode: false,
+                auto_exit: false,
+                agent_binary: "claude".into(),
+                schedule: ScheduleKind::Unscheduled,
+            },
+        )
+        .unwrap();
+        mark_scheduled_task_active(&conn, &active_task, "agent_a").unwrap();
+        let _inactive_task = insert_scheduled_task(
+            &mut conn,
+            NewScheduledTask {
+                repo_path: "/repo".into(),
+                base_branch: None,
+                new_branch: None,
+                branch_name: "b".into(),
+                prompt: "p".into(),
+                plan_mode: false,
+                auto_exit: false,
+                agent_binary: "claude".into(),
+                schedule: ScheduleKind::Unscheduled,
+            },
+        )
+        .unwrap();
+        let map = agent_id_to_task_id_map(&conn).unwrap();
+        assert_eq!(map.len(), 1);
+        assert_eq!(map[0], ("agent_a".to_string(), active_task));
     }
 
     #[test]

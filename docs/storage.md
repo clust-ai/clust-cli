@@ -59,7 +59,45 @@ Migration v3 adds the `color` column and backfills existing repos with cycling c
 
 Migration v4 adds the `editor` column for per-repository editor preferences. When set, the TUI skips the editor picker modal and opens the repository directly in the saved editor.
 
-Migrations v5–v10 originally created and evolved the schedule/batches feature. The schedule system was removed; v5–v10 are kept as version-bump stubs (no schema change) for compatibility with older databases. Migration v11 drops the orphaned `queued_batches` and `queued_batch_tasks` tables on existing databases that ran the schedule feature.
+Migrations v5–v10 originally created and evolved the schedule/batches feature. The first schedule system was removed; v5–v10 are kept as version-bump stubs (no schema change) for compatibility with older databases. Migration v11 drops the orphaned `queued_batches` and `queued_batch_tasks` tables on existing databases that ran the schedule feature.
+
+#### `scheduled_tasks` *(migration v12)*
+
+Per-task schedule entries powering the `Schedule` tab and Opt+S modal. Each row represents one independently-scheduled task.
+
+```sql
+CREATE TABLE scheduled_tasks (
+    id            TEXT PRIMARY KEY,        -- 8-char hex
+    repo_path     TEXT NOT NULL,
+    base_branch   TEXT,                    -- branch used as base when creating new (NULL when reusing existing)
+    new_branch    TEXT,                    -- the new branch name (NULL when reusing existing)
+    branch_name   TEXT NOT NULL,           -- the resolved branch (identifying name)
+    prompt        TEXT NOT NULL,           -- non-empty (enforced in modal + IPC)
+    plan_mode     INTEGER NOT NULL DEFAULT 0,
+    auto_exit     INTEGER NOT NULL DEFAULT 0,
+    schedule_kind TEXT NOT NULL,           -- 'time' | 'depend' | 'unscheduled'
+    start_at      TEXT,                    -- RFC 3339 UTC; only for kind='time'
+    status        TEXT NOT NULL,           -- 'inactive' | 'active' | 'complete' | 'aborted'
+    agent_id      TEXT,                    -- last agent spawned for this task
+    agent_binary  TEXT NOT NULL,           -- which binary to spawn (e.g. 'claude')
+    created_at    TEXT NOT NULL,
+    completed_at  TEXT
+);
+
+-- Branch can be reused once a task is Complete; blocked while Inactive/Active/Aborted.
+CREATE UNIQUE INDEX uq_scheduled_tasks_active_branch
+    ON scheduled_tasks(branch_name)
+    WHERE status != 'complete';
+
+CREATE TABLE scheduled_task_deps (
+    task_id       TEXT NOT NULL,
+    depends_on_id TEXT NOT NULL,
+    PRIMARY KEY (task_id, depends_on_id),
+    FOREIGN KEY (task_id) REFERENCES scheduled_tasks(id) ON DELETE CASCADE
+);
+```
+
+**Lifecycle:** every Inactive row is evaluated by the scheduler poll loop (see `architecture.md`). When the trigger fires, the row's `status` flips to `active` and `agent_id` is set; when the agent exits, the agent-exit hook sets `status='complete'` and stamps `completed_at`. Hubs that crash mid-run leave rows in `active`; on next startup `recover_active_scheduled_tasks` rewrites them all to `aborted` since their PIDs are gone.
 
 #### `agent_history` *(deferred — future migration)*
 
@@ -98,6 +136,7 @@ On startup, the hub checks `schema_version` and applies any pending migrations s
 | Bypass permissions toggle | SQLite `config` table | Persistent (survives restarts) |
 | Registered repositories | SQLite `repos` table | Persistent (auto-cleaned if path deleted) |
 | Per-repo editor preference | SQLite `repos` table (`editor` column) | Persistent (survives restarts) |
+| Scheduled tasks | SQLite `scheduled_tasks` + `scheduled_task_deps` tables | Persistent (survives restarts; Active rows recovered as Aborted) |
 | Agent session history | SQLite `agent_history` table | Persistent *(not yet implemented)* |
 | Running agent state | Hub in-memory | Ephemeral (dies with hub) |
 | Repository branch/worktree data | Fetched from git on demand | Ephemeral (never persisted) |

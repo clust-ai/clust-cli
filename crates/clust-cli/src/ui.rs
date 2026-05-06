@@ -30,9 +30,12 @@ use crate::{
     context_menu::{ContextMenu, ContextMenuItem, MenuResult},
     create_agent_modal::{CreateAgentModal, ModalResult},
     detached_agent_modal::{DetachedAgentModal, DetachedModalResult},
+    edit_prompt_modal::{EditPromptModal, EditPromptResult},
     ipc,
     overview::{self, OverviewFocus, OverviewState},
     repo_modal::{RepoModal, RepoModalResult},
+    schedule::{ScheduleAction, ScheduleState},
+    schedule_modal::{ScheduleModalResult, ScheduleTaskModal},
     search_modal::{SearchModal, SearchResult},
     terminal_emulator, theme, version, window_view,
 };
@@ -146,20 +149,23 @@ enum TreeLevel {
 enum ActiveTab {
     Repositories,
     Overview,
+    Schedule,
 }
 
 impl ActiveTab {
     fn next(self) -> Self {
         match self {
             Self::Repositories => Self::Overview,
-            Self::Overview => Self::Repositories,
+            Self::Overview => Self::Schedule,
+            Self::Schedule => Self::Repositories,
         }
     }
 
     fn prev(self) -> Self {
         match self {
-            Self::Repositories => Self::Overview,
+            Self::Repositories => Self::Schedule,
             Self::Overview => Self::Repositories,
+            Self::Schedule => Self::Overview,
         }
     }
 
@@ -167,6 +173,7 @@ impl ActiveTab {
         match self {
             Self::Repositories => "Repositories",
             Self::Overview => "Overview",
+            Self::Schedule => "Schedule",
         }
     }
 }
@@ -260,6 +267,14 @@ enum ConfirmedAction {
     StartAgentDetach {
         repo_path: String,
         branch_name: String,
+    },
+    /// Delete a single scheduled task.
+    DeleteScheduledTask {
+        task_id: String,
+    },
+    /// Bulk-delete every scheduled task with the given status.
+    ClearScheduledTasksByStatus {
+        status: clust_ipc::ScheduledTaskStatus,
     },
 }
 
@@ -835,12 +850,23 @@ pub fn run(hub_name: &str) -> io::Result<()> {
     let mut purge_progress: Option<PurgeProgress> = None;
     // Repository create/clone modal state
     let mut repo_modal: Option<RepoModal> = None;
+    // Schedule task modal state (Opt+S)
+    let mut schedule_modal: Option<ScheduleTaskModal> = None;
+    // Edit-prompt modal state (e on Inactive/Aborted task)
+    let mut edit_prompt_modal: Option<EditPromptModal> = None;
     // Clone progress modal state
     let mut clone_progress: Option<CloneProgress> = None;
     // Cached list of installed editors (detected once at startup)
     let editors_cache = crate::editor::detect_installed_editors();
     let (agent_start_tx, mut agent_start_rx) = tokio::sync::mpsc::channel::<AgentStartResult>(16);
     let (status_tx, mut status_rx) = tokio::sync::mpsc::channel::<StatusMessage>(4);
+
+    // Schedule tab state
+    let mut schedule_state = ScheduleState::new();
+    let mut scheduled_tasks: Vec<clust_ipc::ScheduledTaskInfo> = Vec::new();
+    let mut last_scheduled_fetch = Instant::now() - Duration::from_secs(10);
+    let (scheduled_task_tx, mut scheduled_task_rx) =
+        tokio::sync::mpsc::channel::<Vec<clust_ipc::ScheduledTaskInfo>>(8);
 
     loop {
         // Drain output events (non-blocking, runs regardless of tab)
@@ -909,7 +935,9 @@ pub fn run(hub_name: &str) -> io::Result<()> {
         let any_modal_open = create_modal.is_some()
             || search_modal.is_some()
             || detached_modal.is_some()
-            || repo_modal.is_some();
+            || repo_modal.is_some()
+            || schedule_modal.is_some()
+            || edit_prompt_modal.is_some();
         while let Ok(result) = agent_start_rx.try_recv() {
             match result {
                 AgentStartResult::Started {
@@ -1017,6 +1045,23 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                 focus_mode_state.update_compare_branches(&repos);
             }
         }
+        // Periodically refresh the scheduled-task list. Spawned async so the
+        // socket round-trip never blocks the event loop. The receiver is
+        // drained at the top of every tick.
+        if hub_running && last_scheduled_fetch.elapsed() >= AGENT_FETCH_INTERVAL {
+            last_scheduled_fetch = Instant::now();
+            let tx = scheduled_task_tx.clone();
+            tokio::spawn(async move {
+                let tasks = ipc::fetch_scheduled_tasks().await;
+                let _ = tx.send(tasks).await;
+            });
+        }
+        while let Ok(tasks) = scheduled_task_rx.try_recv() {
+            scheduled_tasks = tasks.clone();
+            schedule_state.sync_tasks(tasks);
+        }
+        // Drain pending PTY output for active scheduled tasks.
+        schedule_state.drain_output_events();
 
         // Build display_repos: real repos + synthetic "No Repository" for unlinked agents
         let display_repos = {
@@ -1128,7 +1173,9 @@ pub fn run(hub_name: &str) -> io::Result<()> {
         let mut click_map = ClickMap::default();
         let show_modal = create_modal.is_some()
             || detached_modal.is_some()
-            || repo_modal.is_some();
+            || repo_modal.is_some()
+            || schedule_modal.is_some()
+            || edit_prompt_modal.is_some();
         let show_search = search_modal.is_some();
         let purge_ref = &purge_progress;
         let clone_ref = &clone_progress;
@@ -1204,6 +1251,9 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                             &repo_colors,
                             &repos,
                         );
+                    }
+                    ActiveTab::Schedule => {
+                        schedule_state.render(frame, content_area);
                     }
                 }
             }
@@ -1292,6 +1342,12 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                 if let Some(ref modal) = repo_modal {
                     modal.render(frame, content_area);
                 }
+                if let Some(ref modal) = schedule_modal {
+                    modal.render(frame, content_area);
+                }
+                if let Some(ref modal) = edit_prompt_modal {
+                    modal.render(frame, content_area);
+                }
             }
 
             if show_search {
@@ -1374,6 +1430,17 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                 } else {
                                     overview_state.force_resize_all();
                                 }
+                            }
+                            KeyCode::Char('3') => {
+                                active_menu = None;
+                                if in_focus_mode {
+                                    if let Some((aid, cache)) = focus_mode_state.detach() {
+                                        overview_state.store_agent_terminals(aid, cache);
+                                    }
+                                    in_focus_mode = false;
+                                }
+                                active_tab = ActiveTab::Schedule;
+                                last_scheduled_fetch = Instant::now() - Duration::from_secs(10);
                             }
                             _ => {}
                         }
@@ -2424,6 +2491,36 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                                     last_agent_fetch =
                                                         Instant::now() - Duration::from_secs(10);
                                                 }
+                                                ConfirmedAction::DeleteScheduledTask { task_id } => {
+                                                    let refresh_tx = scheduled_task_tx.clone();
+                                                    tokio::spawn(async move {
+                                                        let _ = ipc::send_one_shot(
+                                                            CliMessage::DeleteScheduledTask {
+                                                                id: task_id,
+                                                            },
+                                                        )
+                                                        .await;
+                                                        let tasks =
+                                                            ipc::fetch_scheduled_tasks().await;
+                                                        let _ = refresh_tx.send(tasks).await;
+                                                    });
+                                                }
+                                                ConfirmedAction::ClearScheduledTasksByStatus {
+                                                    status,
+                                                } => {
+                                                    let refresh_tx = scheduled_task_tx.clone();
+                                                    tokio::spawn(async move {
+                                                        let _ = ipc::send_one_shot(
+                                                            CliMessage::DeleteScheduledTasksByStatus {
+                                                                status,
+                                                            },
+                                                        )
+                                                        .await;
+                                                        let tasks =
+                                                            ipc::fetch_scheduled_tasks().await;
+                                                        let _ = refresh_tx.send(tasks).await;
+                                                    });
+                                                }
                                                 ConfirmedAction::StartAgentDetach {
                                                     repo_path,
                                                     branch_name,
@@ -2710,7 +2807,97 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                             }
                             ModalResult::Pending => {}
                         }
-                    // Schedule task modal takes priority over all other input
+                    // Schedule task modal (Opt+S) — multi-step. Mirrors create_modal.
+                    } else if let Some(ref mut modal) = schedule_modal {
+                        match modal.handle_key(key) {
+                            ScheduleModalResult::Cancelled => {
+                                schedule_modal = None;
+                            }
+                            ScheduleModalResult::Pending => {}
+                            ScheduleModalResult::Completed(out) => {
+                                schedule_modal = None;
+                                let tx = status_tx.clone();
+                                let refresh_tx = scheduled_task_tx.clone();
+                                tokio::spawn(async move {
+                                    let msg = clust_ipc::CliMessage::CreateScheduledTask {
+                                        repo_path: out.repo_path,
+                                        base_branch: out.base_branch,
+                                        new_branch: out.new_branch,
+                                        prompt: out.prompt,
+                                        plan_mode: out.plan_mode,
+                                        auto_exit: out.auto_exit,
+                                        agent_binary: None,
+                                        schedule: out.schedule,
+                                    };
+                                    match ipc::send_one_shot(msg).await {
+                                        Ok(HubMessage::ScheduledTaskCreated { info }) => {
+                                            let _ = tx
+                                                .send(StatusMessage {
+                                                    text: format!(
+                                                        "Scheduled task on {}",
+                                                        info.branch_name
+                                                    ),
+                                                    level: StatusLevel::Success,
+                                                    created: Instant::now(),
+                                                })
+                                                .await;
+                                        }
+                                        Ok(HubMessage::Error { message }) => {
+                                            let _ = tx
+                                                .send(StatusMessage {
+                                                    text: format!("Schedule failed: {message}"),
+                                                    level: StatusLevel::Error,
+                                                    created: Instant::now(),
+                                                })
+                                                .await;
+                                        }
+                                        Ok(_) => {}
+                                        Err(e) => {
+                                            let _ = tx
+                                                .send(StatusMessage {
+                                                    text: format!("Schedule failed: {e}"),
+                                                    level: StatusLevel::Error,
+                                                    created: Instant::now(),
+                                                })
+                                                .await;
+                                        }
+                                    }
+                                    // Force a refresh on the next tick.
+                                    let tasks = ipc::fetch_scheduled_tasks().await;
+                                    let _ = refresh_tx.send(tasks).await;
+                                });
+                            }
+                        }
+                    // Edit-prompt modal (e on a task in Schedule tab).
+                    } else if let Some(ref mut modal) = edit_prompt_modal {
+                        match modal.handle_key(key) {
+                            EditPromptResult::Cancelled => {
+                                edit_prompt_modal = None;
+                            }
+                            EditPromptResult::Pending => {}
+                            EditPromptResult::Submitted { task_id, prompt } => {
+                                edit_prompt_modal = None;
+                                let tx = status_tx.clone();
+                                let refresh_tx = scheduled_task_tx.clone();
+                                tokio::spawn(async move {
+                                    let msg = clust_ipc::CliMessage::UpdateScheduledTaskPrompt {
+                                        id: task_id,
+                                        prompt,
+                                    };
+                                    if let Err(e) = ipc::send_one_shot(msg).await {
+                                        let _ = tx
+                                            .send(StatusMessage {
+                                                text: format!("Update failed: {e}"),
+                                                level: StatusLevel::Error,
+                                                created: Instant::now(),
+                                            })
+                                            .await;
+                                    }
+                                    let tasks = ipc::fetch_scheduled_tasks().await;
+                                    let _ = refresh_tx.send(tasks).await;
+                                });
+                            }
+                        }
                     } else if let Some(ref mut modal) = search_modal {
                         match modal.handle_key(key) {
                             SearchResult::Cancelled => {
@@ -2919,6 +3106,16 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                         if !repos.is_empty() && create_modal.is_none() {
                             let modal = CreateAgentModal::new(repos.clone());
                             create_modal = Some(modal);
+                            show_help = false;
+                        }
+                    } else if key.code == KeyCode::Char('s')
+                        && key.modifiers.contains(KeyModifiers::ALT)
+                    {
+                        // Global shortcut: Alt+S opens schedule-task modal
+                        if !repos.is_empty() && schedule_modal.is_none() {
+                            let modal =
+                                ScheduleTaskModal::new(repos.clone(), scheduled_tasks.clone());
+                            schedule_modal = Some(modal);
                             show_help = false;
                         }
                     } else if key.code == KeyCode::Char('d')
@@ -3677,6 +3874,18 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                     _ => {}
                                 }
                             }
+                            // Schedule tab key routing — delegates to ScheduleState
+                            // and then dispatches the resulting ScheduleAction.
+                            _ if active_tab == ActiveTab::Schedule => {
+                                let action = schedule_state.handle_key(key);
+                                dispatch_schedule_action(
+                                    action,
+                                    &mut edit_prompt_modal,
+                                    &mut active_menu,
+                                    status_tx.clone(),
+                                    scheduled_task_tx.clone(),
+                                );
+                            }
                             _ => {}
                         }
                         // Dismiss help overlay on any non-? keypress
@@ -3687,6 +3896,10 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                 }
                 Event::Paste(ref text) => {
                     if let Some(ref mut modal) = create_modal {
+                        modal.handle_paste(text);
+                    } else if let Some(ref mut modal) = schedule_modal {
+                        modal.handle_paste(text);
+                    } else if let Some(ref mut modal) = edit_prompt_modal {
                         modal.handle_paste(text);
                     } else if let Some(ref mut modal) = search_modal {
                         modal.handle_paste(text);
@@ -4816,6 +5029,36 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                                     last_agent_fetch =
                                                         Instant::now() - Duration::from_secs(10);
                                                 }
+                                                ConfirmedAction::DeleteScheduledTask { task_id } => {
+                                                    let refresh_tx = scheduled_task_tx.clone();
+                                                    tokio::spawn(async move {
+                                                        let _ = ipc::send_one_shot(
+                                                            CliMessage::DeleteScheduledTask {
+                                                                id: task_id,
+                                                            },
+                                                        )
+                                                        .await;
+                                                        let tasks =
+                                                            ipc::fetch_scheduled_tasks().await;
+                                                        let _ = refresh_tx.send(tasks).await;
+                                                    });
+                                                }
+                                                ConfirmedAction::ClearScheduledTasksByStatus {
+                                                    status,
+                                                } => {
+                                                    let refresh_tx = scheduled_task_tx.clone();
+                                                    tokio::spawn(async move {
+                                                        let _ = ipc::send_one_shot(
+                                                            CliMessage::DeleteScheduledTasksByStatus {
+                                                                status,
+                                                            },
+                                                        )
+                                                        .await;
+                                                        let tasks =
+                                                            ipc::fetch_scheduled_tasks().await;
+                                                        let _ = refresh_tx.send(tasks).await;
+                                                    });
+                                                }
                                                 ConfirmedAction::StartAgentDetach {
                                                     repo_path,
                                                     branch_name,
@@ -5160,6 +5403,10 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                 {
                                     overview_state.focus = overview::OverviewFocus::Terminal(*idx);
                                 }
+                            }
+                            ActiveTab::Schedule => {
+                                // No mouse interactions on the Schedule tab
+                                // yet — keys-only.
                             }
                         }
                     }
@@ -7208,6 +7455,10 @@ fn resolve_editor_target(
             }
             (None, None)
         }
+        ActiveTab::Schedule => {
+            // No editor target on the Schedule tab — Opt+V is a no-op here.
+            (None, None)
+        }
     }
 }
 
@@ -7319,6 +7570,115 @@ fn trigger_open_in_editor(
 /// Requires the multi-thread tokio scheduler (`#[tokio::main]`).
 fn block_on_async<F: std::future::Future>(f: F) -> F::Output {
     tokio::task::block_in_place(|| tokio::runtime::Handle::current().block_on(f))
+}
+
+/// Translate a `ScheduleAction` returned by the Schedule tab into concrete
+/// state mutations + IPC sends. Kept out of the main loop's match arm so the
+/// arm itself stays a single line.
+fn dispatch_schedule_action(
+    action: ScheduleAction,
+    edit_prompt_modal: &mut Option<EditPromptModal>,
+    active_menu: &mut Option<ActiveMenu>,
+    status_tx: tokio::sync::mpsc::Sender<StatusMessage>,
+    refresh_tx: tokio::sync::mpsc::Sender<Vec<clust_ipc::ScheduledTaskInfo>>,
+) {
+    use crate::context_menu::ContextMenu;
+
+    let send_and_refresh = |msg: CliMessage| {
+        let s_tx = status_tx.clone();
+        let r_tx = refresh_tx.clone();
+        tokio::spawn(async move {
+            match ipc::send_one_shot(msg).await {
+                Ok(HubMessage::Error { message }) => {
+                    let _ = s_tx
+                        .send(StatusMessage {
+                            text: message,
+                            level: StatusLevel::Error,
+                            created: std::time::Instant::now(),
+                        })
+                        .await;
+                }
+                Ok(_) => {}
+                Err(e) => {
+                    let _ = s_tx
+                        .send(StatusMessage {
+                            text: format!("hub error: {e}"),
+                            level: StatusLevel::Error,
+                            created: std::time::Instant::now(),
+                        })
+                        .await;
+                }
+            }
+            let tasks = ipc::fetch_scheduled_tasks().await;
+            let _ = r_tx.send(tasks).await;
+        });
+    };
+
+    match action {
+        ScheduleAction::Noop => {}
+        ScheduleAction::EditPrompt { task_id, current } => {
+            *edit_prompt_modal = Some(EditPromptModal::new(
+                task_id.clone(),
+                task_id, // shown as "branch" in the title — close enough
+                current,
+            ));
+        }
+        ScheduleAction::TogglePlanMode { task_id, new_value } => {
+            send_and_refresh(CliMessage::SetScheduledTaskPlanMode {
+                id: task_id,
+                plan_mode: new_value,
+            });
+        }
+        ScheduleAction::ToggleAutoExit { task_id, new_value } => {
+            send_and_refresh(CliMessage::SetScheduledTaskAutoExit {
+                id: task_id,
+                auto_exit: new_value,
+            });
+        }
+        ScheduleAction::StartNow { task_id } => {
+            send_and_refresh(CliMessage::StartScheduledTaskNow { id: task_id });
+        }
+        ScheduleAction::Restart { task_id, clean } => {
+            send_and_refresh(CliMessage::RestartScheduledTask {
+                id: task_id,
+                clean,
+            });
+        }
+        ScheduleAction::ConfirmDelete {
+            task_id,
+            branch_name,
+        } => {
+            *active_menu = Some(ActiveMenu::ConfirmAction {
+                action: ConfirmedAction::DeleteScheduledTask { task_id },
+                menu: ContextMenu::new(
+                    &format!("Delete scheduled task on {branch_name}?"),
+                    vec!["Delete".to_string(), "Cancel".to_string()],
+                ),
+            });
+        }
+        ScheduleAction::OpenClearMenu => {
+            *active_menu = Some(ActiveMenu::ConfirmAction {
+                action: ConfirmedAction::ClearScheduledTasksByStatus {
+                    status: clust_ipc::ScheduledTaskStatus::Complete,
+                },
+                menu: ContextMenu::new(
+                    "Clear all completed tasks?",
+                    vec!["Clear Completed".to_string(), "Cancel".to_string()],
+                ),
+            });
+        }
+        ScheduleAction::EnterFocusMode { task_id: _ } => {
+            // TODO: hook into focus_mode_state for a scheduled task's active
+            // agent. For now this is a no-op so the build stays green; the
+            // user can still navigate via Cmd+2 → Overview to focus the same
+            // agent.
+            let _ = status_tx.try_send(StatusMessage {
+                text: "Schedule focus mode coming soon — switch to Overview tab".into(),
+                level: StatusLevel::Success,
+                created: std::time::Instant::now(),
+            });
+        }
+    }
 }
 
 #[cfg(test)]
@@ -7886,20 +8246,23 @@ mod tests {
     fn active_tab_next_cycles() {
         let tab = ActiveTab::Repositories;
         assert_eq!(tab.next(), ActiveTab::Overview);
-        assert_eq!(tab.next().next(), ActiveTab::Repositories);
+        assert_eq!(tab.next().next(), ActiveTab::Schedule);
+        assert_eq!(tab.next().next().next(), ActiveTab::Repositories);
     }
 
     #[test]
     fn active_tab_prev_cycles() {
         let tab = ActiveTab::Repositories;
-        assert_eq!(tab.prev(), ActiveTab::Overview);
-        assert_eq!(tab.prev().prev(), ActiveTab::Repositories);
+        assert_eq!(tab.prev(), ActiveTab::Schedule);
+        assert_eq!(tab.prev().prev(), ActiveTab::Overview);
+        assert_eq!(tab.prev().prev().prev(), ActiveTab::Repositories);
     }
 
     #[test]
     fn active_tab_labels() {
         assert_eq!(ActiveTab::Repositories.label(), "Repositories");
         assert_eq!(ActiveTab::Overview.label(), "Overview");
+        assert_eq!(ActiveTab::Schedule.label(), "Schedule");
     }
 
     #[test]
