@@ -199,7 +199,7 @@ pub struct AgentPanel {
     pub worktree_cleanup_shown: bool,
     /// Vertical scroll offset for scrollback (0 = live, >0 = scrolled back).
     pub panel_scroll_offset: usize,
-    task_handle: JoinHandle<()>,
+    pub(crate) task_handle: JoinHandle<()>,
 }
 
 /// Top-level overview state.
@@ -690,7 +690,7 @@ impl OverviewState {
 // Background connection task
 // ---------------------------------------------------------------------------
 
-async fn agent_connection_task(
+pub(crate) async fn agent_connection_task(
     agent_id: String,
     cols: u16,
     rows: u16,

@@ -21,7 +21,7 @@ pub const DEFAULT_HUB: &str = "default_hub";
 /// because the CLI bounces an outdated hub via `connect_to_hub`. See
 /// `validate_client_version` for a helper hubs may use to reject mismatched
 /// clients explicitly.
-pub const PROTOCOL_VERSION: u32 = 8;
+pub const PROTOCOL_VERSION: u32 = 9;
 
 /// Maximum size of a single IPC message payload.
 ///
@@ -223,6 +223,104 @@ pub enum CliMessage {
     StopTerminal {
         id: String,
     },
+    // Scheduled task management
+    CreateScheduledTask {
+        repo_path: String,
+        base_branch: Option<String>,
+        new_branch: Option<String>,
+        prompt: String,
+        plan_mode: bool,
+        auto_exit: bool,
+        agent_binary: Option<String>,
+        schedule: ScheduleKind,
+    },
+    ListScheduledTasks,
+    UpdateScheduledTaskPrompt {
+        id: String,
+        prompt: String,
+    },
+    SetScheduledTaskPlanMode {
+        id: String,
+        plan_mode: bool,
+    },
+    SetScheduledTaskAutoExit {
+        id: String,
+        auto_exit: bool,
+    },
+    DeleteScheduledTask {
+        id: String,
+    },
+    DeleteScheduledTasksByStatus {
+        status: ScheduledTaskStatus,
+    },
+    StartScheduledTaskNow {
+        id: String,
+    },
+    RestartScheduledTask {
+        id: String,
+        clean: bool,
+    },
+}
+
+/// What triggers a scheduled task to start.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ScheduleKind {
+    /// Auto-start at the given absolute time (RFC 3339 UTC).
+    Time { start_at: String },
+    /// Auto-start once every listed task is `Complete`. `Aborted` blocks.
+    Depend { depends_on_ids: Vec<String> },
+    /// Never auto-start; user must trigger manually.
+    Unscheduled,
+}
+
+/// Lifecycle state of a scheduled task.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ScheduledTaskStatus {
+    Inactive,
+    Active,
+    Complete,
+    Aborted,
+}
+
+impl ScheduledTaskStatus {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Inactive => "inactive",
+            Self::Active => "active",
+            Self::Complete => "complete",
+            Self::Aborted => "aborted",
+        }
+    }
+
+    /// Parse the lowercase storage form back into the enum. Named with the
+    /// `parse_` prefix to avoid colliding with `std::str::FromStr::from_str`.
+    pub fn parse_str(s: &str) -> Option<Self> {
+        match s {
+            "inactive" => Some(Self::Inactive),
+            "active" => Some(Self::Active),
+            "complete" => Some(Self::Complete),
+            "aborted" => Some(Self::Aborted),
+            _ => None,
+        }
+    }
+}
+
+/// Wire info for a single scheduled task.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ScheduledTaskInfo {
+    pub id: String,
+    pub repo_path: String,
+    pub repo_name: String,
+    pub branch_name: String,
+    pub prompt: String,
+    pub plan_mode: bool,
+    pub auto_exit: bool,
+    pub agent_binary: String,
+    pub schedule: ScheduleKind,
+    pub status: ScheduledTaskStatus,
+    pub agent_id: Option<String>,
+    pub created_at: String,
+    pub completed_at: Option<String>,
 }
 
 /// Info about a running agent, returned in AgentList.
@@ -433,6 +531,22 @@ pub enum HubMessage {
     },
     TerminalStopped {
         id: String,
+    },
+    // Scheduled task notifications
+    ScheduledTaskCreated {
+        info: ScheduledTaskInfo,
+    },
+    ScheduledTaskList {
+        tasks: Vec<ScheduledTaskInfo>,
+    },
+    ScheduledTaskUpdated {
+        info: ScheduledTaskInfo,
+    },
+    ScheduledTaskDeleted {
+        id: String,
+    },
+    ScheduledTasksCleared {
+        count: usize,
     },
 }
 
@@ -1552,5 +1666,216 @@ mod tests {
         let dir = clust_dir();
         let log = log_path();
         assert_eq!(log.parent().unwrap(), dir);
+    }
+
+    // ── Scheduled task round-trips ────────────────────────────────
+
+    fn sample_task() -> ScheduledTaskInfo {
+        ScheduledTaskInfo {
+            id: "abcd1234".into(),
+            repo_path: "/home/user/project".into(),
+            repo_name: "project".into(),
+            branch_name: "feature/x".into(),
+            prompt: "do the thing".into(),
+            plan_mode: false,
+            auto_exit: true,
+            agent_binary: "claude".into(),
+            schedule: ScheduleKind::Time {
+                start_at: "2026-05-06T10:00:00Z".into(),
+            },
+            status: ScheduledTaskStatus::Inactive,
+            agent_id: None,
+            created_at: "2026-05-06T09:00:00Z".into(),
+            completed_at: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn cli_create_scheduled_task_time() {
+        assert_cli_round_trip(CliMessage::CreateScheduledTask {
+            repo_path: "/repo".into(),
+            base_branch: Some("main".into()),
+            new_branch: Some("feature/x".into()),
+            prompt: "do something".into(),
+            plan_mode: false,
+            auto_exit: true,
+            agent_binary: Some("claude".into()),
+            schedule: ScheduleKind::Time {
+                start_at: "2026-05-06T10:00:00Z".into(),
+            },
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn cli_create_scheduled_task_depend() {
+        assert_cli_round_trip(CliMessage::CreateScheduledTask {
+            repo_path: "/repo".into(),
+            base_branch: None,
+            new_branch: Some("after-foo".into()),
+            prompt: "after foo".into(),
+            plan_mode: true,
+            auto_exit: false,
+            agent_binary: None,
+            schedule: ScheduleKind::Depend {
+                depends_on_ids: vec!["aaa111".into(), "bbb222".into()],
+            },
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn cli_create_scheduled_task_unscheduled() {
+        assert_cli_round_trip(CliMessage::CreateScheduledTask {
+            repo_path: "/repo".into(),
+            base_branch: Some("main".into()),
+            new_branch: None,
+            prompt: "manual".into(),
+            plan_mode: false,
+            auto_exit: false,
+            agent_binary: None,
+            schedule: ScheduleKind::Unscheduled,
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn cli_list_scheduled_tasks() {
+        assert_cli_round_trip(CliMessage::ListScheduledTasks).await;
+    }
+
+    #[tokio::test]
+    async fn cli_update_scheduled_task_prompt() {
+        assert_cli_round_trip(CliMessage::UpdateScheduledTaskPrompt {
+            id: "abcd1234".into(),
+            prompt: "new prompt".into(),
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn cli_set_scheduled_task_plan_mode() {
+        assert_cli_round_trip(CliMessage::SetScheduledTaskPlanMode {
+            id: "abcd1234".into(),
+            plan_mode: true,
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn cli_set_scheduled_task_auto_exit() {
+        assert_cli_round_trip(CliMessage::SetScheduledTaskAutoExit {
+            id: "abcd1234".into(),
+            auto_exit: true,
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn cli_delete_scheduled_task() {
+        assert_cli_round_trip(CliMessage::DeleteScheduledTask {
+            id: "abcd1234".into(),
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn cli_delete_scheduled_tasks_by_status_complete() {
+        assert_cli_round_trip(CliMessage::DeleteScheduledTasksByStatus {
+            status: ScheduledTaskStatus::Complete,
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn cli_delete_scheduled_tasks_by_status_aborted() {
+        assert_cli_round_trip(CliMessage::DeleteScheduledTasksByStatus {
+            status: ScheduledTaskStatus::Aborted,
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn cli_start_scheduled_task_now() {
+        assert_cli_round_trip(CliMessage::StartScheduledTaskNow {
+            id: "abcd1234".into(),
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn cli_restart_scheduled_task_clean() {
+        assert_cli_round_trip(CliMessage::RestartScheduledTask {
+            id: "abcd1234".into(),
+            clean: true,
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn cli_restart_scheduled_task_in_place() {
+        assert_cli_round_trip(CliMessage::RestartScheduledTask {
+            id: "abcd1234".into(),
+            clean: false,
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn hub_scheduled_task_created() {
+        assert_hub_round_trip(HubMessage::ScheduledTaskCreated { info: sample_task() }).await;
+    }
+
+    #[tokio::test]
+    async fn hub_scheduled_task_list_populated() {
+        let mut t2 = sample_task();
+        t2.id = "efef5678".into();
+        t2.schedule = ScheduleKind::Unscheduled;
+        t2.status = ScheduledTaskStatus::Active;
+        t2.agent_id = Some("aabbcc".into());
+        assert_hub_round_trip(HubMessage::ScheduledTaskList {
+            tasks: vec![sample_task(), t2],
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn hub_scheduled_task_list_empty() {
+        assert_hub_round_trip(HubMessage::ScheduledTaskList { tasks: vec![] }).await;
+    }
+
+    #[tokio::test]
+    async fn hub_scheduled_task_updated_complete() {
+        let mut t = sample_task();
+        t.status = ScheduledTaskStatus::Complete;
+        t.completed_at = Some("2026-05-06T10:30:00Z".into());
+        t.agent_id = Some("aabbcc".into());
+        assert_hub_round_trip(HubMessage::ScheduledTaskUpdated { info: t }).await;
+    }
+
+    #[tokio::test]
+    async fn hub_scheduled_task_deleted() {
+        assert_hub_round_trip(HubMessage::ScheduledTaskDeleted {
+            id: "abcd1234".into(),
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn hub_scheduled_tasks_cleared() {
+        assert_hub_round_trip(HubMessage::ScheduledTasksCleared { count: 3 }).await;
+    }
+
+    #[test]
+    fn status_str_round_trip() {
+        for s in [
+            ScheduledTaskStatus::Inactive,
+            ScheduledTaskStatus::Active,
+            ScheduledTaskStatus::Complete,
+            ScheduledTaskStatus::Aborted,
+        ] {
+            assert_eq!(ScheduledTaskStatus::parse_str(s.as_str()), Some(s));
+        }
+        assert_eq!(ScheduledTaskStatus::parse_str("garbage"), None);
     }
 }

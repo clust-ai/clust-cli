@@ -465,6 +465,27 @@ The `?` key toggles a keyboard shortcut overlay rendered as a centered modal (44
 
 Key names are displayed in accent color (left-aligned, 16 chars wide); descriptions use primary text color. Section headers use secondary text color with bold modifier. Sub-context labels use tertiary text color and are indented.
 
+### Schedule Tab
+
+A third top-level tab next to Repositories and Overview, dedicated to **persistent scheduled tasks**. Each task is one row in the SQLite `scheduled_tasks` table (see `storage.md`) and survives hub restarts. Tasks are identified by their git branch name; only one non-completed task can target any given branch at once.
+
+**Layout.** A horizontal grid of vertical task columns, mirroring the Overview tab. `Shift+Left` / `Shift+Right` focus the previous / next column; `Shift+Down` enters focus mode (Active tasks only).
+
+**Per-column rendering depends on `status`:**
+
+| Status | Column body |
+|--------|-------------|
+| `Inactive` | Status pill, `PLAN` and `AUTO-EXIT` indicator pills, schedule info line ("Starts in 1h 23m" / "Waiting on N task(s)" / "Unscheduled — press s to start"), and the full prompt text wrapping on the X axis and scrollable on Y. If any upstream dep has Auto-Exit OFF, a warning line appears: `⚠ depends on tasks without AUTO-EXIT`. |
+| `Active` | Status pill plus a live `TerminalEmulator` rendering the agent's PTY output. |
+| `Complete` | Centred branch name + small green `✓`. |
+| `Aborted` | Status pill (red), the original prompt, and the hint `Aborted — r restart · R restart+clean`. |
+
+**Opening a task (Opt+S modal).** Mirrors the create-agent modal but adds a `Select schedule kind` step (Schedule / Depend / Unscheduled) and either a final time-entry step or a multi-select dependency step. Time strings accept `Ns`, `Nm`, `Nh`, `Nd` durations or wall-clock `HH:MM`. The prompt step rejects empty input. `Alt+P` toggles plan mode and `Alt+X` toggles `Auto-Exit` from anywhere in the modal — Auto-Exit defaults to OFF and only takes effect for agents that advertise the Stop hook (Claude today). If the chosen branch is already used by a non-completed scheduled task, the hub rejects the create message and the modal surfaces "branch '<x>' is already scheduled" on the status bar.
+
+**Editing a task.** Press `e` on an Inactive or Aborted column for the inline edit-prompt modal (multi-line input, Enter to save a non-empty value, Esc to cancel). `p` toggles plan mode and `x` toggles Auto-Exit on the focused task without re-opening the create flow. `s` starts an Inactive task immediately. `r` and `R` restart Aborted tasks (in place / with worktree reset).
+
+**Deleting tasks.** `d` or `Delete` opens a confirmation; if the task is Active, the hub stops the agent before removing the row. `Shift+C` opens the bulk-clear-completed confirmation, which sends `DeleteScheduledTasksByStatus { status: Complete }`.
+
 ### Create Agent Modal
 
 A multi-step modal for creating new agents on git worktrees, opened globally with `Opt+E` (macOS) / `Alt+E`. The modal guides the user through 4 sequential steps:

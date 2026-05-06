@@ -66,8 +66,9 @@ The CLI is a thin client. It does NOT manage agent processes directly.
 - Generate agent IDs (6-char hex hash)
 - Auto-start when first `clust` command is run
 - Shut down on `clust -s` / `clust --stop` (graceful SIGTERM + SIGKILL)
-- Manage SQLite database (config, repo registrations)
+- Manage SQLite database (config, repo registrations, scheduled tasks)
 - Git repository/branch/worktree detection (via `git2`)
+- Run the per-task scheduler poll loop (see *Scheduler*, below) and call the agent-exit hook to flip scheduled tasks to `Complete` when their agent exits
 - macOS tray icon (via `tao` + `tray-icon`, hidden from dock)
 
 ### clust-ipc
@@ -146,6 +147,15 @@ CLI -> Hub:
   TerminalInput { id: String, data: Vec<u8> }
   ResizeTerminal { id: String, cols: u16, rows: u16 }
   StopTerminal { id: String }
+  CreateScheduledTask { repo_path: String, base_branch: Option<String>, new_branch: Option<String>, prompt: String, plan_mode: bool, auto_exit: bool, agent_binary: Option<String>, schedule: ScheduleKind }
+  ListScheduledTasks
+  UpdateScheduledTaskPrompt { id: String, prompt: String }
+  SetScheduledTaskPlanMode { id: String, plan_mode: bool }
+  SetScheduledTaskAutoExit { id: String, auto_exit: bool }
+  DeleteScheduledTask { id: String }
+  DeleteScheduledTasksByStatus { status: ScheduledTaskStatus }
+  StartScheduledTaskNow { id: String }
+  RestartScheduledTask { id: String, clean: bool }
   Ping { protocol_version: u32 }
 
 Hub -> CLI:
@@ -192,12 +202,17 @@ Hub -> CLI:
   TerminalExited { id: String, exit_code: i32 }
   TerminalReplayComplete { id: String }
   TerminalStopped { id: String }
+  ScheduledTaskCreated { info: ScheduledTaskInfo }
+  ScheduledTaskList { tasks: Vec<ScheduledTaskInfo> }
+  ScheduledTaskUpdated { info: ScheduledTaskInfo }
+  ScheduledTaskDeleted { id: String }
+  ScheduledTasksCleared { count: usize }
   Pong { protocol_version: u32 }
 ```
 
 ### Protocol Versioning
 
-The IPC protocol includes a version check to detect stale hubs. `clust-ipc` exports a `PROTOCOL_VERSION` constant (currently `8`) that must be bumped whenever the `CliMessage` or `HubMessage` enum shapes change (since `rmp-serde` uses numeric enum indices).
+The IPC protocol includes a version check to detect stale hubs. `clust-ipc` exports a `PROTOCOL_VERSION` constant (currently `9`) that must be bumped whenever the `CliMessage` or `HubMessage` enum shapes change (since `rmp-serde` uses numeric enum indices).
 
 On connection, the CLI sends a `Ping { protocol_version }` message. The hub replies with `Pong { protocol_version }` carrying its own version. If versions mismatch, the CLI stops the stale hub and spawns a fresh one before proceeding.
 
@@ -244,6 +259,22 @@ clust "do something"
     - Hub removes agent from hub
     - Hub notifies any attached CLIs → they exit gracefully
 ```
+
+## Scheduler
+
+The hub spawns a background `tokio` task on startup (`crate::scheduler::run_scheduler`) that polls the `scheduled_tasks` table every 5 seconds and fires any Inactive task whose trigger condition is satisfied:
+
+| `schedule_kind` | Trigger condition |
+|-----------------|-------------------|
+| `time` | `now >= start_at` |
+| `depend` | every upstream task is `complete` (Aborted upstreams block indefinitely) |
+| `unscheduled` | never auto-fires; user must use `StartScheduledTaskNow` |
+
+When a task fires, the scheduler reuses `crate::agent::create_worktree_and_spawn_agent` — the same helper used by the manual `Opt+E` flow — so worktree creation, branch selection and the `auto_exit` (Stop hook) wiring all behave identically. After spawn, the row is updated to `status='active'` and the new `agent_id` is stored.
+
+Agent exit detection runs inside the existing PTY-reader cleanup path in `crate::agent`. When an agent's PTY closes, the hook calls `crate::db::mark_scheduled_task_complete_by_agent`, which finds the matching `scheduled_tasks WHERE agent_id=? AND status='active'` row, marks it `complete`, and stamps `completed_at`. Dependents are unblocked at the next scheduler tick.
+
+On hub startup, `crate::db::recover_active_scheduled_tasks` rewrites every leftover `active` row to `aborted`, since their agent processes died with the previous hub. The user can then `r` (restart in place) or `R` (restart with `git reset --hard && git clean -fdx` first) from the Schedule tab.
 
 ## Key Dependencies
 

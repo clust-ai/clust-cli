@@ -260,3 +260,30 @@ pub async fn try_fetch_agent_list() -> io::Result<Vec<clust_ipc::AgentInfo>> {
 pub async fn fetch_agent_list() -> Vec<clust_ipc::AgentInfo> {
     try_fetch_agent_list().await.unwrap_or_default()
 }
+
+/// Fetch the full scheduled-task list from the hub. The Schedule tab polls
+/// this on a fixed interval (no push channel exists yet).
+pub async fn fetch_scheduled_tasks() -> Vec<clust_ipc::ScheduledTaskInfo> {
+    let Ok(mut stream) = try_connect().await else {
+        return Vec::new();
+    };
+    if clust_ipc::send_message(&mut stream, &CliMessage::ListScheduledTasks)
+        .await
+        .is_err()
+    {
+        return Vec::new();
+    }
+    match clust_ipc::recv_message::<HubMessage>(&mut stream).await {
+        Ok(HubMessage::ScheduledTaskList { tasks }) => tasks,
+        _ => Vec::new(),
+    }
+}
+
+/// Send a one-shot message and read the reply. Returns the reply or an io error.
+/// Used by Schedule modal completion / Schedule UI keybinds for actions where
+/// we want to surface hub errors back to the user (e.g. branch-already-scheduled).
+pub async fn send_one_shot(msg: CliMessage) -> io::Result<HubMessage> {
+    let mut stream = try_connect().await?;
+    clust_ipc::send_message(&mut stream, &msg).await?;
+    clust_ipc::recv_message::<HubMessage>(&mut stream).await
+}

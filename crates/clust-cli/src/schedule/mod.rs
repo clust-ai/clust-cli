@@ -1,0 +1,1075 @@
+//! Schedule tab — UI state, rendering, and key handling for the per-task
+//! scheduler.
+//!
+//! Layout mirrors the Overview tab: a horizontal grid of equal-width columns,
+//! one per task, with `Shift+Left/Right` to focus a task and `Shift+Down` to
+//! enter focus mode (Active tasks only). Each column's rendering varies by
+//! task status:
+//!
+//! - **Inactive** — header pill + schedule info + plan/auto-exit pills, then
+//!   the prompt body (wrapping; scrollable on Y).
+//! - **Active** — header pill + embedded `TerminalEmulator`, identical look to
+//!   the Overview panel. We open our own attachment so the schedule view stays
+//!   live regardless of what Overview is doing.
+//! - **Complete** — compact: branch name + small `✓`.
+//! - **Aborted** — header pill + prompt + restart hint.
+
+use std::collections::HashMap;
+
+use chrono::{DateTime, Utc};
+use clust_ipc::{ScheduleKind, ScheduledTaskInfo, ScheduledTaskStatus};
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use ratatui::{
+    layout::{Alignment, Constraint, Layout, Rect},
+    style::{Modifier, Style},
+    text::{Line, Span},
+    widgets::{Block, Borders, Paragraph, Wrap},
+    Frame,
+};
+use tokio::sync::mpsc;
+
+use crate::overview::{
+    agent_connection_task, AgentOutputEvent, AgentPanel, AgentTerminalCache, PanelCommand,
+};
+use crate::terminal_emulator::TerminalEmulator;
+use crate::theme;
+
+/// Minimum width of a single task column. Below this, columns scroll horizontally.
+const MIN_PANEL_WIDTH: u16 = 60;
+
+fn max_panels_for_width(available_width: u16) -> usize {
+    (available_width / MIN_PANEL_WIDTH).max(1) as usize
+}
+
+// ---------------------------------------------------------------------------
+// Outcome of key/mouse handling — communicated up to the main loop so it can
+// trigger IPC, open modals, or update status messages.
+// ---------------------------------------------------------------------------
+
+/// Side-effect requested by the Schedule tab as a result of a key press.
+///
+/// The Schedule UI never reaches into the IPC layer or modal stack directly;
+/// instead it returns one of these and the main loop dispatches.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ScheduleAction {
+    /// Nothing to do.
+    Noop,
+    /// Open the inline edit-prompt modal pre-populated with this task's prompt.
+    EditPrompt { task_id: String, current: String },
+    /// Toggle plan_mode for the focused Inactive/Aborted task.
+    TogglePlanMode { task_id: String, new_value: bool },
+    /// Toggle auto_exit for the focused Inactive/Aborted task.
+    ToggleAutoExit { task_id: String, new_value: bool },
+    /// Manually start an Inactive task right now.
+    StartNow { task_id: String },
+    /// Restart an Aborted task.
+    Restart { task_id: String, clean: bool },
+    /// Show a confirmation menu before deleting this single task.
+    ConfirmDelete { task_id: String, branch_name: String },
+    /// Show the "clear by status" sub-menu (Complete / Aborted / both).
+    OpenClearMenu,
+    /// Enter focus mode on the currently-focused Active task.
+    EnterFocusMode { task_id: String },
+}
+
+// ---------------------------------------------------------------------------
+// State
+// ---------------------------------------------------------------------------
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum ScheduleFocus {
+    /// No specific task focused (e.g., empty list).
+    None,
+    /// A task at the given index in `tasks` is focused for keybinds.
+    Task(usize),
+}
+
+/// Per-task scrollback / prompt scroll bookkeeping that survives task list
+/// refreshes (re-keyed by task id, not panel index).
+#[derive(Default)]
+struct TaskUiState {
+    prompt_scroll: u16,
+}
+
+pub struct ScheduleState {
+    pub tasks: Vec<ScheduledTaskInfo>,
+    pub focus: ScheduleFocus,
+    pub scroll_offset: usize,
+    /// Live PTY connections for tasks in the Active state. Keyed by task id so
+    /// we don't lose them when the underlying agent_id list re-orders.
+    panels: HashMap<String, AgentPanel>,
+    /// Per-task UI bookkeeping (scroll positions etc.) preserved across list
+    /// refreshes.
+    ui: HashMap<String, TaskUiState>,
+    /// Channel that all background `agent_connection_task` futures send into.
+    output_tx: mpsc::Sender<AgentOutputEvent>,
+    output_rx: mpsc::Receiver<AgentOutputEvent>,
+    /// Last computed panel dimensions (cached so resize-on-attach is cheap).
+    panel_cols: u16,
+    panel_rows: u16,
+    viewport_width: u16,
+}
+
+impl Default for ScheduleState {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl ScheduleState {
+    pub fn new() -> Self {
+        let (output_tx, output_rx) = mpsc::channel(512);
+        Self {
+            tasks: Vec::new(),
+            focus: ScheduleFocus::None,
+            scroll_offset: 0,
+            panels: HashMap::new(),
+            ui: HashMap::new(),
+            output_tx,
+            output_rx,
+            panel_cols: 80,
+            panel_rows: 24,
+            viewport_width: 0,
+        }
+    }
+
+    /// Replace the task list with a fresh snapshot from the hub. Spawns
+    /// connections for newly-active tasks and aborts ones that left Active.
+    /// Panels for tasks that disappeared entirely are dropped.
+    pub fn sync_tasks(&mut self, tasks: Vec<ScheduledTaskInfo>) {
+        // 1. Drop panels for tasks that no longer exist OR are no longer Active.
+        let alive_active_ids: std::collections::HashSet<String> = tasks
+            .iter()
+            .filter(|t| t.status == ScheduledTaskStatus::Active)
+            .map(|t| t.id.clone())
+            .collect();
+        let to_drop: Vec<String> = self
+            .panels
+            .keys()
+            .filter(|id| !alive_active_ids.contains(*id))
+            .cloned()
+            .collect();
+        for id in to_drop {
+            if let Some(panel) = self.panels.remove(&id) {
+                panel.task_handle.abort();
+            }
+        }
+
+        // 2. Drop UI bookkeeping for tasks that disappeared entirely.
+        let alive_ids: std::collections::HashSet<String> =
+            tasks.iter().map(|t| t.id.clone()).collect();
+        self.ui.retain(|id, _| alive_ids.contains(id));
+
+        // 3. Spawn connections for newly-active tasks.
+        for task in &tasks {
+            if task.status == ScheduledTaskStatus::Active && !self.panels.contains_key(&task.id) {
+                if let Some(agent_id) = &task.agent_id {
+                    self.spawn_connection(&task.id, agent_id, &task.agent_binary, task);
+                }
+            }
+        }
+
+        self.tasks = tasks;
+
+        // 4. Clamp focus.
+        match self.focus {
+            ScheduleFocus::None if !self.tasks.is_empty() => {
+                self.focus = ScheduleFocus::Task(0);
+            }
+            ScheduleFocus::Task(idx) if idx >= self.tasks.len() => {
+                self.focus = if self.tasks.is_empty() {
+                    ScheduleFocus::None
+                } else {
+                    ScheduleFocus::Task(self.tasks.len() - 1)
+                };
+            }
+            _ => {}
+        }
+        if self.tasks.is_empty() {
+            self.focus = ScheduleFocus::None;
+        }
+
+        // 5. Clamp scroll.
+        if self.scroll_offset >= self.tasks.len() {
+            self.scroll_offset = self.tasks.len().saturating_sub(1);
+        }
+    }
+
+    /// Open an attached IPC connection for a task that just transitioned to
+    /// Active. The background task forwards PTY output to `self.output_tx`,
+    /// keyed by `agent_id`. We map back to `task_id` in `drain_output_events`.
+    fn spawn_connection(
+        &mut self,
+        task_id: &str,
+        agent_id: &str,
+        agent_binary: &str,
+        task: &ScheduledTaskInfo,
+    ) {
+        let cols = self.panel_cols;
+        let rows = self.panel_rows;
+        let event_tx = self.output_tx.clone();
+        let (command_tx, command_rx) = mpsc::channel::<PanelCommand>(64);
+        let aid = agent_id.to_string();
+        let handle =
+            tokio::task::spawn(
+                async move { agent_connection_task(aid, cols, rows, event_tx, command_rx).await },
+            );
+        self.panels.insert(
+            task_id.to_string(),
+            AgentPanel {
+                id: agent_id.to_string(),
+                agent_binary: agent_binary.to_string(),
+                branch_name: Some(task.branch_name.clone()),
+                repo_path: Some(task.repo_path.clone()),
+                is_worktree: true,
+                started_at: task.created_at.clone(),
+                vterm: TerminalEmulator::new(cols as usize, rows as usize),
+                command_tx,
+                exited: false,
+                worktree_cleanup_shown: false,
+                panel_scroll_offset: 0,
+                task_handle: handle,
+            },
+        );
+    }
+
+    /// Drain pending PTY output events into the matching task's vterm.
+    pub fn drain_output_events(&mut self) {
+        while let Ok(event) = self.output_rx.try_recv() {
+            match event {
+                AgentOutputEvent::Output { id, data } => {
+                    // Find the task whose agent_id == id, then index into panels.
+                    if let Some(task_id) = self.task_id_for_agent(&id) {
+                        if let Some(panel) = self.panels.get_mut(&task_id) {
+                            panel.vterm.process(&data);
+                        }
+                    }
+                }
+                AgentOutputEvent::Exited { id, .. }
+                | AgentOutputEvent::ConnectionLost { id } => {
+                    if let Some(task_id) = self.task_id_for_agent(&id) {
+                        if let Some(panel) = self.panels.get_mut(&task_id) {
+                            panel.exited = true;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    fn task_id_for_agent(&self, agent_id: &str) -> Option<String> {
+        self.tasks
+            .iter()
+            .find(|t| t.agent_id.as_deref() == Some(agent_id))
+            .map(|t| t.id.clone())
+    }
+
+    /// Resize all live vterms after the panel grid recomputes.
+    pub fn resize_panels_to(&mut self, content_area: Rect) {
+        let visible = self.tasks.len().max(2);
+        let count_fit = max_panels_for_width(content_area.width).max(1);
+        let slots = count_fit.max(2);
+        let panel_w = (content_area.width / slots as u16).max(MIN_PANEL_WIDTH);
+        // Header (1 line) + meta (1 line) + warning (variable, assume 0-1) +
+        // borders (2). The terminal area for active panels lives below.
+        let panel_h = content_area.height;
+        let inner_cols = panel_w.saturating_sub(2);
+        let inner_rows = panel_h.saturating_sub(3); // borders + header
+        self.panel_cols = inner_cols.max(20);
+        self.panel_rows = inner_rows.max(8);
+        self.viewport_width = content_area.width;
+        for panel in self.panels.values_mut() {
+            let cols = self.panel_cols;
+            let rows = self.panel_rows;
+            if (panel.vterm.cols() != cols as usize || panel.vterm.rows() != rows as usize)
+                && panel
+                    .command_tx
+                    .try_send(PanelCommand::Resize { cols, rows })
+                    .is_ok()
+            {
+                panel.vterm.resize(cols as usize, rows as usize);
+            }
+        }
+        let _ = visible;
+    }
+
+    // -- Navigation --
+
+    pub fn focus_prev(&mut self) {
+        if let ScheduleFocus::Task(idx) = self.focus {
+            if !self.tasks.is_empty() {
+                let new = if idx == 0 {
+                    self.tasks.len() - 1
+                } else {
+                    idx - 1
+                };
+                self.focus = ScheduleFocus::Task(new);
+                self.ensure_visible(new);
+            }
+        }
+    }
+
+    pub fn focus_next(&mut self) {
+        if let ScheduleFocus::Task(idx) = self.focus {
+            if !self.tasks.is_empty() {
+                let new = if idx + 1 < self.tasks.len() {
+                    idx + 1
+                } else {
+                    0
+                };
+                self.focus = ScheduleFocus::Task(new);
+                self.ensure_visible(new);
+            }
+        }
+    }
+
+    fn ensure_visible(&mut self, idx: usize) {
+        if idx < self.scroll_offset {
+            self.scroll_offset = idx;
+        }
+        if self.viewport_width > 0 {
+            let fit = max_panels_for_width(self.viewport_width);
+            if idx >= self.scroll_offset + fit {
+                self.scroll_offset = idx + 1 - fit;
+            }
+        }
+    }
+
+    pub fn scroll_prompt_up(&mut self) {
+        if let ScheduleFocus::Task(idx) = self.focus {
+            if let Some(task) = self.tasks.get(idx) {
+                let entry = self.ui.entry(task.id.clone()).or_default();
+                entry.prompt_scroll = entry.prompt_scroll.saturating_sub(1);
+            }
+        }
+    }
+
+    pub fn scroll_prompt_down(&mut self) {
+        if let ScheduleFocus::Task(idx) = self.focus {
+            if let Some(task) = self.tasks.get(idx) {
+                let entry = self.ui.entry(task.id.clone()).or_default();
+                entry.prompt_scroll = entry.prompt_scroll.saturating_add(1);
+            }
+        }
+    }
+
+    /// Take the cached TerminalEmulator + connection for the task's active
+    /// agent so focus mode can reuse them. Returns `None` if the task isn't
+    /// Active. Stash with [`store_panel`] when focus mode closes.
+    #[allow(dead_code)]
+    pub fn take_terminal_cache(&mut self, task_id: &str) -> Option<AgentTerminalCache> {
+        let panel = self.panels.remove(task_id)?;
+        // We don't have any sub-panels to bundle; AgentTerminalCache exists
+        // for focus-mode shells, not for the agent vterm itself. Returning
+        // empty here preserves the type contract; the actual handoff for the
+        // agent vterm uses the AgentPanel directly via the focus_mode_state
+        // helpers in `overview`.
+        // Re-insert so the caller can keep using it; they'll abort if needed.
+        self.panels.insert(task_id.to_string(), panel);
+        Some(AgentTerminalCache::new())
+    }
+
+    /// True if the focused task is Active and has a live attachment, i.e.
+    /// `Shift+Down` is meaningful.
+    pub fn focused_task_is_active(&self) -> bool {
+        match self.focus {
+            ScheduleFocus::Task(idx) => self
+                .tasks
+                .get(idx)
+                .map(|t| t.status == ScheduledTaskStatus::Active && self.panels.contains_key(&t.id))
+                .unwrap_or(false),
+            _ => false,
+        }
+    }
+
+    pub fn focused_task(&self) -> Option<&ScheduledTaskInfo> {
+        match self.focus {
+            ScheduleFocus::Task(idx) => self.tasks.get(idx),
+            _ => None,
+        }
+    }
+
+    /// Convert a key event into a [`ScheduleAction`]. The main loop is
+    /// responsible for executing the action (IPC send, modal open, etc.).
+    pub fn handle_key(&mut self, key: KeyEvent) -> ScheduleAction {
+        // Ignore everything when no task is focused.
+        let Some(task) = self.focused_task().cloned() else {
+            return ScheduleAction::Noop;
+        };
+
+        let shift = key.modifiers.contains(KeyModifiers::SHIFT);
+        match key.code {
+            KeyCode::Left if shift => {
+                self.focus_prev();
+                ScheduleAction::Noop
+            }
+            KeyCode::Right if shift => {
+                self.focus_next();
+                ScheduleAction::Noop
+            }
+            KeyCode::Down if shift => {
+                if self.focused_task_is_active() {
+                    ScheduleAction::EnterFocusMode { task_id: task.id }
+                } else {
+                    ScheduleAction::Noop
+                }
+            }
+            KeyCode::Up => {
+                self.scroll_prompt_up();
+                ScheduleAction::Noop
+            }
+            KeyCode::Down => {
+                self.scroll_prompt_down();
+                ScheduleAction::Noop
+            }
+            KeyCode::Char('e') if !shift => {
+                if matches!(
+                    task.status,
+                    ScheduledTaskStatus::Inactive | ScheduledTaskStatus::Aborted
+                ) {
+                    ScheduleAction::EditPrompt {
+                        task_id: task.id,
+                        current: task.prompt,
+                    }
+                } else {
+                    ScheduleAction::Noop
+                }
+            }
+            KeyCode::Char('p') if !shift => {
+                if matches!(
+                    task.status,
+                    ScheduledTaskStatus::Inactive | ScheduledTaskStatus::Aborted
+                ) {
+                    ScheduleAction::TogglePlanMode {
+                        task_id: task.id,
+                        new_value: !task.plan_mode,
+                    }
+                } else {
+                    ScheduleAction::Noop
+                }
+            }
+            KeyCode::Char('x') if !shift => {
+                if matches!(
+                    task.status,
+                    ScheduledTaskStatus::Inactive | ScheduledTaskStatus::Aborted
+                ) {
+                    ScheduleAction::ToggleAutoExit {
+                        task_id: task.id,
+                        new_value: !task.auto_exit,
+                    }
+                } else {
+                    ScheduleAction::Noop
+                }
+            }
+            KeyCode::Char('s') if !shift => {
+                if task.status == ScheduledTaskStatus::Inactive {
+                    ScheduleAction::StartNow { task_id: task.id }
+                } else {
+                    ScheduleAction::Noop
+                }
+            }
+            // Lowercase r with no shift = in-place restart; uppercase R (which
+            // crossterm reports when Shift+R is pressed) = clean restart.
+            KeyCode::Char('r') if !shift => {
+                if task.status == ScheduledTaskStatus::Aborted {
+                    ScheduleAction::Restart {
+                        task_id: task.id,
+                        clean: false,
+                    }
+                } else {
+                    ScheduleAction::Noop
+                }
+            }
+            KeyCode::Char('R') => {
+                if task.status == ScheduledTaskStatus::Aborted {
+                    ScheduleAction::Restart {
+                        task_id: task.id,
+                        clean: true,
+                    }
+                } else {
+                    ScheduleAction::Noop
+                }
+            }
+            KeyCode::Char('d') | KeyCode::Delete => ScheduleAction::ConfirmDelete {
+                task_id: task.id.clone(),
+                branch_name: task.branch_name.clone(),
+            },
+            KeyCode::Char('C') if shift => ScheduleAction::OpenClearMenu,
+            _ => ScheduleAction::Noop,
+        }
+    }
+
+    // -- Rendering --
+
+    /// Render the Schedule tab into `area`.
+    pub fn render(&mut self, frame: &mut Frame, area: Rect) {
+        if self.tasks.is_empty() {
+            self.render_empty(frame, area);
+            return;
+        }
+        self.resize_panels_to(area);
+
+        let count_fit = max_panels_for_width(area.width).max(1);
+        let visible_count = self
+            .tasks
+            .len()
+            .saturating_sub(self.scroll_offset)
+            .min(count_fit);
+        // Always reserve at least 2 column slots so a single column doesn't
+        // explode to fill the whole width.
+        let slots = visible_count.max(2);
+        let constraints: Vec<Constraint> = (0..visible_count)
+            .map(|_| Constraint::Ratio(1, slots as u32))
+            .collect();
+        if constraints.is_empty() {
+            return;
+        }
+        let panel_areas = Layout::horizontal(constraints).split(area);
+
+        // Snapshot indices/data needed below so we don't borrow self mutably
+        // and immutably at once during rendering.
+        let visible_indices: Vec<usize> =
+            (self.scroll_offset..self.scroll_offset + visible_count).collect();
+        let focused_task_id = self.focused_task().map(|t| t.id.clone());
+        let any_dep_warning_map: HashMap<String, bool> =
+            self.dep_warning_map().into_iter().collect();
+        let now = Utc::now();
+
+        for (display_idx, &task_idx) in visible_indices.iter().enumerate() {
+            let area = panel_areas[display_idx];
+            let task_clone;
+            let prompt_scroll;
+            {
+                let task = &self.tasks[task_idx];
+                task_clone = task.clone();
+                prompt_scroll = self
+                    .ui
+                    .get(&task.id)
+                    .map(|s| s.prompt_scroll)
+                    .unwrap_or(0);
+            }
+            let is_focused = focused_task_id.as_deref() == Some(task_clone.id.as_str());
+            let dep_warning = *any_dep_warning_map.get(&task_clone.id).unwrap_or(&false);
+            self.render_panel(
+                frame,
+                area,
+                &task_clone,
+                is_focused,
+                prompt_scroll,
+                dep_warning,
+                now,
+            );
+        }
+    }
+
+    fn render_empty(&self, frame: &mut Frame, area: Rect) {
+        let mod_key = if cfg!(target_os = "macos") {
+            "Opt"
+        } else {
+            "Alt"
+        };
+        let lines = vec![
+            Line::from(""),
+            Line::from(Span::styled(
+                "No scheduled tasks",
+                Style::default()
+                    .fg(theme::R_TEXT_PRIMARY)
+                    .add_modifier(Modifier::BOLD),
+            )),
+            Line::from(""),
+            Line::from(Span::styled(
+                format!("Press {mod_key}+S to schedule one"),
+                Style::default().fg(theme::R_TEXT_TERTIARY),
+            )),
+        ];
+        let p = Paragraph::new(lines).alignment(Alignment::Center);
+        frame.render_widget(p, area);
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn render_panel(
+        &mut self,
+        frame: &mut Frame,
+        area: Rect,
+        task: &ScheduledTaskInfo,
+        is_focused: bool,
+        prompt_scroll: u16,
+        dep_warning: bool,
+        now: DateTime<Utc>,
+    ) {
+        let border_style = if is_focused {
+            Style::default().fg(theme::R_ACCENT_BRIGHT)
+        } else {
+            Style::default().fg(theme::R_ACCENT_DIM)
+        };
+        let title = format!(" {} ", task.branch_name);
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .border_style(border_style)
+            .title(Span::styled(
+                title,
+                Style::default()
+                    .fg(theme::R_TEXT_PRIMARY)
+                    .add_modifier(Modifier::BOLD),
+            ));
+        let inner = block.inner(area);
+        frame.render_widget(block, area);
+
+        match task.status {
+            ScheduledTaskStatus::Active => self.render_active_body(frame, inner, task),
+            ScheduledTaskStatus::Complete => render_complete_body(frame, inner, task),
+            ScheduledTaskStatus::Aborted => {
+                render_inactive_or_aborted_body(frame, inner, task, prompt_scroll, dep_warning, now)
+            }
+            ScheduledTaskStatus::Inactive => render_inactive_or_aborted_body(
+                frame,
+                inner,
+                task,
+                prompt_scroll,
+                dep_warning,
+                now,
+            ),
+        }
+    }
+
+    fn render_active_body(&mut self, frame: &mut Frame, inner: Rect, task: &ScheduledTaskInfo) {
+        let header = Paragraph::new(Line::from(vec![
+            Span::styled(
+                "ACTIVE ",
+                Style::default()
+                    .fg(theme::R_SUCCESS)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            pill("PLAN", task.plan_mode, theme::R_WARNING),
+            pill("AUTO-EXIT", task.auto_exit, theme::R_INFO),
+        ]));
+        let [hdr_area, term_area] =
+            Layout::vertical([Constraint::Length(1), Constraint::Min(1)]).areas(inner);
+        frame.render_widget(header, hdr_area);
+        if let Some(panel) = self.panels.get_mut(&task.id) {
+            // Resize the vterm to the actual area before rendering so wrapping
+            // matches the on-screen width even if the panel grew/shrank since
+            // the last `resize_panels_to` call.
+            let cols = term_area.width.max(20);
+            let rows = term_area.height.max(4);
+            if panel.vterm.cols() != cols as usize || panel.vterm.rows() != rows as usize {
+                panel.vterm.resize(cols as usize, rows as usize);
+                let _ = panel
+                    .command_tx
+                    .try_send(PanelCommand::Resize { cols, rows });
+            }
+            let lines = panel.vterm.to_ratatui_lines();
+            frame.render_widget(Paragraph::new(lines), term_area);
+        } else {
+            let p = Paragraph::new(Span::styled(
+                "(connecting…)",
+                Style::default().fg(theme::R_TEXT_TERTIARY),
+            ));
+            frame.render_widget(p, term_area);
+        }
+    }
+
+    /// Compute, for each task, whether it has at least one Depend upstream
+    /// whose `auto_exit` is OFF. Surfaced as a warning pill so the user knows
+    /// the chain may stall waiting for a manual exit.
+    fn dep_warning_map(&self) -> Vec<(String, bool)> {
+        let by_id: HashMap<&str, &ScheduledTaskInfo> =
+            self.tasks.iter().map(|t| (t.id.as_str(), t)).collect();
+        self.tasks
+            .iter()
+            .map(|t| {
+                let warn = match &t.schedule {
+                    ScheduleKind::Depend { depends_on_ids } => depends_on_ids.iter().any(|id| {
+                        by_id
+                            .get(id.as_str())
+                            .map(|up| !up.auto_exit && up.status != ScheduledTaskStatus::Complete)
+                            .unwrap_or(false)
+                    }),
+                    _ => false,
+                };
+                (t.id.clone(), warn)
+            })
+            .collect()
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Panel-body renderers (free functions so they don't borrow `self`)
+// ---------------------------------------------------------------------------
+
+fn render_complete_body(frame: &mut Frame, inner: Rect, task: &ScheduledTaskInfo) {
+    let lines = vec![
+        Line::from(""),
+        Line::from(vec![
+            Span::styled(
+                "✓ ",
+                Style::default()
+                    .fg(theme::R_SUCCESS)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                task.branch_name.clone(),
+                Style::default().fg(theme::R_TEXT_DISABLED),
+            ),
+        ]),
+        Line::from(""),
+        Line::from(Span::styled(
+            "completed",
+            Style::default().fg(theme::R_TEXT_DISABLED),
+        )),
+    ];
+    let p = Paragraph::new(lines).alignment(Alignment::Center);
+    frame.render_widget(p, inner);
+}
+
+fn render_inactive_or_aborted_body(
+    frame: &mut Frame,
+    inner: Rect,
+    task: &ScheduledTaskInfo,
+    prompt_scroll: u16,
+    dep_warning: bool,
+    now: DateTime<Utc>,
+) {
+    let aborted = task.status == ScheduledTaskStatus::Aborted;
+    let status_pill = if aborted {
+        Span::styled(
+            "ABORTED ",
+            Style::default()
+                .fg(theme::R_ERROR)
+                .add_modifier(Modifier::BOLD),
+        )
+    } else {
+        Span::styled(
+            "INACTIVE ",
+            Style::default()
+                .fg(theme::R_WARNING)
+                .add_modifier(Modifier::BOLD),
+        )
+    };
+
+    let header = Paragraph::new(Line::from(vec![
+        status_pill,
+        pill("PLAN", task.plan_mode, theme::R_WARNING),
+        pill("AUTO-EXIT", task.auto_exit, theme::R_INFO),
+    ]));
+
+    let mut sched_text = describe_schedule(&task.schedule, now);
+    if aborted {
+        sched_text = "Aborted — r restart · R restart+clean".into();
+    }
+    let sched_line = Paragraph::new(Span::styled(
+        sched_text,
+        Style::default().fg(theme::R_TEXT_TERTIARY),
+    ));
+
+    let warning_line = if dep_warning {
+        Some(Paragraph::new(Span::styled(
+            "⚠ depends on tasks without AUTO-EXIT",
+            Style::default()
+                .fg(theme::R_WARNING)
+                .add_modifier(Modifier::BOLD),
+        )))
+    } else {
+        None
+    };
+
+    // Layout: header | meta | (warning) | prompt body
+    let constraints: Vec<Constraint> = if warning_line.is_some() {
+        vec![
+            Constraint::Length(1),
+            Constraint::Length(1),
+            Constraint::Length(1),
+            Constraint::Min(1),
+        ]
+    } else {
+        vec![
+            Constraint::Length(1),
+            Constraint::Length(1),
+            Constraint::Min(1),
+        ]
+    };
+    let chunks = Layout::vertical(constraints).split(inner);
+
+    frame.render_widget(header, chunks[0]);
+    frame.render_widget(sched_line, chunks[1]);
+    if let Some(w) = warning_line {
+        frame.render_widget(w, chunks[2]);
+        frame.render_widget(prompt_paragraph(task, prompt_scroll), chunks[3]);
+    } else {
+        frame.render_widget(prompt_paragraph(task, prompt_scroll), chunks[2]);
+    }
+}
+
+fn prompt_paragraph(task: &ScheduledTaskInfo, scroll: u16) -> Paragraph<'static> {
+    Paragraph::new(task.prompt.clone())
+        .style(Style::default().fg(theme::R_TEXT_PRIMARY))
+        .wrap(Wrap { trim: false })
+        .scroll((scroll, 0))
+}
+
+fn pill<'a>(label: &'a str, on: bool, on_color: ratatui::style::Color) -> Span<'a> {
+    if on {
+        Span::styled(
+            format!(" {label} "),
+            Style::default()
+                .fg(theme::R_BG_BASE)
+                .bg(on_color)
+                .add_modifier(Modifier::BOLD),
+        )
+    } else {
+        Span::styled(
+            format!(" {label} "),
+            Style::default().fg(theme::R_TEXT_DISABLED),
+        )
+    }
+}
+
+fn describe_schedule(kind: &ScheduleKind, now: DateTime<Utc>) -> String {
+    match kind {
+        ScheduleKind::Time { start_at } => match DateTime::parse_from_rfc3339(start_at) {
+            Ok(dt) => {
+                let target = dt.with_timezone(&Utc);
+                if target <= now {
+                    "Starts: any moment".into()
+                } else {
+                    let delta = target - now;
+                    let total_secs = delta.num_seconds();
+                    if total_secs < 60 {
+                        format!("Starts in {}s", total_secs)
+                    } else if total_secs < 3600 {
+                        format!("Starts in {}m {}s", total_secs / 60, total_secs % 60)
+                    } else if total_secs < 86_400 {
+                        let h = total_secs / 3600;
+                        let m = (total_secs % 3600) / 60;
+                        format!("Starts in {h}h {m}m")
+                    } else {
+                        let d = total_secs / 86_400;
+                        let h = (total_secs % 86_400) / 3600;
+                        format!("Starts in {d}d {h}h")
+                    }
+                }
+            }
+            Err(_) => "Starts: <invalid time>".into(),
+        },
+        ScheduleKind::Depend { depends_on_ids } => {
+            format!("Waiting on {} task(s)", depends_on_ids.len())
+        }
+        ScheduleKind::Unscheduled => "Unscheduled — press s to start".into(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn task(id: &str, status: ScheduledTaskStatus, schedule: ScheduleKind) -> ScheduledTaskInfo {
+        ScheduledTaskInfo {
+            id: id.into(),
+            repo_path: "/repo".into(),
+            repo_name: "repo".into(),
+            branch_name: format!("br-{id}"),
+            prompt: "p".into(),
+            plan_mode: false,
+            auto_exit: false,
+            agent_binary: "claude".into(),
+            schedule,
+            status,
+            agent_id: None,
+            created_at: "2026-05-06T09:00:00Z".into(),
+            completed_at: None,
+        }
+    }
+
+    #[test]
+    fn focus_clamps_when_tasks_shrink() {
+        let mut state = ScheduleState::new();
+        state.sync_tasks(vec![
+            task("a", ScheduledTaskStatus::Inactive, ScheduleKind::Unscheduled),
+            task("b", ScheduledTaskStatus::Inactive, ScheduleKind::Unscheduled),
+            task("c", ScheduledTaskStatus::Inactive, ScheduleKind::Unscheduled),
+        ]);
+        state.focus = ScheduleFocus::Task(2);
+        state.sync_tasks(vec![task(
+            "a",
+            ScheduledTaskStatus::Inactive,
+            ScheduleKind::Unscheduled,
+        )]);
+        assert_eq!(state.focus, ScheduleFocus::Task(0));
+    }
+
+    #[test]
+    fn focus_becomes_none_when_list_empty() {
+        let mut state = ScheduleState::new();
+        state.sync_tasks(vec![task(
+            "a",
+            ScheduledTaskStatus::Inactive,
+            ScheduleKind::Unscheduled,
+        )]);
+        state.focus = ScheduleFocus::Task(0);
+        state.sync_tasks(Vec::new());
+        assert_eq!(state.focus, ScheduleFocus::None);
+    }
+
+    #[test]
+    fn focus_initialises_when_tasks_appear() {
+        let mut state = ScheduleState::new();
+        assert_eq!(state.focus, ScheduleFocus::None);
+        state.sync_tasks(vec![task(
+            "a",
+            ScheduledTaskStatus::Inactive,
+            ScheduleKind::Unscheduled,
+        )]);
+        assert_eq!(state.focus, ScheduleFocus::Task(0));
+    }
+
+    #[test]
+    fn dep_warning_when_upstream_no_auto_exit() {
+        let mut state = ScheduleState::new();
+        let mut up = task("u", ScheduledTaskStatus::Inactive, ScheduleKind::Unscheduled);
+        up.auto_exit = false;
+        let down = task(
+            "d",
+            ScheduledTaskStatus::Inactive,
+            ScheduleKind::Depend {
+                depends_on_ids: vec!["u".into()],
+            },
+        );
+        state.sync_tasks(vec![up, down]);
+        let warns: HashMap<String, bool> = state.dep_warning_map().into_iter().collect();
+        assert_eq!(warns.get("d"), Some(&true));
+        assert_eq!(warns.get("u"), Some(&false));
+    }
+
+    #[test]
+    fn dep_warning_clears_when_upstream_completes() {
+        let mut state = ScheduleState::new();
+        let mut up = task("u", ScheduledTaskStatus::Complete, ScheduleKind::Unscheduled);
+        up.auto_exit = false;
+        let down = task(
+            "d",
+            ScheduledTaskStatus::Inactive,
+            ScheduleKind::Depend {
+                depends_on_ids: vec!["u".into()],
+            },
+        );
+        state.sync_tasks(vec![up, down]);
+        let warns: HashMap<String, bool> = state.dep_warning_map().into_iter().collect();
+        assert_eq!(warns.get("d"), Some(&false));
+    }
+
+    #[test]
+    fn dep_warning_off_when_upstream_auto_exits() {
+        let mut state = ScheduleState::new();
+        let mut up = task("u", ScheduledTaskStatus::Inactive, ScheduleKind::Unscheduled);
+        up.auto_exit = true;
+        let down = task(
+            "d",
+            ScheduledTaskStatus::Inactive,
+            ScheduleKind::Depend {
+                depends_on_ids: vec!["u".into()],
+            },
+        );
+        state.sync_tasks(vec![up, down]);
+        let warns: HashMap<String, bool> = state.dep_warning_map().into_iter().collect();
+        assert_eq!(warns.get("d"), Some(&false));
+    }
+
+    #[test]
+    fn handle_key_e_emits_edit_for_inactive() {
+        let mut state = ScheduleState::new();
+        state.sync_tasks(vec![task(
+            "a",
+            ScheduledTaskStatus::Inactive,
+            ScheduleKind::Unscheduled,
+        )]);
+        let action = state.handle_key(KeyEvent::new(KeyCode::Char('e'), KeyModifiers::NONE));
+        match action {
+            ScheduleAction::EditPrompt { task_id, .. } => assert_eq!(task_id, "a"),
+            other => panic!("expected EditPrompt, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn handle_key_e_noop_for_active() {
+        let mut state = ScheduleState::new();
+        state.sync_tasks(vec![task(
+            "a",
+            ScheduledTaskStatus::Active,
+            ScheduleKind::Unscheduled,
+        )]);
+        let action = state.handle_key(KeyEvent::new(KeyCode::Char('e'), KeyModifiers::NONE));
+        assert_eq!(action, ScheduleAction::Noop);
+    }
+
+    #[test]
+    fn handle_key_s_starts_inactive() {
+        let mut state = ScheduleState::new();
+        state.sync_tasks(vec![task(
+            "a",
+            ScheduledTaskStatus::Inactive,
+            ScheduleKind::Unscheduled,
+        )]);
+        let action = state.handle_key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE));
+        assert_eq!(
+            action,
+            ScheduleAction::StartNow {
+                task_id: "a".into()
+            }
+        );
+    }
+
+    #[test]
+    fn handle_key_r_restarts_aborted_only() {
+        let mut state = ScheduleState::new();
+        state.sync_tasks(vec![task(
+            "a",
+            ScheduledTaskStatus::Aborted,
+            ScheduleKind::Unscheduled,
+        )]);
+        let r = state.handle_key(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::NONE));
+        assert_eq!(
+            r,
+            ScheduleAction::Restart {
+                task_id: "a".into(),
+                clean: false
+            }
+        );
+        let r_clean = state.handle_key(KeyEvent::new(KeyCode::Char('R'), KeyModifiers::SHIFT));
+        assert_eq!(
+            r_clean,
+            ScheduleAction::Restart {
+                task_id: "a".into(),
+                clean: true
+            }
+        );
+    }
+
+    #[test]
+    fn handle_key_d_confirms_delete() {
+        let mut state = ScheduleState::new();
+        state.sync_tasks(vec![task(
+            "a",
+            ScheduledTaskStatus::Inactive,
+            ScheduleKind::Unscheduled,
+        )]);
+        let action = state.handle_key(KeyEvent::new(KeyCode::Char('d'), KeyModifiers::NONE));
+        match action {
+            ScheduleAction::ConfirmDelete { task_id, .. } => assert_eq!(task_id, "a"),
+            other => panic!("expected ConfirmDelete, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn describe_schedule_unscheduled() {
+        let s = describe_schedule(&ScheduleKind::Unscheduled, Utc::now());
+        assert!(s.starts_with("Unscheduled"));
+    }
+
+    #[test]
+    fn describe_schedule_in_2_hours() {
+        let now = Utc::now();
+        let target = (now + chrono::Duration::hours(2)).to_rfc3339();
+        let s = describe_schedule(&ScheduleKind::Time { start_at: target }, now);
+        assert!(s.contains("2h"), "got {s}");
+    }
+}
