@@ -5619,7 +5619,11 @@ fn find_url_at_click(
 // ---------------------------------------------------------------------------
 
 fn render_tab_bar(frame: &mut Frame, area: Rect, active_tab: ActiveTab, click_map: &mut ClickMap) {
-    let tabs = [ActiveTab::Repositories, ActiveTab::Overview];
+    let tabs = [
+        ActiveTab::Repositories,
+        ActiveTab::Overview,
+        ActiveTab::Schedule,
+    ];
     let mut spans = Vec::new();
     let mut cursor_x = area.x;
 
