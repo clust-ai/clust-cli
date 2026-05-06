@@ -463,6 +463,7 @@ The `?` key toggles a keyboard shortcut overlay rendered as a centered modal (44
 - **Global section (always shown):** `q / Esc×2`, `Q`, `Ctrl+C`, `Tab`, `Shift+Tab`, `?`, `F2`, `Alt+M`, `Alt+E`, `Alt+D`, `Alt+F`, `Alt+N`, `Alt+V`, `Alt+B`, `Alt+P`, `Alt+T`, `Alt+I`, `Cmd+1`, `Cmd+2`.
 - **Repositories section (shown when Repositories tab is active):** `↑/↓` navigate items, `←/→` navigate tree, `Shift+↑/↓` jump prev/next repo, `Enter` open menu, `Space` collapse/expand.
 - **Overview section (shown when Overview tab is active):** `Shift+←/→` scroll panels, `Shift+↓` enter terminal, plus an "In terminal:" sub-context label followed by `Shift+↑` back to options bar, `Shift+↓` enter focus mode, `Shift+←/→` switch agent, `PgUp/PgDn` scroll terminal.
+- **Schedule section (shown when Schedule tab is active):** `Alt+S` schedule new task, `Shift+←/→` switch focused task, `↑/↓` scroll prompt, `d/Del` delete, `Shift+C` clear by status. Three sub-context labels follow: "Inactive task:" (`e` edit prompt, `p` toggle plan, `x` toggle auto-exit, `s` start now), "Active task:" (`Shift+↓` enter focus mode), "Aborted task:" (`e` edit, `p` plan, `x` auto-exit, `r` restart, `Shift+R` clean restart).
 - **Focus Mode section (shown when in focus mode):** `Shift+↑` exit, `Shift+←/→` switch panel, `Shift+PgUp/PgDn` scroll terminal, plus a "Left panel:" sub-context label followed by `Tab` cycle tabs, `Shift+Tab` prev tab (used in Terminal tab since Tab is forwarded to the shell), `↑/↓` move cursor, `v` toggle selection, `Enter` send selection, `Esc` cancel selection.
 
 Key names are displayed in accent color (left-aligned, 16 chars wide); descriptions use primary text color. Section headers use secondary text color with bold modifier. Sub-context labels use tertiary text color and are indented.
@@ -471,16 +472,20 @@ Key names are displayed in accent color (left-aligned, 16 chars wide); descripti
 
 A third top-level tab next to Repositories and Overview, dedicated to **persistent scheduled tasks**. Each task is one row in the SQLite `scheduled_tasks` table (see `storage.md`) and survives hub restarts. Tasks are identified by their git branch name; only one non-completed task can target any given branch at once.
 
-**Layout.** A horizontal grid of vertical task columns, mirroring the Overview tab. `Shift+Left` / `Shift+Right` focus the previous / next column; `Shift+Down` enters focus mode (Active tasks only).
+**Layout.** A horizontal grid of vertical task columns (mirroring the Overview tab) on top, followed by a fixed two-row **keybind hint footer** so every applicable shortcut is visible at a glance. `Shift+Left` / `Shift+Right` focus the previous / next column; `Shift+Down` enters focus mode (Active tasks only).
+
+**Keybind hint footer (bottom 2 rows of the tab area):**
+- Row 1 (always the same): `Shift+←/→ switch panel · Opt+S new task · d/Del delete · Shift+C clear by status · ? help`.
+- Row 2 (status-aware): a colored status pill (`INACTIVE` / `ACTIVE` / `ABORTED` / `COMPLETE`) followed by only the bindings that apply to the focused task — e.g. for Inactive: `e edit prompt · p toggle plan · x toggle auto-exit · s start now · ↑/↓ scroll prompt`. When no task is focused (empty list), row 2 invites the user to press `Opt+S` to begin. Keys are rendered in `R_ACCENT_BRIGHT` bold; descriptions in `R_TEXT_SECONDARY`; separators in `R_TEXT_DISABLED`.
 
 **Per-column rendering depends on `status`:**
 
 | Status | Column body |
 |--------|-------------|
-| `Inactive` | Status pill, `PLAN` and `AUTO-EXIT` indicator pills, schedule info line ("Starts in 1h 23m" / "Waiting on N task(s)" / "Unscheduled — press s to start"), and the full prompt text wrapping on the X axis and scrollable on Y. If any upstream dep has Auto-Exit OFF, a warning line appears: `⚠ depends on tasks without AUTO-EXIT`. |
-| `Active` | Status pill plus a live `TerminalEmulator` rendering the agent's PTY output. |
-| `Complete` | Centred branch name + small green `✓`. |
-| `Aborted` | Status pill (red), the original prompt, and the hint `Aborted — r restart · R restart+clean`. |
+| `Inactive` | Status pill, `PLAN` and `AUTO-EXIT` indicator pills, a schedule info line that highlights inline keybinds in accent color (e.g. "Unscheduled — press **s** to start now" / "Starts in 1h 23m" / "Waiting on N task(s)"), and the full prompt text wrapping on the X axis and scrollable on Y. If any upstream dep has Auto-Exit OFF, a warning line appears: `⚠ depends on tasks without AUTO-EXIT`. |
+| `Active` | Status pill, an action hint sub-line "Press **Shift+↓** for focus mode", plus a live `TerminalEmulator` rendering the agent's PTY output. |
+| `Complete` | Centred branch name + small green `✓`, with a final `press d to remove` hint. |
+| `Aborted` | Status pill (red), the original prompt, and an inline hint "Aborted — press **r** to restart, **Shift+R** for clean restart" with the keys highlighted in accent color. |
 
 **Opening a task (Opt+S modal).** Mirrors the create-agent modal but adds a `Select schedule kind` step (Schedule / Depend / Unscheduled) and either a final time-entry step or a multi-select dependency step. Time strings accept `Ns`, `Nm`, `Nh`, `Nd` durations or wall-clock `HH:MM`. The prompt step rejects empty input. `Alt+P` toggles plan mode and `Alt+X` toggles `Auto-Exit` from anywhere in the modal — Auto-Exit defaults to OFF and only takes effect for agents that advertise the Stop hook (Claude today). If the chosen branch is already used by a non-completed scheduled task, the hub rejects the create message and the modal surfaces "branch '<x>' is already scheduled" on the status bar.
 
