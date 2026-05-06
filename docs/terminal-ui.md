@@ -472,7 +472,11 @@ Key names are displayed in accent color (left-aligned, 16 chars wide); descripti
 
 A third top-level tab next to Repositories and Overview, dedicated to **persistent scheduled tasks**. Each task is one row in the SQLite `scheduled_tasks` table (see `storage.md`) and survives hub restarts. Tasks are identified by their git branch name; only one non-completed task can target any given branch at once.
 
-**Layout.** A horizontal grid of vertical task columns (mirroring the Overview tab) on top, followed by a fixed two-row **keybind hint footer** so every applicable shortcut is visible at a glance. `Shift+Left` / `Shift+Right` focus the previous / next column; `Shift+Down` enters focus mode (Active tasks only).
+**Layout.** A single-row **top bar** (mirroring the Overview options bar) above a horizontal grid of vertical task columns, with a fixed two-row **keybind hint footer** below so every applicable shortcut is visible at a glance. `Shift+Left` / `Shift+Right` focus the previous / next column; `Shift+Down` enters focus mode (Active tasks only).
+
+**Top bar.** Shows the same kind of summary as the Overview options bar, minus the click/collapse affordances (Schedule has neither yet). On the left, one chip per repo that currently has a scheduled task: a coloured `●` plus the repo name in primary text. A vertical-bar separator follows, then one branch indicator per task. Branch indicators are coloured by repo: tasks visible on screen render in inverse video (repo-coloured background, primary-text foreground); tasks scrolled off render in repo-coloured text on the bar background.
+
+**Repo grouping.** Tasks are sorted by repo (using the same order as the Overview repo chips), then by `created_at`, then by id. Each task's column border tints with its repo colour — full colour when focused, dimmed when unfocused — so the same per-repo palette used in Overview applies here. When the focused task survives a re-sync that reshuffles indices, focus follows the task by id rather than staying glued to the numeric slot.
 
 **Keybind hint footer (bottom 2 rows of the tab area):**
 - Row 1 (always the same): `Shift+←/→ switch panel · Opt+S new task · d/Del delete · Shift+C clear by status · ? help`.

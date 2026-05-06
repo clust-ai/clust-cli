@@ -1058,7 +1058,7 @@ pub fn run(hub_name: &str) -> io::Result<()> {
         }
         while let Ok(tasks) = scheduled_task_rx.try_recv() {
             scheduled_tasks = tasks.clone();
-            schedule_state.sync_tasks(tasks);
+            schedule_state.sync_tasks(tasks, &repos);
         }
         // Drain pending PTY output for active scheduled tasks.
         schedule_state.drain_output_events();
@@ -1253,7 +1253,7 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                         );
                     }
                     ActiveTab::Schedule => {
-                        schedule_state.render(frame, content_area);
+                        schedule_state.render(frame, content_area, &repos, &repo_colors);
                     }
                 }
             }
