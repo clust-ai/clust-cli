@@ -14,14 +14,14 @@
 //! - **Complete** — compact: branch name + small `✓`.
 //! - **Aborted** — header pill + prompt + restart hint.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use chrono::{DateTime, Utc};
-use clust_ipc::{ScheduleKind, ScheduledTaskInfo, ScheduledTaskStatus};
+use clust_ipc::{RepoInfo, ScheduleKind, ScheduledTaskInfo, ScheduledTaskStatus};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::{
     layout::{Alignment, Constraint, Layout, Rect},
-    style::{Modifier, Style},
+    style::{Color, Modifier, Style},
     text::{Line, Span},
     widgets::{Block, Borders, Paragraph, Wrap},
     Frame,
@@ -135,10 +135,20 @@ impl ScheduleState {
 
     /// Replace the task list with a fresh snapshot from the hub. Spawns
     /// connections for newly-active tasks and aborts ones that left Active.
-    /// Panels for tasks that disappeared entirely are dropped.
-    pub fn sync_tasks(&mut self, tasks: Vec<ScheduledTaskInfo>) {
+    /// Panels for tasks that disappeared entirely are dropped. Tasks are
+    /// sorted by repo order (matching the Overview panel) so navigation walks
+    /// through them in repo-grouped order.
+    pub fn sync_tasks(&mut self, tasks: Vec<ScheduledTaskInfo>, repos: &[RepoInfo]) {
+        // Remember the focused task by id so we can restore focus after
+        // sorting (otherwise a re-sync that reshuffles indices would steal
+        // focus to the task that happens to land at the same numeric index).
+        let prev_focus_id = match self.focus {
+            ScheduleFocus::Task(idx) => self.tasks.get(idx).map(|t| t.id.clone()),
+            _ => None,
+        };
+
         // 1. Drop panels for tasks that no longer exist OR are no longer Active.
-        let alive_active_ids: std::collections::HashSet<String> = tasks
+        let alive_active_ids: HashSet<String> = tasks
             .iter()
             .filter(|t| t.status == ScheduledTaskStatus::Active)
             .map(|t| t.id.clone())
@@ -156,8 +166,7 @@ impl ScheduleState {
         }
 
         // 2. Drop UI bookkeeping for tasks that disappeared entirely.
-        let alive_ids: std::collections::HashSet<String> =
-            tasks.iter().map(|t| t.id.clone()).collect();
+        let alive_ids: HashSet<String> = tasks.iter().map(|t| t.id.clone()).collect();
         self.ui.retain(|id, _| alive_ids.contains(id));
 
         // 3. Spawn connections for newly-active tasks.
@@ -171,7 +180,35 @@ impl ScheduleState {
 
         self.tasks = tasks;
 
-        // 4. Clamp focus.
+        // 4. Sort by repo order, then by created_at, then by id — same
+        //    ordering Overview uses for its sorted_indices.
+        let repo_order: HashMap<&str, usize> = repos
+            .iter()
+            .enumerate()
+            .map(|(i, r)| (r.path.as_str(), i))
+            .collect();
+        self.tasks.sort_by(|a, b| {
+            let oa = repo_order
+                .get(a.repo_path.as_str())
+                .copied()
+                .unwrap_or(usize::MAX);
+            let ob = repo_order
+                .get(b.repo_path.as_str())
+                .copied()
+                .unwrap_or(usize::MAX);
+            oa.cmp(&ob)
+                .then_with(|| a.created_at.cmp(&b.created_at))
+                .then_with(|| a.id.cmp(&b.id))
+        });
+
+        // 5. Restore focus on the same task id when possible.
+        if let Some(id) = prev_focus_id {
+            if let Some(new_idx) = self.tasks.iter().position(|t| t.id == id) {
+                self.focus = ScheduleFocus::Task(new_idx);
+            }
+        }
+
+        // 6. Clamp focus to a valid index.
         match self.focus {
             ScheduleFocus::None if !self.tasks.is_empty() => {
                 self.focus = ScheduleFocus::Task(0);
@@ -189,7 +226,7 @@ impl ScheduleState {
             self.focus = ScheduleFocus::None;
         }
 
-        // 5. Clamp scroll.
+        // 7. Clamp scroll.
         if self.scroll_offset >= self.tasks.len() {
             self.scroll_offset = self.tasks.len().saturating_sub(1);
         }
@@ -501,29 +538,58 @@ impl ScheduleState {
 
     // -- Rendering --
 
-    /// Render the Schedule tab into `area`.
+    /// Render the Schedule tab into `area`. `repos` provides the canonical
+    /// order + color palette for grouping; `repo_colors` is the path→color-name
+    /// lookup the rest of the UI uses.
     ///
-    /// Layout: panel grid on top, a 2-row keybind hint footer at the bottom so
-    /// the user always has every applicable shortcut visible. The footer is
-    /// status-aware — its second line changes based on the focused task's
-    /// state (Inactive / Active / Aborted / Complete).
-    pub fn render(&mut self, frame: &mut Frame, area: Rect) {
+    /// Layout: a 1-row top bar (Overview-style repo chips + branch indicators),
+    /// the panel grid in the middle, then a 2-row keybind hint footer at the
+    /// bottom so the user always has every applicable shortcut visible. The
+    /// footer is status-aware — its second line changes based on the focused
+    /// task's state.
+    pub fn render(
+        &mut self,
+        frame: &mut Frame,
+        area: Rect,
+        repos: &[RepoInfo],
+        repo_colors: &HashMap<String, String>,
+    ) {
         let hint_height: u16 = 2;
-        let [content_area, hint_area] = if area.height > hint_height + 1 {
-            Layout::vertical([Constraint::Min(1), Constraint::Length(hint_height)]).areas(area)
+        let bar_height: u16 = 1;
+        // Need room for the top bar + at least one row of panels + the hint
+        // footer; if the viewport is too small, drop the hint footer first
+        // (the bar is cheap and orienting, the hint is large but optional).
+        let (bar_area, panels_area, hint_area) = if area.height > bar_height + hint_height + 1 {
+            let [b, p, h] = Layout::vertical([
+                Constraint::Length(bar_height),
+                Constraint::Min(1),
+                Constraint::Length(hint_height),
+            ])
+            .areas(area);
+            (b, p, h)
+        } else if area.height > bar_height + 1 {
+            let [b, p] = Layout::vertical([Constraint::Length(bar_height), Constraint::Min(1)])
+                .areas(area);
+            (b, p, Rect::new(area.x, area.y + area.height, area.width, 0))
         } else {
-            // Tiny viewport: skip the hint bar so the panels still render.
-            [area, Rect::new(area.x, area.y + area.height, area.width, 0)]
+            (
+                Rect::new(area.x, area.y, area.width, 0),
+                area,
+                Rect::new(area.x, area.y + area.height, area.width, 0),
+            )
         };
 
         if self.tasks.is_empty() {
-            self.render_empty(frame, content_area);
+            // Paint the bar background even when empty so the layout doesn't
+            // shift the moment a task appears.
+            render_empty_bar(frame, bar_area);
+            self.render_empty(frame, panels_area);
             self.render_keybind_hint_bar(frame, hint_area, None);
             return;
         }
-        self.resize_panels_to(content_area);
+        self.resize_panels_to(panels_area);
 
-        let count_fit = max_panels_for_width(content_area.width).max(1);
+        let count_fit = max_panels_for_width(panels_area.width).max(1);
         let visible_count = self
             .tasks
             .len()
@@ -535,14 +601,22 @@ impl ScheduleState {
         let constraints: Vec<Constraint> = (0..visible_count)
             .map(|_| Constraint::Ratio(1, slots as u32))
             .collect();
+
+        // Indices visible on screen — used to invert-video the matching
+        // branch indicators in the bar.
+        let visible_set: HashSet<usize> = if visible_count > 0 {
+            (self.scroll_offset..self.scroll_offset + visible_count).collect()
+        } else {
+            HashSet::new()
+        };
+        self.render_options_bar(frame, bar_area, repos, &visible_set);
+
         if constraints.is_empty() {
             self.render_keybind_hint_bar(frame, hint_area, None);
             return;
         }
-        let panel_areas = Layout::horizontal(constraints).split(content_area);
+        let panel_areas = Layout::horizontal(constraints).split(panels_area);
 
-        // Snapshot indices/data needed below so we don't borrow self mutably
-        // and immutably at once during rendering.
         let visible_indices: Vec<usize> =
             (self.scroll_offset..self.scroll_offset + visible_count).collect();
         let focused_task_id = self.focused_task().map(|t| t.id.clone());
@@ -565,6 +639,9 @@ impl ScheduleState {
             }
             let is_focused = focused_task_id.as_deref() == Some(task_clone.id.as_str());
             let dep_warning = *any_dep_warning_map.get(&task_clone.id).unwrap_or(&false);
+            let repo_color = repo_colors
+                .get(task_clone.repo_path.as_str())
+                .map(|c| theme::repo_color(c));
             self.render_panel(
                 frame,
                 area,
@@ -573,6 +650,7 @@ impl ScheduleState {
                 prompt_scroll,
                 dep_warning,
                 now,
+                repo_color,
             );
         }
 
@@ -663,6 +741,91 @@ impl ScheduleState {
         }
     }
 
+    /// Render the schedule top bar: repo chips on the left, branch indicators
+    /// on the right. Mirrors Overview's options bar minus the click/collapse
+    /// affordances (Schedule has neither yet).
+    fn render_options_bar(
+        &self,
+        frame: &mut Frame,
+        area: Rect,
+        repos: &[RepoInfo],
+        visible_set: &HashSet<usize>,
+    ) {
+        let bar_bg = theme::R_BG_RAISED;
+
+        frame.render_widget(
+            Paragraph::new(Line::from(Span::styled(
+                " ".repeat(area.width as usize),
+                Style::default().bg(bar_bg),
+            ))),
+            area,
+        );
+
+        // Only show chips for repos that actually have tasks scheduled —
+        // matches what users care about on this tab and avoids a noisy bar.
+        let used_paths: HashSet<&str> =
+            self.tasks.iter().map(|t| t.repo_path.as_str()).collect();
+        let mut spans: Vec<Span> = Vec::new();
+        let mut shown_any_repo = false;
+
+        for repo in repos.iter() {
+            if !used_paths.contains(repo.path.as_str()) {
+                continue;
+            }
+            let color = repo
+                .color
+                .as_ref()
+                .map(|c| theme::repo_color(c))
+                .unwrap_or(theme::R_ACCENT);
+
+            spans.push(Span::styled(
+                " \u{25cf} ",
+                Style::default().fg(color).bg(bar_bg),
+            ));
+            spans.push(Span::styled(
+                format!("{} ", repo.name),
+                Style::default().fg(theme::R_TEXT_PRIMARY).bg(bar_bg),
+            ));
+            shown_any_repo = true;
+        }
+
+        if shown_any_repo && !self.tasks.is_empty() {
+            spans.push(Span::styled(
+                " \u{2502} ",
+                Style::default().fg(theme::R_TEXT_TERTIARY).bg(bar_bg),
+            ));
+        }
+
+        // Branch indicators — tasks are already in repo-sorted order.
+        for (idx, task) in self.tasks.iter().enumerate() {
+            let repo_color = repos
+                .iter()
+                .find(|r| r.path == task.repo_path)
+                .and_then(|r| r.color.as_ref())
+                .map(|c| theme::repo_color(c))
+                .unwrap_or(theme::R_ACCENT);
+
+            let is_visible = visible_set.contains(&idx);
+            let style = if is_visible {
+                Style::default().fg(theme::R_TEXT_PRIMARY).bg(repo_color)
+            } else {
+                Style::default().fg(repo_color).bg(bar_bg)
+            };
+            spans.push(Span::styled(format!(" {} ", task.branch_name), style));
+        }
+
+        // Pad remaining width so the bar paints edge-to-edge in the bar bg.
+        let content_len: usize = spans.iter().map(|s| s.content.chars().count()).sum();
+        let remaining = (area.width as usize).saturating_sub(content_len);
+        if remaining > 0 {
+            spans.push(Span::styled(
+                " ".repeat(remaining),
+                Style::default().bg(bar_bg),
+            ));
+        }
+        frame.render_widget(Paragraph::new(Line::from(spans)), area);
+    }
+
     fn render_empty(&self, frame: &mut Frame, area: Rect) {
         let mod_key = if cfg!(target_os = "macos") {
             "Opt"
@@ -726,12 +889,17 @@ impl ScheduleState {
         prompt_scroll: u16,
         dep_warning: bool,
         now: DateTime<Utc>,
+        repo_color: Option<Color>,
     ) {
-        let border_style = if is_focused {
-            Style::default().fg(theme::R_ACCENT_BRIGHT)
-        } else {
-            Style::default().fg(theme::R_ACCENT_DIM)
+        // Border tints with the repo color when known; falls back to the
+        // accent. Focused = full color, unfocused = dimmed (mirrors Overview).
+        let border_color = match (is_focused, repo_color) {
+            (true, Some(c)) => c,
+            (false, Some(c)) => theme::dim_color(c),
+            (true, None) => theme::R_ACCENT_BRIGHT,
+            (false, None) => theme::R_ACCENT_DIM,
         };
+        let border_style = Style::default().fg(border_color);
         let title = format!(" {} ", task.branch_name);
         let block = Block::default()
             .borders(Borders::ALL)
@@ -849,6 +1017,15 @@ impl ScheduleState {
 // ---------------------------------------------------------------------------
 // Panel-body renderers (free functions so they don't borrow `self`)
 // ---------------------------------------------------------------------------
+
+/// Render an empty top bar (just the bg fill) when there are no tasks.
+fn render_empty_bar(frame: &mut Frame, area: Rect) {
+    let line = Line::from(Span::styled(
+        " ".repeat(area.width as usize),
+        Style::default().bg(theme::R_BG_RAISED),
+    ));
+    frame.render_widget(Paragraph::new(line), area);
+}
 
 fn render_complete_body(frame: &mut Frame, inner: Rect, task: &ScheduledTaskInfo) {
     let lines = vec![
@@ -1114,33 +1291,49 @@ mod tests {
         }
     }
 
+    /// Tests don't care about repo ordering, so they pass an empty slice;
+    /// tasks fall back to created_at + id ordering, which matches their
+    /// declaration order in these fixtures.
+    fn sync(state: &mut ScheduleState, tasks: Vec<ScheduledTaskInfo>) {
+        state.sync_tasks(tasks, &[]);
+    }
+
     #[test]
     fn focus_clamps_when_tasks_shrink() {
         let mut state = ScheduleState::new();
-        state.sync_tasks(vec![
-            task("a", ScheduledTaskStatus::Inactive, ScheduleKind::Unscheduled),
-            task("b", ScheduledTaskStatus::Inactive, ScheduleKind::Unscheduled),
-            task("c", ScheduledTaskStatus::Inactive, ScheduleKind::Unscheduled),
-        ]);
+        sync(
+            &mut state,
+            vec![
+                task("a", ScheduledTaskStatus::Inactive, ScheduleKind::Unscheduled),
+                task("b", ScheduledTaskStatus::Inactive, ScheduleKind::Unscheduled),
+                task("c", ScheduledTaskStatus::Inactive, ScheduleKind::Unscheduled),
+            ],
+        );
         state.focus = ScheduleFocus::Task(2);
-        state.sync_tasks(vec![task(
-            "a",
-            ScheduledTaskStatus::Inactive,
-            ScheduleKind::Unscheduled,
-        )]);
+        sync(
+            &mut state,
+            vec![task(
+                "a",
+                ScheduledTaskStatus::Inactive,
+                ScheduleKind::Unscheduled,
+            )],
+        );
         assert_eq!(state.focus, ScheduleFocus::Task(0));
     }
 
     #[test]
     fn focus_becomes_none_when_list_empty() {
         let mut state = ScheduleState::new();
-        state.sync_tasks(vec![task(
-            "a",
-            ScheduledTaskStatus::Inactive,
-            ScheduleKind::Unscheduled,
-        )]);
+        sync(
+            &mut state,
+            vec![task(
+                "a",
+                ScheduledTaskStatus::Inactive,
+                ScheduleKind::Unscheduled,
+            )],
+        );
         state.focus = ScheduleFocus::Task(0);
-        state.sync_tasks(Vec::new());
+        sync(&mut state, Vec::new());
         assert_eq!(state.focus, ScheduleFocus::None);
     }
 
@@ -1148,11 +1341,14 @@ mod tests {
     fn focus_initialises_when_tasks_appear() {
         let mut state = ScheduleState::new();
         assert_eq!(state.focus, ScheduleFocus::None);
-        state.sync_tasks(vec![task(
-            "a",
-            ScheduledTaskStatus::Inactive,
-            ScheduleKind::Unscheduled,
-        )]);
+        sync(
+            &mut state,
+            vec![task(
+                "a",
+                ScheduledTaskStatus::Inactive,
+                ScheduleKind::Unscheduled,
+            )],
+        );
         assert_eq!(state.focus, ScheduleFocus::Task(0));
     }
 
@@ -1168,7 +1364,7 @@ mod tests {
                 depends_on_ids: vec!["u".into()],
             },
         );
-        state.sync_tasks(vec![up, down]);
+        sync(&mut state, vec![up, down]);
         let warns: HashMap<String, bool> = state.dep_warning_map().into_iter().collect();
         assert_eq!(warns.get("d"), Some(&true));
         assert_eq!(warns.get("u"), Some(&false));
@@ -1186,7 +1382,7 @@ mod tests {
                 depends_on_ids: vec!["u".into()],
             },
         );
-        state.sync_tasks(vec![up, down]);
+        sync(&mut state, vec![up, down]);
         let warns: HashMap<String, bool> = state.dep_warning_map().into_iter().collect();
         assert_eq!(warns.get("d"), Some(&false));
     }
@@ -1203,7 +1399,7 @@ mod tests {
                 depends_on_ids: vec!["u".into()],
             },
         );
-        state.sync_tasks(vec![up, down]);
+        sync(&mut state, vec![up, down]);
         let warns: HashMap<String, bool> = state.dep_warning_map().into_iter().collect();
         assert_eq!(warns.get("d"), Some(&false));
     }
@@ -1211,11 +1407,14 @@ mod tests {
     #[test]
     fn handle_key_e_emits_edit_for_inactive() {
         let mut state = ScheduleState::new();
-        state.sync_tasks(vec![task(
-            "a",
-            ScheduledTaskStatus::Inactive,
-            ScheduleKind::Unscheduled,
-        )]);
+        sync(
+            &mut state,
+            vec![task(
+                "a",
+                ScheduledTaskStatus::Inactive,
+                ScheduleKind::Unscheduled,
+            )],
+        );
         let action = state.handle_key(KeyEvent::new(KeyCode::Char('e'), KeyModifiers::NONE));
         match action {
             ScheduleAction::EditPrompt { task_id, .. } => assert_eq!(task_id, "a"),
@@ -1226,11 +1425,14 @@ mod tests {
     #[test]
     fn handle_key_e_noop_for_active() {
         let mut state = ScheduleState::new();
-        state.sync_tasks(vec![task(
-            "a",
-            ScheduledTaskStatus::Active,
-            ScheduleKind::Unscheduled,
-        )]);
+        sync(
+            &mut state,
+            vec![task(
+                "a",
+                ScheduledTaskStatus::Active,
+                ScheduleKind::Unscheduled,
+            )],
+        );
         let action = state.handle_key(KeyEvent::new(KeyCode::Char('e'), KeyModifiers::NONE));
         assert_eq!(action, ScheduleAction::Noop);
     }
@@ -1238,11 +1440,14 @@ mod tests {
     #[test]
     fn handle_key_s_starts_inactive() {
         let mut state = ScheduleState::new();
-        state.sync_tasks(vec![task(
-            "a",
-            ScheduledTaskStatus::Inactive,
-            ScheduleKind::Unscheduled,
-        )]);
+        sync(
+            &mut state,
+            vec![task(
+                "a",
+                ScheduledTaskStatus::Inactive,
+                ScheduleKind::Unscheduled,
+            )],
+        );
         let action = state.handle_key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE));
         assert_eq!(
             action,
@@ -1255,11 +1460,14 @@ mod tests {
     #[test]
     fn handle_key_r_restarts_aborted_only() {
         let mut state = ScheduleState::new();
-        state.sync_tasks(vec![task(
-            "a",
-            ScheduledTaskStatus::Aborted,
-            ScheduleKind::Unscheduled,
-        )]);
+        sync(
+            &mut state,
+            vec![task(
+                "a",
+                ScheduledTaskStatus::Aborted,
+                ScheduleKind::Unscheduled,
+            )],
+        );
         let r = state.handle_key(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::NONE));
         assert_eq!(
             r,
@@ -1281,16 +1489,93 @@ mod tests {
     #[test]
     fn handle_key_d_confirms_delete() {
         let mut state = ScheduleState::new();
-        state.sync_tasks(vec![task(
-            "a",
-            ScheduledTaskStatus::Inactive,
-            ScheduleKind::Unscheduled,
-        )]);
+        sync(
+            &mut state,
+            vec![task(
+                "a",
+                ScheduledTaskStatus::Inactive,
+                ScheduleKind::Unscheduled,
+            )],
+        );
         let action = state.handle_key(KeyEvent::new(KeyCode::Char('d'), KeyModifiers::NONE));
         match action {
             ScheduleAction::ConfirmDelete { task_id, .. } => assert_eq!(task_id, "a"),
             other => panic!("expected ConfirmDelete, got {:?}", other),
         }
+    }
+
+    #[test]
+    fn tasks_sort_by_repo_order_then_created_at() {
+        // Two repos with explicit order; tasks arrive in mixed order from
+        // the hub. After sync, they must appear sorted by repo first, then
+        // by created_at within a repo.
+        let repo_a = RepoInfo {
+            path: "/repo-a".into(),
+            name: "repo-a".into(),
+            color: Some("red".into()),
+            editor: None,
+            local_branches: vec![],
+            remote_branches: vec![],
+        };
+        let repo_b = RepoInfo {
+            path: "/repo-b".into(),
+            name: "repo-b".into(),
+            color: Some("blue".into()),
+            editor: None,
+            local_branches: vec![],
+            remote_branches: vec![],
+        };
+        let mut t1 = task("1", ScheduledTaskStatus::Inactive, ScheduleKind::Unscheduled);
+        t1.repo_path = "/repo-b".into();
+        t1.created_at = "2026-05-06T10:00:00Z".into();
+        let mut t2 = task("2", ScheduledTaskStatus::Inactive, ScheduleKind::Unscheduled);
+        t2.repo_path = "/repo-a".into();
+        t2.created_at = "2026-05-06T11:00:00Z".into();
+        let mut t3 = task("3", ScheduledTaskStatus::Inactive, ScheduleKind::Unscheduled);
+        t3.repo_path = "/repo-a".into();
+        t3.created_at = "2026-05-06T09:00:00Z".into();
+
+        let mut state = ScheduleState::new();
+        state.sync_tasks(vec![t1, t2, t3], &[repo_a, repo_b]);
+
+        let order: Vec<&str> = state.tasks.iter().map(|t| t.id.as_str()).collect();
+        // repo-a comes first; within it, t3 (09:00) before t2 (11:00). repo-b
+        // comes last with t1.
+        assert_eq!(order, vec!["3", "2", "1"]);
+    }
+
+    #[test]
+    fn focus_follows_task_id_after_resort() {
+        let repo_a = RepoInfo {
+            path: "/repo-a".into(),
+            name: "a".into(),
+            color: None,
+            editor: None,
+            local_branches: vec![],
+            remote_branches: vec![],
+        };
+        let repo_b = RepoInfo {
+            path: "/repo-b".into(),
+            name: "b".into(),
+            color: None,
+            editor: None,
+            local_branches: vec![],
+            remote_branches: vec![],
+        };
+        let mut t1 = task("1", ScheduledTaskStatus::Inactive, ScheduleKind::Unscheduled);
+        t1.repo_path = "/repo-a".into();
+        let mut t2 = task("2", ScheduledTaskStatus::Inactive, ScheduleKind::Unscheduled);
+        t2.repo_path = "/repo-b".into();
+
+        let mut state = ScheduleState::new();
+        // First sync: only repo-a known; t2 falls to the end (unknown repo).
+        state.sync_tasks(vec![t1.clone(), t2.clone()], std::slice::from_ref(&repo_a));
+        // Focus the repo-a task (t1) at index 0.
+        state.focus = ScheduleFocus::Task(0);
+        // Now sync with both repos in reversed order: t2 (repo-b) sorts
+        // first, t1 second. Focus must follow t1 to its new index (1).
+        state.sync_tasks(vec![t1, t2], &[repo_b, repo_a]);
+        assert_eq!(state.focus, ScheduleFocus::Task(1));
     }
 
     #[test]
