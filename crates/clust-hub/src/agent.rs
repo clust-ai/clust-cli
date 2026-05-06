@@ -347,6 +347,13 @@ pub struct CreateWorktreeParams<'a> {
     pub cols: u16,
     pub rows: u16,
     pub exit_when_done: bool,
+    /// When `Some(task_id)`, the helper marks that scheduled task `active`
+    /// (with the just-allocated agent_id) inside the same hub-lock window as
+    /// the agent insert, so the PTY reader's exit hook is guaranteed to see
+    /// `status='active'` if the agent exits before this function returns.
+    /// Without this, fast-exiting agents leave the task stuck `active` (and,
+    /// after a hub restart, `aborted`).
+    pub scheduled_task_id: Option<String>,
 }
 
 /// Create a git worktree and spawn an agent in it.
@@ -367,6 +374,7 @@ pub async fn create_worktree_and_spawn_agent(
         cols,
         rows,
         exit_when_done,
+        scheduled_task_id,
     } = params;
     let sanitized_new = new_branch.map(clust_ipc::branch::sanitize_branch_name);
     let branch_name = sanitized_new
@@ -410,7 +418,7 @@ pub async fn create_worktree_and_spawn_agent(
 
     let result = {
         let mut hub_state = state.lock().await;
-        spawn_agent(
+        let spawn = spawn_agent(
             &mut hub_state,
             SpawnAgentParams {
                 prompt,
@@ -428,7 +436,18 @@ pub async fn create_worktree_and_spawn_agent(
                 exit_when_done,
             },
             state.clone(),
-        )
+        );
+        // For scheduled spawns, transition the row to `active` in the same
+        // lock window as the `agents.insert`. The PTY reader's exit hook
+        // (`mark_scheduled_task_complete_by_agent`) needs this same lock for
+        // its cleanup, so it cannot run until we release here — by which time
+        // the row is already `active` and the WHERE-clause matches.
+        if let (Ok((agent_id, _)), Some(task_id)) = (&spawn, scheduled_task_id.as_ref()) {
+            if let Some(ref conn) = hub_state.db {
+                crate::db::mark_scheduled_task_active(conn, task_id, agent_id)?;
+            }
+        }
+        spawn
     };
 
     match result {

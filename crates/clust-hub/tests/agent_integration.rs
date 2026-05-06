@@ -6,6 +6,34 @@ use tokio::sync::Mutex;
 // Integration tests for the agent module.
 // These tests spawn real PTY processes to verify the full lifecycle.
 
+/// Initialize a real git repo at `path` with a single commit on the default
+/// branch, plus an additional `extra_branch` pointing at the same commit so
+/// `git worktree add <path> <extra_branch>` will succeed without detaching
+/// HEAD. Uses the `git` CLI so this test crate doesn't need `git2` as a
+/// dev-dependency. Returns the default branch's name.
+fn init_repo_with_branch(path: &std::path::Path, extra_branch: &str) -> String {
+    let run = |args: &[&str]| {
+        let out = std::process::Command::new("git")
+            .current_dir(path)
+            .args(args)
+            .output()
+            .expect("failed to invoke git");
+        assert!(
+            out.status.success(),
+            "git {args:?} failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        out
+    };
+    run(&["init"]);
+    run(&["config", "user.email", "test@test.com"]);
+    run(&["config", "user.name", "Test"]);
+    run(&["commit", "--allow-empty", "-m", "initial"]);
+    run(&["branch", extra_branch]);
+    let head = run(&["rev-parse", "--abbrev-ref", "HEAD"]);
+    String::from_utf8_lossy(&head.stdout).trim().to_string()
+}
+
 /// Helper to create shared hub state for tests.
 fn new_shared_state() -> clust_hub::agent::SharedHubState {
     Arc::new(Mutex::new(clust_hub::agent::HubState::new()))
@@ -580,4 +608,88 @@ async fn agents_in_different_hubs_are_separated() {
         }
     }
     tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+}
+
+/// Regression test for the race in `fire_scheduled_task` where a fast-exiting
+/// agent's PTY-reader cleanup could run before the task transitioned out of
+/// `inactive`, leaving the row stuck `active` forever (and `aborted` after a
+/// hub restart). The fix marks the task `active` inside the same hub-lock
+/// window as the agent insert. With `agent_binary = "true"` the child exits
+/// effectively immediately, which deterministically loses the race in the
+/// pre-fix code.
+#[tokio::test]
+async fn fast_exiting_scheduled_task_reaches_complete_not_active() {
+    let tmp = tempfile::tempdir().unwrap();
+    let db_path = tmp.path().join("clust.db");
+    let repo_path = tmp.path().join("repo");
+    std::fs::create_dir_all(&repo_path).unwrap();
+    let _head_branch = init_repo_with_branch(&repo_path, "fast-task");
+
+    let state: clust_hub::agent::SharedHubState =
+        Arc::new(Mutex::new(clust_hub::agent::HubState::new()));
+    {
+        let mut hub = state.lock().await;
+        let conn = clust_hub::db::open_or_create_at(&db_path).unwrap();
+        hub.db = Some(conn);
+    }
+
+    let task_id = {
+        let mut hub = state.lock().await;
+        let conn = hub.db.as_mut().unwrap();
+        let past = (chrono::Utc::now() - chrono::Duration::seconds(60)).to_rfc3339();
+        clust_hub::db::insert_scheduled_task(
+            conn,
+            clust_hub::db::NewScheduledTask {
+                repo_path: repo_path.to_string_lossy().into_owned(),
+                // Original creation params are recorded but not used by
+                // fire_scheduled_task — `branch_name` is what drives the
+                // worktree checkout via the `SpawnFields` trait impl.
+                base_branch: None,
+                new_branch: None,
+                branch_name: "fast-task".into(),
+                prompt: "noop".into(),
+                plan_mode: false,
+                auto_exit: false,
+                agent_binary: "true".into(),
+                schedule: clust_ipc::ScheduleKind::Time { start_at: past },
+            },
+        )
+        .unwrap()
+    };
+
+    let task = {
+        let hub = state.lock().await;
+        let conn = hub.db.as_ref().unwrap();
+        clust_hub::db::get_scheduled_task(conn, &task_id, &|p| p.to_string())
+            .unwrap()
+            .unwrap()
+    };
+
+    let _agent_id = clust_hub::scheduler::fire_scheduled_task(&state, &task)
+        .await
+        .expect("fire_scheduled_task should succeed");
+
+    // Poll for up to 5s. With the fix, the PTY reader's mark_complete runs
+    // after the task is `active`, so we land on Complete deterministically.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    let mut final_status = clust_ipc::ScheduledTaskStatus::Inactive;
+    while std::time::Instant::now() < deadline {
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        let hub = state.lock().await;
+        let conn = hub.db.as_ref().unwrap();
+        let t = clust_hub::db::get_scheduled_task(conn, &task_id, &|p| p.to_string())
+            .unwrap()
+            .unwrap();
+        final_status = t.status;
+        if final_status == clust_ipc::ScheduledTaskStatus::Complete {
+            break;
+        }
+    }
+
+    assert_eq!(
+        final_status,
+        clust_ipc::ScheduledTaskStatus::Complete,
+        "fast-exiting scheduled task should reach Complete (regression: \
+         pre-fix race left the row stuck Active or Aborted)"
+    );
 }

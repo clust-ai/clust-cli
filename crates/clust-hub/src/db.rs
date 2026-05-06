@@ -599,6 +599,26 @@ pub fn mark_scheduled_task_complete_by_agent(
             params![now, agent_id],
         )
         .map_err(|e| format!("failed to complete task by agent: {e}"))?;
+    if n == 0 {
+        // Most agents are not scheduled tasks — n=0 is normal for them.
+        // But if a scheduled task DOES reference this agent_id and it's
+        // somehow not `active`, we have a regression of the
+        // fire_scheduled_task race (or a similar new bug). Surface it.
+        let pending: Option<String> = conn
+            .query_row(
+                "SELECT id FROM scheduled_tasks
+                 WHERE agent_id=?1 AND status!='active' AND status!='complete'",
+                params![agent_id],
+                |row| row.get(0),
+            )
+            .ok();
+        if let Some(id) = pending {
+            eprintln!(
+                "[hub] WARN: mark_complete_by_agent matched 0 rows for agent {agent_id} \
+                 but scheduled task {id} references it in non-active state — possible scheduler race"
+            );
+        }
+    }
     Ok(n > 0)
 }
 
