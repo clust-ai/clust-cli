@@ -24,7 +24,9 @@ use ratatui::{
     Frame,
 };
 
-use clust_ipc::{BranchInfo, RepoInfo, ScheduleKind, ScheduledTaskInfo, ScheduledTaskStatus};
+use clust_ipc::{
+    AgentInfo, BranchInfo, RepoInfo, ScheduleKind, ScheduledTaskInfo, ScheduledTaskStatus,
+};
 
 use crate::theme;
 
@@ -77,6 +79,26 @@ pub struct ScheduleModalOutput {
     pub plan_mode: bool,
     pub auto_exit: bool,
     pub schedule: ScheduleKind,
+    /// Running worktree-agent IDs picked alongside scheduled-task deps in the
+    /// dependency step. The hub promotes each one to a shadow scheduled-task
+    /// row before persisting the new task.
+    pub extra_agent_deps: Vec<String>,
+}
+
+/// One row in the dep picker — either an existing scheduled task or a
+/// currently-running Opt+E worktree agent that hasn't been promoted yet.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DepKind {
+    Task,
+    Agent,
+}
+
+/// Tagged ID stored in `selected_deps` so submission can split the picks back
+/// into scheduled-task IDs and agent IDs.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct DepSelection {
+    kind: DepKind,
+    id: String,
 }
 
 // ---------------------------------------------------------------------------
@@ -94,8 +116,13 @@ pub struct ScheduleTaskModal {
     /// Snapshot of every existing scheduled task, used by the Depend step.
     /// Filtered fuzzily by `input` while on that step.
     all_tasks: Vec<ScheduledTaskInfo>,
-    /// Picked dependencies (task ids) accumulated by Space-toggling.
-    selected_deps: Vec<String>,
+    /// Snapshot of running Opt+E worktree agents that don't yet have a shadow
+    /// scheduled-task row. Surfaced alongside `all_tasks` in the dep picker
+    /// so a manually spawned agent can be selected as a dependency.
+    candidate_agents: Vec<AgentInfo>,
+    /// Picked dependencies (tagged with kind so submission can split them)
+    /// accumulated by Space-toggling.
+    selected_deps: Vec<DepSelection>,
 
     selected_repo: Option<RepoInfo>,
     schedule_kind: Option<ScheduleKindChoice>,
@@ -115,7 +142,30 @@ pub struct ScheduleTaskModal {
 }
 
 impl ScheduleTaskModal {
-    pub fn new(repos: Vec<RepoInfo>, all_tasks: Vec<ScheduledTaskInfo>) -> Self {
+    pub fn new(
+        repos: Vec<RepoInfo>,
+        all_tasks: Vec<ScheduledTaskInfo>,
+        running_agents: Vec<AgentInfo>,
+    ) -> Self {
+        // Only worktree agents with a known repo + branch are useful as deps:
+        // we need those fields to materialize a shadow scheduled-task row, and
+        // the dep picker labels rows as `repo / branch`.
+        // Drop any agent that already has an `active` shadow row to avoid
+        // listing it twice (once as Task, once as Agent).
+        let already_promoted: std::collections::HashSet<&str> = all_tasks
+            .iter()
+            .filter(|t| t.status == ScheduledTaskStatus::Active)
+            .filter_map(|t| t.agent_id.as_deref())
+            .collect();
+        let candidate_agents: Vec<AgentInfo> = running_agents
+            .into_iter()
+            .filter(|a| {
+                a.is_worktree
+                    && a.repo_path.is_some()
+                    && a.branch_name.is_some()
+                    && !already_promoted.contains(a.id.as_str())
+            })
+            .collect();
         Self {
             step: ScheduleModalStep::SelectRepo,
             input: String::new(),
@@ -124,6 +174,7 @@ impl ScheduleTaskModal {
             repos,
             branches: Vec::new(),
             all_tasks,
+            candidate_agents,
             selected_deps: Vec::new(),
             selected_repo: None,
             schedule_kind: None,
@@ -363,8 +414,19 @@ impl ScheduleTaskModal {
                     return ScheduleModalResult::Pending;
                 }
                 let prompt = self.recover_prompt();
-                let depends_on_ids = self.selected_deps.clone();
-                self.complete_with(prompt, ScheduleKind::Depend { depends_on_ids })
+                let mut depends_on_ids: Vec<String> = Vec::new();
+                let mut extra_agent_deps: Vec<String> = Vec::new();
+                for sel in &self.selected_deps {
+                    match sel.kind {
+                        DepKind::Task => depends_on_ids.push(sel.id.clone()),
+                        DepKind::Agent => extra_agent_deps.push(sel.id.clone()),
+                    }
+                }
+                self.complete_with_deps(
+                    prompt,
+                    ScheduleKind::Depend { depends_on_ids },
+                    extra_agent_deps,
+                )
             }
         }
     }
@@ -374,6 +436,15 @@ impl ScheduleTaskModal {
     }
 
     fn complete_with(&mut self, prompt: String, schedule: ScheduleKind) -> ScheduleModalResult {
+        self.complete_with_deps(prompt, schedule, Vec::new())
+    }
+
+    fn complete_with_deps(
+        &mut self,
+        prompt: String,
+        schedule: ScheduleKind,
+        extra_agent_deps: Vec<String>,
+    ) -> ScheduleModalResult {
         let repo = self
             .selected_repo
             .as_ref()
@@ -386,17 +457,22 @@ impl ScheduleTaskModal {
             plan_mode: self.plan_mode,
             auto_exit: self.auto_exit,
             schedule,
+            extra_agent_deps,
         })
     }
 
     fn toggle_dep_at_cursor(&mut self) {
         let filtered = self.filtered_deps();
-        if let Some(&(idx, _)) = filtered.get(self.selected_idx) {
-            let id = self.all_tasks[idx].id.clone();
-            if let Some(pos) = self.selected_deps.iter().position(|x| x == &id) {
+        if let Some(&(kind, idx, _)) = filtered.get(self.selected_idx) {
+            let id = match kind {
+                DepKind::Task => self.all_tasks[idx].id.clone(),
+                DepKind::Agent => self.candidate_agents[idx].id.clone(),
+            };
+            let sel = DepSelection { kind, id };
+            if let Some(pos) = self.selected_deps.iter().position(|x| *x == sel) {
                 self.selected_deps.remove(pos);
             } else {
-                self.selected_deps.push(id);
+                self.selected_deps.push(sel);
             }
         }
     }
@@ -417,8 +493,10 @@ impl ScheduleTaskModal {
     }
 
     fn kind_choices(&self) -> Vec<ScheduleKindChoice> {
-        // Hide Depend if there are no existing tasks to depend on.
-        if self.all_tasks.is_empty() {
+        // Hide Depend only when there's nothing at all to depend on. A
+        // running Opt+E worktree agent is just as valid a dependency target
+        // as an existing scheduled task.
+        if self.all_tasks.is_empty() && self.candidate_agents.is_empty() {
             vec![ScheduleKindChoice::Schedule, ScheduleKindChoice::Unscheduled]
         } else {
             vec![
@@ -473,27 +551,46 @@ impl ScheduleTaskModal {
         results
     }
 
-    fn filtered_deps(&self) -> Vec<(usize, i64)> {
+    /// Unified dep-picker view: existing scheduled tasks first, then running
+    /// Opt+E worktree agents. Each entry carries its kind so rendering and
+    /// toggling can resolve back to the right backing slice.
+    fn filtered_deps(&self) -> Vec<(DepKind, usize, i64)> {
+        let mut results: Vec<(DepKind, usize, i64)> = Vec::new();
         if self.input.is_empty() {
-            return self
-                .all_tasks
-                .iter()
-                .enumerate()
-                .map(|(i, _)| (i, 0))
-                .collect();
+            results.extend(
+                self.all_tasks
+                    .iter()
+                    .enumerate()
+                    .map(|(i, _)| (DepKind::Task, i, 0)),
+            );
+            results.extend(
+                self.candidate_agents
+                    .iter()
+                    .enumerate()
+                    .map(|(i, _)| (DepKind::Agent, i, 0)),
+            );
+            return results;
         }
-        let mut results: Vec<(usize, i64)> = self
-            .all_tasks
-            .iter()
-            .enumerate()
-            .filter_map(|(i, t)| {
-                let label = format!("{} {}", t.repo_name, t.branch_name);
-                self.matcher
-                    .fuzzy_match(&label, &self.input)
-                    .map(|score| (i, score))
-            })
-            .collect();
-        results.sort_by_key(|b| std::cmp::Reverse(b.1));
+        for (i, t) in self.all_tasks.iter().enumerate() {
+            let label = format!("{} {}", t.repo_name, t.branch_name);
+            if let Some(score) = self.matcher.fuzzy_match(&label, &self.input) {
+                results.push((DepKind::Task, i, score));
+            }
+        }
+        for (i, a) in self.candidate_agents.iter().enumerate() {
+            let repo_name = a
+                .repo_path
+                .as_deref()
+                .and_then(|p| std::path::Path::new(p).file_name())
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            let branch = a.branch_name.as_deref().unwrap_or("");
+            let label = format!("{} {}", repo_name, branch);
+            if let Some(score) = self.matcher.fuzzy_match(&label, &self.input) {
+                results.push((DepKind::Agent, i, score));
+            }
+        }
+        results.sort_by_key(|b| std::cmp::Reverse(b.2));
         results
     }
 
@@ -705,21 +802,8 @@ impl ScheduleTaskModal {
             .iter()
             .take(area.height as usize)
             .enumerate()
-            .map(|(i, &(idx, _))| {
-                let task = &self.all_tasks[idx];
-                let checked = self.selected_deps.iter().any(|x| x == &task.id);
+            .map(|(i, &(kind, idx, _))| {
                 let cursor = i == self.selected_idx;
-                let mark = if checked { "[x] " } else { "[ ] " };
-                let status = match task.status {
-                    ScheduledTaskStatus::Active => "ACTIVE",
-                    ScheduledTaskStatus::Inactive => "INACTIVE",
-                    ScheduledTaskStatus::Complete => "COMPLETE",
-                    ScheduledTaskStatus::Aborted => "ABORTED",
-                };
-                let label = format!(
-                    "{}{} / {} [{}]",
-                    mark, task.repo_name, task.branch_name, status
-                );
                 let style = if cursor {
                     Style::default()
                         .fg(theme::R_BG_BASE)
@@ -727,6 +811,45 @@ impl ScheduleTaskModal {
                         .add_modifier(Modifier::BOLD)
                 } else {
                     Style::default().fg(theme::R_TEXT_PRIMARY)
+                };
+                let label = match kind {
+                    DepKind::Task => {
+                        let task = &self.all_tasks[idx];
+                        let checked = self.selected_deps.iter().any(|x| {
+                            x.kind == DepKind::Task && x.id == task.id
+                        });
+                        let mark = if checked { "[x] " } else { "[ ] " };
+                        let status = match task.status {
+                            ScheduledTaskStatus::Active => "ACTIVE",
+                            ScheduledTaskStatus::Inactive => "INACTIVE",
+                            ScheduledTaskStatus::Complete => "COMPLETE",
+                            ScheduledTaskStatus::Aborted => "ABORTED",
+                        };
+                        format!(
+                            "{}{} / {} [{}]",
+                            mark, task.repo_name, task.branch_name, status
+                        )
+                    }
+                    DepKind::Agent => {
+                        let agent = &self.candidate_agents[idx];
+                        let checked = self.selected_deps.iter().any(|x| {
+                            x.kind == DepKind::Agent && x.id == agent.id
+                        });
+                        let mark = if checked { "[x] " } else { "[ ] " };
+                        let repo_name = agent
+                            .repo_path
+                            .as_deref()
+                            .and_then(|p| std::path::Path::new(p).file_name())
+                            .map(|n| n.to_string_lossy().into_owned())
+                            .unwrap_or_else(|| "?".to_string());
+                        let branch = agent.branch_name.as_deref().unwrap_or("?");
+                        let auto = if agent.auto_exit {
+                            " AUTO-EXIT"
+                        } else {
+                            " no-auto-exit"
+                        };
+                        format!("{}{} / {} [AGENT{}]", mark, repo_name, branch, auto)
+                    }
                 };
                 Line::from(Span::styled(label, style))
             })

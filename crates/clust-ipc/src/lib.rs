@@ -140,6 +140,12 @@ pub enum CliMessage {
         plan_mode: bool,
         allow_bypass: bool,
         hub: String,
+        /// When true and the resolved agent supports a Stop hook, the spawned
+        /// agent terminates itself at its first natural stopping point. Mirrors
+        /// the per-task `auto_exit` flag on scheduled tasks so a manually
+        /// spawned agent can also act as a dependency in a scheduled chain.
+        #[serde(default)]
+        auto_exit: bool,
     },
     DeleteLocalBranch {
         working_dir: Option<String>,
@@ -233,6 +239,12 @@ pub enum CliMessage {
         auto_exit: bool,
         agent_binary: Option<String>,
         schedule: ScheduleKind,
+        /// Running worktree-agent IDs the new task should also depend on.
+        /// The hub promotes each one to a shadow `scheduled_tasks` row
+        /// (status=`active`, `agent_id` set) before persisting the new task,
+        /// so the existing dep edges still reference task IDs.
+        #[serde(default)]
+        extra_agent_deps: Vec<String>,
     },
     ListScheduledTasks,
     UpdateScheduledTaskPrompt {
@@ -335,6 +347,15 @@ pub struct AgentInfo {
     pub repo_path: Option<String>,
     pub branch_name: Option<String>,
     pub is_worktree: bool,
+    /// Spawn-time flags surfaced so the schedule modal's dep picker can render
+    /// status pills and the hub can populate a shadow scheduled-task row when
+    /// the agent is selected as a dependency.
+    #[serde(default)]
+    pub auto_exit: bool,
+    #[serde(default)]
+    pub plan_mode: bool,
+    #[serde(default)]
+    pub prompt: Option<String>,
 }
 
 /// Info about a registered repository, returned in RepoList.
@@ -838,6 +859,9 @@ mod tests {
                     repo_path: Some("/tmp/project".into()),
                     branch_name: Some("main".into()),
                     is_worktree: false,
+                    auto_exit: true,
+                    plan_mode: false,
+                    prompt: Some("hello".into()),
                 },
                 AgentInfo {
                     id: "bbb222".into(),
@@ -849,6 +873,9 @@ mod tests {
                     repo_path: None,
                     branch_name: None,
                     is_worktree: false,
+                    auto_exit: false,
+                    plan_mode: true,
+                    prompt: None,
                 },
             ],
         })
@@ -1411,6 +1438,9 @@ mod tests {
                         repo_path: Some("/home/user/project".into()),
                         branch_name: Some("feature/auth".into()),
                         is_worktree: true,
+                        auto_exit: false,
+                        plan_mode: false,
+                        prompt: None,
                     }],
                 },
             ],
@@ -1521,6 +1551,7 @@ mod tests {
             plan_mode: false,
             allow_bypass: false,
             hub: DEFAULT_HUB.into(),
+            auto_exit: true,
         })
         .await;
     }
@@ -1539,6 +1570,7 @@ mod tests {
             plan_mode: false,
             allow_bypass: false,
             hub: DEFAULT_HUB.into(),
+            auto_exit: false,
         })
         .await;
     }
@@ -1703,6 +1735,7 @@ mod tests {
             schedule: ScheduleKind::Time {
                 start_at: "2026-05-06T10:00:00Z".into(),
             },
+            extra_agent_deps: Vec::new(),
         })
         .await;
     }
@@ -1720,6 +1753,7 @@ mod tests {
             schedule: ScheduleKind::Depend {
                 depends_on_ids: vec!["aaa111".into(), "bbb222".into()],
             },
+            extra_agent_deps: vec!["ag0001".into()],
         })
         .await;
     }
@@ -1735,6 +1769,7 @@ mod tests {
             auto_exit: false,
             agent_binary: None,
             schedule: ScheduleKind::Unscheduled,
+            extra_agent_deps: Vec::new(),
         })
         .await;
     }

@@ -17,6 +17,9 @@ pub trait AgentMatcher {
     fn hub(&self) -> &str;
     fn working_dir(&self) -> &str;
     fn is_worktree(&self) -> bool;
+    fn auto_exit(&self) -> bool;
+    fn plan_mode(&self) -> bool;
+    fn prompt(&self) -> Option<&str>;
 }
 
 impl AgentMatcher for AgentEntry {
@@ -48,6 +51,15 @@ impl AgentMatcher for AgentEntry {
     fn is_worktree(&self) -> bool {
         self.is_worktree
     }
+    fn auto_exit(&self) -> bool {
+        self.auto_exit
+    }
+    fn plan_mode(&self) -> bool {
+        self.plan_mode
+    }
+    fn prompt(&self) -> Option<&str> {
+        self.prompt.as_deref()
+    }
 }
 
 /// Lightweight snapshot of agent fields needed for repo state queries.
@@ -61,6 +73,9 @@ pub(crate) struct AgentSnapshot {
     pub repo_path: Option<String>,
     pub branch_name: Option<String>,
     pub is_worktree: bool,
+    pub auto_exit: bool,
+    pub plan_mode: bool,
+    pub prompt: Option<String>,
 }
 
 impl AgentMatcher for AgentSnapshot {
@@ -90,6 +105,15 @@ impl AgentMatcher for AgentSnapshot {
     }
     fn is_worktree(&self) -> bool {
         self.is_worktree
+    }
+    fn auto_exit(&self) -> bool {
+        self.auto_exit
+    }
+    fn plan_mode(&self) -> bool {
+        self.plan_mode
+    }
+    fn prompt(&self) -> Option<&str> {
+        self.prompt.as_deref()
     }
 }
 
@@ -437,6 +461,9 @@ fn parse_worktree_list_porcelain_z<A: AgentMatcher>(
                         repo_path: a.repo_path().map(|s| s.to_string()),
                         branch_name: a.branch_name().map(|s| s.to_string()),
                         is_worktree: a.is_worktree(),
+                        auto_exit: a.auto_exit(),
+                        plan_mode: a.plan_mode(),
+                        prompt: a.prompt().map(|s| s.to_string()),
                     })
                     .collect();
 
@@ -1309,6 +1336,9 @@ mod tests {
             branch_name: branch_name.map(|s| s.to_string()),
             is_worktree,
             settings_path: None,
+            auto_exit: false,
+            plan_mode: false,
+            prompt: None,
         }
     }
 

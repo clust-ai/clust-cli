@@ -296,6 +296,9 @@ async fn handle_connection(
                         repo_path: e.repo_path.clone(),
                         branch_name: e.branch_name.clone(),
                         is_worktree: e.is_worktree,
+                        auto_exit: e.auto_exit,
+                        plan_mode: e.plan_mode,
+                        prompt: e.prompt.clone(),
                     })
                     .collect()
             };
@@ -466,6 +469,9 @@ async fn handle_connection(
                                     repo_path: v.repo_path.clone(),
                                     branch_name: v.branch_name.clone(),
                                     is_worktree: v.is_worktree,
+                                    auto_exit: v.auto_exit,
+                                    plan_mode: v.plan_mode,
+                                    prompt: v.prompt.clone(),
                                 },
                             )
                         })
@@ -819,6 +825,9 @@ async fn handle_connection(
                                         repo_path: v.repo_path.clone(),
                                         branch_name: v.branch_name.clone(),
                                         is_worktree: v.is_worktree,
+                                        auto_exit: v.auto_exit,
+                                        plan_mode: v.plan_mode,
+                                        prompt: v.prompt.clone(),
                                     },
                                 )
                             })
@@ -1059,6 +1068,9 @@ async fn handle_connection(
                                         repo_path: v.repo_path.clone(),
                                         branch_name: v.branch_name.clone(),
                                         is_worktree: v.is_worktree,
+                                        auto_exit: v.auto_exit,
+                                        plan_mode: v.plan_mode,
+                                        prompt: v.prompt.clone(),
                                     },
                                 )
                             })
@@ -1114,6 +1126,7 @@ async fn handle_connection(
             plan_mode,
             allow_bypass,
             hub,
+            auto_exit,
         } => {
             match crate::agent::create_worktree_and_spawn_agent(
                 crate::agent::CreateWorktreeParams {
@@ -1128,7 +1141,7 @@ async fn handle_connection(
                     hub: &hub,
                     cols,
                     rows,
-                    exit_when_done: false,
+                    exit_when_done: auto_exit,
                     scheduled_task_id: None,
                 },
             )
@@ -1810,6 +1823,7 @@ async fn handle_connection(
             auto_exit,
             agent_binary,
             schedule,
+            extra_agent_deps,
         } => {
             // Resolve which agent binary the spawn will use, falling back to
             // the hub's configured default. We persist the resolution rather
@@ -1872,6 +1886,102 @@ async fn handle_connection(
                 .await?;
                 return Ok(());
             }
+
+            // Promote each running-agent dep to a shadow scheduled-task row
+            // (or reuse the existing one), so the new task's persisted deps
+            // can stay as plain task IDs. We do this BEFORE inserting the
+            // new task so the FK-style edge in `scheduled_task_deps` exists.
+            let mut promoted_dep_ids: Vec<String> = Vec::new();
+            let mut promotion_error: Option<String> = None;
+            for agent_id in &extra_agent_deps {
+                let entry_info = hub.agents.get(agent_id).map(|e| {
+                    (
+                        e.repo_path.clone(),
+                        e.branch_name.clone(),
+                        e.prompt.clone(),
+                        e.plan_mode,
+                        e.auto_exit,
+                        e.agent_binary.clone(),
+                    )
+                });
+                let Some((rp, bn, p, pm, ae, bin)) = entry_info else {
+                    promotion_error = Some(format!(
+                        "agent {agent_id} is no longer running and cannot be used as a dependency"
+                    ));
+                    break;
+                };
+                let conn = hub.db.as_ref().unwrap();
+                let existing = match crate::db::find_scheduled_task_by_agent_id(conn, agent_id) {
+                    Ok(x) => x,
+                    Err(e) => {
+                        promotion_error = Some(e);
+                        break;
+                    }
+                };
+                if let Some(task_id) = existing {
+                    promoted_dep_ids.push(task_id);
+                    continue;
+                }
+                let Some(rp) = rp else {
+                    promotion_error = Some(format!(
+                        "agent {agent_id} has no repo path and cannot be used as a dependency"
+                    ));
+                    break;
+                };
+                let Some(bn) = bn else {
+                    promotion_error = Some(format!(
+                        "agent {agent_id} has no branch name and cannot be used as a dependency"
+                    ));
+                    break;
+                };
+                let spec = crate::db::NewScheduledTask {
+                    repo_path: rp,
+                    base_branch: None,
+                    new_branch: None,
+                    branch_name: bn,
+                    prompt: p.unwrap_or_default(),
+                    plan_mode: pm,
+                    auto_exit: ae,
+                    agent_binary: bin,
+                    schedule: clust_ipc::ScheduleKind::Unscheduled,
+                };
+                match crate::db::insert_active_shadow_task(conn, spec, agent_id) {
+                    Ok(id) => promoted_dep_ids.push(id),
+                    Err(e) => {
+                        promotion_error = Some(e);
+                        break;
+                    }
+                }
+            }
+            if let Some(e) = promotion_error {
+                drop(hub);
+                clust_ipc::send_message_write(
+                    &mut writer,
+                    &HubMessage::Error { message: e },
+                )
+                .await?;
+                return Ok(());
+            }
+
+            // Merge promoted shadow-task IDs into the dep list. This only
+            // takes effect for `Depend` schedules; for the other variants
+            // the picker step never runs and `extra_agent_deps` is empty.
+            let schedule = if promoted_dep_ids.is_empty() {
+                schedule
+            } else {
+                match schedule {
+                    clust_ipc::ScheduleKind::Depend { mut depends_on_ids } => {
+                        for id in promoted_dep_ids {
+                            if !depends_on_ids.contains(&id) {
+                                depends_on_ids.push(id);
+                            }
+                        }
+                        clust_ipc::ScheduleKind::Depend { depends_on_ids }
+                    }
+                    other => other,
+                }
+            };
+
             let conn = hub.db.as_mut().unwrap();
             let result = crate::db::insert_scheduled_task(
                 conn,

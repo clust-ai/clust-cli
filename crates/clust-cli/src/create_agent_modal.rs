@@ -37,6 +37,7 @@ pub struct ModalOutput {
     pub new_branch: Option<String>,
     pub prompt: Option<String>,
     pub plan_mode: bool,
+    pub auto_exit: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -64,6 +65,7 @@ pub struct CreateAgentModal {
     pre_selected: bool,
 
     plan_mode: bool,
+    auto_exit: bool,
 
     matcher: SkimMatcherV2,
 }
@@ -83,6 +85,7 @@ impl CreateAgentModal {
             new_branch_required: false,
             pre_selected: false,
             plan_mode: false,
+            auto_exit: false,
             matcher: SkimMatcherV2::default(),
         }
     }
@@ -101,6 +104,7 @@ impl CreateAgentModal {
             new_branch_required: true,
             pre_selected: true,
             plan_mode: false,
+            auto_exit: false,
             matcher: SkimMatcherV2::default(),
         }
     }
@@ -189,8 +193,10 @@ impl CreateAgentModal {
             }
             KeyCode::Char(c) => {
                 if key.modifiers.contains(KeyModifiers::ALT) {
-                    if c == 'p' {
+                    if c == 'p' || c == 'P' {
                         self.plan_mode = !self.plan_mode;
+                    } else if c == 'x' || c == 'X' {
+                        self.auto_exit = !self.auto_exit;
                     }
                     return ModalResult::Pending;
                 }
@@ -275,6 +281,7 @@ impl CreateAgentModal {
                     new_branch: self.new_branch_name.clone(),
                     prompt,
                     plan_mode: self.plan_mode,
+                    auto_exit: self.auto_exit,
                 })
             }
         }
@@ -451,22 +458,29 @@ impl CreateAgentModal {
         };
         let mut spans: Vec<Span> = Vec::new();
 
-        if self.plan_mode {
-            spans.push(Span::styled(
+        spans.push(if self.plan_mode {
+            Span::styled(
                 "PLAN",
                 Style::default()
                     .fg(theme::R_WARNING)
                     .add_modifier(Modifier::BOLD),
-            ));
+            )
         } else {
-            spans.push(Span::styled(
-                "Normal",
-                Style::default().fg(theme::R_TEXT_DISABLED),
-            ));
-        }
-
+            Span::styled("Plan", Style::default().fg(theme::R_TEXT_DISABLED))
+        });
+        spans.push(Span::styled("  ", Style::default()));
+        spans.push(if self.auto_exit {
+            Span::styled(
+                "AUTO-EXIT",
+                Style::default()
+                    .fg(theme::R_INFO)
+                    .add_modifier(Modifier::BOLD),
+            )
+        } else {
+            Span::styled("Auto-Exit", Style::default().fg(theme::R_TEXT_DISABLED))
+        });
         spans.push(Span::styled(
-            format!("  {mod_key}+P toggle plan mode"),
+            format!("    {mod_key}+P plan · {mod_key}+X auto-exit"),
             Style::default().fg(theme::R_TEXT_DISABLED),
         ));
 

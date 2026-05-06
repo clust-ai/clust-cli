@@ -128,7 +128,7 @@ CLI -> Hub:
   AddWorktree { working_dir: Option<String>, repo_name: Option<String>, branch_name: String, base_branch: Option<String>, checkout_existing: bool }
   RemoveWorktree { working_dir: Option<String>, repo_name: Option<String>, branch_name: String, delete_local_branch: bool, force: bool }
   GetWorktreeInfo { working_dir: Option<String>, repo_name: Option<String>, branch_name: String }
-  CreateWorktreeAgent { repo_path: String, target_branch: Option<String>, new_branch: Option<String>, prompt: Option<String>, agent_binary: Option<String>, cols: u16, rows: u16, accept_edits: bool, plan_mode: bool, allow_bypass: bool, hub: String }
+  CreateWorktreeAgent { repo_path: String, target_branch: Option<String>, new_branch: Option<String>, prompt: Option<String>, agent_binary: Option<String>, cols: u16, rows: u16, accept_edits: bool, plan_mode: bool, allow_bypass: bool, hub: String, auto_exit: bool }
   DeleteLocalBranch { working_dir: Option<String>, repo_name: Option<String>, branch_name: String, force: bool }
   DeleteRemoteBranch { working_dir: Option<String>, repo_name: Option<String>, branch_name: String }
   CheckoutRemoteBranch { working_dir: Option<String>, repo_name: Option<String>, remote_branch: String }
@@ -147,7 +147,7 @@ CLI -> Hub:
   TerminalInput { id: String, data: Vec<u8> }
   ResizeTerminal { id: String, cols: u16, rows: u16 }
   StopTerminal { id: String }
-  CreateScheduledTask { repo_path: String, base_branch: Option<String>, new_branch: Option<String>, prompt: String, plan_mode: bool, auto_exit: bool, agent_binary: Option<String>, schedule: ScheduleKind }
+  CreateScheduledTask { repo_path: String, base_branch: Option<String>, new_branch: Option<String>, prompt: String, plan_mode: bool, auto_exit: bool, agent_binary: Option<String>, schedule: ScheduleKind, extra_agent_deps: Vec<String> }
   ListScheduledTasks
   UpdateScheduledTaskPrompt { id: String, prompt: String }
   SetScheduledTaskPlanMode { id: String, plan_mode: bool }
@@ -275,6 +275,10 @@ When a task fires, the scheduler reuses `crate::agent::create_worktree_and_spawn
 Agent exit detection runs inside the existing PTY-reader cleanup path in `crate::agent`. When an agent's PTY closes, the hook calls `crate::db::mark_scheduled_task_complete_by_agent`, which finds the matching `scheduled_tasks WHERE agent_id=? AND status='active'` row, marks it `complete`, and stamps `completed_at`. If zero rows are updated but a non-`active` row references that `agent_id`, a warning is logged so similar regressions surface loudly. Dependents are unblocked at the next scheduler tick.
 
 On hub startup, `crate::db::recover_active_scheduled_tasks` rewrites every leftover `active` row to `aborted`, since their agent processes died with the previous hub. The user can then `r` (restart in place) or `R` (restart with `git reset --hard && git clean -fdx` first) from the Schedule tab.
+
+### Cross-mode dependencies (Opt+E agents as deps)
+
+The Opt+S "Depend" picker lists currently-running `Opt+E` worktree agents alongside existing scheduled tasks. When at least one such agent is selected, the CLI sends those agent IDs in `CreateScheduledTask.extra_agent_deps`. Before persisting the new task, the hub promotes each referenced agent to a *shadow* `scheduled_tasks` row (`status=active`, `agent_id=<the running agent>`, `schedule_kind=unscheduled`) so the existing dep edges still reference task IDs. The shadow row makes the agent appear on the Schedule tab as Active. When the agent eventually exits, the existing PTY-reader hook (`mark_scheduled_task_complete_by_agent`) flips the shadow row to `complete`, unblocking any downstream tasks at the next scheduler tick — exactly the same path a normally-scheduled task follows. Until an `Opt+E` agent is selected as a dep, it has no scheduled-task row and does not appear on the Schedule tab.
 
 ## Key Dependencies
 
