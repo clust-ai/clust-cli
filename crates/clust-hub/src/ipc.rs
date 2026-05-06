@@ -1129,6 +1129,7 @@ async fn handle_connection(
                     cols,
                     rows,
                     exit_when_done: false,
+                    scheduled_task_id: None,
                 },
             )
             .await

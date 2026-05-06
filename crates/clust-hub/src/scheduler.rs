@@ -157,6 +157,12 @@ pub fn should_fire(
 ///
 /// Used by both the auto-trigger pass and the manual "start now" / "restart"
 /// IPC handlers, so a task always reaches `active` through the same code path.
+///
+/// The `active` transition is performed inside `create_worktree_and_spawn_agent`
+/// under the same hub-lock window as the agent insert (see the
+/// `scheduled_task_id` field on `CreateWorktreeParams`). This closes a race
+/// where a fast-exiting agent's PTY reader could otherwise run cleanup before
+/// the task left `inactive`, leaving the row stuck `active` indefinitely.
 pub async fn fire_scheduled_task(
     state: &SharedHubState,
     task: &ScheduledTaskInfo,
@@ -174,14 +180,9 @@ pub async fn fire_scheduled_task(
         cols: DEFAULT_COLS,
         rows: DEFAULT_ROWS,
         exit_when_done: task.auto_exit,
+        scheduled_task_id: Some(task.id.clone()),
     })
     .await?;
-
-    // Persist active + agent_id while still under the hub lock.
-    let hub = state.lock().await;
-    if let Some(ref conn) = hub.db {
-        db::mark_scheduled_task_active(conn, &task.id, &agent_id)?;
-    }
     Ok(agent_id)
 }
 
@@ -251,18 +252,22 @@ trait SpawnFields {
 
 impl SpawnFields for ScheduledTaskInfo {
     fn base_branch_for_spawn(&self) -> Option<String> {
-        // The wire type carries `branch_name` (the resolved/identifying name)
-        // but not the original `base_branch` / `new_branch`. For respawns we
-        // re-derive: if the worktree already exists at the conventional path
-        // we'll reuse it via `add_worktree`'s short-circuit; otherwise we ask
-        // for a checkout-existing of `branch_name`.
-        None
+        // The wire type carries the resolved `branch_name` but not the
+        // original `base_branch` / `new_branch`. For both first-fire and
+        // respawn we want a "checkout existing" of `branch_name` — this lets
+        // `add_worktree` short-circuit when the worktree already exists, and
+        // create one anchored to that branch otherwise. Returning `None` here
+        // (the previous behavior) made `create_worktree_and_spawn_agent`
+        // error out on its `either target_branch or new_branch must be
+        // provided` check, so every fire ended in `aborted`.
+        Some(self.branch_name.clone())
     }
 
     fn new_branch_for_spawn(&self) -> Option<String> {
-        // For now we always treat this as "checkout existing" once the task is
-        // persisted: the worktree was created on first spawn and the same
-        // branch_name is reused on restarts.
+        // We always treat scheduled-task spawns as "checkout existing":
+        // first-fire creates the worktree from the existing branch; later
+        // fires reuse it. Returning `None` here keeps `checkout_existing=true`
+        // in `create_worktree_and_spawn_agent`.
         None
     }
 }
