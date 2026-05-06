@@ -6480,6 +6480,8 @@ fn render_status_bar(
                     format!("Shift+\u{2193} enter terminal  Shift+\u{2190}/\u{2192} scroll  {mod_key}+R new agent  q quit  ? keys")
                 }
             }
+        } else if active_tab == ActiveTab::Schedule {
+            format!("{mod_key}+S new task  Shift+\u{2190}/\u{2192} switch panel  d delete  Shift+C clear  ? keys")
         } else {
             format!("{mod_key}+N new repo  {mod_key}+R new agent  {mod_key}+V open editor  q quit  Q stop+quit  ? keys")
         };
@@ -6604,6 +6606,30 @@ fn render_help_overlay(frame: &mut Frame, area: Rect, active_tab: ActiveTab, in_
         lines.push(binding_line("Shift+\u{2193}", "Enter focus mode"));
         lines.push(binding_line("Shift+\u{2190}/\u{2192}", "Switch agent"));
         lines.push(binding_line("PgUp / PgDn", "Scroll terminal"));
+    }
+
+    // -- Schedule --
+    if active_tab == ActiveTab::Schedule {
+        lines.push(Line::from(""));
+        lines.push(header_line("Schedule"));
+        lines.push(binding_line("Alt+S", "Schedule a new task"));
+        lines.push(binding_line("Shift+\u{2190}/\u{2192}", "Switch focused task"));
+        lines.push(binding_line("\u{2191} / \u{2193}", "Scroll prompt body"));
+        lines.push(binding_line("d / Del", "Delete focused task"));
+        lines.push(binding_line("Shift+C", "Clear by status menu"));
+        lines.push(sub_label_line("Inactive task:"));
+        lines.push(binding_line("e", "Edit prompt"));
+        lines.push(binding_line("p", "Toggle plan mode"));
+        lines.push(binding_line("x", "Toggle auto-exit"));
+        lines.push(binding_line("s", "Start now"));
+        lines.push(sub_label_line("Active task:"));
+        lines.push(binding_line("Shift+\u{2193}", "Enter focus mode (live PTY)"));
+        lines.push(sub_label_line("Aborted task:"));
+        lines.push(binding_line("e", "Edit prompt"));
+        lines.push(binding_line("p", "Toggle plan mode"));
+        lines.push(binding_line("x", "Toggle auto-exit"));
+        lines.push(binding_line("r", "Restart"));
+        lines.push(binding_line("Shift+R", "Restart with clean worktree"));
     }
 
     // -- Focus Mode --

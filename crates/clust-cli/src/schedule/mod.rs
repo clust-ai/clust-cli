@@ -502,14 +502,28 @@ impl ScheduleState {
     // -- Rendering --
 
     /// Render the Schedule tab into `area`.
+    ///
+    /// Layout: panel grid on top, a 2-row keybind hint footer at the bottom so
+    /// the user always has every applicable shortcut visible. The footer is
+    /// status-aware — its second line changes based on the focused task's
+    /// state (Inactive / Active / Aborted / Complete).
     pub fn render(&mut self, frame: &mut Frame, area: Rect) {
+        let hint_height: u16 = 2;
+        let [content_area, hint_area] = if area.height > hint_height + 1 {
+            Layout::vertical([Constraint::Min(1), Constraint::Length(hint_height)]).areas(area)
+        } else {
+            // Tiny viewport: skip the hint bar so the panels still render.
+            [area, Rect::new(area.x, area.y + area.height, area.width, 0)]
+        };
+
         if self.tasks.is_empty() {
-            self.render_empty(frame, area);
+            self.render_empty(frame, content_area);
+            self.render_keybind_hint_bar(frame, hint_area, None);
             return;
         }
-        self.resize_panels_to(area);
+        self.resize_panels_to(content_area);
 
-        let count_fit = max_panels_for_width(area.width).max(1);
+        let count_fit = max_panels_for_width(content_area.width).max(1);
         let visible_count = self
             .tasks
             .len()
@@ -522,9 +536,10 @@ impl ScheduleState {
             .map(|_| Constraint::Ratio(1, slots as u32))
             .collect();
         if constraints.is_empty() {
+            self.render_keybind_hint_bar(frame, hint_area, None);
             return;
         }
-        let panel_areas = Layout::horizontal(constraints).split(area);
+        let panel_areas = Layout::horizontal(constraints).split(content_area);
 
         // Snapshot indices/data needed below so we don't borrow self mutably
         // and immutably at once during rendering.
@@ -560,6 +575,92 @@ impl ScheduleState {
                 now,
             );
         }
+
+        let focused_status = self.focused_task().map(|t| t.status);
+        self.render_keybind_hint_bar(frame, hint_area, focused_status);
+    }
+
+    /// Two-row keybind hint footer so the user can see every shortcut at a
+    /// glance. Top row = always-available bindings, bottom row = bindings
+    /// specific to the focused task's status.
+    fn render_keybind_hint_bar(
+        &self,
+        frame: &mut Frame,
+        area: Rect,
+        focused_status: Option<ScheduledTaskStatus>,
+    ) {
+        if area.height == 0 {
+            return;
+        }
+        let mod_key = if cfg!(target_os = "macos") {
+            "Opt"
+        } else {
+            "Alt"
+        };
+
+        let common_pairs: Vec<(String, String)> = vec![
+            ("Shift+\u{2190}/\u{2192}".into(), "switch panel".into()),
+            (format!("{mod_key}+S"), "new task".into()),
+            ("d/Del".into(), "delete".into()),
+            ("Shift+C".into(), "clear by status".into()),
+            ("?".into(), "help".into()),
+        ];
+
+        // Bottom row: actions that apply only to the focused task's current state.
+        let status_pairs: Vec<(String, String)> = match focused_status {
+            Some(ScheduledTaskStatus::Inactive) => vec![
+                ("e".into(), "edit prompt".into()),
+                ("p".into(), "toggle plan".into()),
+                ("x".into(), "toggle auto-exit".into()),
+                ("s".into(), "start now".into()),
+                ("\u{2191}/\u{2193}".into(), "scroll prompt".into()),
+            ],
+            Some(ScheduledTaskStatus::Active) => vec![
+                ("Shift+\u{2193}".into(), "focus mode (terminal)".into()),
+            ],
+            Some(ScheduledTaskStatus::Aborted) => vec![
+                ("e".into(), "edit prompt".into()),
+                ("p".into(), "toggle plan".into()),
+                ("x".into(), "toggle auto-exit".into()),
+                ("r".into(), "restart".into()),
+                ("Shift+R".into(), "clean restart".into()),
+            ],
+            Some(ScheduledTaskStatus::Complete) => vec![
+                ("d/Del".into(), "delete completed task".into()),
+            ],
+            None => vec![
+                (format!("{mod_key}+S"), "schedule a task to begin".into()),
+            ],
+        };
+
+        let status_label = match focused_status {
+            Some(ScheduledTaskStatus::Inactive) => Some(("INACTIVE", theme::R_WARNING)),
+            Some(ScheduledTaskStatus::Active) => Some(("ACTIVE", theme::R_SUCCESS)),
+            Some(ScheduledTaskStatus::Aborted) => Some(("ABORTED", theme::R_ERROR)),
+            Some(ScheduledTaskStatus::Complete) => Some(("COMPLETE", theme::R_TEXT_DISABLED)),
+            None => None,
+        };
+
+        let chunks = if area.height >= 2 {
+            Layout::vertical([Constraint::Length(1), Constraint::Length(1)])
+                .split(area)
+                .to_vec()
+        } else {
+            vec![area]
+        };
+
+        // Top row: common keybinds, no status label.
+        frame.render_widget(
+            Paragraph::new(Line::from(build_hint_spans(&common_pairs, None))),
+            chunks[0],
+        );
+
+        if chunks.len() > 1 {
+            frame.render_widget(
+                Paragraph::new(Line::from(build_hint_spans(&status_pairs, status_label))),
+                chunks[1],
+            );
+        }
     }
 
     fn render_empty(&self, frame: &mut Frame, area: Rect) {
@@ -577,10 +678,39 @@ impl ScheduleState {
                     .add_modifier(Modifier::BOLD),
             )),
             Line::from(""),
-            Line::from(Span::styled(
-                format!("Press {mod_key}+S to schedule one"),
-                Style::default().fg(theme::R_TEXT_TERTIARY),
-            )),
+            Line::from(vec![
+                Span::styled(
+                    "Press ",
+                    Style::default().fg(theme::R_TEXT_TERTIARY),
+                ),
+                Span::styled(
+                    format!("{mod_key}+S"),
+                    Style::default()
+                        .fg(theme::R_ACCENT_BRIGHT)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(
+                    " to schedule one",
+                    Style::default().fg(theme::R_TEXT_TERTIARY),
+                ),
+            ]),
+            Line::from(""),
+            Line::from(vec![
+                Span::styled(
+                    "or press ",
+                    Style::default().fg(theme::R_TEXT_TERTIARY),
+                ),
+                Span::styled(
+                    "?",
+                    Style::default()
+                        .fg(theme::R_ACCENT_BRIGHT)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(
+                    " for the full keybind reference",
+                    Style::default().fg(theme::R_TEXT_TERTIARY),
+                ),
+            ]),
         ];
         let p = Paragraph::new(lines).alignment(Alignment::Center);
         frame.render_widget(p, area);
@@ -643,9 +773,32 @@ impl ScheduleState {
             pill("PLAN", task.plan_mode, theme::R_WARNING),
             pill("AUTO-EXIT", task.auto_exit, theme::R_INFO),
         ]));
-        let [hdr_area, term_area] =
-            Layout::vertical([Constraint::Length(1), Constraint::Min(1)]).areas(inner);
+        // Sub-line nudges the user toward the only meaningful action on an
+        // Active panel: dropping into focus mode for the live PTY.
+        let action_hint = Paragraph::new(Line::from(vec![
+            Span::styled(
+                "Press ",
+                Style::default().fg(theme::R_TEXT_TERTIARY),
+            ),
+            Span::styled(
+                "Shift+\u{2193}",
+                Style::default()
+                    .fg(theme::R_ACCENT_BRIGHT)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                " for focus mode",
+                Style::default().fg(theme::R_TEXT_TERTIARY),
+            ),
+        ]));
+        let [hdr_area, hint_area, term_area] = Layout::vertical([
+            Constraint::Length(1),
+            Constraint::Length(1),
+            Constraint::Min(1),
+        ])
+        .areas(inner);
         frame.render_widget(header, hdr_area);
+        frame.render_widget(action_hint, hint_area);
         if let Some(panel) = self.panels.get_mut(&task.id) {
             // Resize the vterm to the actual area before rendering so wrapping
             // matches the on-screen width even if the panel grew/shrank since
@@ -717,6 +870,23 @@ fn render_complete_body(frame: &mut Frame, inner: Rect, task: &ScheduledTaskInfo
             "completed",
             Style::default().fg(theme::R_TEXT_DISABLED),
         )),
+        Line::from(""),
+        Line::from(vec![
+            Span::styled(
+                "press ",
+                Style::default().fg(theme::R_TEXT_TERTIARY),
+            ),
+            Span::styled(
+                "d",
+                Style::default()
+                    .fg(theme::R_ACCENT_BRIGHT)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                " to remove",
+                Style::default().fg(theme::R_TEXT_TERTIARY),
+            ),
+        ]),
     ];
     let p = Paragraph::new(lines).alignment(Alignment::Center);
     frame.render_widget(p, inner);
@@ -753,14 +923,7 @@ fn render_inactive_or_aborted_body(
         pill("AUTO-EXIT", task.auto_exit, theme::R_INFO),
     ]));
 
-    let mut sched_text = describe_schedule(&task.schedule, now);
-    if aborted {
-        sched_text = "Aborted — r restart · R restart+clean".into();
-    }
-    let sched_line = Paragraph::new(Span::styled(
-        sched_text,
-        Style::default().fg(theme::R_TEXT_TERTIARY),
-    ));
+    let sched_line = Paragraph::new(Line::from(schedule_line_spans(&task.schedule, aborted, now)));
 
     let warning_line = if dep_warning {
         Some(Paragraph::new(Span::styled(
@@ -805,6 +968,46 @@ fn prompt_paragraph(task: &ScheduledTaskInfo, scroll: u16) -> Paragraph<'static>
         .style(Style::default().fg(theme::R_TEXT_PRIMARY))
         .wrap(Wrap { trim: false })
         .scroll((scroll, 0))
+}
+
+/// Render a row of `key — description` pairs separated by middle dots,
+/// optionally prefixed with a colored status pill (`[INACTIVE]` etc.).
+fn build_hint_spans(
+    pairs: &[(String, String)],
+    status_label: Option<(&str, ratatui::style::Color)>,
+) -> Vec<Span<'static>> {
+    let mut spans: Vec<Span<'static>> = Vec::new();
+    spans.push(Span::raw(" "));
+    if let Some((label, color)) = status_label {
+        spans.push(Span::styled(
+            format!(" {label} "),
+            Style::default()
+                .fg(theme::R_BG_BASE)
+                .bg(color)
+                .add_modifier(Modifier::BOLD),
+        ));
+        spans.push(Span::raw("  "));
+    }
+    for (i, (key, desc)) in pairs.iter().enumerate() {
+        if i > 0 {
+            spans.push(Span::styled(
+                "  \u{00b7}  ",
+                Style::default().fg(theme::R_TEXT_DISABLED),
+            ));
+        }
+        spans.push(Span::styled(
+            key.clone(),
+            Style::default()
+                .fg(theme::R_ACCENT_BRIGHT)
+                .add_modifier(Modifier::BOLD),
+        ));
+        spans.push(Span::raw(" "));
+        spans.push(Span::styled(
+            desc.clone(),
+            Style::default().fg(theme::R_TEXT_SECONDARY),
+        ));
+    }
+    spans
 }
 
 fn pill<'a>(label: &'a str, on: bool, on_color: ratatui::style::Color) -> Span<'a> {
@@ -854,8 +1057,39 @@ fn describe_schedule(kind: &ScheduleKind, now: DateTime<Utc>) -> String {
         ScheduleKind::Depend { depends_on_ids } => {
             format!("Waiting on {} task(s)", depends_on_ids.len())
         }
-        ScheduleKind::Unscheduled => "Unscheduled — press s to start".into(),
+        ScheduleKind::Unscheduled => "Unscheduled".into(),
     }
+}
+
+/// Schedule meta line — a description of when the task will run, with any
+/// inline keybinds rendered in the accent color so they stand out.
+fn schedule_line_spans(
+    kind: &ScheduleKind,
+    aborted: bool,
+    now: DateTime<Utc>,
+) -> Vec<Span<'static>> {
+    let key_style = Style::default()
+        .fg(theme::R_ACCENT_BRIGHT)
+        .add_modifier(Modifier::BOLD);
+    let dim = Style::default().fg(theme::R_TEXT_TERTIARY);
+
+    if aborted {
+        return vec![
+            Span::styled("Aborted — press ", dim),
+            Span::styled("r", key_style),
+            Span::styled(" to restart, ", dim),
+            Span::styled("Shift+R", key_style),
+            Span::styled(" for clean restart", dim),
+        ];
+    }
+    if matches!(kind, ScheduleKind::Unscheduled) {
+        return vec![
+            Span::styled("Unscheduled — press ", dim),
+            Span::styled("s", key_style),
+            Span::styled(" to start now", dim),
+        ];
+    }
+    vec![Span::styled(describe_schedule(kind, now), dim)]
 }
 
 #[cfg(test)]
