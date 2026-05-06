@@ -89,14 +89,15 @@ The dashboard has a top tab bar, two content panels separated by a vertical divi
 
 #### Tab Bar
 
-A 1-row bar at the top of the terminal with two tabs:
+A 1-row bar at the top of the terminal with three tabs:
 
 | Tab | Description |
 |-----|-------------|
 | `Repositories` | Two-panel view with repo tree and agent cards (default) |
 | `Overview` | Multi-agent terminal overview with horizontal panels |
+| `Schedule` | Per-task scheduler with horizontal columns for inactive/active/complete/aborted tasks |
 
-The active tab is highlighted with the accent color. A `Tab/Shift+Tab` hint is shown to the right of the tabs. Focus mode is not a tab -- it is an overlay state entered explicitly from either tab (see Focus Mode section below). When focus mode is active, the tab bar is replaced by a back-bar header.
+The active tab is highlighted with the accent color. A `Tab/Shift+Tab` hint is shown to the right of the tabs. Tabs render in the order shown above (Repositories, Overview, Schedule) and `Tab`/`Shift+Tab` cycles through them in that order. Focus mode is not a tab -- it is an overlay state entered explicitly from either tab (see Focus Mode section below). When focus mode is active, the tab bar is replaced by a back-bar header.
 
 #### Content Panels (Repositories tab)
 
@@ -219,6 +220,7 @@ On startup, `clust ui` automatically connects to the hub daemon, starting it if 
 | `Opt+V` (macOS) / `Alt+V` | Open in editor (see Editor Integration below) |
 | `Cmd+1` | Switch to Repositories tab (dismisses context menus, exits focus mode) |
 | `Cmd+2` | Switch to Overview tab (dismisses context menus, exits focus mode) |
+| `Cmd+3` | Switch to Schedule tab (dismisses context menus, exits focus mode) |
 
 **Repositories tab:**
 
