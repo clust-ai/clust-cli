@@ -626,6 +626,52 @@ pub fn update_scheduled_task_auto_exit(
     Ok(())
 }
 
+/// Replace a task's schedule kind, start_at, and dep edges in a single
+/// transaction. Resets the task to `inactive` (clearing `completed_at`) so an
+/// aborted or untriggered row is picked up by the next scheduler tick under
+/// the new trigger. The agent_id is preserved so a previously-fired worktree
+/// can still be cleaned up by `RestartScheduledTask`.
+pub fn reschedule_scheduled_task(
+    conn: &mut Connection,
+    id: &str,
+    schedule: &ScheduleKind,
+) -> Result<(), String> {
+    let (kind, start_at, deps): (&str, Option<String>, Vec<String>) = match schedule {
+        ScheduleKind::Time { start_at } => ("time", Some(start_at.clone()), Vec::new()),
+        ScheduleKind::Depend { depends_on_ids } => ("depend", None, depends_on_ids.clone()),
+        ScheduleKind::Unscheduled => ("unscheduled", None, Vec::new()),
+    };
+    let tx = conn
+        .transaction()
+        .map_err(|e| format!("failed to begin reschedule tx: {e}"))?;
+    let updated = tx
+        .execute(
+            "UPDATE scheduled_tasks
+             SET schedule_kind=?1, start_at=?2, status='inactive', completed_at=NULL
+             WHERE id=?3",
+            params![kind, start_at, id],
+        )
+        .map_err(|e| format!("failed to update scheduled task: {e}"))?;
+    if updated == 0 {
+        return Err(format!("no scheduled task with id '{id}'"));
+    }
+    tx.execute(
+        "DELETE FROM scheduled_task_deps WHERE task_id=?1",
+        params![id],
+    )
+    .map_err(|e| format!("failed to clear task deps: {e}"))?;
+    for dep in &deps {
+        tx.execute(
+            "INSERT INTO scheduled_task_deps (task_id, depends_on_id) VALUES (?1, ?2)",
+            params![id, dep],
+        )
+        .map_err(|e| format!("failed to insert task dependency: {e}"))?;
+    }
+    tx.commit()
+        .map_err(|e| format!("failed to commit reschedule tx: {e}"))?;
+    Ok(())
+}
+
 /// Mark a task `active` and remember which agent is fulfilling it. Used by both
 /// the auto-trigger loop and manual start-now / restart paths.
 pub fn mark_scheduled_task_active(

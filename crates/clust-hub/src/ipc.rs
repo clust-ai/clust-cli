@@ -2385,6 +2385,186 @@ async fn handle_connection(
                 }
             }
         }
+        CliMessage::RescheduleScheduledTask {
+            id,
+            schedule,
+            extra_agent_deps,
+        } => {
+            // Look the task up first so we can validate its current status —
+            // only Inactive and Aborted tasks can be rescheduled. Active
+            // worktrees are running and Complete tasks already finished.
+            let task = {
+                let hub = state.lock().await;
+                hub.db.as_ref().and_then(|conn| {
+                    let lookup = repo_name_lookup_from(Some(conn));
+                    crate::db::get_scheduled_task(conn, &id, &lookup)
+                        .ok()
+                        .flatten()
+                })
+            };
+            let Some(task) = task else {
+                clust_ipc::send_message_write(
+                    &mut writer,
+                    &HubMessage::Error {
+                        message: format!("scheduled task {id} not found"),
+                    },
+                )
+                .await?;
+                return Ok(());
+            };
+            if !matches!(
+                task.status,
+                clust_ipc::ScheduledTaskStatus::Inactive
+                    | clust_ipc::ScheduledTaskStatus::Aborted
+            ) {
+                clust_ipc::send_message_write(
+                    &mut writer,
+                    &HubMessage::Error {
+                        message: "reschedule only valid for Inactive or Aborted tasks"
+                            .into(),
+                    },
+                )
+                .await?;
+                return Ok(());
+            }
+
+            let mut hub = state.lock().await;
+            if hub.db.is_none() {
+                clust_ipc::send_message_write(
+                    &mut writer,
+                    &HubMessage::Error {
+                        message: "database unavailable".into(),
+                    },
+                )
+                .await?;
+                return Ok(());
+            }
+
+            // Promote any picked Opt+E worktree agent IDs to shadow scheduled
+            // tasks (mirrors the create path) before the dep edges are
+            // rewritten, so the new edges all reference task IDs.
+            let mut promoted_dep_ids: Vec<String> = Vec::new();
+            let mut promotion_error: Option<String> = None;
+            for agent_id in &extra_agent_deps {
+                let entry_info = hub.agents.get(agent_id).map(|e| {
+                    (
+                        e.repo_path.clone(),
+                        e.branch_name.clone(),
+                        e.prompt.clone(),
+                        e.plan_mode,
+                        e.auto_exit,
+                        e.agent_binary.clone(),
+                    )
+                });
+                let Some((rp, bn, p, pm, ae, bin)) = entry_info else {
+                    promotion_error = Some(format!(
+                        "agent {agent_id} is no longer running and cannot be used as a dependency"
+                    ));
+                    break;
+                };
+                let conn = hub.db.as_ref().unwrap();
+                let existing = match crate::db::find_scheduled_task_by_agent_id(conn, agent_id)
+                {
+                    Ok(x) => x,
+                    Err(e) => {
+                        promotion_error = Some(e);
+                        break;
+                    }
+                };
+                if let Some(task_id) = existing {
+                    promoted_dep_ids.push(task_id);
+                    continue;
+                }
+                let Some(rp) = rp else {
+                    promotion_error = Some(format!(
+                        "agent {agent_id} has no repo path and cannot be used as a dependency"
+                    ));
+                    break;
+                };
+                let Some(bn) = bn else {
+                    promotion_error = Some(format!(
+                        "agent {agent_id} has no branch name and cannot be used as a dependency"
+                    ));
+                    break;
+                };
+                let spec = crate::db::NewScheduledTask {
+                    repo_path: rp,
+                    base_branch: None,
+                    new_branch: None,
+                    branch_name: bn,
+                    prompt: p.unwrap_or_default(),
+                    plan_mode: pm,
+                    auto_exit: ae,
+                    agent_binary: bin,
+                    schedule: clust_ipc::ScheduleKind::Unscheduled,
+                };
+                match crate::db::insert_active_shadow_task(conn, spec, agent_id) {
+                    Ok(id) => promoted_dep_ids.push(id),
+                    Err(e) => {
+                        promotion_error = Some(e);
+                        break;
+                    }
+                }
+            }
+            if let Some(e) = promotion_error {
+                drop(hub);
+                clust_ipc::send_message_write(
+                    &mut writer,
+                    &HubMessage::Error { message: e },
+                )
+                .await?;
+                return Ok(());
+            }
+
+            let schedule = if promoted_dep_ids.is_empty() {
+                schedule
+            } else {
+                match schedule {
+                    clust_ipc::ScheduleKind::Depend { mut depends_on_ids } => {
+                        for id in promoted_dep_ids {
+                            if !depends_on_ids.contains(&id) {
+                                depends_on_ids.push(id);
+                            }
+                        }
+                        clust_ipc::ScheduleKind::Depend { depends_on_ids }
+                    }
+                    other => other,
+                }
+            };
+
+            let conn = hub.db.as_mut().unwrap();
+            let result = crate::db::reschedule_scheduled_task(conn, &id, &schedule);
+            match result {
+                Ok(()) => {
+                    let lookup = repo_name_lookup_from(hub.db.as_ref());
+                    let info = crate::db::get_scheduled_task(
+                        hub.db.as_ref().unwrap(),
+                        &id,
+                        &lookup,
+                    )
+                    .ok()
+                    .flatten();
+                    drop(hub);
+                    if let Some(info) = info {
+                        clust_ipc::send_message_write(
+                            &mut writer,
+                            &HubMessage::ScheduledTaskUpdated { info },
+                        )
+                        .await?;
+                    } else {
+                        clust_ipc::send_message_write(&mut writer, &HubMessage::Ok).await?;
+                    }
+                }
+                Err(e) => {
+                    drop(hub);
+                    clust_ipc::send_message_write(
+                        &mut writer,
+                        &HubMessage::Error { message: e },
+                    )
+                    .await?;
+                }
+            }
+        }
 
         _ => {
             clust_ipc::send_message_write(

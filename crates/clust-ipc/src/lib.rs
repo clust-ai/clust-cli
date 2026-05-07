@@ -272,6 +272,19 @@ pub enum CliMessage {
         id: String,
         clean: bool,
     },
+    /// Replace an existing task's schedule kind (and start_at / dep edges) in
+    /// place. Used by the Schedule tab's reschedule modal: the repo, branch,
+    /// and prompt stay put, only the trigger changes. An aborted task is
+    /// flipped back to `inactive` so the new schedule can take effect.
+    RescheduleScheduledTask {
+        id: String,
+        schedule: ScheduleKind,
+        /// Same shadow-promotion semantics as `CreateScheduledTask`: any
+        /// running Opt+E worktree agents picked in the dep step get a shadow
+        /// `scheduled_tasks` row before the dep edges are written.
+        #[serde(default)]
+        extra_agent_deps: Vec<String>,
+    },
 }
 
 /// What triggers a scheduled task to start.
@@ -1867,6 +1880,40 @@ mod tests {
         assert_cli_round_trip(CliMessage::RestartScheduledTask {
             id: "abcd1234".into(),
             clean: false,
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn cli_reschedule_scheduled_task_time() {
+        assert_cli_round_trip(CliMessage::RescheduleScheduledTask {
+            id: "abcd1234".into(),
+            schedule: ScheduleKind::Time {
+                start_at: "2026-05-06T10:00:00Z".into(),
+            },
+            extra_agent_deps: Vec::new(),
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn cli_reschedule_scheduled_task_depend() {
+        assert_cli_round_trip(CliMessage::RescheduleScheduledTask {
+            id: "abcd1234".into(),
+            schedule: ScheduleKind::Depend {
+                depends_on_ids: vec!["aaa111".into()],
+            },
+            extra_agent_deps: vec!["ag0001".into()],
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn cli_reschedule_scheduled_task_unscheduled() {
+        assert_cli_round_trip(CliMessage::RescheduleScheduledTask {
+            id: "abcd1234".into(),
+            schedule: ScheduleKind::Unscheduled,
+            extra_agent_deps: Vec::new(),
         })
         .await;
     }

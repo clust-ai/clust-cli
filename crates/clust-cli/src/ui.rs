@@ -214,6 +214,8 @@ pub(crate) enum ScheduleHintKey {
     Restart,
     /// Clean-restart the focused aborted task (Shift+R).
     CleanRestart,
+    /// Reschedule the focused inactive/aborted task (Shift+S).
+    Reschedule,
     /// Enter focus mode on the focused active task (Shift+↓).
     EnterFocusMode,
     /// Switch to previous panel (Shift+←).
@@ -2868,24 +2870,55 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                 schedule_modal = None;
                                 let tx = status_tx.clone();
                                 let refresh_tx = scheduled_task_tx.clone();
+                                let is_reschedule = out.reschedule_task_id.is_some();
                                 tokio::spawn(async move {
-                                    let msg = clust_ipc::CliMessage::CreateScheduledTask {
-                                        repo_path: out.repo_path,
-                                        base_branch: out.base_branch,
-                                        new_branch: out.new_branch,
-                                        prompt: out.prompt,
-                                        plan_mode: out.plan_mode,
-                                        auto_exit: out.auto_exit,
-                                        agent_binary: None,
-                                        schedule: out.schedule,
-                                        extra_agent_deps: out.extra_agent_deps,
+                                    let msg = if let Some(id) = out.reschedule_task_id {
+                                        clust_ipc::CliMessage::RescheduleScheduledTask {
+                                            id,
+                                            schedule: out.schedule,
+                                            extra_agent_deps: out.extra_agent_deps,
+                                        }
+                                    } else {
+                                        clust_ipc::CliMessage::CreateScheduledTask {
+                                            repo_path: out.repo_path,
+                                            base_branch: out.base_branch,
+                                            new_branch: out.new_branch,
+                                            prompt: out.prompt,
+                                            plan_mode: out.plan_mode,
+                                            auto_exit: out.auto_exit,
+                                            agent_binary: None,
+                                            schedule: out.schedule,
+                                            extra_agent_deps: out.extra_agent_deps,
+                                        }
+                                    };
+                                    let verb_past = if is_reschedule {
+                                        "Rescheduled"
+                                    } else {
+                                        "Scheduled"
+                                    };
+                                    let verb_fail = if is_reschedule {
+                                        "Reschedule"
+                                    } else {
+                                        "Schedule"
                                     };
                                     match ipc::send_one_shot(msg).await {
                                         Ok(HubMessage::ScheduledTaskCreated { info }) => {
                                             let _ = tx
                                                 .send(StatusMessage {
                                                     text: format!(
-                                                        "Scheduled task on {}",
+                                                        "{verb_past} task on {}",
+                                                        info.branch_name
+                                                    ),
+                                                    level: StatusLevel::Success,
+                                                    created: Instant::now(),
+                                                })
+                                                .await;
+                                        }
+                                        Ok(HubMessage::ScheduledTaskUpdated { info }) => {
+                                            let _ = tx
+                                                .send(StatusMessage {
+                                                    text: format!(
+                                                        "{verb_past} task on {}",
                                                         info.branch_name
                                                     ),
                                                     level: StatusLevel::Success,
@@ -2896,7 +2929,9 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                         Ok(HubMessage::Error { message }) => {
                                             let _ = tx
                                                 .send(StatusMessage {
-                                                    text: format!("Schedule failed: {message}"),
+                                                    text: format!(
+                                                        "{verb_fail} failed: {message}"
+                                                    ),
                                                     level: StatusLevel::Error,
                                                     created: Instant::now(),
                                                 })
@@ -2906,7 +2941,7 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                         Err(e) => {
                                             let _ = tx
                                                 .send(StatusMessage {
-                                                    text: format!("Schedule failed: {e}"),
+                                                    text: format!("{verb_fail} failed: {e}"),
                                                     level: StatusLevel::Error,
                                                     created: Instant::now(),
                                                 })
@@ -3653,7 +3688,11 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                 dispatch_schedule_action(
                                     action,
                                     &mut edit_prompt_modal,
+                                    &mut schedule_modal,
                                     &mut active_menu,
+                                    &repos,
+                                    &scheduled_tasks,
+                                    &agents,
                                     status_tx.clone(),
                                     scheduled_task_tx.clone(),
                                 );
@@ -4021,7 +4060,11 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                         dispatch_schedule_action(
                                             other,
                                             &mut edit_prompt_modal,
+                                            &mut schedule_modal,
                                             &mut active_menu,
+                                            &repos,
+                                            &scheduled_tasks,
+                                            &agents,
                                             status_tx.clone(),
                                             scheduled_task_tx.clone(),
                                         );
@@ -7819,10 +7862,15 @@ fn block_on_async<F: std::future::Future>(f: F) -> F::Output {
 /// Translate a `ScheduleAction` returned by the Schedule tab into concrete
 /// state mutations + IPC sends. Kept out of the main loop's match arm so the
 /// arm itself stays a single line.
+#[allow(clippy::too_many_arguments)]
 fn dispatch_schedule_action(
     action: ScheduleAction,
     edit_prompt_modal: &mut Option<EditPromptModal>,
+    schedule_modal: &mut Option<ScheduleTaskModal>,
     active_menu: &mut Option<ActiveMenu>,
+    repos: &[clust_ipc::RepoInfo],
+    scheduled_tasks: &[clust_ipc::ScheduledTaskInfo],
+    agents: &[clust_ipc::AgentInfo],
     status_tx: tokio::sync::mpsc::Sender<StatusMessage>,
     refresh_tx: tokio::sync::mpsc::Sender<Vec<clust_ipc::ScheduledTaskInfo>>,
 ) {
@@ -7912,6 +7960,27 @@ fn dispatch_schedule_action(
             // Handled inline at the Schedule key-routing site so it can
             // reach focus_mode_state / agents / last_content_area.
         }
+        ScheduleAction::OpenReschedule { task_id } => {
+            if schedule_modal.is_some() {
+                // Another schedule modal is already on screen — silently
+                // ignore so we don't stomp it.
+                return;
+            }
+            let Some(task) = scheduled_tasks.iter().find(|t| t.id == task_id) else {
+                let _ = status_tx.try_send(StatusMessage {
+                    text: format!("scheduled task {task_id} not found"),
+                    level: StatusLevel::Error,
+                    created: std::time::Instant::now(),
+                });
+                return;
+            };
+            *schedule_modal = Some(ScheduleTaskModal::new_reschedule(
+                task,
+                repos.to_vec(),
+                scheduled_tasks.to_vec(),
+                agents.to_vec(),
+            ));
+        }
     }
 }
 
@@ -7938,7 +8007,11 @@ fn handle_schedule_hint_click(
         dispatch_schedule_action(
             action,
             edit_prompt_modal,
+            schedule_modal,
             active_menu,
+            repos,
+            scheduled_tasks,
+            agents,
             status_tx.clone(),
             refresh_tx.clone(),
         );
@@ -8009,6 +8082,11 @@ fn handle_schedule_hint_click(
         }
         ScheduleHintKey::EnterFocusMode => {
             let action = schedule_state.handle_key(synth_key(KeyCode::Down, KeyModifiers::SHIFT));
+            dispatch(action);
+        }
+        ScheduleHintKey::Reschedule => {
+            let action =
+                schedule_state.handle_key(synth_key(KeyCode::Char('S'), KeyModifiers::SHIFT));
             dispatch(action);
         }
     }

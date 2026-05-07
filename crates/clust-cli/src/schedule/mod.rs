@@ -76,6 +76,10 @@ pub enum ScheduleAction {
     OpenClearMenu,
     /// Enter focus mode on the currently-focused Active task.
     EnterFocusMode { task_id: String },
+    /// Open the reschedule modal pre-populated from this task. The modal
+    /// keeps the repo, branch, prompt and plan/auto-exit flags untouched —
+    /// only the schedule kind (and start_at / dep set) can be overwritten.
+    OpenReschedule { task_id: String },
 }
 
 // ---------------------------------------------------------------------------
@@ -607,6 +611,19 @@ impl ScheduleState {
                     ScheduleAction::Noop
                 }
             }
+            // Shift+S: reschedule. Only meaningful for tasks that haven't run
+            // yet (Inactive) or stopped (Aborted) — Active tasks have a live
+            // worktree and Complete tasks already finished.
+            KeyCode::Char('S') => {
+                if matches!(
+                    task.status,
+                    ScheduledTaskStatus::Inactive | ScheduledTaskStatus::Aborted
+                ) {
+                    ScheduleAction::OpenReschedule { task_id: task.id }
+                } else {
+                    ScheduleAction::Noop
+                }
+            }
             KeyCode::Char('d') | KeyCode::Delete => ScheduleAction::ConfirmDelete {
                 task_id: task.id.clone(),
                 branch_name: task.branch_name.clone(),
@@ -808,6 +825,11 @@ impl ScheduleState {
                     "start now".into(),
                     Some(ScheduleHintKey::StartNow),
                 ),
+                (
+                    "Shift+S".into(),
+                    "reschedule".into(),
+                    Some(ScheduleHintKey::Reschedule),
+                ),
                 ("\u{2191}/\u{2193}".into(), "scroll prompt".into(), None),
             ],
             Some(ScheduledTaskStatus::Active) => vec![
@@ -840,6 +862,11 @@ impl ScheduleState {
                     "Shift+R".into(),
                     "clean restart".into(),
                     Some(ScheduleHintKey::CleanRestart),
+                ),
+                (
+                    "Shift+S".into(),
+                    "reschedule".into(),
+                    Some(ScheduleHintKey::Reschedule),
                 ),
             ],
             Some(ScheduledTaskStatus::Complete) => vec![(
@@ -1682,6 +1709,72 @@ mod tests {
                 clean: true
             }
         );
+    }
+
+    #[test]
+    fn handle_key_shift_s_reschedules_inactive() {
+        let mut state = ScheduleState::new();
+        sync(
+            &mut state,
+            vec![task(
+                "a",
+                ScheduledTaskStatus::Inactive,
+                ScheduleKind::Unscheduled,
+            )],
+        );
+        let action = state.handle_key(KeyEvent::new(KeyCode::Char('S'), KeyModifiers::SHIFT));
+        assert_eq!(
+            action,
+            ScheduleAction::OpenReschedule { task_id: "a".into() }
+        );
+    }
+
+    #[test]
+    fn handle_key_shift_s_reschedules_aborted() {
+        let mut state = ScheduleState::new();
+        sync(
+            &mut state,
+            vec![task(
+                "a",
+                ScheduledTaskStatus::Aborted,
+                ScheduleKind::Unscheduled,
+            )],
+        );
+        let action = state.handle_key(KeyEvent::new(KeyCode::Char('S'), KeyModifiers::SHIFT));
+        assert_eq!(
+            action,
+            ScheduleAction::OpenReschedule { task_id: "a".into() }
+        );
+    }
+
+    #[test]
+    fn handle_key_shift_s_noop_for_active() {
+        let mut state = ScheduleState::new();
+        sync(
+            &mut state,
+            vec![task(
+                "a",
+                ScheduledTaskStatus::Active,
+                ScheduleKind::Unscheduled,
+            )],
+        );
+        let action = state.handle_key(KeyEvent::new(KeyCode::Char('S'), KeyModifiers::SHIFT));
+        assert_eq!(action, ScheduleAction::Noop);
+    }
+
+    #[test]
+    fn handle_key_shift_s_noop_for_complete() {
+        let mut state = ScheduleState::new();
+        sync(
+            &mut state,
+            vec![task(
+                "a",
+                ScheduledTaskStatus::Complete,
+                ScheduleKind::Unscheduled,
+            )],
+        );
+        let action = state.handle_key(KeyEvent::new(KeyCode::Char('S'), KeyModifiers::SHIFT));
+        assert_eq!(action, ScheduleAction::Noop);
     }
 
     #[test]
