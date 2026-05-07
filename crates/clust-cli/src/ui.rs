@@ -3889,15 +3889,73 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                             }
                             // Schedule tab key routing — delegates to ScheduleState
                             // and then dispatches the resulting ScheduleAction.
+                            // EnterFocusMode is handled inline because it
+                            // needs access to focus_mode_state, the agents
+                            // list, and last_content_area; everything else
+                            // routes through dispatch_schedule_action.
                             _ if active_tab == ActiveTab::Schedule => {
                                 let action = schedule_state.handle_key(key);
-                                dispatch_schedule_action(
-                                    action,
-                                    &mut edit_prompt_modal,
-                                    &mut active_menu,
-                                    status_tx.clone(),
-                                    scheduled_task_tx.clone(),
-                                );
+                                match action {
+                                    ScheduleAction::EnterFocusMode { task_id } => {
+                                        let task = schedule_state
+                                            .tasks
+                                            .iter()
+                                            .find(|t| t.id == task_id)
+                                            .cloned();
+                                        if let Some(task) = task {
+                                            if let Some(agent_id) = task.agent_id.as_deref() {
+                                                let found =
+                                                    agents.iter().find(|a| a.id == agent_id);
+                                                let working_dir = found
+                                                    .map(|a| a.working_dir.clone())
+                                                    .unwrap_or_default();
+                                                let repo_path = found
+                                                    .and_then(|a| a.repo_path.clone())
+                                                    .or_else(|| Some(task.repo_path.clone()));
+                                                let branch_name = found
+                                                    .and_then(|a| a.branch_name.clone())
+                                                    .or_else(|| Some(task.branch_name.clone()));
+                                                let is_wt = found
+                                                    .map(|a| a.is_worktree)
+                                                    .unwrap_or(true);
+                                                let agent_binary = found
+                                                    .map(|a| a.agent_binary.clone())
+                                                    .unwrap_or_else(|| task.agent_binary.clone());
+                                                let fm_cols = (last_content_area.width * 40
+                                                    / 100)
+                                                    .saturating_sub(2)
+                                                    .max(1);
+                                                let fm_rows = last_content_area
+                                                    .height
+                                                    .saturating_sub(3)
+                                                    .max(1);
+                                                let existing_terminals = overview_state
+                                                    .take_agent_terminals(agent_id);
+                                                focus_mode_state.open_agent(
+                                                    agent_id,
+                                                    &agent_binary,
+                                                    fm_cols,
+                                                    fm_rows,
+                                                    &working_dir,
+                                                    repo_path.as_deref(),
+                                                    branch_name.as_deref(),
+                                                    is_wt,
+                                                    existing_terminals,
+                                                );
+                                                in_focus_mode = true;
+                                            }
+                                        }
+                                    }
+                                    other => {
+                                        dispatch_schedule_action(
+                                            other,
+                                            &mut edit_prompt_modal,
+                                            &mut active_menu,
+                                            status_tx.clone(),
+                                            scheduled_task_tx.clone(),
+                                        );
+                                    }
+                                }
                             }
                             _ => {}
                         }
@@ -7713,16 +7771,9 @@ fn dispatch_schedule_action(
                 ),
             });
         }
-        ScheduleAction::EnterFocusMode { task_id: _ } => {
-            // TODO: hook into focus_mode_state for a scheduled task's active
-            // agent. For now this is a no-op so the build stays green; the
-            // user can still navigate via Cmd+2 → Overview to focus the same
-            // agent.
-            let _ = status_tx.try_send(StatusMessage {
-                text: "Schedule focus mode coming soon — switch to Overview tab".into(),
-                level: StatusLevel::Success,
-                created: std::time::Instant::now(),
-            });
+        ScheduleAction::EnterFocusMode { .. } => {
+            // Handled inline at the Schedule key-routing site so it can
+            // reach focus_mode_state / agents / last_content_area.
         }
     }
 }
