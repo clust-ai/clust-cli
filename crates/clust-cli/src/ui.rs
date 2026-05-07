@@ -6,8 +6,8 @@ use std::time::{Duration, Instant};
 use crossterm::{
     event::{
         self, DisableBracketedPaste, DisableFocusChange, DisableMouseCapture, EnableBracketedPaste,
-        EnableFocusChange, EnableMouseCapture, Event, KeyCode, KeyEventKind, KeyModifiers,
-        KeyboardEnhancementFlags, MouseButton, MouseEvent, MouseEventKind,
+        EnableFocusChange, EnableMouseCapture, Event, KeyCode, KeyEvent, KeyEventKind,
+        KeyModifiers, KeyboardEnhancementFlags, MouseButton, MouseEvent, MouseEventKind,
         PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
     },
     terminal::{
@@ -190,6 +190,38 @@ enum TreeClickTarget {
     Branch(usize, usize, usize),
 }
 
+/// A clickable keybind hint in the Schedule tab footer. Each variant maps to
+/// the same action the corresponding key would trigger.
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum ScheduleHintKey {
+    /// Open the schedule-task modal (Opt+S).
+    NewTask,
+    /// Confirm-delete the focused task (d / Del).
+    Delete,
+    /// Open the clear-by-status menu (Shift+C).
+    ClearByStatus,
+    /// Show the help overlay (?).
+    Help,
+    /// Edit the focused task's prompt (e).
+    EditPrompt,
+    /// Toggle plan mode on the focused task (p).
+    TogglePlan,
+    /// Toggle auto-exit on the focused task (x).
+    ToggleAutoExit,
+    /// Start the focused inactive task now (s).
+    StartNow,
+    /// Restart the focused aborted task in place (r).
+    Restart,
+    /// Clean-restart the focused aborted task (Shift+R).
+    CleanRestart,
+    /// Enter focus mode on the focused active task (Shift+↓).
+    EnterFocusMode,
+    /// Switch to previous panel (Shift+←).
+    PrevPanel,
+    /// Switch to next panel (Shift+→).
+    NextPanel,
+}
+
 /// Accumulates clickable regions during rendering so the mouse handler can
 /// map a click position to a UI action.
 #[derive(Default)]
@@ -205,6 +237,11 @@ pub(crate) struct ClickMap {
     pub(crate) overview_panels: Vec<(Rect, usize)>, // (area, global_panel_idx)
     pub(crate) overview_repo_buttons: Vec<(Rect, String)>, // (area, repo_path) — collapse toggle
     pub(crate) overview_agent_indicators: Vec<(Rect, usize)>, // (area, global_panel_idx) — focus agent
+
+    // Schedule tab
+    pub(crate) schedule_panels: Vec<(Rect, usize)>, // (area, task_idx)
+    pub(crate) schedule_branch_indicators: Vec<(Rect, usize)>, // (area, task_idx) — top-bar chips
+    pub(crate) schedule_hint_keys: Vec<(Rect, ScheduleHintKey)>, // (area, action) — clickable footer hints
 
     // Focus mode
     pub(crate) focus_left_area: Rect,
@@ -1253,7 +1290,13 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                         );
                     }
                     ActiveTab::Schedule => {
-                        schedule_state.render(frame, content_area, &repos, &repo_colors);
+                        schedule_state.render(
+                            frame,
+                            content_area,
+                            &repos,
+                            &repo_colors,
+                            &mut click_map,
+                        );
                     }
                 }
             }
@@ -2493,7 +2536,9 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                                     last_agent_fetch =
                                                         Instant::now() - Duration::from_secs(10);
                                                 }
-                                                ConfirmedAction::DeleteScheduledTask { task_id } => {
+                                                ConfirmedAction::DeleteScheduledTask {
+                                                    task_id,
+                                                } => {
                                                     let refresh_tx = scheduled_task_tx.clone();
                                                     tokio::spawn(async move {
                                                         let _ = ipc::send_one_shot(
@@ -5102,7 +5147,9 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                                     last_agent_fetch =
                                                         Instant::now() - Duration::from_secs(10);
                                                 }
-                                                ConfirmedAction::DeleteScheduledTask { task_id } => {
+                                                ConfirmedAction::DeleteScheduledTask {
+                                                    task_id,
+                                                } => {
                                                     let refresh_tx = scheduled_task_tx.clone();
                                                     tokio::spawn(async move {
                                                         let _ = ipc::send_one_shot(
@@ -5336,9 +5383,7 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                     } else if in_focus_mode {
                         // Focus mode click handling
                         if click_map.focus_back_button.contains(pos) {
-                            if active_tab == ActiveTab::Overview
-                                && overview_state.initialized
-                            {
+                            if active_tab == ActiveTab::Overview && overview_state.initialized {
                                 overview_state.force_resize_all();
                             }
                             if let Some((aid, cache)) = focus_mode_state.detach() {
@@ -5479,8 +5524,47 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                 }
                             }
                             ActiveTab::Schedule => {
-                                // No mouse interactions on the Schedule tab
-                                // yet — keys-only.
+                                // 1) Top-bar branch indicators: focus + scroll
+                                //    that task into view.
+                                if let Some((_, idx)) = click_map
+                                    .schedule_branch_indicators
+                                    .iter()
+                                    .find(|(r, _)| r.contains(pos))
+                                {
+                                    schedule_state.focus_task_index(*idx);
+                                }
+                                // 2) Hint footer: synthesize the matching key
+                                //    so the same dispatch path runs.
+                                else if let Some((_, hint_key)) = click_map
+                                    .schedule_hint_keys
+                                    .iter()
+                                    .find(|(r, _)| r.contains(pos))
+                                {
+                                    let hk = *hint_key;
+                                    handle_schedule_hint_click(
+                                        hk,
+                                        &mut schedule_state,
+                                        &mut edit_prompt_modal,
+                                        &mut active_menu,
+                                        &mut schedule_modal,
+                                        &mut show_help,
+                                        &repos,
+                                        &scheduled_tasks,
+                                        &agents,
+                                        status_tx.clone(),
+                                        scheduled_task_tx.clone(),
+                                    );
+                                }
+                                // 3) Panel click: focus the task. This goes
+                                //    last so chips/hints in the bar/footer win
+                                //    over the (much larger) panel rect.
+                                else if let Some((_, idx)) = click_map
+                                    .schedule_panels
+                                    .iter()
+                                    .find(|(r, _)| r.contains(pos))
+                                {
+                                    schedule_state.focus_task_index(*idx);
+                                }
                             }
                         }
                     }
@@ -5548,6 +5632,14 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                     (panel.panel_scroll_offset + 3).min(max);
                             }
                         }
+                    } else if active_tab == ActiveTab::Schedule {
+                        if let Some((_, idx)) = click_map
+                            .schedule_panels
+                            .iter()
+                            .find(|(r, _)| r.contains(pos))
+                        {
+                            schedule_state.scroll_prompt_at(*idx, -1);
+                        }
                     }
                 }
                 Event::Mouse(MouseEvent {
@@ -5612,6 +5704,14 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                 panel.panel_scroll_offset =
                                     panel.panel_scroll_offset.saturating_sub(3);
                             }
+                        }
+                    } else if active_tab == ActiveTab::Schedule {
+                        if let Some((_, idx)) = click_map
+                            .schedule_panels
+                            .iter()
+                            .find(|(r, _)| r.contains(pos))
+                        {
+                            schedule_state.scroll_prompt_at(*idx, 1);
                         }
                     }
                 }
@@ -6687,7 +6787,10 @@ fn render_help_overlay(frame: &mut Frame, area: Rect, active_tab: ActiveTab, in_
         lines.push(Line::from(""));
         lines.push(header_line("Schedule"));
         lines.push(binding_line("Alt+S", "Schedule a new task"));
-        lines.push(binding_line("Shift+\u{2190}/\u{2192}", "Switch focused task"));
+        lines.push(binding_line(
+            "Shift+\u{2190}/\u{2192}",
+            "Switch focused task",
+        ));
         lines.push(binding_line("\u{2191} / \u{2193}", "Scroll prompt body"));
         lines.push(binding_line("d / Del", "Delete focused task"));
         lines.push(binding_line("Shift+C", "Clear by status menu"));
@@ -6697,7 +6800,10 @@ fn render_help_overlay(frame: &mut Frame, area: Rect, active_tab: ActiveTab, in_
         lines.push(binding_line("x", "Toggle auto-exit"));
         lines.push(binding_line("s", "Start now"));
         lines.push(sub_label_line("Active task:"));
-        lines.push(binding_line("Shift+\u{2193}", "Enter focus mode (live PTY)"));
+        lines.push(binding_line(
+            "Shift+\u{2193}",
+            "Enter focus mode (live PTY)",
+        ));
         lines.push(sub_label_line("Aborted task:"));
         lines.push(binding_line("e", "Edit prompt"));
         lines.push(binding_line("p", "Toggle plan mode"));
@@ -7743,10 +7849,7 @@ fn dispatch_schedule_action(
             send_and_refresh(CliMessage::StartScheduledTaskNow { id: task_id });
         }
         ScheduleAction::Restart { task_id, clean } => {
-            send_and_refresh(CliMessage::RestartScheduledTask {
-                id: task_id,
-                clean,
-            });
+            send_and_refresh(CliMessage::RestartScheduledTask { id: task_id, clean });
         }
         ScheduleAction::ConfirmDelete {
             task_id,
@@ -7774,6 +7877,105 @@ fn dispatch_schedule_action(
         ScheduleAction::EnterFocusMode { .. } => {
             // Handled inline at the Schedule key-routing site so it can
             // reach focus_mode_state / agents / last_content_area.
+        }
+    }
+}
+
+/// Handle a click on the Schedule footer keybind hints. Most actions reuse
+/// `ScheduleState::handle_key` so the dispatch logic stays in a single place;
+/// the handful of "global" hints (new task, help) replicate the keyboard
+/// shortcut here because they live above the Schedule tab.
+#[allow(clippy::too_many_arguments)]
+fn handle_schedule_hint_click(
+    hint: ScheduleHintKey,
+    schedule_state: &mut ScheduleState,
+    edit_prompt_modal: &mut Option<EditPromptModal>,
+    active_menu: &mut Option<ActiveMenu>,
+    schedule_modal: &mut Option<ScheduleTaskModal>,
+    show_help: &mut bool,
+    repos: &[RepoInfo],
+    scheduled_tasks: &[clust_ipc::ScheduledTaskInfo],
+    agents: &[AgentInfo],
+    status_tx: tokio::sync::mpsc::Sender<StatusMessage>,
+    refresh_tx: tokio::sync::mpsc::Sender<Vec<clust_ipc::ScheduledTaskInfo>>,
+) {
+    let synth_key = |code: KeyCode, mods: KeyModifiers| KeyEvent::new(code, mods);
+    let mut dispatch = |action: ScheduleAction| {
+        dispatch_schedule_action(
+            action,
+            edit_prompt_modal,
+            active_menu,
+            status_tx.clone(),
+            refresh_tx.clone(),
+        );
+    };
+    match hint {
+        ScheduleHintKey::NewTask => {
+            // Mirrors the Alt+S keyboard shortcut. Schedule tab is allowed to
+            // open the modal even with no repos (the modal renders its own
+            // "add a repo first" empty state would be nicer, but matching the
+            // keyboard path means: no repos, no modal).
+            if !repos.is_empty() && schedule_modal.is_none() {
+                *schedule_modal = Some(ScheduleTaskModal::new(
+                    repos.to_vec(),
+                    scheduled_tasks.to_vec(),
+                    agents.to_vec(),
+                ));
+                *show_help = false;
+            }
+        }
+        ScheduleHintKey::Help => {
+            *show_help = true;
+        }
+        ScheduleHintKey::PrevPanel => {
+            schedule_state.focus_prev();
+        }
+        ScheduleHintKey::NextPanel => {
+            schedule_state.focus_next();
+        }
+        ScheduleHintKey::Delete => {
+            let action =
+                schedule_state.handle_key(synth_key(KeyCode::Char('d'), KeyModifiers::NONE));
+            dispatch(action);
+        }
+        ScheduleHintKey::ClearByStatus => {
+            let action =
+                schedule_state.handle_key(synth_key(KeyCode::Char('C'), KeyModifiers::SHIFT));
+            dispatch(action);
+        }
+        ScheduleHintKey::EditPrompt => {
+            let action =
+                schedule_state.handle_key(synth_key(KeyCode::Char('e'), KeyModifiers::NONE));
+            dispatch(action);
+        }
+        ScheduleHintKey::TogglePlan => {
+            let action =
+                schedule_state.handle_key(synth_key(KeyCode::Char('p'), KeyModifiers::NONE));
+            dispatch(action);
+        }
+        ScheduleHintKey::ToggleAutoExit => {
+            let action =
+                schedule_state.handle_key(synth_key(KeyCode::Char('x'), KeyModifiers::NONE));
+            dispatch(action);
+        }
+        ScheduleHintKey::StartNow => {
+            let action =
+                schedule_state.handle_key(synth_key(KeyCode::Char('s'), KeyModifiers::NONE));
+            dispatch(action);
+        }
+        ScheduleHintKey::Restart => {
+            let action =
+                schedule_state.handle_key(synth_key(KeyCode::Char('r'), KeyModifiers::NONE));
+            dispatch(action);
+        }
+        ScheduleHintKey::CleanRestart => {
+            let action =
+                schedule_state.handle_key(synth_key(KeyCode::Char('R'), KeyModifiers::SHIFT));
+            dispatch(action);
+        }
+        ScheduleHintKey::EnterFocusMode => {
+            let action = schedule_state.handle_key(synth_key(KeyCode::Down, KeyModifiers::SHIFT));
+            dispatch(action);
         }
     }
 }
