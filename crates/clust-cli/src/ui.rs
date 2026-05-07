@@ -3640,6 +3640,36 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                 }
                             }
                         }
+                    }
+                    // Schedule tab + focused task is Active: forward typing to
+                    // the agent's PTY. Reserve Shift+arrows for navigation
+                    // (Shift+Down enters focus mode) and PageUp/PageDown for
+                    // scrollback. Mirrors Overview's terminal-focus key flow.
+                    else if active_tab == ActiveTab::Schedule
+                        && schedule_state.focused_task_is_active()
+                    {
+                        let shift = key.modifiers.contains(KeyModifiers::SHIFT);
+                        match (shift, key.code) {
+                            (true, KeyCode::Left) => schedule_state.focus_prev(),
+                            (true, KeyCode::Right) => schedule_state.focus_next(),
+                            (true, KeyCode::Down) => {
+                                let action = schedule_state.handle_key(key);
+                                dispatch_schedule_action(
+                                    action,
+                                    &mut edit_prompt_modal,
+                                    &mut active_menu,
+                                    status_tx.clone(),
+                                    scheduled_task_tx.clone(),
+                                );
+                            }
+                            (_, KeyCode::PageUp) => schedule_state.panel_scroll_up(),
+                            (_, KeyCode::PageDown) => schedule_state.panel_scroll_down(),
+                            _ => {
+                                if let Some(bytes) = overview::input::key_event_to_bytes(&key) {
+                                    schedule_state.send_input(bytes);
+                                }
+                            }
+                        }
                     } else {
                         // Normal key handling (options bar, other tabs)
                         match key.code {
@@ -4055,6 +4085,14 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                         bytes.extend_from_slice(text.as_bytes());
                         bytes.extend_from_slice(b"\x1b[201~");
                         overview_state.send_input(bytes);
+                    } else if active_tab == ActiveTab::Schedule
+                        && schedule_state.focused_task_is_active()
+                    {
+                        let mut bytes = Vec::new();
+                        bytes.extend_from_slice(b"\x1b[200~");
+                        bytes.extend_from_slice(text.as_bytes());
+                        bytes.extend_from_slice(b"\x1b[201~");
+                        schedule_state.send_input(bytes);
                     }
                 }
                 Event::Resize(cols, rows) => {

@@ -8,9 +8,11 @@
 //!
 //! - **Inactive** — header pill + schedule info + plan/auto-exit pills, then
 //!   the prompt body (wrapping; scrollable on Y).
-//! - **Active** — header pill + embedded `TerminalEmulator`, identical look to
-//!   the Overview panel. We open our own attachment so the schedule view stays
-//!   live regardless of what Overview is doing.
+//! - **Active** — embedded `TerminalEmulator` filling the entire inner area
+//!   of the column. We open our own attachment so the schedule view stays
+//!   live regardless of what Overview is doing. When the panel is focused,
+//!   typing is forwarded straight to the agent's PTY (mirrors Overview's
+//!   terminal-focus key flow).
 //! - **Complete** — compact: branch name + small `✓`.
 //! - **Aborted** — header pill + prompt + restart hint.
 
@@ -309,11 +311,14 @@ impl ScheduleState {
         let count_fit = max_panels_for_width(content_area.width).max(1);
         let slots = count_fit.max(2);
         let panel_w = (content_area.width / slots as u16).max(MIN_PANEL_WIDTH);
-        // Header (1 line) + meta (1 line) + warning (variable, assume 0-1) +
-        // borders (2). The terminal area for active panels lives below.
+        // Active panels hand the entire inner area to the terminal (no inner
+        // header / hint rows), so the usable rows = panel_h − 2 borders.
+        // panel_cols/rows are only used to spawn fresh PTYs for newly-Active
+        // tasks; the per-frame `render_active_body` re-resizes to the actual
+        // inner rect.
         let panel_h = content_area.height;
         let inner_cols = panel_w.saturating_sub(2);
-        let inner_rows = panel_h.saturating_sub(3); // borders + header
+        let inner_rows = panel_h.saturating_sub(2);
         self.panel_cols = inner_cols.max(20);
         self.panel_rows = inner_rows.max(8);
         self.viewport_width = content_area.width;
@@ -416,6 +421,53 @@ impl ScheduleState {
                 entry.prompt_scroll = entry.prompt_scroll.saturating_add(1);
             }
         }
+    }
+
+    /// Forward raw bytes to the focused Active task's PTY. No-op if the
+    /// focused task isn't Active or has no live attachment.
+    pub fn send_input(&self, data: Vec<u8>) {
+        if let Some(panel) = self.focused_active_panel() {
+            let _ = panel.command_tx.try_send(PanelCommand::Input(data));
+        }
+    }
+
+    /// Scroll the focused Active panel's scrollback up by one page.
+    pub fn panel_scroll_up(&mut self) {
+        if let Some(task_id) = self.focused_active_task_id() {
+            if let Some(panel) = self.panels.get_mut(&task_id) {
+                let page = panel.vterm.rows();
+                let max = panel.vterm.scrollback_len();
+                panel.panel_scroll_offset = (panel.panel_scroll_offset + page).min(max);
+            }
+        }
+    }
+
+    /// Scroll the focused Active panel's scrollback down by one page.
+    pub fn panel_scroll_down(&mut self) {
+        if let Some(task_id) = self.focused_active_task_id() {
+            if let Some(panel) = self.panels.get_mut(&task_id) {
+                let page = panel.vterm.rows();
+                panel.panel_scroll_offset = panel.panel_scroll_offset.saturating_sub(page);
+            }
+        }
+    }
+
+    fn focused_active_task_id(&self) -> Option<String> {
+        match self.focus {
+            ScheduleFocus::Task(idx) => self
+                .tasks
+                .get(idx)
+                .filter(|t| {
+                    t.status == ScheduledTaskStatus::Active && self.panels.contains_key(&t.id)
+                })
+                .map(|t| t.id.clone()),
+            _ => None,
+        }
+    }
+
+    fn focused_active_panel(&self) -> Option<&AgentPanel> {
+        let task_id = self.focused_active_task_id()?;
+        self.panels.get(&task_id)
     }
 
     /// Take the cached TerminalEmulator + connection for the task's active
@@ -758,11 +810,15 @@ impl ScheduleState {
                 ),
                 ("\u{2191}/\u{2193}".into(), "scroll prompt".into(), None),
             ],
-            Some(ScheduledTaskStatus::Active) => vec![(
-                "Shift+\u{2193}".into(),
-                "focus mode (terminal)".into(),
-                Some(ScheduleHintKey::EnterFocusMode),
-            )],
+            Some(ScheduledTaskStatus::Active) => vec![
+                ("type".into(), "send to agent".into(), None),
+                (
+                    "Shift+\u{2193}".into(),
+                    "focus mode (terminal)".into(),
+                    Some(ScheduleHintKey::EnterFocusMode),
+                ),
+                ("PgUp/PgDn".into(), "scroll".into(), None),
+            ],
             Some(ScheduledTaskStatus::Aborted) => vec![
                 (
                     "e".into(),
@@ -1041,59 +1097,33 @@ impl ScheduleState {
     }
 
     fn render_active_body(&mut self, frame: &mut Frame, inner: Rect, task: &ScheduledTaskInfo) {
-        let header = Paragraph::new(Line::from(vec![
-            Span::styled(
-                "ACTIVE ",
-                Style::default()
-                    .fg(theme::R_SUCCESS)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            pill("PLAN", task.plan_mode, theme::R_WARNING),
-            pill("AUTO-EXIT", task.auto_exit, theme::R_INFO),
-        ]));
-        // Sub-line nudges the user toward the only meaningful action on an
-        // Active panel: dropping into focus mode for the live PTY.
-        let action_hint = Paragraph::new(Line::from(vec![
-            Span::styled("Press ", Style::default().fg(theme::R_TEXT_TERTIARY)),
-            Span::styled(
-                "Shift+\u{2193}",
-                Style::default()
-                    .fg(theme::R_ACCENT_BRIGHT)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(
-                " for focus mode",
-                Style::default().fg(theme::R_TEXT_TERTIARY),
-            ),
-        ]));
-        let [hdr_area, hint_area, term_area] = Layout::vertical([
-            Constraint::Length(1),
-            Constraint::Length(1),
-            Constraint::Min(1),
-        ])
-        .areas(inner);
-        frame.render_widget(header, hdr_area);
-        frame.render_widget(action_hint, hint_area);
+        // Active panels hand the entire inner area to the live PTY so the
+        // terminal output gets the maximum width and height. Status pills and
+        // hints would only steal rows the user wants to see; the keybind
+        // footer at the bottom of the tab already documents Shift+↓.
         if let Some(panel) = self.panels.get_mut(&task.id) {
-            // Resize the vterm to the actual area before rendering so wrapping
-            // matches the on-screen width even if the panel grew/shrank since
-            // the last `resize_panels_to` call.
-            let cols = term_area.width.max(20);
-            let rows = term_area.height.max(4);
+            let cols = inner.width.max(20);
+            let rows = inner.height.max(4);
             if panel.vterm.cols() != cols as usize || panel.vterm.rows() != rows as usize {
                 panel.vterm.resize(cols as usize, rows as usize);
                 let _ = panel
                     .command_tx
                     .try_send(PanelCommand::Resize { cols, rows });
             }
-            let lines = panel.vterm.to_ratatui_lines();
-            frame.render_widget(Paragraph::new(lines), term_area);
+            let lines = if panel.panel_scroll_offset > 0 {
+                panel
+                    .vterm
+                    .to_ratatui_lines_scrolled(panel.panel_scroll_offset)
+            } else {
+                panel.vterm.to_ratatui_lines()
+            };
+            frame.render_widget(Paragraph::new(lines), inner);
         } else {
             let p = Paragraph::new(Span::styled(
                 "(connecting…)",
                 Style::default().fg(theme::R_TEXT_TERTIARY),
             ));
-            frame.render_widget(p, term_area);
+            frame.render_widget(p, inner);
         }
     }
 
