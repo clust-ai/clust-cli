@@ -474,13 +474,13 @@ A third top-level tab next to Repositories and Overview, dedicated to **persiste
 
 **Layout.** A single-row **top bar** (mirroring the Overview options bar) above a horizontal grid of vertical task columns, with a fixed two-row **keybind hint footer** below so every applicable shortcut is visible at a glance. `Shift+Left` / `Shift+Right` focus the previous / next column; `Shift+Down` enters focus mode (Active tasks only).
 
-**Top bar.** Shows the same kind of summary as the Overview options bar, minus the click/collapse affordances (Schedule has neither yet). On the left, one chip per repo that currently has a scheduled task: a coloured `●` plus the repo name in primary text. A vertical-bar separator follows, then one branch indicator per task. Branch indicators are coloured by repo: tasks visible on screen render in inverse video (repo-coloured background, primary-text foreground); tasks scrolled off render in repo-coloured text on the bar background.
+**Top bar.** Shows the same kind of summary as the Overview options bar. On the left, one chip per repo that currently has a scheduled task: a coloured `●` plus the repo name in primary text. A vertical-bar separator follows, then one branch indicator per task. Branch indicators are coloured by repo: tasks visible on screen render in inverse video (repo-coloured background, primary-text foreground); tasks scrolled off render in repo-coloured text on the bar background. Each branch chip is **clickable** — clicking one focuses that task and scrolls the panel grid until it is visible (handy when many tasks have been scheduled at once and only some fit on screen).
 
 **Repo grouping.** Tasks are sorted by repo (using the same order as the Overview repo chips), then by `created_at`, then by id. Each task's column border tints with its repo colour — full colour when focused, dimmed when unfocused — so the same per-repo palette used in Overview applies here. When the focused task survives a re-sync that reshuffles indices, focus follows the task by id rather than staying glued to the numeric slot.
 
 **Keybind hint footer (bottom 2 rows of the tab area):**
-- Row 1 (always the same): `Shift+←/→ switch panel · Opt+S new task · d/Del delete · Shift+C clear by status · ? help`.
-- Row 2 (status-aware): a colored status pill (`INACTIVE` / `ACTIVE` / `ABORTED` / `COMPLETE`) followed by only the bindings that apply to the focused task — e.g. for Inactive: `e edit prompt · p toggle plan · x toggle auto-exit · s start now · ↑/↓ scroll prompt`. When no task is focused (empty list), row 2 invites the user to press `Opt+S` to begin. Keys are rendered in `R_ACCENT_BRIGHT` bold; descriptions in `R_TEXT_SECONDARY`; separators in `R_TEXT_DISABLED`.
+- Row 1 (always the same): `Shift+← prev · Shift+→ next · Opt+S new task · d/Del delete · Shift+C clear by status · ? help`.
+- Row 2 (status-aware): a colored status pill (`INACTIVE` / `ACTIVE` / `ABORTED` / `COMPLETE`) followed by only the bindings that apply to the focused task — e.g. for Inactive: `e edit prompt · p toggle plan · x toggle auto-exit · s start now · ↑/↓ scroll prompt`. When no task is focused (empty list), row 2 invites the user to press `Opt+S` to begin. Keys are rendered in `R_ACCENT_BRIGHT` bold; descriptions in `R_TEXT_SECONDARY`; separators in `R_TEXT_DISABLED`. **The footer is also a clickable button strip** — clicking any hint with a defined key fires the same action (e.g. clicking `e edit prompt` opens the edit-prompt modal). The `↑/↓ scroll prompt` hint is the only non-clickable hint, since its action is the wheel itself.
 
 **Per-column rendering depends on `status`:**
 
@@ -689,6 +689,9 @@ A `ClickMap` struct is populated during each render pass and consumed during mou
 - `overview_panels` -- Overview tab panel regions mapped to global panel indices
 - `overview_repo_buttons` -- Overview tab repo group block regions mapped to repo path strings (click to toggle collapse/expand)
 - `overview_agent_indicators` -- Overview tab agent indicator regions within repo group blocks mapped to global panel indices (click to focus agent)
+- `schedule_panels` -- Schedule tab task panel regions mapped to task indices (click to focus the task)
+- `schedule_branch_indicators` -- Schedule tab top-bar branch chip regions mapped to task indices (click to focus + scroll into view)
+- `schedule_hint_keys` -- Schedule tab footer keybind hints mapped to `ScheduleHintKey` values (click fires the same action the key would)
 - `focus_left_area` / `focus_right_area` -- Focus mode panel areas for focus switching
 - `focus_left_tabs` -- Focus mode left panel tab regions mapped to `LeftPanelTab` values
 - `overview_content_areas` -- Overview tab terminal content areas (inner area excluding borders/header) mapped to global panel indices, used for Cmd+click URL detection
@@ -720,6 +723,17 @@ The right panel is view-only — clicks in it have no effect. To interact with a
 | Agent indicator (within repo block) | Focus that agent's terminal panel (`OverviewFocus::Terminal(idx)`) |
 | Agent panel | Focus that terminal panel (`OverviewFocus::Terminal(idx)`) |
 
+**Schedule tab:**
+
+| Click Target | Action |
+|--------------|--------|
+| Branch chip in top bar | Focus that task and scroll the panel grid until it is visible |
+| Task panel | Focus that task |
+| Footer keybind hint (e.g. `e edit prompt`, `s start now`, `r restart`) | Trigger the same action the key would (the click is dispatched through `ScheduleState::handle_key`, so all status/focus rules apply identically) |
+| Footer keybind hint (`Opt+S new task`, `?` help) | Open the schedule modal / show the help overlay (mirrors the global keyboard shortcut) |
+
+The hint footer is two rows: the top row holds globally-applicable hints (prev/next panel, new task, delete, clear, help) and the bottom row holds focus-specific hints whose contents change with the focused task's status (Inactive / Active / Aborted / Complete). All hints with a defined keystroke are clickable; the `↑/↓ scroll prompt` hint on the Inactive row is not (scrolling is handled via the wheel instead). Each hit zone covers the full `key + space + description` width so the user can click sloppily and still hit the right action.
+
 **Focus mode:**
 
 | Click Target | Action |
@@ -750,6 +764,12 @@ Scroll wheel events scroll the element under the mouse cursor rather than the ke
 | Cursor Position | Scroll Action |
 |-----------------|---------------|
 | Over an agent panel | Scroll that panel's scrollback up/down (regardless of which panel has keyboard focus) |
+
+**Schedule tab:**
+
+| Cursor Position | Scroll Action |
+|-----------------|---------------|
+| Over a task panel | Scroll that task's prompt up/down by one line per wheel tick (1 line). For Inactive/Aborted tasks this scrolls the prompt body; for Active tasks the wheel scroll has no visible effect because the panel embeds a live agent vterm whose scrollback is reachable from focus mode. Focus is **not** changed by the wheel — the user can scroll a panel's prompt without losing their current task selection. |
 
 **Focus mode:**
 
