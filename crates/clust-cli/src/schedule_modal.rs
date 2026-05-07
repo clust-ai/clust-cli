@@ -1264,7 +1264,7 @@ pub fn parse_time(input: &str, now: chrono::DateTime<Utc>) -> Result<chrono::Dat
         if h > 23 || m > 59 {
             return Err("HH:MM out of range".into());
         }
-        let local_now = Local::now();
+        let local_now = now.with_timezone(&Local);
         let today = local_now.date_naive();
         let target_naive_today = today
             .and_time(NaiveTime::from_hms_opt(h, m, 0).ok_or_else(invalid_msg)?);
