@@ -21,7 +21,7 @@ pub const DEFAULT_HUB: &str = "default_hub";
 /// because the CLI bounces an outdated hub via `connect_to_hub`. See
 /// `validate_client_version` for a helper hubs may use to reject mismatched
 /// clients explicitly.
-pub const PROTOCOL_VERSION: u32 = 9;
+pub const PROTOCOL_VERSION: u32 = 10;
 
 /// Maximum size of a single IPC message payload.
 ///
@@ -83,6 +83,16 @@ pub enum CliMessage {
     StopHub,
     StopAgent {
         id: String,
+    },
+    /// Toggle a running agent's `auto_exit` flag. When `auto_exit=false` the
+    /// hub neutralizes the per-spawn settings file so the Stop hook stops
+    /// firing; the agent process keeps running until the user stops it
+    /// manually. Setting `auto_exit=true` only works for agents whose
+    /// settings file was injected at spawn time — agents started without
+    /// `--settings` cannot opt in retroactively.
+    SetAgentAutoExit {
+        id: String,
+        auto_exit: bool,
     },
     SetDefault {
         agent_binary: String,
@@ -805,6 +815,15 @@ mod tests {
     async fn cli_stop_agent() {
         assert_cli_round_trip(CliMessage::StopAgent {
             id: "abc123".into(),
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn cli_set_agent_auto_exit() {
+        assert_cli_round_trip(CliMessage::SetAgentAutoExit {
+            id: "abc123".into(),
+            auto_exit: false,
         })
         .await;
     }
