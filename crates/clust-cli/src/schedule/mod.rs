@@ -33,6 +33,7 @@ use crate::overview::{
 };
 use crate::terminal_emulator::TerminalEmulator;
 use crate::theme;
+use crate::ui::{ClickMap, ScheduleHintKey};
 
 /// Minimum width of a single task column. Below this, columns scroll horizontally.
 const MIN_PANEL_WIDTH: u16 = 60;
@@ -65,7 +66,10 @@ pub enum ScheduleAction {
     /// Restart an Aborted task.
     Restart { task_id: String, clean: bool },
     /// Show a confirmation menu before deleting this single task.
-    ConfirmDelete { task_id: String, branch_name: String },
+    ConfirmDelete {
+        task_id: String,
+        branch_name: String,
+    },
     /// Show the "clear by status" sub-menu (Complete / Aborted / both).
     OpenClearMenu,
     /// Enter focus mode on the currently-focused Active task.
@@ -247,10 +251,9 @@ impl ScheduleState {
         let event_tx = self.output_tx.clone();
         let (command_tx, command_rx) = mpsc::channel::<PanelCommand>(64);
         let aid = agent_id.to_string();
-        let handle =
-            tokio::task::spawn(
-                async move { agent_connection_task(aid, cols, rows, event_tx, command_rx).await },
-            );
+        let handle = tokio::task::spawn(async move {
+            agent_connection_task(aid, cols, rows, event_tx, command_rx).await
+        });
         self.panels.insert(
             task_id.to_string(),
             AgentPanel {
@@ -282,8 +285,7 @@ impl ScheduleState {
                         }
                     }
                 }
-                AgentOutputEvent::Exited { id, .. }
-                | AgentOutputEvent::ConnectionLost { id } => {
+                AgentOutputEvent::Exited { id, .. } | AgentOutputEvent::ConnectionLost { id } => {
                     if let Some(task_id) = self.task_id_for_agent(&id) {
                         if let Some(panel) = self.panels.get_mut(&task_id) {
                             panel.exited = true;
@@ -331,6 +333,32 @@ impl ScheduleState {
     }
 
     // -- Navigation --
+
+    /// Set focus to the task at `idx` and scroll it into view. No-op if the
+    /// index is out of range. Used by the mouse handler when a panel or
+    /// branch indicator is clicked.
+    pub fn focus_task_index(&mut self, idx: usize) {
+        if idx < self.tasks.len() {
+            self.focus = ScheduleFocus::Task(idx);
+            self.ensure_visible(idx);
+        }
+    }
+
+    /// Adjust the prompt scroll on the task at `idx` by `delta` lines (positive
+    /// scrolls down, negative scrolls up). Does not change focus, so the user
+    /// can scroll a panel's prompt without losing their selected task.
+    pub fn scroll_prompt_at(&mut self, idx: usize, delta: i32) {
+        if let Some(task) = self.tasks.get(idx) {
+            let entry = self.ui.entry(task.id.clone()).or_default();
+            if delta < 0 {
+                entry.prompt_scroll = entry
+                    .prompt_scroll
+                    .saturating_sub(delta.unsigned_abs() as u16);
+            } else {
+                entry.prompt_scroll = entry.prompt_scroll.saturating_add(delta as u16);
+            }
+        }
+    }
 
     pub fn focus_prev(&mut self) {
         if let ScheduleFocus::Task(idx) = self.focus {
@@ -553,6 +581,7 @@ impl ScheduleState {
         area: Rect,
         repos: &[RepoInfo],
         repo_colors: &HashMap<String, String>,
+        click_map: &mut ClickMap,
     ) {
         let hint_height: u16 = 2;
         let bar_height: u16 = 1;
@@ -568,8 +597,8 @@ impl ScheduleState {
             .areas(area);
             (b, p, h)
         } else if area.height > bar_height + 1 {
-            let [b, p] = Layout::vertical([Constraint::Length(bar_height), Constraint::Min(1)])
-                .areas(area);
+            let [b, p] =
+                Layout::vertical([Constraint::Length(bar_height), Constraint::Min(1)]).areas(area);
             (b, p, Rect::new(area.x, area.y + area.height, area.width, 0))
         } else {
             (
@@ -584,7 +613,7 @@ impl ScheduleState {
             // shift the moment a task appears.
             render_empty_bar(frame, bar_area);
             self.render_empty(frame, panels_area);
-            self.render_keybind_hint_bar(frame, hint_area, None);
+            self.render_keybind_hint_bar(frame, hint_area, None, click_map);
             return;
         }
         self.resize_panels_to(panels_area);
@@ -609,10 +638,10 @@ impl ScheduleState {
         } else {
             HashSet::new()
         };
-        self.render_options_bar(frame, bar_area, repos, &visible_set);
+        self.render_options_bar(frame, bar_area, repos, &visible_set, click_map);
 
         if constraints.is_empty() {
-            self.render_keybind_hint_bar(frame, hint_area, None);
+            self.render_keybind_hint_bar(frame, hint_area, None, click_map);
             return;
         }
         let panel_areas = Layout::horizontal(constraints).split(panels_area);
@@ -626,16 +655,13 @@ impl ScheduleState {
 
         for (display_idx, &task_idx) in visible_indices.iter().enumerate() {
             let area = panel_areas[display_idx];
+            click_map.schedule_panels.push((area, task_idx));
             let task_clone;
             let prompt_scroll;
             {
                 let task = &self.tasks[task_idx];
                 task_clone = task.clone();
-                prompt_scroll = self
-                    .ui
-                    .get(&task.id)
-                    .map(|s| s.prompt_scroll)
-                    .unwrap_or(0);
+                prompt_scroll = self.ui.get(&task.id).map(|s| s.prompt_scroll).unwrap_or(0);
             }
             let is_focused = focused_task_id.as_deref() == Some(task_clone.id.as_str());
             let dep_warning = *any_dep_warning_map.get(&task_clone.id).unwrap_or(&false);
@@ -655,17 +681,19 @@ impl ScheduleState {
         }
 
         let focused_status = self.focused_task().map(|t| t.status);
-        self.render_keybind_hint_bar(frame, hint_area, focused_status);
+        self.render_keybind_hint_bar(frame, hint_area, focused_status, click_map);
     }
 
     /// Two-row keybind hint footer so the user can see every shortcut at a
     /// glance. Top row = always-available bindings, bottom row = bindings
-    /// specific to the focused task's status.
+    /// specific to the focused task's status. Each pair is recorded into the
+    /// click map so a click on a key hint fires the same action.
     fn render_keybind_hint_bar(
         &self,
         frame: &mut Frame,
         area: Rect,
         focused_status: Option<ScheduledTaskStatus>,
+        click_map: &mut ClickMap,
     ) {
         if area.height == 0 {
             return;
@@ -676,39 +704,98 @@ impl ScheduleState {
             "Alt"
         };
 
-        let common_pairs: Vec<(String, String)> = vec![
-            ("Shift+\u{2190}/\u{2192}".into(), "switch panel".into()),
-            (format!("{mod_key}+S"), "new task".into()),
-            ("d/Del".into(), "delete".into()),
-            ("Shift+C".into(), "clear by status".into()),
-            ("?".into(), "help".into()),
+        let common_pairs: Vec<(String, String, Option<ScheduleHintKey>)> = vec![
+            (
+                "Shift+\u{2190}".into(),
+                "prev".into(),
+                Some(ScheduleHintKey::PrevPanel),
+            ),
+            (
+                "Shift+\u{2192}".into(),
+                "next".into(),
+                Some(ScheduleHintKey::NextPanel),
+            ),
+            (
+                format!("{mod_key}+S"),
+                "new task".into(),
+                Some(ScheduleHintKey::NewTask),
+            ),
+            (
+                "d/Del".into(),
+                "delete".into(),
+                Some(ScheduleHintKey::Delete),
+            ),
+            (
+                "Shift+C".into(),
+                "clear by status".into(),
+                Some(ScheduleHintKey::ClearByStatus),
+            ),
+            ("?".into(), "help".into(), Some(ScheduleHintKey::Help)),
         ];
 
         // Bottom row: actions that apply only to the focused task's current state.
-        let status_pairs: Vec<(String, String)> = match focused_status {
+        let status_pairs: Vec<(String, String, Option<ScheduleHintKey>)> = match focused_status {
             Some(ScheduledTaskStatus::Inactive) => vec![
-                ("e".into(), "edit prompt".into()),
-                ("p".into(), "toggle plan".into()),
-                ("x".into(), "toggle auto-exit".into()),
-                ("s".into(), "start now".into()),
-                ("\u{2191}/\u{2193}".into(), "scroll prompt".into()),
+                (
+                    "e".into(),
+                    "edit prompt".into(),
+                    Some(ScheduleHintKey::EditPrompt),
+                ),
+                (
+                    "p".into(),
+                    "toggle plan".into(),
+                    Some(ScheduleHintKey::TogglePlan),
+                ),
+                (
+                    "x".into(),
+                    "toggle auto-exit".into(),
+                    Some(ScheduleHintKey::ToggleAutoExit),
+                ),
+                (
+                    "s".into(),
+                    "start now".into(),
+                    Some(ScheduleHintKey::StartNow),
+                ),
+                ("\u{2191}/\u{2193}".into(), "scroll prompt".into(), None),
             ],
-            Some(ScheduledTaskStatus::Active) => vec![
-                ("Shift+\u{2193}".into(), "focus mode (terminal)".into()),
-            ],
+            Some(ScheduledTaskStatus::Active) => vec![(
+                "Shift+\u{2193}".into(),
+                "focus mode (terminal)".into(),
+                Some(ScheduleHintKey::EnterFocusMode),
+            )],
             Some(ScheduledTaskStatus::Aborted) => vec![
-                ("e".into(), "edit prompt".into()),
-                ("p".into(), "toggle plan".into()),
-                ("x".into(), "toggle auto-exit".into()),
-                ("r".into(), "restart".into()),
-                ("Shift+R".into(), "clean restart".into()),
+                (
+                    "e".into(),
+                    "edit prompt".into(),
+                    Some(ScheduleHintKey::EditPrompt),
+                ),
+                (
+                    "p".into(),
+                    "toggle plan".into(),
+                    Some(ScheduleHintKey::TogglePlan),
+                ),
+                (
+                    "x".into(),
+                    "toggle auto-exit".into(),
+                    Some(ScheduleHintKey::ToggleAutoExit),
+                ),
+                ("r".into(), "restart".into(), Some(ScheduleHintKey::Restart)),
+                (
+                    "Shift+R".into(),
+                    "clean restart".into(),
+                    Some(ScheduleHintKey::CleanRestart),
+                ),
             ],
-            Some(ScheduledTaskStatus::Complete) => vec![
-                ("d/Del".into(), "delete completed task".into()),
-            ],
-            None => vec![
-                (format!("{mod_key}+S"), "schedule a task to begin".into()),
-            ],
+            Some(ScheduledTaskStatus::Complete) => vec![(
+                "d/Del".into(),
+                "delete completed task".into(),
+                Some(ScheduleHintKey::Delete),
+            )],
+            None => vec![(
+                format!("{mod_key}+S"),
+                "schedule a task to begin".into(),
+                Some(ScheduleHintKey::NewTask),
+            )],
         };
 
         let status_label = match focused_status {
@@ -728,28 +815,28 @@ impl ScheduleState {
         };
 
         // Top row: common keybinds, no status label.
-        frame.render_widget(
-            Paragraph::new(Line::from(build_hint_spans(&common_pairs, None))),
-            chunks[0],
-        );
+        let (top_spans, top_hits) = build_hint_spans_with_hits(&common_pairs, None, chunks[0]);
+        frame.render_widget(Paragraph::new(Line::from(top_spans)), chunks[0]);
+        click_map.schedule_hint_keys.extend(top_hits);
 
         if chunks.len() > 1 {
-            frame.render_widget(
-                Paragraph::new(Line::from(build_hint_spans(&status_pairs, status_label))),
-                chunks[1],
-            );
+            let (bot_spans, bot_hits) =
+                build_hint_spans_with_hits(&status_pairs, status_label, chunks[1]);
+            frame.render_widget(Paragraph::new(Line::from(bot_spans)), chunks[1]);
+            click_map.schedule_hint_keys.extend(bot_hits);
         }
     }
 
     /// Render the schedule top bar: repo chips on the left, branch indicators
-    /// on the right. Mirrors Overview's options bar minus the click/collapse
-    /// affordances (Schedule has neither yet).
+    /// on the right. Branch indicators are clickable — clicking one focuses
+    /// the corresponding task and scrolls it into view.
     fn render_options_bar(
         &self,
         frame: &mut Frame,
         area: Rect,
         repos: &[RepoInfo],
         visible_set: &HashSet<usize>,
+        click_map: &mut ClickMap,
     ) {
         let bar_bg = theme::R_BG_RAISED;
 
@@ -763,10 +850,16 @@ impl ScheduleState {
 
         // Only show chips for repos that actually have tasks scheduled —
         // matches what users care about on this tab and avoids a noisy bar.
-        let used_paths: HashSet<&str> =
-            self.tasks.iter().map(|t| t.repo_path.as_str()).collect();
+        let used_paths: HashSet<&str> = self.tasks.iter().map(|t| t.repo_path.as_str()).collect();
         let mut spans: Vec<Span> = Vec::new();
+        let mut col_cursor: u16 = area.x;
         let mut shown_any_repo = false;
+
+        let push_span =
+            |span: Span<'static>, spans: &mut Vec<Span<'static>>, col_cursor: &mut u16| {
+                *col_cursor = col_cursor.saturating_add(span.content.chars().count() as u16);
+                spans.push(span);
+            };
 
         for repo in repos.iter() {
             if !used_paths.contains(repo.path.as_str()) {
@@ -778,25 +871,35 @@ impl ScheduleState {
                 .map(|c| theme::repo_color(c))
                 .unwrap_or(theme::R_ACCENT);
 
-            spans.push(Span::styled(
-                " \u{25cf} ",
-                Style::default().fg(color).bg(bar_bg),
-            ));
-            spans.push(Span::styled(
-                format!("{} ", repo.name),
-                Style::default().fg(theme::R_TEXT_PRIMARY).bg(bar_bg),
-            ));
+            push_span(
+                Span::styled(" \u{25cf} ", Style::default().fg(color).bg(bar_bg)),
+                &mut spans,
+                &mut col_cursor,
+            );
+            push_span(
+                Span::styled(
+                    format!("{} ", repo.name),
+                    Style::default().fg(theme::R_TEXT_PRIMARY).bg(bar_bg),
+                ),
+                &mut spans,
+                &mut col_cursor,
+            );
             shown_any_repo = true;
         }
 
         if shown_any_repo && !self.tasks.is_empty() {
-            spans.push(Span::styled(
-                " \u{2502} ",
-                Style::default().fg(theme::R_TEXT_TERTIARY).bg(bar_bg),
-            ));
+            push_span(
+                Span::styled(
+                    " \u{2502} ",
+                    Style::default().fg(theme::R_TEXT_TERTIARY).bg(bar_bg),
+                ),
+                &mut spans,
+                &mut col_cursor,
+            );
         }
 
-        // Branch indicators — tasks are already in repo-sorted order.
+        // Branch indicators — tasks are already in repo-sorted order. Each
+        // chip records its rect so a click can focus that task.
         for (idx, task) in self.tasks.iter().enumerate() {
             let repo_color = repos
                 .iter()
@@ -811,7 +914,25 @@ impl ScheduleState {
             } else {
                 Style::default().fg(repo_color).bg(bar_bg)
             };
-            spans.push(Span::styled(format!(" {} ", task.branch_name), style));
+            let label = format!(" {} ", task.branch_name);
+            let label_w = label.chars().count() as u16;
+            let chip_x = col_cursor;
+            let chip_rect = Rect::new(chip_x, area.y, label_w.min(area.width), area.height);
+            // Clamp to the bar's right edge in case the chip would overflow —
+            // overflow chips just won't be clickable past the visible width.
+            if chip_x < area.x + area.width {
+                let clipped_w = (area.x + area.width).saturating_sub(chip_x);
+                let safe_rect = Rect::new(
+                    chip_x,
+                    chip_rect.y,
+                    label_w.min(clipped_w),
+                    chip_rect.height,
+                );
+                if safe_rect.width > 0 {
+                    click_map.schedule_branch_indicators.push((safe_rect, idx));
+                }
+            }
+            push_span(Span::styled(label, style), &mut spans, &mut col_cursor);
         }
 
         // Pad remaining width so the bar paints edge-to-edge in the bar bg.
@@ -842,10 +963,7 @@ impl ScheduleState {
             )),
             Line::from(""),
             Line::from(vec![
-                Span::styled(
-                    "Press ",
-                    Style::default().fg(theme::R_TEXT_TERTIARY),
-                ),
+                Span::styled("Press ", Style::default().fg(theme::R_TEXT_TERTIARY)),
                 Span::styled(
                     format!("{mod_key}+S"),
                     Style::default()
@@ -859,10 +977,7 @@ impl ScheduleState {
             ]),
             Line::from(""),
             Line::from(vec![
-                Span::styled(
-                    "or press ",
-                    Style::default().fg(theme::R_TEXT_TERTIARY),
-                ),
+                Span::styled("or press ", Style::default().fg(theme::R_TEXT_TERTIARY)),
                 Span::styled(
                     "?",
                     Style::default()
@@ -919,14 +1034,9 @@ impl ScheduleState {
             ScheduledTaskStatus::Aborted => {
                 render_inactive_or_aborted_body(frame, inner, task, prompt_scroll, dep_warning, now)
             }
-            ScheduledTaskStatus::Inactive => render_inactive_or_aborted_body(
-                frame,
-                inner,
-                task,
-                prompt_scroll,
-                dep_warning,
-                now,
-            ),
+            ScheduledTaskStatus::Inactive => {
+                render_inactive_or_aborted_body(frame, inner, task, prompt_scroll, dep_warning, now)
+            }
         }
     }
 
@@ -944,10 +1054,7 @@ impl ScheduleState {
         // Sub-line nudges the user toward the only meaningful action on an
         // Active panel: dropping into focus mode for the live PTY.
         let action_hint = Paragraph::new(Line::from(vec![
-            Span::styled(
-                "Press ",
-                Style::default().fg(theme::R_TEXT_TERTIARY),
-            ),
+            Span::styled("Press ", Style::default().fg(theme::R_TEXT_TERTIARY)),
             Span::styled(
                 "Shift+\u{2193}",
                 Style::default()
@@ -1049,20 +1156,14 @@ fn render_complete_body(frame: &mut Frame, inner: Rect, task: &ScheduledTaskInfo
         )),
         Line::from(""),
         Line::from(vec![
-            Span::styled(
-                "press ",
-                Style::default().fg(theme::R_TEXT_TERTIARY),
-            ),
+            Span::styled("press ", Style::default().fg(theme::R_TEXT_TERTIARY)),
             Span::styled(
                 "d",
                 Style::default()
                     .fg(theme::R_ACCENT_BRIGHT)
                     .add_modifier(Modifier::BOLD),
             ),
-            Span::styled(
-                " to remove",
-                Style::default().fg(theme::R_TEXT_TERTIARY),
-            ),
+            Span::styled(" to remove", Style::default().fg(theme::R_TEXT_TERTIARY)),
         ]),
     ];
     let p = Paragraph::new(lines).alignment(Alignment::Center);
@@ -1100,7 +1201,11 @@ fn render_inactive_or_aborted_body(
         pill("AUTO-EXIT", task.auto_exit, theme::R_INFO),
     ]));
 
-    let sched_line = Paragraph::new(Line::from(schedule_line_spans(&task.schedule, aborted, now)));
+    let sched_line = Paragraph::new(Line::from(schedule_line_spans(
+        &task.schedule,
+        aborted,
+        now,
+    )));
 
     let warning_line = if dep_warning {
         Some(Paragraph::new(Span::styled(
@@ -1149,42 +1254,79 @@ fn prompt_paragraph(task: &ScheduledTaskInfo, scroll: u16) -> Paragraph<'static>
 
 /// Render a row of `key — description` pairs separated by middle dots,
 /// optionally prefixed with a colored status pill (`[INACTIVE]` etc.).
-fn build_hint_spans(
-    pairs: &[(String, String)],
+/// Also computes a click rect for each pair tagged with a [`ScheduleHintKey`]
+/// so the footer doubles as a clickable button strip.
+fn build_hint_spans_with_hits(
+    pairs: &[(String, String, Option<ScheduleHintKey>)],
     status_label: Option<(&str, ratatui::style::Color)>,
-) -> Vec<Span<'static>> {
+    row_area: Rect,
+) -> (Vec<Span<'static>>, Vec<(Rect, ScheduleHintKey)>) {
     let mut spans: Vec<Span<'static>> = Vec::new();
-    spans.push(Span::raw(" "));
+    let mut hits: Vec<(Rect, ScheduleHintKey)> = Vec::new();
+    let mut col: u16 = row_area.x;
+    let row_y = row_area.y;
+    let row_end = row_area.x + row_area.width;
+    let row_h = row_area.height.max(1);
+
+    let push = |span: Span<'static>, spans: &mut Vec<Span<'static>>, col: &mut u16| {
+        let w = span.content.chars().count() as u16;
+        spans.push(span);
+        *col = col.saturating_add(w);
+    };
+
+    push(Span::raw(" "), &mut spans, &mut col);
     if let Some((label, color)) = status_label {
-        spans.push(Span::styled(
-            format!(" {label} "),
-            Style::default()
-                .fg(theme::R_BG_BASE)
-                .bg(color)
-                .add_modifier(Modifier::BOLD),
-        ));
-        spans.push(Span::raw("  "));
+        push(
+            Span::styled(
+                format!(" {label} "),
+                Style::default()
+                    .fg(theme::R_BG_BASE)
+                    .bg(color)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            &mut spans,
+            &mut col,
+        );
+        push(Span::raw("  "), &mut spans, &mut col);
     }
-    for (i, (key, desc)) in pairs.iter().enumerate() {
+    for (i, (key, desc, hint_key)) in pairs.iter().enumerate() {
         if i > 0 {
-            spans.push(Span::styled(
-                "  \u{00b7}  ",
-                Style::default().fg(theme::R_TEXT_DISABLED),
-            ));
+            push(
+                Span::styled("  \u{00b7}  ", Style::default().fg(theme::R_TEXT_DISABLED)),
+                &mut spans,
+                &mut col,
+            );
         }
-        spans.push(Span::styled(
-            key.clone(),
-            Style::default()
-                .fg(theme::R_ACCENT_BRIGHT)
-                .add_modifier(Modifier::BOLD),
-        ));
-        spans.push(Span::raw(" "));
-        spans.push(Span::styled(
-            desc.clone(),
-            Style::default().fg(theme::R_TEXT_SECONDARY),
-        ));
+        let pair_start = col;
+        push(
+            Span::styled(
+                key.clone(),
+                Style::default()
+                    .fg(theme::R_ACCENT_BRIGHT)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            &mut spans,
+            &mut col,
+        );
+        push(Span::raw(" "), &mut spans, &mut col);
+        push(
+            Span::styled(desc.clone(), Style::default().fg(theme::R_TEXT_SECONDARY)),
+            &mut spans,
+            &mut col,
+        );
+        if let Some(hk) = hint_key {
+            // The whole "key + space + description" is the click hit zone so
+            // users can click sloppily and still hit the right action. Clamp
+            // to the visible row width.
+            if pair_start < row_end {
+                let end = col.min(row_end);
+                if end > pair_start {
+                    hits.push((Rect::new(pair_start, row_y, end - pair_start, row_h), *hk));
+                }
+            }
+        }
     }
-    spans
+    (spans, hits)
 }
 
 fn pill<'a>(label: &'a str, on: bool, on_color: ratatui::style::Color) -> Span<'a> {
@@ -1306,9 +1448,21 @@ mod tests {
         sync(
             &mut state,
             vec![
-                task("a", ScheduledTaskStatus::Inactive, ScheduleKind::Unscheduled),
-                task("b", ScheduledTaskStatus::Inactive, ScheduleKind::Unscheduled),
-                task("c", ScheduledTaskStatus::Inactive, ScheduleKind::Unscheduled),
+                task(
+                    "a",
+                    ScheduledTaskStatus::Inactive,
+                    ScheduleKind::Unscheduled,
+                ),
+                task(
+                    "b",
+                    ScheduledTaskStatus::Inactive,
+                    ScheduleKind::Unscheduled,
+                ),
+                task(
+                    "c",
+                    ScheduledTaskStatus::Inactive,
+                    ScheduleKind::Unscheduled,
+                ),
             ],
         );
         state.focus = ScheduleFocus::Task(2);
@@ -1357,7 +1511,11 @@ mod tests {
     #[test]
     fn dep_warning_when_upstream_no_auto_exit() {
         let mut state = ScheduleState::new();
-        let mut up = task("u", ScheduledTaskStatus::Inactive, ScheduleKind::Unscheduled);
+        let mut up = task(
+            "u",
+            ScheduledTaskStatus::Inactive,
+            ScheduleKind::Unscheduled,
+        );
         up.auto_exit = false;
         let down = task(
             "d",
@@ -1375,7 +1533,11 @@ mod tests {
     #[test]
     fn dep_warning_clears_when_upstream_completes() {
         let mut state = ScheduleState::new();
-        let mut up = task("u", ScheduledTaskStatus::Complete, ScheduleKind::Unscheduled);
+        let mut up = task(
+            "u",
+            ScheduledTaskStatus::Complete,
+            ScheduleKind::Unscheduled,
+        );
         up.auto_exit = false;
         let down = task(
             "d",
@@ -1392,7 +1554,11 @@ mod tests {
     #[test]
     fn dep_warning_off_when_upstream_auto_exits() {
         let mut state = ScheduleState::new();
-        let mut up = task("u", ScheduledTaskStatus::Inactive, ScheduleKind::Unscheduled);
+        let mut up = task(
+            "u",
+            ScheduledTaskStatus::Inactive,
+            ScheduleKind::Unscheduled,
+        );
         up.auto_exit = true;
         let down = task(
             "d",
@@ -1527,13 +1693,25 @@ mod tests {
             local_branches: vec![],
             remote_branches: vec![],
         };
-        let mut t1 = task("1", ScheduledTaskStatus::Inactive, ScheduleKind::Unscheduled);
+        let mut t1 = task(
+            "1",
+            ScheduledTaskStatus::Inactive,
+            ScheduleKind::Unscheduled,
+        );
         t1.repo_path = "/repo-b".into();
         t1.created_at = "2026-05-06T10:00:00Z".into();
-        let mut t2 = task("2", ScheduledTaskStatus::Inactive, ScheduleKind::Unscheduled);
+        let mut t2 = task(
+            "2",
+            ScheduledTaskStatus::Inactive,
+            ScheduleKind::Unscheduled,
+        );
         t2.repo_path = "/repo-a".into();
         t2.created_at = "2026-05-06T11:00:00Z".into();
-        let mut t3 = task("3", ScheduledTaskStatus::Inactive, ScheduleKind::Unscheduled);
+        let mut t3 = task(
+            "3",
+            ScheduledTaskStatus::Inactive,
+            ScheduleKind::Unscheduled,
+        );
         t3.repo_path = "/repo-a".into();
         t3.created_at = "2026-05-06T09:00:00Z".into();
 
@@ -1564,9 +1742,17 @@ mod tests {
             local_branches: vec![],
             remote_branches: vec![],
         };
-        let mut t1 = task("1", ScheduledTaskStatus::Inactive, ScheduleKind::Unscheduled);
+        let mut t1 = task(
+            "1",
+            ScheduledTaskStatus::Inactive,
+            ScheduleKind::Unscheduled,
+        );
         t1.repo_path = "/repo-a".into();
-        let mut t2 = task("2", ScheduledTaskStatus::Inactive, ScheduleKind::Unscheduled);
+        let mut t2 = task(
+            "2",
+            ScheduledTaskStatus::Inactive,
+            ScheduleKind::Unscheduled,
+        );
         t2.repo_path = "/repo-b".into();
 
         let mut state = ScheduleState::new();
