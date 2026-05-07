@@ -281,6 +281,12 @@ On hub startup, `crate::db::recover_active_scheduled_tasks` rewrites every lefto
 
 The Opt+S "Depend" picker lists currently-running `Opt+E` worktree agents alongside existing scheduled tasks. When at least one such agent is selected, the CLI sends those agent IDs in `CreateScheduledTask.extra_agent_deps`. Before persisting the new task, the hub promotes each referenced agent to a *shadow* `scheduled_tasks` row (`status=active`, `agent_id=<the running agent>`, `schedule_kind=unscheduled`) so the existing dep edges still reference task IDs. The shadow row makes the agent appear on the Schedule tab as Active. When the agent eventually exits, the existing PTY-reader hook (`mark_scheduled_task_complete_by_agent`) flips the shadow row to `complete`, unblocking any downstream tasks at the next scheduler tick — exactly the same path a normally-scheduled task follows. Until an `Opt+E` agent is selected as a dep, it has no scheduled-task row and does not appear on the Schedule tab.
 
+### Future-branch chaining (depend on a branch that doesn't exist yet)
+
+The Opt+S "Depend" picker tags Inactive tasks that will create a new branch as **FUTURE** so a downstream task can chain off a branch that isn't on disk yet — selecting one of these is a normal task-id dep and the scheduler resolves it the same way (wait until the upstream is `complete`).
+
+The SelectBranch step under **Depend** also offers *future* branches as base options. Picking a future branch records the upstream task id, pre-checks it in the dep picker, and re-injects it into `depends_on_ids` at submission as a safety net. This guarantees `git worktree add <wt> <future-branch>` won't run before the upstream creates that branch. Future branches are not offered for `Schedule`/`Unscheduled` kinds because there's no dep mechanism to enforce ordering for those.
+
 ## Key Dependencies
 
 | Crate | Purpose |
