@@ -88,8 +88,10 @@ pub enum ScheduleAction {
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum ScheduleFocus {
-    /// No specific task focused (e.g., empty list).
-    None,
+    /// The top filter bar is focused — Left/Right cycles repo chips,
+    /// Enter/Space toggles a chip's collapse state, Shift+Down moves into
+    /// a task. This is the default state when no tasks are visible.
+    OptionsBar,
     /// A task at the given index in `tasks` is focused for keybinds.
     Task(usize),
 }
@@ -105,6 +107,17 @@ pub struct ScheduleState {
     pub tasks: Vec<ScheduledTaskInfo>,
     pub focus: ScheduleFocus,
     pub scroll_offset: usize,
+    /// Repo paths that are currently filtered out of the panel grid. Mirrors
+    /// the Overview tab's filter model — collapsed repos still show their
+    /// chip in the bar (dimmed) but their tasks disappear from the grid.
+    pub collapsed_repos: HashSet<String>,
+    /// Cursor position within the bar's repo chips when the bar is focused.
+    /// Indexes into the ordered list of repos that have at least one task.
+    pub filter_cursor: usize,
+    /// Indices into `self.tasks` for tasks whose repo is not collapsed.
+    /// Recomputed whenever the task list or `collapsed_repos` changes; used
+    /// by both navigation (focus_prev/next walk this list) and rendering.
+    pub visible_task_indices: Vec<usize>,
     /// Live PTY connections for tasks in the Active state. Keyed by task id so
     /// we don't lose them when the underlying agent_id list re-orders.
     panels: HashMap<String, AgentPanel>,
@@ -131,8 +144,11 @@ impl ScheduleState {
         let (output_tx, output_rx) = mpsc::channel(512);
         Self {
             tasks: Vec::new(),
-            focus: ScheduleFocus::None,
+            focus: ScheduleFocus::OptionsBar,
             scroll_offset: 0,
+            collapsed_repos: HashSet::new(),
+            filter_cursor: 0,
+            visible_task_indices: Vec::new(),
             panels: HashMap::new(),
             ui: HashMap::new(),
             output_tx,
@@ -212,34 +228,81 @@ impl ScheduleState {
         });
 
         // 5. Restore focus on the same task id when possible.
+        let had_prev_focus = prev_focus_id.is_some();
         if let Some(id) = prev_focus_id {
             if let Some(new_idx) = self.tasks.iter().position(|t| t.id == id) {
                 self.focus = ScheduleFocus::Task(new_idx);
             }
         }
 
-        // 6. Clamp focus to a valid index.
+        // 6. Recompute visible indices (used by focus clamping below) before
+        //    clamping focus — collapsed repos may have shrunk the visible set.
+        self.recompute_visible_task_indices();
+
+        // 7. Clamp focus to a valid index. The first time tasks appear we
+        //    auto-focus the first visible task so the keybind hints become
+        //    immediately useful; if no tasks are visible (all collapsed or
+        //    list is empty) we fall back to the bar.
         match self.focus {
-            ScheduleFocus::None if !self.tasks.is_empty() => {
-                self.focus = ScheduleFocus::Task(0);
+            ScheduleFocus::OptionsBar
+                if !self.visible_task_indices.is_empty() && !had_prev_focus =>
+            {
+                let first = self.visible_task_indices[0];
+                self.focus = ScheduleFocus::Task(first);
             }
             ScheduleFocus::Task(idx) if idx >= self.tasks.len() => {
-                self.focus = if self.tasks.is_empty() {
-                    ScheduleFocus::None
-                } else {
-                    ScheduleFocus::Task(self.tasks.len() - 1)
-                };
+                self.focus = self
+                    .visible_task_indices
+                    .last()
+                    .copied()
+                    .map(ScheduleFocus::Task)
+                    .unwrap_or(ScheduleFocus::OptionsBar);
             }
             _ => {}
         }
         if self.tasks.is_empty() {
-            self.focus = ScheduleFocus::None;
+            self.focus = ScheduleFocus::OptionsBar;
         }
 
-        // 7. Clamp scroll.
+        // 8. Clamp filter_cursor to the new used-repos count.
+        let used_count = self.used_repo_paths().len();
+        if used_count == 0 {
+            self.filter_cursor = 0;
+        } else if self.filter_cursor >= used_count {
+            self.filter_cursor = used_count - 1;
+        }
+
+        // 9. Clamp scroll.
         if self.scroll_offset >= self.tasks.len() {
             self.scroll_offset = self.tasks.len().saturating_sub(1);
         }
+    }
+
+    /// Ordered list of repo paths that have at least one task. Order matches
+    /// `self.tasks` (which is sorted by `RepoInfo` order in `sync_tasks`),
+    /// so this is the canonical bar-cursor traversal order.
+    pub fn used_repo_paths(&self) -> Vec<String> {
+        let mut seen: HashSet<String> = HashSet::new();
+        let mut result = Vec::new();
+        for task in &self.tasks {
+            if seen.insert(task.repo_path.clone()) {
+                result.push(task.repo_path.clone());
+            }
+        }
+        result
+    }
+
+    /// Refresh `visible_task_indices` from `self.tasks` and `collapsed_repos`.
+    /// Cheap enough to call on every render and after every state mutation
+    /// that could change visibility.
+    fn recompute_visible_task_indices(&mut self) {
+        self.visible_task_indices = self
+            .tasks
+            .iter()
+            .enumerate()
+            .filter(|(_, t)| !self.collapsed_repos.contains(t.repo_path.as_str()))
+            .map(|(i, _)| i)
+            .collect();
     }
 
     /// Open an attached IPC connection for a task that just transitioned to
@@ -345,9 +408,15 @@ impl ScheduleState {
 
     /// Set focus to the task at `idx` and scroll it into view. No-op if the
     /// index is out of range. Used by the mouse handler when a panel or
-    /// branch indicator is clicked.
+    /// branch indicator is clicked. If the task's repo is collapsed, the
+    /// repo is un-collapsed first so the panel becomes visible.
     pub fn focus_task_index(&mut self, idx: usize) {
-        if idx < self.tasks.len() {
+        if let Some(task) = self.tasks.get(idx) {
+            if self.collapsed_repos.contains(task.repo_path.as_str()) {
+                let path = task.repo_path.clone();
+                self.collapsed_repos.remove(&path);
+                self.recompute_visible_task_indices();
+            }
             self.focus = ScheduleFocus::Task(idx);
             self.ensure_visible(idx);
         }
@@ -371,40 +440,132 @@ impl ScheduleState {
 
     pub fn focus_prev(&mut self) {
         if let ScheduleFocus::Task(idx) = self.focus {
-            if !self.tasks.is_empty() {
-                let new = if idx == 0 {
-                    self.tasks.len() - 1
-                } else {
-                    idx - 1
-                };
-                self.focus = ScheduleFocus::Task(new);
-                self.ensure_visible(new);
+            if let Some(pos) = self.visible_task_indices.iter().position(|&i| i == idx) {
+                let len = self.visible_task_indices.len();
+                let new_pos = if pos == 0 { len - 1 } else { pos - 1 };
+                let new_idx = self.visible_task_indices[new_pos];
+                self.focus = ScheduleFocus::Task(new_idx);
+                self.ensure_visible(new_idx);
             }
         }
     }
 
     pub fn focus_next(&mut self) {
         if let ScheduleFocus::Task(idx) = self.focus {
-            if !self.tasks.is_empty() {
-                let new = if idx + 1 < self.tasks.len() {
-                    idx + 1
-                } else {
-                    0
-                };
-                self.focus = ScheduleFocus::Task(new);
-                self.ensure_visible(new);
+            if let Some(pos) = self.visible_task_indices.iter().position(|&i| i == idx) {
+                let len = self.visible_task_indices.len();
+                let new_pos = (pos + 1) % len;
+                let new_idx = self.visible_task_indices[new_pos];
+                self.focus = ScheduleFocus::Task(new_idx);
+                self.ensure_visible(new_idx);
             }
         }
     }
 
+    /// Move focus from the bar onto the first visible task (or do nothing if
+    /// there are no visible tasks). Used by `Shift+Down` from the bar.
+    pub fn enter_task_focus(&mut self) {
+        if let Some(&first) = self.visible_task_indices.first() {
+            self.focus = ScheduleFocus::Task(first);
+            self.ensure_visible(first);
+        }
+    }
+
+    /// Return focus to the bar from a task. Used by `Shift+Up` from a task.
+    pub fn exit_task_focus(&mut self) {
+        self.focus = ScheduleFocus::OptionsBar;
+    }
+
+    /// Cycle the filter cursor one position to the left (saturating at 0).
+    pub fn filter_cursor_left(&mut self) {
+        if self.filter_cursor > 0 {
+            self.filter_cursor -= 1;
+        }
+    }
+
+    /// Cycle the filter cursor one position to the right (saturating at the
+    /// last used repo).
+    pub fn filter_cursor_right(&mut self) {
+        let count = self.used_repo_paths().len();
+        if count > 0 && self.filter_cursor + 1 < count {
+            self.filter_cursor += 1;
+        }
+    }
+
+    /// Toggle the collapsed state of the repo currently under the filter
+    /// cursor. If the focused task ends up in a now-collapsed repo, jump
+    /// focus to the next visible task (or back to the bar if none remain).
+    pub fn toggle_filter_at_cursor(&mut self) {
+        let used = self.used_repo_paths();
+        let Some(repo_path) = used.get(self.filter_cursor).cloned() else {
+            return;
+        };
+        if self.collapsed_repos.contains(&repo_path) {
+            self.collapsed_repos.remove(&repo_path);
+        } else {
+            self.collapsed_repos.insert(repo_path);
+        }
+        self.recompute_visible_task_indices();
+        if let ScheduleFocus::Task(idx) = self.focus {
+            if !self.visible_task_indices.contains(&idx) {
+                self.focus = self
+                    .visible_task_indices
+                    .first()
+                    .copied()
+                    .map(|i| {
+                        self.ensure_visible(i);
+                        ScheduleFocus::Task(i)
+                    })
+                    .unwrap_or(ScheduleFocus::OptionsBar);
+            }
+        }
+    }
+
+    /// Toggle collapse for the given repo path (used by mouse clicks on a
+    /// chip in the bar). Mirrors `toggle_filter_at_cursor` but addressed by
+    /// path rather than cursor index.
+    pub fn toggle_filter_for_repo(&mut self, repo_path: &str) {
+        if self.collapsed_repos.contains(repo_path) {
+            self.collapsed_repos.remove(repo_path);
+        } else {
+            self.collapsed_repos.insert(repo_path.to_string());
+        }
+        // Move filter_cursor onto the clicked chip so subsequent keyboard
+        // toggles operate on the chip the user just touched.
+        if let Some(pos) = self.used_repo_paths().iter().position(|p| p == repo_path) {
+            self.filter_cursor = pos;
+        }
+        self.recompute_visible_task_indices();
+        if let ScheduleFocus::Task(idx) = self.focus {
+            if !self.visible_task_indices.contains(&idx) {
+                self.focus = self
+                    .visible_task_indices
+                    .first()
+                    .copied()
+                    .map(|i| {
+                        self.ensure_visible(i);
+                        ScheduleFocus::Task(i)
+                    })
+                    .unwrap_or(ScheduleFocus::OptionsBar);
+            }
+        }
+    }
+
+    /// Make sure the task at global index `idx` is visible on-screen. The
+    /// `scroll_offset` indexes into `visible_task_indices` (mirrors Overview's
+    /// scroll into `sorted_indices`), so we map the global idx to its
+    /// position in the visible list first.
     fn ensure_visible(&mut self, idx: usize) {
-        if idx < self.scroll_offset {
-            self.scroll_offset = idx;
+        let Some(pos) = self.visible_task_indices.iter().position(|&i| i == idx) else {
+            return;
+        };
+        if pos < self.scroll_offset {
+            self.scroll_offset = pos;
         }
         if self.viewport_width > 0 {
             let fit = max_panels_for_width(self.viewport_width);
-            if idx >= self.scroll_offset + fit {
-                self.scroll_offset = idx + 1 - fit;
+            if pos >= self.scroll_offset + fit {
+                self.scroll_offset = pos + 1 - fit;
             }
         }
     }
@@ -512,13 +673,39 @@ impl ScheduleState {
 
     /// Convert a key event into a [`ScheduleAction`]. The main loop is
     /// responsible for executing the action (IPC send, modal open, etc.).
+    ///
+    /// Two-mode handling: when the bar is focused, only filter-bar nav keys
+    /// are consumed (everything else is a Noop, falling through to the rest
+    /// of the UI). When a task is focused, the existing per-status keymap
+    /// applies, with `Shift+Up` returning focus to the bar.
     pub fn handle_key(&mut self, key: KeyEvent) -> ScheduleAction {
-        // Ignore everything when no task is focused.
+        let shift = key.modifiers.contains(KeyModifiers::SHIFT);
+
+        // OptionsBar focused: handle filter cursor + bar→task transition.
+        if self.focus == ScheduleFocus::OptionsBar {
+            match key.code {
+                KeyCode::Left if !shift => {
+                    self.filter_cursor_left();
+                }
+                KeyCode::Right if !shift => {
+                    self.filter_cursor_right();
+                }
+                KeyCode::Enter | KeyCode::Char(' ') => {
+                    self.toggle_filter_at_cursor();
+                }
+                KeyCode::Down if shift => {
+                    self.enter_task_focus();
+                }
+                _ => {}
+            }
+            return ScheduleAction::Noop;
+        }
+
+        // Task focused: existing per-status keymap.
         let Some(task) = self.focused_task().cloned() else {
             return ScheduleAction::Noop;
         };
 
-        let shift = key.modifiers.contains(KeyModifiers::SHIFT);
         match key.code {
             KeyCode::Left if shift => {
                 self.focus_prev();
@@ -526,6 +713,10 @@ impl ScheduleState {
             }
             KeyCode::Right if shift => {
                 self.focus_next();
+                ScheduleAction::Noop
+            }
+            KeyCode::Up if shift => {
+                self.exit_task_focus();
                 ScheduleAction::Noop
             }
             KeyCode::Down if shift => {
@@ -677,6 +868,10 @@ impl ScheduleState {
             )
         };
 
+        // Refresh the visible-tasks list every frame so any external mutation
+        // (sync_tasks, manual collapsed_repos changes) is reflected.
+        self.recompute_visible_task_indices();
+
         if self.tasks.is_empty() {
             // Paint the bar background even when empty so the layout doesn't
             // shift the moment a task appears.
@@ -688,8 +883,13 @@ impl ScheduleState {
         self.resize_panels_to(panels_area);
 
         let count_fit = max_panels_for_width(panels_area.width).max(1);
+        // Clamp scroll to the visible-tasks list so collapsing a repo doesn't
+        // leave the grid scrolled past the last remaining panel.
+        if self.scroll_offset >= self.visible_task_indices.len() {
+            self.scroll_offset = self.visible_task_indices.len().saturating_sub(1);
+        }
         let visible_count = self
-            .tasks
+            .visible_task_indices
             .len()
             .saturating_sub(self.scroll_offset)
             .min(count_fit);
@@ -701,13 +901,26 @@ impl ScheduleState {
             .collect();
 
         // Indices visible on screen — used to invert-video the matching
-        // branch indicators in the bar.
+        // branch indicators in the bar. These are global indices into
+        // `self.tasks`, picked out of `visible_task_indices`.
         let visible_set: HashSet<usize> = if visible_count > 0 {
-            (self.scroll_offset..self.scroll_offset + visible_count).collect()
+            self.visible_task_indices[self.scroll_offset..self.scroll_offset + visible_count]
+                .iter()
+                .copied()
+                .collect()
         } else {
             HashSet::new()
         };
-        self.render_options_bar(frame, bar_area, repos, &visible_set, click_map);
+        let bar_focused = self.focus == ScheduleFocus::OptionsBar;
+        self.render_options_bar(
+            frame,
+            bar_area,
+            repos,
+            &visible_set,
+            bar_focused,
+            self.filter_cursor,
+            click_map,
+        );
 
         if constraints.is_empty() {
             self.render_keybind_hint_bar(frame, hint_area, None, click_map);
@@ -715,8 +928,9 @@ impl ScheduleState {
         }
         let panel_areas = Layout::horizontal(constraints).split(panels_area);
 
-        let visible_indices: Vec<usize> =
-            (self.scroll_offset..self.scroll_offset + visible_count).collect();
+        let visible_indices: Vec<usize> = self.visible_task_indices
+            [self.scroll_offset..self.scroll_offset + visible_count]
+            .to_vec();
         let focused_task_id = self.focused_task().map(|t| t.id.clone());
         let any_dep_warning_map: HashMap<String, bool> =
             self.dep_warning_map().into_iter().collect();
@@ -912,16 +1126,27 @@ impl ScheduleState {
 
     /// Render the schedule top bar: repo chips on the left, branch indicators
     /// on the right. Branch indicators are clickable — clicking one focuses
-    /// the corresponding task and scrolls it into view.
+    /// the corresponding task and scrolls it into view. Repo chips are
+    /// clickable filter toggles; when the bar is focused the cursor position
+    /// gets a highlight background and Left/Right cycles through chips.
+    #[allow(clippy::too_many_arguments)]
     fn render_options_bar(
         &self,
         frame: &mut Frame,
         area: Rect,
         repos: &[RepoInfo],
         visible_set: &HashSet<usize>,
+        bar_focused: bool,
+        filter_cursor: usize,
         click_map: &mut ClickMap,
     ) {
-        let bar_bg = theme::R_BG_RAISED;
+        // Bar background brightens slightly when focused so the user can tell
+        // that keystrokes will land here. Mirrors Overview's behavior.
+        let bar_bg = if bar_focused {
+            theme::R_BG_OVERLAY
+        } else {
+            theme::R_BG_RAISED
+        };
 
         frame.render_widget(
             Paragraph::new(Line::from(Span::styled(
@@ -933,10 +1158,13 @@ impl ScheduleState {
 
         // Only show chips for repos that actually have tasks scheduled —
         // matches what users care about on this tab and avoids a noisy bar.
+        // Iterate `repos` in canonical order (matches `self.tasks` sort) so
+        // the on-screen cursor index lines up with `filter_cursor`.
         let used_paths: HashSet<&str> = self.tasks.iter().map(|t| t.repo_path.as_str()).collect();
         let mut spans: Vec<Span> = Vec::new();
         let mut col_cursor: u16 = area.x;
         let mut shown_any_repo = false;
+        let mut cursor_idx: usize = 0;
 
         let push_span =
             |span: Span<'static>, spans: &mut Vec<Span<'static>>, col_cursor: &mut u16| {
@@ -954,20 +1182,50 @@ impl ScheduleState {
                 .map(|c| theme::repo_color(c))
                 .unwrap_or(theme::R_ACCENT);
 
+            let is_collapsed = self.collapsed_repos.contains(&repo.path);
+            let is_cursor = bar_focused && cursor_idx == filter_cursor;
+            let chip_bg = if is_cursor {
+                theme::R_BG_ACTIVE
+            } else {
+                bar_bg
+            };
+            let (dot_color, text_color) = if is_collapsed {
+                (theme::dim_color(color), theme::R_TEXT_DISABLED)
+            } else {
+                (color, theme::R_TEXT_PRIMARY)
+            };
+
+            // Track the chip's rect so a click toggles the filter. Width is
+            // " ● " (3) + name + trailing space (1) = 4 + name.
+            let chip_x = col_cursor;
+            let chip_w = 4u16 + repo.name.chars().count() as u16;
+
             push_span(
-                Span::styled(" \u{25cf} ", Style::default().fg(color).bg(bar_bg)),
+                Span::styled(" \u{25cf} ", Style::default().fg(dot_color).bg(chip_bg)),
                 &mut spans,
                 &mut col_cursor,
             );
             push_span(
                 Span::styled(
                     format!("{} ", repo.name),
-                    Style::default().fg(theme::R_TEXT_PRIMARY).bg(bar_bg),
+                    Style::default().fg(text_color).bg(chip_bg),
                 ),
                 &mut spans,
                 &mut col_cursor,
             );
+
+            if chip_x < area.x + area.width {
+                let clipped_w = (area.x + area.width).saturating_sub(chip_x).min(chip_w);
+                if clipped_w > 0 {
+                    let chip_rect = Rect::new(chip_x, area.y, clipped_w, area.height);
+                    click_map
+                        .schedule_repo_buttons
+                        .push((chip_rect, repo.path.clone()));
+                }
+            }
+
             shown_any_repo = true;
+            cursor_idx += 1;
         }
 
         if shown_any_repo && !self.tasks.is_empty() {
@@ -982,7 +1240,9 @@ impl ScheduleState {
         }
 
         // Branch indicators — tasks are already in repo-sorted order. Each
-        // chip records its rect so a click can focus that task.
+        // chip records its rect so a click can focus that task. Indicators
+        // for tasks in collapsed repos are dimmed but still rendered (and
+        // still clickable — clicking un-collapses the repo).
         for (idx, task) in self.tasks.iter().enumerate() {
             let repo_color = repos
                 .iter()
@@ -992,8 +1252,11 @@ impl ScheduleState {
                 .unwrap_or(theme::R_ACCENT);
 
             let is_visible = visible_set.contains(&idx);
+            let is_repo_collapsed = self.collapsed_repos.contains(task.repo_path.as_str());
             let style = if is_visible {
                 Style::default().fg(theme::R_TEXT_PRIMARY).bg(repo_color)
+            } else if is_repo_collapsed {
+                Style::default().fg(theme::R_TEXT_DISABLED).bg(bar_bg)
             } else {
                 Style::default().fg(repo_color).bg(bar_bg)
             };
@@ -1535,7 +1798,7 @@ mod tests {
     }
 
     #[test]
-    fn focus_becomes_none_when_list_empty() {
+    fn focus_becomes_bar_when_list_empty() {
         let mut state = ScheduleState::new();
         sync(
             &mut state,
@@ -1547,13 +1810,13 @@ mod tests {
         );
         state.focus = ScheduleFocus::Task(0);
         sync(&mut state, Vec::new());
-        assert_eq!(state.focus, ScheduleFocus::None);
+        assert_eq!(state.focus, ScheduleFocus::OptionsBar);
     }
 
     #[test]
     fn focus_initialises_when_tasks_appear() {
         let mut state = ScheduleState::new();
-        assert_eq!(state.focus, ScheduleFocus::None);
+        assert_eq!(state.focus, ScheduleFocus::OptionsBar);
         sync(
             &mut state,
             vec![task(
@@ -1725,7 +1988,9 @@ mod tests {
         let action = state.handle_key(KeyEvent::new(KeyCode::Char('S'), KeyModifiers::SHIFT));
         assert_eq!(
             action,
-            ScheduleAction::OpenReschedule { task_id: "a".into() }
+            ScheduleAction::OpenReschedule {
+                task_id: "a".into()
+            }
         );
     }
 
@@ -1743,7 +2008,9 @@ mod tests {
         let action = state.handle_key(KeyEvent::new(KeyCode::Char('S'), KeyModifiers::SHIFT));
         assert_eq!(
             action,
-            ScheduleAction::OpenReschedule { task_id: "a".into() }
+            ScheduleAction::OpenReschedule {
+                task_id: "a".into()
+            }
         );
     }
 
@@ -1901,5 +2168,201 @@ mod tests {
         let target = (now + chrono::Duration::hours(2)).to_rfc3339();
         let s = describe_schedule(&ScheduleKind::Time { start_at: target }, now);
         assert!(s.contains("2h"), "got {s}");
+    }
+
+    /// Build two tasks across two repos. Used by the filter tests below.
+    fn two_repo_state() -> (ScheduleState, RepoInfo, RepoInfo) {
+        let repo_a = RepoInfo {
+            path: "/repo-a".into(),
+            name: "a".into(),
+            color: None,
+            editor: None,
+            local_branches: vec![],
+            remote_branches: vec![],
+        };
+        let repo_b = RepoInfo {
+            path: "/repo-b".into(),
+            name: "b".into(),
+            color: None,
+            editor: None,
+            local_branches: vec![],
+            remote_branches: vec![],
+        };
+        let mut t1 = task(
+            "1",
+            ScheduledTaskStatus::Inactive,
+            ScheduleKind::Unscheduled,
+        );
+        t1.repo_path = "/repo-a".into();
+        let mut t2 = task(
+            "2",
+            ScheduledTaskStatus::Inactive,
+            ScheduleKind::Unscheduled,
+        );
+        t2.repo_path = "/repo-b".into();
+        let mut state = ScheduleState::new();
+        state.sync_tasks(vec![t1, t2], &[repo_a.clone(), repo_b.clone()]);
+        (state, repo_a, repo_b)
+    }
+
+    #[test]
+    fn used_repo_paths_in_canonical_order() {
+        let (state, _, _) = two_repo_state();
+        let used = state.used_repo_paths();
+        assert_eq!(used, vec!["/repo-a".to_string(), "/repo-b".to_string()]);
+    }
+
+    #[test]
+    fn collapsing_repo_hides_its_tasks_from_visible_indices() {
+        let (mut state, _, _) = two_repo_state();
+        // Both tasks visible to start.
+        assert_eq!(state.visible_task_indices.len(), 2);
+        // Collapse repo-a; only repo-b's task should remain visible.
+        state.collapsed_repos.insert("/repo-a".into());
+        state.recompute_visible_task_indices();
+        let visible_repos: Vec<&str> = state
+            .visible_task_indices
+            .iter()
+            .map(|i| state.tasks[*i].repo_path.as_str())
+            .collect();
+        assert_eq!(visible_repos, vec!["/repo-b"]);
+    }
+
+    #[test]
+    fn toggle_filter_at_cursor_moves_focus_off_collapsed_task() {
+        let (mut state, _, _) = two_repo_state();
+        // Focus the task in repo-a (index 0 in canonical order).
+        state.focus = ScheduleFocus::Task(0);
+        state.filter_cursor = 0; // repo-a chip
+        state.toggle_filter_at_cursor();
+        // Repo-a is now collapsed; focus must have moved to the next visible
+        // task (repo-b's task) instead of being stuck on the hidden one.
+        assert!(state.collapsed_repos.contains("/repo-a"));
+        match state.focus {
+            ScheduleFocus::Task(idx) => {
+                assert_eq!(state.tasks[idx].repo_path, "/repo-b");
+            }
+            other => panic!("expected Task focus, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn toggle_filter_drops_to_bar_when_no_visible_tasks_remain() {
+        let (mut state, _, _) = two_repo_state();
+        state.focus = ScheduleFocus::Task(0);
+        // Collapse both repos.
+        state.filter_cursor = 0;
+        state.toggle_filter_at_cursor();
+        state.filter_cursor = 1;
+        state.toggle_filter_at_cursor();
+        assert_eq!(state.focus, ScheduleFocus::OptionsBar);
+    }
+
+    #[test]
+    fn filter_cursor_clamps_to_used_repo_count() {
+        let (mut state, _, _) = two_repo_state();
+        state.filter_cursor = 0;
+        state.filter_cursor_right(); // 0 → 1
+        assert_eq!(state.filter_cursor, 1);
+        state.filter_cursor_right(); // saturates at last
+        assert_eq!(state.filter_cursor, 1);
+        state.filter_cursor_left(); // 1 → 0
+        assert_eq!(state.filter_cursor, 0);
+        state.filter_cursor_left(); // saturates at 0
+        assert_eq!(state.filter_cursor, 0);
+    }
+
+    #[test]
+    fn enter_task_focus_picks_first_visible_task() {
+        let (mut state, _, _) = two_repo_state();
+        state.focus = ScheduleFocus::OptionsBar;
+        // Collapse repo-a so only repo-b's task is visible.
+        state.collapsed_repos.insert("/repo-a".into());
+        state.recompute_visible_task_indices();
+        state.enter_task_focus();
+        match state.focus {
+            ScheduleFocus::Task(idx) => {
+                assert_eq!(state.tasks[idx].repo_path, "/repo-b");
+            }
+            other => panic!("expected Task focus, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn handle_key_on_bar_cycles_filter_cursor() {
+        let (mut state, _, _) = two_repo_state();
+        state.focus = ScheduleFocus::OptionsBar;
+        state.filter_cursor = 0;
+        let _ = state.handle_key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
+        assert_eq!(state.filter_cursor, 1);
+        let _ = state.handle_key(KeyEvent::new(KeyCode::Left, KeyModifiers::NONE));
+        assert_eq!(state.filter_cursor, 0);
+    }
+
+    #[test]
+    fn handle_key_on_bar_enter_toggles_filter() {
+        let (mut state, _, _) = two_repo_state();
+        state.focus = ScheduleFocus::OptionsBar;
+        state.filter_cursor = 0; // repo-a
+        let _ = state.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(state.collapsed_repos.contains("/repo-a"));
+        // Pressing Enter again un-collapses.
+        let _ = state.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(!state.collapsed_repos.contains("/repo-a"));
+    }
+
+    #[test]
+    fn handle_key_on_bar_shift_down_enters_task_focus() {
+        let (mut state, _, _) = two_repo_state();
+        state.focus = ScheduleFocus::OptionsBar;
+        let _ = state.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::SHIFT));
+        assert!(matches!(state.focus, ScheduleFocus::Task(_)));
+    }
+
+    #[test]
+    fn handle_key_shift_up_returns_focus_to_bar() {
+        let (mut state, _, _) = two_repo_state();
+        state.focus = ScheduleFocus::Task(0);
+        let _ = state.handle_key(KeyEvent::new(KeyCode::Up, KeyModifiers::SHIFT));
+        assert_eq!(state.focus, ScheduleFocus::OptionsBar);
+    }
+
+    #[test]
+    fn focus_task_index_uncollapses_hidden_repo() {
+        let (mut state, _, _) = two_repo_state();
+        state.collapsed_repos.insert("/repo-a".into());
+        state.recompute_visible_task_indices();
+        // Find the task in repo-a and click its branch indicator.
+        let a_idx = state
+            .tasks
+            .iter()
+            .position(|t| t.repo_path == "/repo-a")
+            .unwrap();
+        state.focus_task_index(a_idx);
+        // Repo-a must be un-collapsed and the task focused.
+        assert!(!state.collapsed_repos.contains("/repo-a"));
+        assert_eq!(state.focus, ScheduleFocus::Task(a_idx));
+    }
+
+    #[test]
+    fn collapsed_repos_persist_across_sync() {
+        let (mut state, repo_a, repo_b) = two_repo_state();
+        state.collapsed_repos.insert("/repo-a".into());
+        // Re-sync with the same task set.
+        let mut t1 = task(
+            "1",
+            ScheduledTaskStatus::Inactive,
+            ScheduleKind::Unscheduled,
+        );
+        t1.repo_path = "/repo-a".into();
+        let mut t2 = task(
+            "2",
+            ScheduledTaskStatus::Inactive,
+            ScheduleKind::Unscheduled,
+        );
+        t2.repo_path = "/repo-b".into();
+        state.sync_tasks(vec![t1, t2], &[repo_a, repo_b]);
+        // The collapsed-repo set must be preserved across sync.
+        assert!(state.collapsed_repos.contains("/repo-a"));
     }
 }

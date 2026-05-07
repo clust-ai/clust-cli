@@ -243,6 +243,7 @@ pub(crate) struct ClickMap {
     // Schedule tab
     pub(crate) schedule_panels: Vec<(Rect, usize)>, // (area, task_idx)
     pub(crate) schedule_branch_indicators: Vec<(Rect, usize)>, // (area, task_idx) — top-bar chips
+    pub(crate) schedule_repo_buttons: Vec<(Rect, String)>, // (area, repo_path) — bar filter toggle
     pub(crate) schedule_hint_keys: Vec<(Rect, ScheduleHintKey)>, // (area, action) — clickable footer hints
 
     // Focus mode
@@ -2929,9 +2930,7 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                         Ok(HubMessage::Error { message }) => {
                                             let _ = tx
                                                 .send(StatusMessage {
-                                                    text: format!(
-                                                        "{verb_fail} failed: {message}"
-                                                    ),
+                                                    text: format!("{verb_fail} failed: {message}"),
                                                     level: StatusLevel::Error,
                                                     created: Instant::now(),
                                                 })
@@ -3683,6 +3682,7 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                         match (shift, key.code) {
                             (true, KeyCode::Left) => schedule_state.focus_prev(),
                             (true, KeyCode::Right) => schedule_state.focus_next(),
+                            (true, KeyCode::Up) => schedule_state.exit_task_focus(),
                             (true, KeyCode::Down) => {
                                 let action = schedule_state.handle_key(key);
                                 dispatch_schedule_action(
@@ -4025,22 +4025,20 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                                 let branch_name = found
                                                     .and_then(|a| a.branch_name.clone())
                                                     .or_else(|| Some(task.branch_name.clone()));
-                                                let is_wt = found
-                                                    .map(|a| a.is_worktree)
-                                                    .unwrap_or(true);
+                                                let is_wt =
+                                                    found.map(|a| a.is_worktree).unwrap_or(true);
                                                 let agent_binary = found
                                                     .map(|a| a.agent_binary.clone())
                                                     .unwrap_or_else(|| task.agent_binary.clone());
-                                                let fm_cols = (last_content_area.width * 40
-                                                    / 100)
+                                                let fm_cols = (last_content_area.width * 40 / 100)
                                                     .saturating_sub(2)
                                                     .max(1);
                                                 let fm_rows = last_content_area
                                                     .height
                                                     .saturating_sub(3)
                                                     .max(1);
-                                                let existing_terminals = overview_state
-                                                    .take_agent_terminals(agent_id);
+                                                let existing_terminals =
+                                                    overview_state.take_agent_terminals(agent_id);
                                                 focus_mode_state.open_agent(
                                                     agent_id,
                                                     &agent_binary,
@@ -5601,16 +5599,28 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                 }
                             }
                             ActiveTab::Schedule => {
-                                // 1) Top-bar branch indicators: focus + scroll
+                                // 1) Top-bar repo chips: toggle the filter for
+                                //    that repo. Checked first so a chip click
+                                //    isn't shadowed by an indicator chip
+                                //    starting at the same x.
+                                if let Some((_, repo_path)) = click_map
+                                    .schedule_repo_buttons
+                                    .iter()
+                                    .find(|(r, _)| r.contains(pos))
+                                {
+                                    let path = repo_path.clone();
+                                    schedule_state.toggle_filter_for_repo(&path);
+                                }
+                                // 2) Top-bar branch indicators: focus + scroll
                                 //    that task into view.
-                                if let Some((_, idx)) = click_map
+                                else if let Some((_, idx)) = click_map
                                     .schedule_branch_indicators
                                     .iter()
                                     .find(|(r, _)| r.contains(pos))
                                 {
                                     schedule_state.focus_task_index(*idx);
                                 }
-                                // 2) Hint footer: synthesize the matching key
+                                // 3) Hint footer: synthesize the matching key
                                 //    so the same dispatch path runs.
                                 else if let Some((_, hint_key)) = click_map
                                     .schedule_hint_keys
@@ -5632,7 +5642,7 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                         scheduled_task_tx.clone(),
                                     );
                                 }
-                                // 3) Panel click: focus the task. This goes
+                                // 4) Panel click: focus the task. This goes
                                 //    last so chips/hints in the bar/footer win
                                 //    over the (much larger) panel rect.
                                 else if let Some((_, idx)) = click_map
@@ -6868,9 +6878,14 @@ fn render_help_overlay(frame: &mut Frame, area: Rect, active_tab: ActiveTab, in_
             "Shift+\u{2190}/\u{2192}",
             "Switch focused task",
         ));
+        lines.push(binding_line("Shift+\u{2191}", "Back to top bar"));
         lines.push(binding_line("\u{2191} / \u{2193}", "Scroll prompt body"));
         lines.push(binding_line("d / Del", "Delete focused task"));
         lines.push(binding_line("Shift+C", "Clear by status menu"));
+        lines.push(sub_label_line("On top bar:"));
+        lines.push(binding_line("\u{2190} / \u{2192}", "Cycle repo filter chip"));
+        lines.push(binding_line("Enter / Space", "Toggle filter under cursor"));
+        lines.push(binding_line("Shift+\u{2193}", "Enter task focus"));
         lines.push(sub_label_line("Inactive task:"));
         lines.push(binding_line("e", "Edit prompt"));
         lines.push(binding_line("p", "Toggle plan mode"));
