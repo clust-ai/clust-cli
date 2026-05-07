@@ -334,10 +334,10 @@ pub fn recover_active_scheduled_tasks(conn: &Connection) -> Result<usize, String
 
 /// Generate a unique 8-char hex ID for a scheduled task.
 pub fn generate_scheduled_task_id(conn: &Connection) -> Result<String, String> {
-    use rand::Rng;
-    let mut rng = rand::thread_rng();
+    use rand::RngExt;
+    let mut rng = rand::rng();
     for _ in 0..1024 {
-        let bytes: [u8; 4] = rng.gen();
+        let bytes: [u8; 4] = rng.random();
         let id = format!(
             "{:02x}{:02x}{:02x}{:02x}",
             bytes[0], bytes[1], bytes[2], bytes[3]
