@@ -341,6 +341,24 @@ async fn handle_connection(
                 .await?;
             }
         }
+        CliMessage::SetAgentAutoExit { id, auto_exit } => {
+            let result = {
+                let mut hub = state.lock().await;
+                agent::set_agent_auto_exit(&mut hub, &id, auto_exit)
+            };
+            match result {
+                Ok(()) => {
+                    clust_ipc::send_message_write(&mut writer, &HubMessage::Ok).await?;
+                }
+                Err(e) => {
+                    clust_ipc::send_message_write(
+                        &mut writer,
+                        &HubMessage::Error { message: e },
+                    )
+                    .await?;
+                }
+            }
+        }
         CliMessage::SetDefault { agent_binary } => {
             let result = {
                 let hub = state.lock().await;

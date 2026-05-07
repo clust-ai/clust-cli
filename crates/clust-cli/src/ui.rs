@@ -3613,6 +3613,12 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                 KeyCode::PageDown => {
                                     overview_state.panel_scroll_down();
                                 }
+                                KeyCode::Char('X') => {
+                                    disable_auto_exit_for_focused_panel(
+                                        &mut overview_state,
+                                        status_tx.clone(),
+                                    );
+                                }
                                 _ => {
                                     // Shift+other key — forward to agent
                                     if let Some(bytes) = overview::input::key_event_to_bytes(&key) {
@@ -3783,6 +3789,12 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                         {
                                             overview_state.filter_cursor += 1;
                                         }
+                                    }
+                                    KeyCode::Char('X') => {
+                                        disable_auto_exit_for_focused_panel(
+                                            &mut overview_state,
+                                            status_tx.clone(),
+                                        );
                                     }
                                     KeyCode::Enter | KeyCode::Char(' ') => {
                                         // Toggle collapse for the selected repo group
@@ -6862,10 +6874,12 @@ fn render_help_overlay(frame: &mut Frame, area: Rect, active_tab: ActiveTab, in_
         lines.push(header_line("Overview"));
         lines.push(binding_line("Shift+\u{2190}/\u{2192}", "Scroll panels"));
         lines.push(binding_line("Shift+\u{2193}", "Enter terminal"));
+        lines.push(binding_line("Shift+X", "Disable auto-exit"));
         lines.push(sub_label_line("In terminal:"));
         lines.push(binding_line("Shift+\u{2191}", "Back to options bar"));
         lines.push(binding_line("Shift+\u{2193}", "Enter focus mode"));
         lines.push(binding_line("Shift+\u{2190}/\u{2192}", "Switch agent"));
+        lines.push(binding_line("Shift+X", "Disable auto-exit"));
         lines.push(binding_line("PgUp / PgDn", "Scroll terminal"));
     }
 
@@ -7018,6 +7032,82 @@ fn set_bypass_permissions_ipc(enabled: bool) {
         let _ = clust_ipc::send_message(&mut stream, &CliMessage::SetBypassPermissions { enabled })
             .await;
         let _ = clust_ipc::recv_message::<HubMessage>(&mut stream).await;
+    });
+}
+
+/// Disable auto-exit for the agent currently focused in the overview.
+///
+/// Resolves the focused agent (terminal mode) or the most recently focused
+/// agent (options-bar mode). Skips silently when no panel exists, when the
+/// focused agent has already exited, or when its auto-exit flag is already
+/// off — there's nothing to do in those cases. Optimistically clears the
+/// pill locally before the IPC round-trip so the user sees the change
+/// instantly; the next 2-second agents poll reconciles back if the hub
+/// rejected the request. Surfaces hub errors via the status line.
+fn disable_auto_exit_for_focused_panel(
+    overview_state: &mut overview::OverviewState,
+    status_tx: tokio::sync::mpsc::Sender<StatusMessage>,
+) {
+    let panel_idx = match overview_state.focus {
+        OverviewFocus::Terminal(idx) => Some(idx),
+        OverviewFocus::OptionsBar => {
+            if overview_state.sorted_indices.contains(&overview_state.last_terminal_idx) {
+                Some(overview_state.last_terminal_idx)
+            } else {
+                overview_state.sorted_indices.first().copied()
+            }
+        }
+    };
+    let Some(idx) = panel_idx else {
+        return;
+    };
+    let id = match overview_state.panels.get(idx) {
+        Some(panel) if !panel.exited && panel.auto_exit => panel.id.clone(),
+        _ => return,
+    };
+
+    // Optimistic local update for snappy UX. The next agents poll
+    // re-syncs from the hub, so a rejection rolls back automatically.
+    if let Some(panel) = overview_state.panels.get_mut(idx) {
+        panel.auto_exit = false;
+    }
+
+    tokio::spawn(async move {
+        match ipc::send_one_shot(CliMessage::SetAgentAutoExit {
+            id: id.clone(),
+            auto_exit: false,
+        })
+        .await
+        {
+            Ok(HubMessage::Ok) => {
+                let _ = status_tx
+                    .send(StatusMessage {
+                        text: format!("auto-exit disabled for agent {id}"),
+                        level: StatusLevel::Success,
+                        created: std::time::Instant::now(),
+                    })
+                    .await;
+            }
+            Ok(HubMessage::Error { message }) => {
+                let _ = status_tx
+                    .send(StatusMessage {
+                        text: format!("auto-exit: {message}"),
+                        level: StatusLevel::Error,
+                        created: std::time::Instant::now(),
+                    })
+                    .await;
+            }
+            Ok(_) => {}
+            Err(e) => {
+                let _ = status_tx
+                    .send(StatusMessage {
+                        text: format!("auto-exit: hub error: {e}"),
+                        level: StatusLevel::Error,
+                        created: std::time::Instant::now(),
+                    })
+                    .await;
+            }
+        }
     });
 }
 

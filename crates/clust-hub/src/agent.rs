@@ -490,13 +490,61 @@ fn write_exit_when_done_settings(agent_id: &str) -> Result<std::path::PathBuf, S
     std::fs::create_dir_all(&dir)
         .map_err(|e| format!("failed to create agent settings dir: {e}"))?;
     let path = dir.join("settings.json");
+    write_stop_hook_to(&path)?;
+    Ok(path)
+}
+
+fn write_stop_hook_to(path: &std::path::Path) -> Result<(), String> {
     let cmd = stop_hook_command()?;
     let json = format!(
         "{{\"hooks\":{{\"Stop\":[{{\"hooks\":[{{\"type\":\"command\",\"command\":\"{}\"}}]}}]}}}}",
         cmd.replace('\\', "\\\\").replace('"', "\\\"")
     );
-    std::fs::write(&path, json).map_err(|e| format!("failed to write agent settings file: {e}"))?;
-    Ok(path)
+    std::fs::write(path, json).map_err(|e| format!("failed to write agent settings file: {e}"))
+}
+
+/// Toggle the `auto_exit` flag on a running agent.
+///
+/// Disabling rewrites the per-spawn `settings.json` with `{}` so the agent's
+/// Stop hook no longer terminates the process; the agent keeps running until
+/// the user stops it manually. Enabling rewrites the file with the Stop hook
+/// payload, but only works for agents that were spawned with a settings file
+/// (i.e. their resolved binary supports the Stop hook and `auto_exit=true`
+/// was set at spawn time).
+pub fn set_agent_auto_exit(
+    state: &mut HubState,
+    agent_id: &str,
+    auto_exit: bool,
+) -> Result<(), String> {
+    let agent = state
+        .agents
+        .get_mut(agent_id)
+        .ok_or_else(|| format!("agent {agent_id} not found"))?;
+
+    match agent.settings_path.clone() {
+        Some(path) => {
+            if auto_exit {
+                write_stop_hook_to(&path)?;
+            } else {
+                std::fs::write(&path, "{}")
+                    .map_err(|e| format!("failed to update agent settings: {e}"))?;
+            }
+            agent.auto_exit = auto_exit;
+            Ok(())
+        }
+        None => {
+            if auto_exit {
+                Err(
+                    "cannot enable auto_exit: agent was spawned without a settings file"
+                        .to_string(),
+                )
+            } else {
+                // Already effectively disabled (no Stop hook was ever installed).
+                agent.auto_exit = false;
+                Ok(())
+            }
+        }
+    }
 }
 
 /// Resolve the absolute command string the agent's Stop hook should invoke.
@@ -1007,5 +1055,93 @@ mod tests {
             .expect("failed to open pty for test");
         drop(pair.slave);
         pair.master
+    }
+
+    /// Helper: build a minimal AgentEntry for tests that exercise the in-memory
+    /// agent map without spawning a real PTY child.
+    fn make_test_agent_entry(
+        id: &str,
+        settings_path: Option<std::path::PathBuf>,
+        auto_exit: bool,
+    ) -> AgentEntry {
+        AgentEntry {
+            id: id.to_string(),
+            agent_binary: "test".into(),
+            started_at: "2026-01-01T00:00:00Z".into(),
+            working_dir: "/tmp".into(),
+            hub: clust_ipc::DEFAULT_HUB.into(),
+            pid: None,
+            pty_master: create_dummy_pty_master(),
+            pty_writer: Box::new(std::io::sink()),
+            output_tx: broadcast::channel(1).0,
+            replay_buffer: Arc::new(std::sync::Mutex::new(ReplayBuffer::new())),
+            attached_count: Arc::new(AtomicUsize::new(0)),
+            client_sizes: HashMap::new(),
+            current_pty_size: (80, 24),
+            active_client_id: None,
+            next_client_id: AtomicU64::new(0),
+            repo_path: None,
+            branch_name: None,
+            is_worktree: false,
+            settings_path,
+            auto_exit,
+            plan_mode: false,
+            prompt: None,
+        }
+    }
+
+    // ── set_agent_auto_exit tests ──────────────────────────────────
+
+    #[test]
+    fn set_agent_auto_exit_unknown_id_errors() {
+        let mut state = HubState::new();
+        let result = set_agent_auto_exit(&mut state, "missing", false);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("not found"));
+    }
+
+    #[test]
+    fn set_agent_auto_exit_disable_neutralizes_settings_file() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let settings = tmp.path().join("settings.json");
+        std::fs::write(&settings, "{\"hooks\":{\"Stop\":[]}}").unwrap();
+
+        let mut state = HubState::new();
+        state.agents.insert(
+            "abc123".into(),
+            make_test_agent_entry("abc123", Some(settings.clone()), true),
+        );
+
+        set_agent_auto_exit(&mut state, "abc123", false).expect("disable should succeed");
+
+        assert!(!state.agents["abc123"].auto_exit);
+        let contents = std::fs::read_to_string(&settings).unwrap();
+        assert_eq!(contents, "{}");
+    }
+
+    #[test]
+    fn set_agent_auto_exit_enable_without_settings_path_errors() {
+        let mut state = HubState::new();
+        state.agents.insert(
+            "abc123".into(),
+            make_test_agent_entry("abc123", None, false),
+        );
+
+        let result = set_agent_auto_exit(&mut state, "abc123", true);
+        assert!(result.is_err());
+        // The agent's flag should remain off when enabling fails.
+        assert!(!state.agents["abc123"].auto_exit);
+    }
+
+    #[test]
+    fn set_agent_auto_exit_disable_without_settings_path_is_idempotent() {
+        let mut state = HubState::new();
+        state.agents.insert(
+            "abc123".into(),
+            make_test_agent_entry("abc123", None, false),
+        );
+
+        set_agent_auto_exit(&mut state, "abc123", false).expect("disable should succeed");
+        assert!(!state.agents["abc123"].auto_exit);
     }
 }
