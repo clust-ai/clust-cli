@@ -532,7 +532,8 @@ pub fn get_scheduled_task(
 ) -> Result<Option<ScheduledTaskInfo>, String> {
     let row = conn
         .query_row(
-            "SELECT id, repo_path, branch_name, prompt, plan_mode, auto_exit,
+            "SELECT id, repo_path, branch_name, base_branch, new_branch,
+                    prompt, plan_mode, auto_exit,
                     schedule_kind, start_at, status, agent_id, agent_binary,
                     created_at, completed_at
              FROM scheduled_tasks WHERE id = ?1",
@@ -553,7 +554,8 @@ pub fn list_scheduled_tasks(
 ) -> Result<Vec<ScheduledTaskInfo>, String> {
     let mut stmt = conn
         .prepare(
-            "SELECT id, repo_path, branch_name, prompt, plan_mode, auto_exit,
+            "SELECT id, repo_path, branch_name, base_branch, new_branch,
+                    prompt, plan_mode, auto_exit,
                     schedule_kind, start_at, status, agent_id, agent_binary,
                     created_at, completed_at
              FROM scheduled_tasks ORDER BY created_at ASC, id ASC",
@@ -755,6 +757,8 @@ struct PartialTask {
     id: String,
     repo_path: String,
     branch_name: String,
+    base_branch: Option<String>,
+    new_branch: Option<String>,
     prompt: String,
     plan_mode: bool,
     auto_exit: bool,
@@ -772,16 +776,18 @@ fn row_to_partial(row: &rusqlite::Row<'_>) -> rusqlite::Result<PartialTask> {
         id: row.get(0)?,
         repo_path: row.get(1)?,
         branch_name: row.get(2)?,
-        prompt: row.get(3)?,
-        plan_mode: row.get::<_, i64>(4)? != 0,
-        auto_exit: row.get::<_, i64>(5)? != 0,
-        schedule_kind: row.get(6)?,
-        start_at: row.get(7)?,
-        status: row.get(8)?,
-        agent_id: row.get(9)?,
-        agent_binary: row.get(10)?,
-        created_at: row.get(11)?,
-        completed_at: row.get(12)?,
+        base_branch: row.get(3)?,
+        new_branch: row.get(4)?,
+        prompt: row.get(5)?,
+        plan_mode: row.get::<_, i64>(6)? != 0,
+        auto_exit: row.get::<_, i64>(7)? != 0,
+        schedule_kind: row.get(8)?,
+        start_at: row.get(9)?,
+        status: row.get(10)?,
+        agent_id: row.get(11)?,
+        agent_binary: row.get(12)?,
+        created_at: row.get(13)?,
+        completed_at: row.get(14)?,
     })
 }
 
@@ -806,6 +812,8 @@ fn hydrate(
         repo_path: p.repo_path,
         repo_name,
         branch_name: p.branch_name,
+        base_branch: p.base_branch,
+        new_branch: p.new_branch,
         prompt: p.prompt,
         plan_mode: p.plan_mode,
         auto_exit: p.auto_exit,

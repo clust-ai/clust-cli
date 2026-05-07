@@ -201,7 +201,11 @@ pub async fn clean_worktree_for_task(task: &ScheduledTaskInfo) -> Result<(), Str
     let repo_root = std::path::Path::new(&task.repo_path);
     let wt = crate::repo::worktree_path(repo_root, &task.branch_name);
     if !wt.exists() {
-        return Err(format!("worktree {} does not exist", wt.display()));
+        // Nothing to clean. A first-fire failure leaves no worktree on disk,
+        // so `R` (clean restart) on such a task should fall through to
+        // `fire_scheduled_task`, which creates a fresh worktree. Erroring
+        // here would strand the user with no way to recover the task.
+        return Ok(());
     }
     let wt_str = wt.to_string_lossy().into_owned();
     tokio::task::spawn_blocking(move || -> Result<(), String> {
@@ -252,23 +256,24 @@ trait SpawnFields {
 
 impl SpawnFields for ScheduledTaskInfo {
     fn base_branch_for_spawn(&self) -> Option<String> {
-        // The wire type carries the resolved `branch_name` but not the
-        // original `base_branch` / `new_branch`. For both first-fire and
-        // respawn we want a "checkout existing" of `branch_name` — this lets
-        // `add_worktree` short-circuit when the worktree already exists, and
-        // create one anchored to that branch otherwise. Returning `None` here
-        // (the previous behavior) made `create_worktree_and_spawn_agent`
-        // error out on its `either target_branch or new_branch must be
-        // provided` check, so every fire ended in `aborted`.
-        Some(self.branch_name.clone())
+        // Prefer the original base ref (e.g. `main`, `origin/foo`) so a task
+        // created with `new_branch=Some(X), base_branch=Some(main)` re-fires
+        // as `git worktree add -b X <wt> main`. Fall back to `branch_name`
+        // for shadow tasks (promoted from a running agent) where neither
+        // original field was recorded — those always reuse an existing
+        // worktree, and `add_worktree` short-circuits when the worktree
+        // already exists on disk.
+        self.base_branch
+            .clone()
+            .or_else(|| Some(self.branch_name.clone()))
     }
 
     fn new_branch_for_spawn(&self) -> Option<String> {
-        // We always treat scheduled-task spawns as "checkout existing":
-        // first-fire creates the worktree from the existing branch; later
-        // fires reuse it. Returning `None` here keeps `checkout_existing=true`
-        // in `create_worktree_and_spawn_agent`.
-        None
+        // Returning `Some(...)` triggers the `-b <new_branch>` arm in
+        // `add_worktree`, which is exactly what a "create new branch" task
+        // wants on first fire. Subsequent fires of the same task short-circuit
+        // because the worktree directory already exists.
+        self.new_branch.clone()
     }
 }
 
@@ -282,6 +287,8 @@ mod tests {
             repo_path: "/repo".into(),
             repo_name: "repo".into(),
             branch_name: format!("br-{id}"),
+            base_branch: None,
+            new_branch: None,
             prompt: "p".into(),
             plan_mode: false,
             auto_exit: false,
