@@ -157,10 +157,10 @@ pub enum AgentEvent {
 
 /// Generate a unique 6-character hex agent ID.
 pub fn generate_agent_id<V>(existing: &HashMap<String, V>) -> String {
-    use rand::Rng;
-    let mut rng = rand::thread_rng();
+    use rand::RngExt;
+    let mut rng = rand::rng();
     loop {
-        let bytes: [u8; 3] = rng.gen();
+        let bytes: [u8; 3] = rng.random();
         let id = format!("{:02x}{:02x}{:02x}", bytes[0], bytes[1], bytes[2]);
         if !existing.contains_key(&id) {
             return id;
@@ -678,10 +678,10 @@ impl TerminalEntry {
 
 /// Generate a unique terminal ID with "t" prefix.
 pub fn generate_terminal_id(existing: &HashMap<String, TerminalEntry>) -> String {
-    use rand::Rng;
-    let mut rng = rand::thread_rng();
+    use rand::RngExt;
+    let mut rng = rand::rng();
     loop {
-        let bytes: [u8; 3] = rng.gen();
+        let bytes: [u8; 3] = rng.random();
         let id = format!("t{:02x}{:02x}{:02x}", bytes[0], bytes[1], bytes[2]);
         if !existing.contains_key(&id) {
             return id;
