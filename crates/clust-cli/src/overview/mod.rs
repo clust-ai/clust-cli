@@ -197,6 +197,11 @@ pub struct AgentPanel {
     /// tertiary sort key in the overview so newly-spawned agents are appended
     /// at the end of their (repo, batch) group.
     pub started_at: String,
+    /// Mirrors `AgentInfo::auto_exit` for the running agent. Drives the
+    /// header pill in the overview and gates the disable-auto-exit keybind.
+    /// Refreshed each agent-list poll, so a successful `SetAgentAutoExit`
+    /// shows up here on the next tick.
+    pub auto_exit: bool,
     pub vterm: TerminalEmulator,
     pub command_tx: mpsc::Sender<PanelCommand>,
     pub exited: bool,
@@ -323,6 +328,7 @@ impl OverviewState {
             if let Some(panel) = self.panels.iter_mut().find(|p| p.id == agent.id) {
                 panel.branch_name = agent.branch_name.clone();
                 panel.repo_path = agent.repo_path.clone();
+                panel.auto_exit = agent.auto_exit;
             }
         }
 
@@ -681,6 +687,7 @@ impl OverviewState {
             repo_path: agent.repo_path.clone(),
             is_worktree: agent.is_worktree,
             started_at: agent.started_at.clone(),
+            auto_exit: agent.auto_exit,
             vterm: TerminalEmulator::new(cols as usize, rows as usize),
             command_tx,
             exited: false,
@@ -1542,6 +1549,17 @@ pub(crate) fn render_agent_panel(
         header_spans.push(Span::styled(" ", Style::default().bg(header_bg)));
     }
 
+    if panel.auto_exit && !panel.exited {
+        header_spans.push(Span::styled(
+            "AUTO-EXIT",
+            Style::default()
+                .fg(theme::R_INFO)
+                .bg(header_bg)
+                .add_modifier(Modifier::BOLD),
+        ));
+        header_spans.push(Span::styled(" ", Style::default().bg(header_bg)));
+    }
+
     // Scroll indicator
     if panel.panel_scroll_offset > 0 {
         let indicator = format!("↑{} ", panel.panel_scroll_offset);
@@ -1985,6 +2003,10 @@ impl FocusModeState {
             // Focus mode has a single panel and never sorts it, so the
             // creation timestamp is irrelevant here.
             started_at: String::new(),
+            // Focus mode reads auto_exit fresh from the agent list each tick
+            // through the regular overview path; this initial value is only
+            // a placeholder until the next sync.
+            auto_exit: false,
             vterm: TerminalEmulator::new(cols as usize, rows as usize),
             command_tx,
             exited: false,

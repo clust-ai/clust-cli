@@ -114,6 +114,7 @@ CLI -> Hub:
   ListAgents { hub: Option<String> }
   StopHub
   StopAgent { id: String }
+  SetAgentAutoExit { id: String, auto_exit: bool }
   SetDefault { agent_binary: String }
   GetDefault
   RegisterRepo { path: String }
@@ -213,7 +214,7 @@ Hub -> CLI:
 
 ### Protocol Versioning
 
-The IPC protocol includes a version check to detect stale hubs. `clust-ipc` exports a `PROTOCOL_VERSION` constant (currently `9`) that must be bumped whenever the `CliMessage` or `HubMessage` enum shapes change (since `rmp-serde` uses numeric enum indices).
+The IPC protocol includes a version check to detect stale hubs. `clust-ipc` exports a `PROTOCOL_VERSION` constant (currently `10`) that must be bumped whenever the `CliMessage` or `HubMessage` enum shapes change (since `rmp-serde` uses numeric enum indices).
 
 On connection, the CLI sends a `Ping { protocol_version }` message. The hub replies with `Pong { protocol_version }` carrying its own version. If versions mismatch, the CLI stops the stale hub and spawns a fresh one before proceeding.
 

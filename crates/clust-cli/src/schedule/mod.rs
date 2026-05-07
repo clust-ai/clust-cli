@@ -332,6 +332,7 @@ impl ScheduleState {
                 repo_path: Some(task.repo_path.clone()),
                 is_worktree: true,
                 started_at: task.created_at.clone(),
+                auto_exit: task.auto_exit,
                 vterm: TerminalEmulator::new(cols as usize, rows as usize),
                 command_tx,
                 exited: false,
