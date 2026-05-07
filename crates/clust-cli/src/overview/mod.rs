@@ -1,5 +1,6 @@
 pub mod gitdiff;
 pub mod input;
+pub mod term_complete;
 
 use std::collections::{HashMap, HashSet};
 
@@ -13,7 +14,7 @@ use ratatui::{
 use tokio::sync::{mpsc, watch};
 use tokio::task::JoinHandle;
 
-use crossterm::event::{KeyCode, KeyEvent};
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use fuzzy_matcher::skim::SkimMatcherV2;
 use fuzzy_matcher::FuzzyMatcher;
 
@@ -102,6 +103,10 @@ pub struct TerminalPanel {
     /// `agent_terminals` cache (i.e., focus mode closed).
     event_rx: mpsc::Receiver<TerminalOutputEvent>,
     task_handle: JoinHandle<()>,
+    /// Local mirror of what the user has typed since the last command boundary,
+    /// used to drive Tab completion. The shell still owns its own input state
+    /// over the PTY; this is just a best-effort echo of recent keystrokes.
+    pub input_buffer: term_complete::InputBuffer,
 }
 
 impl TerminalPanel {
@@ -1865,6 +1870,9 @@ pub struct FocusModeState {
     /// failure; cleared when the user dismisses or successfully spawns a new
     /// terminal.
     pub terminal_status_message: Option<String>,
+    /// Active tab-completion popup, if any. Tied to the active terminal — only
+    /// one popup is open at a time across all terminals.
+    pub completion: Option<term_complete::CompletionState>,
 }
 
 impl FocusModeState {
@@ -1913,6 +1921,7 @@ impl FocusModeState {
             terminal_cols: 80,
             terminal_rows: 24,
             terminal_status_message: None,
+            completion: None,
         }
     }
 
@@ -2008,6 +2017,7 @@ impl FocusModeState {
         // Default sub-mode is Navigate so the user is never accidentally
         // typing into a shell they didn't expect to be in.
         self.terminal_input_focused = false;
+        self.completion = None;
         if existing_terminals.panels.is_empty() {
             self.terminal_panels = Vec::new();
             self.current_terminal_idx = 0;
@@ -2149,6 +2159,7 @@ impl FocusModeState {
         let current_idx = self.current_terminal_idx;
         self.current_terminal_idx = 0;
         self.terminal_input_focused = false;
+        self.completion = None;
         if panels.is_empty() {
             return None;
         }
@@ -2241,6 +2252,7 @@ impl FocusModeState {
             scroll_offset: 0,
             event_rx,
             task_handle: handle,
+            input_buffer: term_complete::InputBuffer::new(),
         });
         self.current_terminal_idx = self.terminal_panels.len() - 1;
         // Clear any stale spawn-failure banner — the user just asked for a
@@ -2269,6 +2281,7 @@ impl FocusModeState {
         let panel = self.terminal_panels.remove(self.current_terminal_idx);
         let _ = panel.command_tx.try_send(PanelCommand::Detach);
         panel.task_handle.abort();
+        self.completion = None;
         if self.terminal_panels.is_empty() {
             self.current_terminal_idx = 0;
         } else if self.current_terminal_idx >= self.terminal_panels.len() {
@@ -2282,6 +2295,7 @@ impl FocusModeState {
             return;
         }
         self.current_terminal_idx = (self.current_terminal_idx + 1) % self.terminal_panels.len();
+        self.completion = None;
     }
 
     /// Switch to the previous terminal in the list (wraps around).
@@ -2294,12 +2308,14 @@ impl FocusModeState {
         } else {
             self.current_terminal_idx - 1
         };
+        self.completion = None;
     }
 
     /// Switch to the terminal at the given index, if valid.
     pub fn select_terminal(&mut self, idx: usize) {
         if idx < self.terminal_panels.len() {
             self.current_terminal_idx = idx;
+            self.completion = None;
         }
     }
 
@@ -2322,6 +2338,7 @@ impl FocusModeState {
         }
         self.current_terminal_idx = 0;
         self.terminal_input_focused = false;
+        self.completion = None;
     }
 
     /// Drain terminal output events into the vterm of every live panel so
@@ -2344,6 +2361,162 @@ impl FocusModeState {
         if let Some(panel) = self.current_terminal() {
             let _ = panel.command_tx.try_send(PanelCommand::Input(data));
         }
+    }
+
+    /// Single entry point for keystrokes that arrive while the Terminal tab is
+    /// focused in Type sub-mode. Owns three concerns:
+    ///   1. Driving the completion popup when one is open.
+    ///   2. Intercepting plain Tab to start a new completion.
+    ///   3. Tracking the local input buffer used by completion, then
+    ///      forwarding the key to the PTY (the existing behaviour).
+    pub fn handle_terminal_type_key(&mut self, key: &KeyEvent) {
+        // 1. Popup is open — give it first crack at the key.
+        if self.completion.is_some() {
+            match key.code {
+                KeyCode::Up => {
+                    if let Some(c) = self.completion.as_mut() {
+                        c.move_up();
+                    }
+                    return;
+                }
+                KeyCode::Down => {
+                    if let Some(c) = self.completion.as_mut() {
+                        c.move_down();
+                    }
+                    return;
+                }
+                KeyCode::Tab | KeyCode::Enter => {
+                    self.accept_completion();
+                    return;
+                }
+                KeyCode::Esc => {
+                    self.completion = None;
+                    return;
+                }
+                _ => {
+                    // Any other key dismisses the popup and falls through to
+                    // normal handling — so the shell sees the keystroke and
+                    // the user can re-press Tab once they've typed more.
+                    self.completion = None;
+                }
+            }
+        }
+
+        // 2. Plain Tab — try TUI-level completion. Modifier+Tab variants are
+        //    forwarded as-is so existing shell bindings (e.g. shift-tab as
+        //    BackTab → \x1b[Z) keep working.
+        let is_plain_tab = matches!(key.code, KeyCode::Tab)
+            && !key
+                .modifiers
+                .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT | KeyModifiers::SHIFT);
+        if is_plain_tab && self.try_start_completion() {
+            return;
+        }
+
+        // 3. Track the buffer (best-effort) and forward bytes to the PTY.
+        self.update_input_buffer(key);
+        if key.code == KeyCode::Esc {
+            self.send_terminal_input(vec![0x1b]);
+        } else if let Some(bytes) = input::key_event_to_bytes(key) {
+            self.send_terminal_input(bytes);
+        }
+    }
+
+    /// Update the local input buffer in response to a keystroke. Reset on
+    /// command boundaries (Enter, Ctrl+C, Ctrl+U, Ctrl+G); append on printable
+    /// characters; pop on Backspace. Other keys (arrows, F-keys, Ctrl+letter
+    /// other than the resets) are deliberately ignored — tracking them
+    /// faithfully would require shadowing the shell's full line editor.
+    fn update_input_buffer(&mut self, key: &KeyEvent) {
+        let Some(panel) = self.terminal_panels.get_mut(self.current_terminal_idx) else {
+            return;
+        };
+        if matches!(key.code, KeyCode::Enter) {
+            panel.input_buffer.clear();
+            return;
+        }
+        if key.modifiers.contains(KeyModifiers::CONTROL) {
+            if let KeyCode::Char(c) = key.code {
+                let lower = c.to_ascii_lowercase();
+                if matches!(lower, 'c' | 'u' | 'g') {
+                    panel.input_buffer.clear();
+                }
+            }
+            return;
+        }
+        match key.code {
+            KeyCode::Char(c) => panel.input_buffer.push_char(c),
+            KeyCode::Backspace => panel.input_buffer.pop_char(),
+            _ => {}
+        }
+    }
+
+    /// Compute completions for the active terminal's buffer. Returns `true`
+    /// when the keystroke was consumed (single-match inserted inline, or
+    /// multi-match popup opened).
+    fn try_start_completion(&mut self) -> bool {
+        let Some(panel) = self.terminal_panels.get(self.current_terminal_idx) else {
+            return false;
+        };
+        if panel.input_buffer.is_empty() {
+            return false;
+        }
+        let buffer = panel.input_buffer.as_str().to_string();
+        let working_dir = self.working_dir.clone().unwrap_or_else(|| ".".to_string());
+        let Some(result) = term_complete::compute_completions(&buffer, &working_dir) else {
+            return false;
+        };
+
+        if result.items.len() == 1 {
+            let item = result.items[0].clone();
+            self.insert_completion(&result.prefix, &item);
+            return true;
+        }
+
+        self.completion = Some(term_complete::CompletionState {
+            prefix: result.prefix,
+            items: result.items,
+            selected: 0,
+            scroll: 0,
+        });
+        true
+    }
+
+    fn accept_completion(&mut self) {
+        let Some(state) = self.completion.take() else {
+            return;
+        };
+        let Some(item) = state.items.get(state.selected).cloned() else {
+            return;
+        };
+        self.insert_completion(&state.prefix, &item);
+    }
+
+    /// Send the bytes the shell needs to grow `prefix` into `item.display`
+    /// (plus a trailing `/` for directories or space for files/commands), and
+    /// mirror those bytes into the local input buffer so the next Tab can
+    /// continue from the new state.
+    fn insert_completion(&mut self, prefix: &str, item: &term_complete::CompletionItem) {
+        if !item.display.starts_with(prefix) {
+            // Defensive — `compute_completions` always returns items whose
+            // display starts with the prefix, but if that ever drifts we
+            // refuse to send junk to the shell.
+            return;
+        }
+        let suffix = &item.display[prefix.len()..];
+        let trailing: char = match item.kind {
+            term_complete::CompletionKind::Directory => '/',
+            term_complete::CompletionKind::File | term_complete::CompletionKind::Command => ' ',
+        };
+
+        if let Some(panel) = self.terminal_panels.get_mut(self.current_terminal_idx) {
+            panel.input_buffer.push_str(suffix);
+            panel.input_buffer.push_char(trailing);
+        }
+
+        let mut bytes: Vec<u8> = suffix.as_bytes().to_vec();
+        bytes.push(trailing as u8);
+        self.send_terminal_input(bytes);
     }
 
     /// Handle terminal panel resize. Resizes every panel so the user sees
@@ -2860,14 +3033,120 @@ fn render_terminal_tab(
     // target — i.e., focus_side == Left AND sub-mode == Type. In Navigate
     // mode the cursor is hidden so the user has a clear visual cue that
     // typing won't reach the shell.
-    if panel_focused && in_type_mode && panel.scroll_offset == 0 && !panel.vterm.hide_cursor() {
+    let cursor_pos = if panel_focused
+        && in_type_mode
+        && panel.scroll_offset == 0
+        && !panel.vterm.hide_cursor()
+    {
         let (cursor_row, cursor_col) = panel.vterm.cursor_position();
         let x = content_area.x + cursor_col;
         let y = content_area.y + cursor_row;
         if x < content_area.x + content_area.width && y < content_area.y + content_area.height {
             frame.set_cursor_position(Position { x, y });
+            Some((x, y))
+        } else {
+            None
         }
+    } else {
+        None
+    };
+
+    // Render the tab-completion popup, if any, anchored near the shell cursor.
+    if let (Some(completion), Some((cx, cy))) = (state.completion.as_ref(), cursor_pos) {
+        render_completion_popup(frame, content_area, cx, cy, completion);
     }
+}
+
+/// Draw the tab-completion popup as a small bordered list near the shell
+/// cursor. Placed above the cursor when there's room above; otherwise below.
+fn render_completion_popup(
+    frame: &mut Frame,
+    area: Rect,
+    cursor_x: u16,
+    cursor_y: u16,
+    state: &term_complete::CompletionState,
+) {
+    if state.items.is_empty() {
+        return;
+    }
+
+    let max_display_width: u16 = state
+        .items
+        .iter()
+        .map(|i| i.display.chars().count() as u16)
+        .max()
+        .unwrap_or(0);
+    // +2 for the side borders, +2 for left/right padding.
+    let desired_width = max_display_width.saturating_add(4).max(10);
+    let popup_width = desired_width.min(area.width.max(1));
+
+    let visible_rows = state
+        .items
+        .len()
+        .min(term_complete::POPUP_VISIBLE_ROWS) as u16;
+    // +2 for top/bottom borders.
+    let popup_height = visible_rows.saturating_add(2).min(area.height.max(1));
+
+    // Prefer placing above the cursor row so the user can still see what they
+    // typed. Fall back to below if the cursor is too close to the top of the
+    // panel.
+    let above_room = cursor_y.saturating_sub(area.y);
+    let popup_y = if above_room >= popup_height {
+        cursor_y.saturating_sub(popup_height)
+    } else {
+        let candidate = cursor_y.saturating_add(1);
+        let max_y = area.y + area.height.saturating_sub(popup_height);
+        candidate.min(max_y)
+    };
+
+    // Anchor to the cursor column, but never let the popup spill off the right
+    // edge of the panel.
+    let max_x = area.x + area.width.saturating_sub(popup_width);
+    let popup_x = cursor_x.min(max_x).max(area.x);
+
+    let popup_rect = Rect {
+        x: popup_x,
+        y: popup_y,
+        width: popup_width,
+        height: popup_height,
+    };
+
+    // Build the visible slice with the selected row highlighted.
+    let visible_items: Vec<Line> = state
+        .items
+        .iter()
+        .enumerate()
+        .skip(state.scroll)
+        .take(term_complete::POPUP_VISIBLE_ROWS)
+        .map(|(abs_idx, item)| {
+            let style = if abs_idx == state.selected {
+                Style::default()
+                    .bg(theme::R_SELECTION_BG)
+                    .fg(theme::R_TEXT_PRIMARY)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default()
+                    .bg(theme::R_BG_SURFACE)
+                    .fg(theme::R_TEXT_SECONDARY)
+            };
+            Line::from(Span::styled(format!(" {} ", item.display), style))
+        })
+        .collect();
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .style(
+            Style::default()
+                .bg(theme::R_BG_SURFACE)
+                .fg(theme::R_TEXT_TERTIARY),
+        );
+    let para = Paragraph::new(visible_items)
+        .block(block)
+        .style(Style::default().bg(theme::R_BG_SURFACE));
+
+    // Clear the area first so we don't see terminal contents bleeding through.
+    frame.render_widget(ratatui::widgets::Clear, popup_rect);
+    frame.render_widget(para, popup_rect);
 }
 
 /// Render the per-terminal label strip: `[1] [2*] [3]    [+]`. The active

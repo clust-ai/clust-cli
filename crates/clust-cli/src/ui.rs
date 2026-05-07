@@ -3426,15 +3426,11 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                             focus_mode_state.terminal_input_focused =
                                                 !focus_mode_state.terminal_input_focused;
                                         } else if focus_mode_state.terminal_input_focused {
-                                            // Type mode: forward everything to
-                                            // the PTY (existing behaviour).
-                                            if key.code == KeyCode::Esc {
-                                                focus_mode_state.send_terminal_input(vec![0x1b]);
-                                            } else if let Some(bytes) =
-                                                overview::input::key_event_to_bytes(&key)
-                                            {
-                                                focus_mode_state.send_terminal_input(bytes);
-                                            }
+                                            // Type mode: tab completion +
+                                            // forward to the PTY. The handler
+                                            // owns the input-buffer mirror,
+                                            // popup state, and byte forwarding.
+                                            focus_mode_state.handle_terminal_type_key(&key);
                                         } else {
                                             // Navigate mode: TUI commands.
                                             match key.code {
