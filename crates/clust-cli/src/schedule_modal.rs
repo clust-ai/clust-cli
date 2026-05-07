@@ -6,8 +6,16 @@
 //! - **Schedule** — final step is a free-text time/duration entry parsed by
 //!   [`parse_time`].
 //! - **Depend** — final step is a multi-select list of every existing
-//!   scheduled task across all repos.
+//!   scheduled task across all repos. Inactive tasks that will create a new
+//!   branch surface as **FUTURE** so a chain can be wired before the upstream
+//!   branch physically exists.
 //! - **Unscheduled** — submits immediately after the prompt step.
+//!
+//! Under **Depend**, the SelectBranch step also offers *future* branches —
+//! branches that don't exist yet but will be created by an Inactive scheduled
+//! task in the same repo. Picking one records the upstream task id and
+//! auto-injects it into `depends_on_ids` at submission so the new task waits
+//! for its base to actually exist before firing.
 //!
 //! Differs from Opt+E in two ways: the prompt cannot be empty, and the modal
 //! exposes an `Auto Exit` toggle (Alt+X) in addition to plan-mode (Alt+P).
@@ -108,12 +116,70 @@ enum DepKind {
     Agent,
 }
 
+/// Rank used to sort the dep picker so the most chain-relevant entries float
+/// to the top. Lower = earlier in the list.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum DepRank {
+    Future,  // Inactive task that will create a new branch
+    Pending, // Inactive task reusing an existing branch
+    Running, // Active scheduled task
+    Agent,   // Running Opt+E worktree agent (not yet promoted)
+    Done,    // Complete task
+    Aborted, // Aborted task
+}
+
+/// One-word status label for a scheduled task, surfacing "FUTURE" for the
+/// Inactive+new_branch case so the dep picker reads as a chain of future
+/// branches rather than a list of completed records.
+fn task_status_label(task: &ScheduledTaskInfo) -> &'static str {
+    match (task.status, task.new_branch.is_some()) {
+        (ScheduledTaskStatus::Inactive, true) => "FUTURE",
+        (ScheduledTaskStatus::Inactive, false) => "PENDING",
+        (ScheduledTaskStatus::Active, _) => "RUNNING",
+        (ScheduledTaskStatus::Complete, _) => "DONE",
+        (ScheduledTaskStatus::Aborted, _) => "ABORTED",
+    }
+}
+
+fn task_dep_rank(task: &ScheduledTaskInfo) -> DepRank {
+    match (task.status, task.new_branch.is_some()) {
+        (ScheduledTaskStatus::Inactive, true) => DepRank::Future,
+        (ScheduledTaskStatus::Inactive, false) => DepRank::Pending,
+        (ScheduledTaskStatus::Active, _) => DepRank::Running,
+        (ScheduledTaskStatus::Complete, _) => DepRank::Done,
+        (ScheduledTaskStatus::Aborted, _) => DepRank::Aborted,
+    }
+}
+
 /// Tagged ID stored in `selected_deps` so submission can split the picks back
 /// into scheduled-task IDs and agent IDs.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct DepSelection {
     kind: DepKind,
     id: String,
+}
+
+/// One choice in the SelectBranch step: either an existing local branch in the
+/// repo, or a *future* branch that will be created when an upstream Inactive
+/// scheduled task fires. Picking a future branch records the upstream task id
+/// so it can be auto-injected into `depends_on_ids` at submission, ensuring
+/// the new task waits for its base to actually exist.
+#[derive(Debug, Clone)]
+enum BranchChoice {
+    Existing(BranchInfo),
+    Future {
+        branch_name: String,
+        upstream_task_id: String,
+    },
+}
+
+impl BranchChoice {
+    fn name(&self) -> &str {
+        match self {
+            Self::Existing(b) => b.name.as_str(),
+            Self::Future { branch_name, .. } => branch_name.as_str(),
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -127,7 +193,11 @@ pub struct ScheduleTaskModal {
     selected_idx: usize,
 
     repos: Vec<RepoInfo>,
-    branches: Vec<BranchInfo>,
+    /// Choices shown in the SelectBranch step. Populated after the schedule
+    /// kind is chosen so future branches can be conditionally included only
+    /// when the kind is Depend (where the upstream task can be auto-added as
+    /// a dep to make the chain actually wait for the branch to exist).
+    branches: Vec<BranchChoice>,
     /// Snapshot of every existing scheduled task, used by the Depend step.
     /// Filtered fuzzily by `input` while on that step.
     all_tasks: Vec<ScheduledTaskInfo>,
@@ -142,6 +212,10 @@ pub struct ScheduleTaskModal {
     selected_repo: Option<RepoInfo>,
     schedule_kind: Option<ScheduleKindChoice>,
     target_branch: Option<String>,
+    /// Set when the user picked a future branch as the base. The upstream
+    /// task id is auto-included in `depends_on_ids` at submission so the new
+    /// task waits for the branch to be created before firing.
+    implicit_upstream_task_id: Option<String>,
     new_branch_name: Option<String>,
     new_branch_required: bool,
     /// Last time-parse error message; cleared whenever input changes.
@@ -198,6 +272,7 @@ impl ScheduleTaskModal {
             selected_repo: None,
             schedule_kind: None,
             target_branch: None,
+            implicit_upstream_task_id: None,
             new_branch_name: None,
             new_branch_required: false,
             time_error: None,
@@ -261,6 +336,7 @@ impl ScheduleTaskModal {
             mode: ScheduleModalMode::Reschedule {
                 task_id: task.id.clone(),
             },
+            implicit_upstream_task_id: None,
             matcher: SkimMatcherV2::default(),
         }
     }
@@ -386,6 +462,7 @@ impl ScheduleTaskModal {
             ScheduleModalStep::SelectBranch => {
                 self.step = ScheduleModalStep::SelectScheduleKind;
                 self.target_branch = None;
+                self.implicit_upstream_task_id = None;
             }
             ScheduleModalStep::NewBranch => {
                 if self.new_branch_required {
@@ -393,6 +470,7 @@ impl ScheduleTaskModal {
                 } else {
                     self.step = ScheduleModalStep::SelectBranch;
                     self.target_branch = None;
+                    self.implicit_upstream_task_id = None;
                 }
             }
             ScheduleModalStep::EnterPrompt => {
@@ -415,13 +493,60 @@ impl ScheduleTaskModal {
         ScheduleModalResult::Pending
     }
 
+    /// Build the branch picker for the selected repo and chosen schedule kind.
+    /// Existing local branches always show; *future* branches (from Inactive
+    /// scheduled tasks with `new_branch` set, in the same repo) only show when
+    /// `kind == Depend` because that is the only kind where we can wire an
+    /// auto-dep on the upstream creator task.
+    fn populate_branches(&mut self, kind: ScheduleKindChoice) {
+        let mut out: Vec<BranchChoice> = Vec::new();
+        let Some(repo) = &self.selected_repo else {
+            self.branches = out;
+            return;
+        };
+        for b in &repo.local_branches {
+            out.push(BranchChoice::Existing(b.clone()));
+        }
+        if matches!(kind, ScheduleKindChoice::Depend) {
+            let existing: std::collections::HashSet<&str> = repo
+                .local_branches
+                .iter()
+                .map(|b| b.name.as_str())
+                .collect();
+            // Track future branches we've already added so two Inactive tasks
+            // racing to create the same branch name don't both surface.
+            let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+            for t in &self.all_tasks {
+                if t.repo_path != repo.path {
+                    continue;
+                }
+                if t.status != ScheduledTaskStatus::Inactive {
+                    continue;
+                }
+                if t.new_branch.is_none() {
+                    continue;
+                }
+                if existing.contains(t.branch_name.as_str()) {
+                    continue;
+                }
+                if !seen.insert(t.branch_name.clone()) {
+                    continue;
+                }
+                out.push(BranchChoice::Future {
+                    branch_name: t.branch_name.clone(),
+                    upstream_task_id: t.id.clone(),
+                });
+            }
+        }
+        self.branches = out;
+    }
+
     fn handle_enter(&mut self) -> ScheduleModalResult {
         match self.step {
             ScheduleModalStep::SelectRepo => {
                 let filtered = self.filtered_repos();
                 if let Some(&(idx, _)) = filtered.get(self.selected_idx) {
                     let repo = self.repos[idx].clone();
-                    self.branches = repo.local_branches.clone();
                     self.selected_repo = Some(repo);
                     self.step = ScheduleModalStep::SelectScheduleKind;
                     self.reset_input();
@@ -453,6 +578,7 @@ impl ScheduleTaskModal {
                             }
                         }
                     }
+                    self.populate_branches(choice);
                     if self.branches.is_empty() {
                         self.new_branch_required = true;
                         self.step = ScheduleModalStep::NewBranch;
@@ -466,7 +592,12 @@ impl ScheduleTaskModal {
             ScheduleModalStep::SelectBranch => {
                 let filtered = self.filtered_branches();
                 if let Some(&(idx, _)) = filtered.get(self.selected_idx) {
-                    self.target_branch = Some(self.branches[idx].name.clone());
+                    let choice = self.branches[idx].clone();
+                    self.target_branch = Some(choice.name().to_string());
+                    self.implicit_upstream_task_id = match choice {
+                        BranchChoice::Future { upstream_task_id, .. } => Some(upstream_task_id),
+                        BranchChoice::Existing(_) => None,
+                    };
                     self.step = ScheduleModalStep::NewBranch;
                     self.reset_input();
                 }
@@ -501,6 +632,19 @@ impl ScheduleTaskModal {
                     }
                     ScheduleKindChoice::Depend => {
                         self.step = ScheduleModalStep::SelectDependencies;
+                        // If the user picked a future branch as the base,
+                        // pre-check the upstream task so the chain is visible
+                        // in the picker and the user can extend (but not
+                        // accidentally drop) it.
+                        if let Some(ref upstream_id) = self.implicit_upstream_task_id {
+                            let sel = DepSelection {
+                                kind: DepKind::Task,
+                                id: upstream_id.clone(),
+                            };
+                            if !self.selected_deps.contains(&sel) {
+                                self.selected_deps.push(sel);
+                            }
+                        }
                         self.reset_input();
                         ScheduleModalResult::Pending
                     }
@@ -569,6 +713,20 @@ impl ScheduleTaskModal {
         let reschedule_task_id = match &self.mode {
             ScheduleModalMode::Reschedule { task_id } => Some(task_id.clone()),
             ScheduleModalMode::Create => None,
+        };
+        // When the user picked a future branch as the base, the upstream task
+        // MUST end up in `depends_on_ids` regardless of what they did in the
+        // dep picker — otherwise the new task could fire before the branch
+        // exists. The picker pre-selects it but the user can untoggle, so we
+        // also re-inject here as a safety net.
+        let schedule = match (&self.implicit_upstream_task_id, schedule) {
+            (Some(upstream_id), ScheduleKind::Depend { mut depends_on_ids }) => {
+                if !depends_on_ids.iter().any(|id| id == upstream_id) {
+                    depends_on_ids.push(upstream_id.clone());
+                }
+                ScheduleKind::Depend { depends_on_ids }
+            }
+            (_, schedule) => schedule,
         };
         ScheduleModalResult::Completed(ScheduleModalOutput {
             repo_path: repo.path.clone(),
@@ -665,7 +823,7 @@ impl ScheduleTaskModal {
             .enumerate()
             .filter_map(|(i, branch)| {
                 self.matcher
-                    .fuzzy_match(&branch.name, &self.input)
+                    .fuzzy_match(branch.name(), &self.input)
                     .map(|score| (i, score))
             })
             .collect();
@@ -673,26 +831,29 @@ impl ScheduleTaskModal {
         results
     }
 
-    /// Unified dep-picker view: existing scheduled tasks first, then running
-    /// Opt+E worktree agents. Each entry carries its kind so rendering and
-    /// toggling can resolve back to the right backing slice.
+    /// Unified dep-picker view: scheduled tasks and running Opt+E agents.
+    ///
+    /// When the input is empty, entries are bucketed by `DepRank` so the most
+    /// chain-relevant rows (Future first, then Pending, Running, Agents, Done,
+    /// Aborted) lead the list. When filtering, fuzzy match score wins — a
+    /// matching aborted row should still be reachable.
     fn filtered_deps(&self) -> Vec<(DepKind, usize, i64)> {
-        let mut results: Vec<(DepKind, usize, i64)> = Vec::new();
         if self.input.is_empty() {
-            results.extend(
-                self.all_tasks
-                    .iter()
-                    .enumerate()
-                    .map(|(i, _)| (DepKind::Task, i, 0)),
-            );
-            results.extend(
-                self.candidate_agents
-                    .iter()
-                    .enumerate()
-                    .map(|(i, _)| (DepKind::Agent, i, 0)),
-            );
-            return results;
+            let mut entries: Vec<(DepRank, DepKind, usize)> = Vec::new();
+            for (i, t) in self.all_tasks.iter().enumerate() {
+                entries.push((task_dep_rank(t), DepKind::Task, i));
+            }
+            for (i, _) in self.candidate_agents.iter().enumerate() {
+                entries.push((DepRank::Agent, DepKind::Agent, i));
+            }
+            // Stable sort preserves DB-insert order within a rank bucket.
+            entries.sort_by_key(|e| e.0);
+            return entries
+                .into_iter()
+                .map(|(_, kind, idx)| (kind, idx, 0))
+                .collect();
         }
+        let mut results: Vec<(DepKind, usize, i64)> = Vec::new();
         for (i, t) in self.all_tasks.iter().enumerate() {
             let label = format!("{} {}", t.repo_name, t.branch_name);
             if let Some(score) = self.matcher.fuzzy_match(&label, &self.input) {
@@ -815,11 +976,24 @@ impl ScheduleTaskModal {
         match self.step {
             ScheduleModalStep::SelectRepo => format!("{prefix} — select repository"),
             ScheduleModalStep::SelectScheduleKind => format!("{prefix} — pick when to start"),
-            ScheduleModalStep::SelectBranch => format!("{prefix} — select branch"),
+            ScheduleModalStep::SelectBranch => {
+                if matches!(self.schedule_kind, Some(ScheduleKindChoice::Depend))
+                    && self
+                        .branches
+                        .iter()
+                        .any(|b| matches!(b, BranchChoice::Future { .. }))
+                {
+                    format!("{prefix} — select branch (existing or future)")
+                } else {
+                    format!("{prefix} — select branch")
+                }
+            }
             ScheduleModalStep::NewBranch => format!("{prefix} — new branch (Enter to skip)"),
             ScheduleModalStep::EnterPrompt => format!("{prefix} — prompt (required)"),
             ScheduleModalStep::EnterStartTime => format!("{prefix} — start time"),
-            ScheduleModalStep::SelectDependencies => format!("{prefix} — pick dependencies"),
+            ScheduleModalStep::SelectDependencies => {
+                format!("{prefix} — pick dependencies (incl. future branches)")
+            }
         }
     }
 
@@ -828,7 +1002,17 @@ impl ScheduleTaskModal {
             ScheduleModalStep::SelectRepo => "↑/↓ select · Enter confirm · Esc cancel".into(),
             ScheduleModalStep::SelectScheduleKind => "↑/↓ select · Enter confirm".into(),
             ScheduleModalStep::SelectBranch => {
-                "type to filter, Enter pick existing — leave empty to create one".into()
+                if matches!(self.schedule_kind, Some(ScheduleKindChoice::Depend))
+                    && self
+                        .branches
+                        .iter()
+                        .any(|b| matches!(b, BranchChoice::Future { .. }))
+                {
+                    "type to filter, Enter pick existing OR future — leave empty to create one"
+                        .into()
+                } else {
+                    "type to filter, Enter pick existing — leave empty to create one".into()
+                }
             }
             ScheduleModalStep::NewBranch => {
                 if self.new_branch_required {
@@ -843,7 +1027,8 @@ impl ScheduleTaskModal {
                 None => "examples: 5m · 2h · 1d · 30s · 20:00".into(),
             },
             ScheduleModalStep::SelectDependencies => {
-                "Space toggles, Enter confirms (≥1 required)".into()
+                "Space toggles · Enter confirms (≥1) · FUTURE = will be created by another task"
+                    .into()
             }
         }
     }
@@ -917,7 +1102,11 @@ impl ScheduleTaskModal {
             .enumerate()
             .map(|(i, &(idx, _))| {
                 let b = &self.branches[idx];
-                self.render_simple_item(&b.name, None, i == self.selected_idx)
+                let secondary = match b {
+                    BranchChoice::Existing(_) => None,
+                    BranchChoice::Future { .. } => Some("future — created by scheduled task"),
+                };
+                self.render_simple_item(b.name(), secondary, i == self.selected_idx)
             })
             .collect();
         frame.render_widget(Paragraph::new(lines), area);
@@ -946,12 +1135,12 @@ impl ScheduleTaskModal {
                             x.kind == DepKind::Task && x.id == task.id
                         });
                         let mark = if checked { "[x] " } else { "[ ] " };
-                        let status = match task.status {
-                            ScheduledTaskStatus::Active => "ACTIVE",
-                            ScheduledTaskStatus::Inactive => "INACTIVE",
-                            ScheduledTaskStatus::Complete => "COMPLETE",
-                            ScheduledTaskStatus::Aborted => "ABORTED",
-                        };
+                        // Surface "future branch" semantics for tasks that
+                        // haven't fired yet: an Inactive task with new_branch
+                        // set will create that branch when it eventually
+                        // fires, so it is a *future* branch to the user even
+                        // though no worktree exists yet on disk.
+                        let status = task_status_label(task);
                         format!(
                             "{}{} / {} [{}]",
                             mark, task.repo_name, task.branch_name, status
@@ -1264,6 +1453,35 @@ mod tests {
         }
     }
 
+    // ----- Future-branch picker -----
+
+    fn make_task(
+        id: &str,
+        repo_path: &str,
+        repo_name: &str,
+        branch_name: &str,
+        new_branch: Option<&str>,
+        status: ScheduledTaskStatus,
+    ) -> ScheduledTaskInfo {
+        ScheduledTaskInfo {
+            id: id.to_string(),
+            repo_path: repo_path.to_string(),
+            repo_name: repo_name.to_string(),
+            branch_name: branch_name.to_string(),
+            base_branch: Some("main".to_string()),
+            new_branch: new_branch.map(String::from),
+            prompt: "do thing".to_string(),
+            plan_mode: false,
+            auto_exit: false,
+            agent_binary: "claude".to_string(),
+            schedule: ScheduleKind::Unscheduled,
+            status,
+            agent_id: None,
+            created_at: "2026-05-07T00:00:00Z".to_string(),
+            completed_at: None,
+        }
+    }
+
     #[test]
     fn reschedule_starts_at_kind_step() {
         let task = sample_existing_task();
@@ -1301,6 +1519,274 @@ mod tests {
                 assert!(!out.auto_exit);
             }
             other => panic!("expected Completed, got {:?}", other),
+        }
+    }
+
+    fn make_repo(path: &str, name: &str, branches: &[&str]) -> RepoInfo {
+        RepoInfo {
+            path: path.to_string(),
+            name: name.to_string(),
+            color: None,
+            editor: None,
+            local_branches: branches
+                .iter()
+                .map(|n| BranchInfo {
+                    name: (*n).to_string(),
+                    is_head: false,
+                    active_agent_count: 0,
+                    is_worktree: false,
+                    is_remote: false,
+                })
+                .collect(),
+            remote_branches: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn status_label_distinguishes_future_from_pending() {
+        let future = make_task(
+            "1",
+            "/r",
+            "r",
+            "feature/foo",
+            Some("feature/foo"),
+            ScheduledTaskStatus::Inactive,
+        );
+        let pending = make_task(
+            "2",
+            "/r",
+            "r",
+            "main",
+            None,
+            ScheduledTaskStatus::Inactive,
+        );
+        let running = make_task(
+            "3",
+            "/r",
+            "r",
+            "main",
+            None,
+            ScheduledTaskStatus::Active,
+        );
+        let done = make_task("4", "/r", "r", "main", None, ScheduledTaskStatus::Complete);
+        let aborted = make_task("5", "/r", "r", "main", None, ScheduledTaskStatus::Aborted);
+        assert_eq!(task_status_label(&future), "FUTURE");
+        assert_eq!(task_status_label(&pending), "PENDING");
+        assert_eq!(task_status_label(&running), "RUNNING");
+        assert_eq!(task_status_label(&done), "DONE");
+        assert_eq!(task_status_label(&aborted), "ABORTED");
+    }
+
+    #[test]
+    fn dep_rank_orders_future_first() {
+        let future = make_task(
+            "1",
+            "/r",
+            "r",
+            "f",
+            Some("f"),
+            ScheduledTaskStatus::Inactive,
+        );
+        let pending = make_task("2", "/r", "r", "p", None, ScheduledTaskStatus::Inactive);
+        let running = make_task("3", "/r", "r", "x", None, ScheduledTaskStatus::Active);
+        let done = make_task("4", "/r", "r", "y", None, ScheduledTaskStatus::Complete);
+        let aborted = make_task("5", "/r", "r", "z", None, ScheduledTaskStatus::Aborted);
+        let mut ranks = [
+            task_dep_rank(&aborted),
+            task_dep_rank(&done),
+            task_dep_rank(&running),
+            task_dep_rank(&pending),
+            task_dep_rank(&future),
+        ];
+        ranks.sort();
+        assert_eq!(
+            ranks,
+            [
+                DepRank::Future,
+                DepRank::Pending,
+                DepRank::Running,
+                DepRank::Done,
+                DepRank::Aborted,
+            ]
+        );
+    }
+
+    #[test]
+    fn populate_branches_includes_future_when_depend() {
+        let repo = make_repo("/r", "r", &["main", "develop"]);
+        let mut modal = ScheduleTaskModal::new(
+            vec![repo.clone()],
+            vec![make_task(
+                "t1",
+                "/r",
+                "r",
+                "feature/foo",
+                Some("feature/foo"),
+                ScheduledTaskStatus::Inactive,
+            )],
+            Vec::new(),
+        );
+        modal.selected_repo = Some(repo);
+        modal.populate_branches(ScheduleKindChoice::Depend);
+        assert!(modal
+            .branches
+            .iter()
+            .any(|b| matches!(b, BranchChoice::Future { branch_name, .. } if branch_name == "feature/foo")));
+        // Existing branches still present.
+        assert!(modal
+            .branches
+            .iter()
+            .any(|b| matches!(b, BranchChoice::Existing(bi) if bi.name == "main")));
+    }
+
+    #[test]
+    fn populate_branches_hides_future_when_not_depend() {
+        let repo = make_repo("/r", "r", &["main"]);
+        let mut modal = ScheduleTaskModal::new(
+            vec![repo.clone()],
+            vec![make_task(
+                "t1",
+                "/r",
+                "r",
+                "feature/foo",
+                Some("feature/foo"),
+                ScheduledTaskStatus::Inactive,
+            )],
+            Vec::new(),
+        );
+        modal.selected_repo = Some(repo);
+        modal.populate_branches(ScheduleKindChoice::Schedule);
+        assert!(modal
+            .branches
+            .iter()
+            .all(|b| !matches!(b, BranchChoice::Future { .. })));
+        modal.populate_branches(ScheduleKindChoice::Unscheduled);
+        assert!(modal
+            .branches
+            .iter()
+            .all(|b| !matches!(b, BranchChoice::Future { .. })));
+    }
+
+    #[test]
+    fn populate_branches_excludes_future_already_existing_locally() {
+        // If a local branch named "foo" already exists, an Inactive task that
+        // would re-create "foo" should not surface as a future-branch option.
+        let repo = make_repo("/r", "r", &["main", "foo"]);
+        let mut modal = ScheduleTaskModal::new(
+            vec![repo.clone()],
+            vec![make_task(
+                "t1",
+                "/r",
+                "r",
+                "foo",
+                Some("foo"),
+                ScheduledTaskStatus::Inactive,
+            )],
+            Vec::new(),
+        );
+        modal.selected_repo = Some(repo);
+        modal.populate_branches(ScheduleKindChoice::Depend);
+        let future_count = modal
+            .branches
+            .iter()
+            .filter(|b| matches!(b, BranchChoice::Future { .. }))
+            .count();
+        assert_eq!(future_count, 0);
+    }
+
+    #[test]
+    fn populate_branches_dedupes_future_with_same_name() {
+        // Two Inactive tasks racing for the same future branch name should
+        // only surface once in the branch picker.
+        let repo = make_repo("/r", "r", &["main"]);
+        let mut modal = ScheduleTaskModal::new(
+            vec![repo.clone()],
+            vec![
+                make_task(
+                    "t1",
+                    "/r",
+                    "r",
+                    "foo",
+                    Some("foo"),
+                    ScheduledTaskStatus::Inactive,
+                ),
+                make_task(
+                    "t2",
+                    "/r",
+                    "r",
+                    "foo",
+                    Some("foo"),
+                    ScheduledTaskStatus::Inactive,
+                ),
+            ],
+            Vec::new(),
+        );
+        modal.selected_repo = Some(repo);
+        modal.populate_branches(ScheduleKindChoice::Depend);
+        let future_count = modal
+            .branches
+            .iter()
+            .filter(|b| matches!(b, BranchChoice::Future { .. }))
+            .count();
+        assert_eq!(future_count, 1);
+    }
+
+    #[test]
+    fn future_branch_pick_records_implicit_upstream_and_injects_into_deps() {
+        let repo = make_repo("/r", "r", &["main"]);
+        let upstream = make_task(
+            "upstream-1",
+            "/r",
+            "r",
+            "feature/foo",
+            Some("feature/foo"),
+            ScheduledTaskStatus::Inactive,
+        );
+        let mut modal = ScheduleTaskModal::new(
+            vec![repo.clone()],
+            vec![upstream.clone()],
+            Vec::new(),
+        );
+        // Walk through: SelectRepo → SelectScheduleKind=Depend → SelectBranch
+        modal.selected_repo = Some(repo);
+        modal.step = ScheduleModalStep::SelectScheduleKind;
+        modal.schedule_kind = Some(ScheduleKindChoice::Depend);
+        modal.populate_branches(ScheduleKindChoice::Depend);
+        modal.step = ScheduleModalStep::SelectBranch;
+        // Pick the Future branch (last entry; existing "main" is index 0).
+        let future_idx = modal
+            .branches
+            .iter()
+            .position(|b| matches!(b, BranchChoice::Future { .. }))
+            .expect("future branch present");
+        modal.selected_idx = future_idx;
+        let _ = modal.handle_enter();
+        assert_eq!(modal.target_branch.as_deref(), Some("feature/foo"));
+        assert_eq!(modal.implicit_upstream_task_id.as_deref(), Some("upstream-1"));
+
+        // Now drive submission with empty depends — the upstream must still
+        // end up in `depends_on_ids` to keep the chain intact.
+        modal.new_branch_name = Some("feature/foo-extension".to_string());
+        modal.prompt_value = "do work".to_string();
+        modal.step = ScheduleModalStep::SelectDependencies;
+        // Manually clear selected_deps as if user untoggled — re-injection
+        // must still happen on submit.
+        modal.selected_deps.clear();
+        let result = modal.complete_with_deps(
+            "do work".to_string(),
+            ScheduleKind::Depend {
+                depends_on_ids: Vec::new(),
+            },
+            Vec::new(),
+        );
+        match result {
+            ScheduleModalResult::Completed(out) => match out.schedule {
+                ScheduleKind::Depend { depends_on_ids } => {
+                    assert!(depends_on_ids.iter().any(|id| id == "upstream-1"));
+                }
+                other => panic!("expected Depend, got {other:?}"),
+            },
+            other => panic!("expected Completed, got {other:?}"),
         }
     }
 
@@ -1377,5 +1863,37 @@ mod tests {
             }
             other => panic!("expected Completed, got {:?}", other),
         }
+    }
+
+    #[test]
+    fn dep_picker_sorts_future_first_when_input_empty() {
+        let repo = make_repo("/r", "r", &["main"]);
+        let aborted = make_task("a", "/r", "r", "ab", None, ScheduledTaskStatus::Aborted);
+        let done = make_task("d", "/r", "r", "do", None, ScheduledTaskStatus::Complete);
+        let running = make_task("r", "/r", "r", "ru", None, ScheduledTaskStatus::Active);
+        let pending = make_task("p", "/r", "r", "pe", None, ScheduledTaskStatus::Inactive);
+        let future = make_task(
+            "f",
+            "/r",
+            "r",
+            "fu",
+            Some("fu"),
+            ScheduledTaskStatus::Inactive,
+        );
+        // Note the deliberately scrambled insertion order.
+        let modal = ScheduleTaskModal::new(
+            vec![repo],
+            vec![aborted, done, running, pending, future],
+            Vec::new(),
+        );
+        let filtered = modal.filtered_deps();
+        let ids: Vec<&str> = filtered
+            .iter()
+            .filter_map(|(kind, idx, _)| match kind {
+                DepKind::Task => Some(modal.all_tasks[*idx].id.as_str()),
+                DepKind::Agent => None,
+            })
+            .collect();
+        assert_eq!(ids, vec!["f", "p", "r", "d", "a"]);
     }
 }
