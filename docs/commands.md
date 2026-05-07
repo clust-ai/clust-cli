@@ -478,5 +478,6 @@ The Schedule tab shows every persistent scheduled task as a vertical column. Ina
 | `s` | Start the focused Inactive task right now |
 | `r` | Restart the focused Aborted task in place |
 | `R` (Shift+R) | Restart the focused Aborted task after `git reset --hard HEAD && git clean -fdx` in the worktree |
+| `S` (Shift+S) | Reschedule the focused Inactive/Aborted task — opens the schedule modal pre-populated with the task's repo/branch/prompt so only the trigger (Schedule / Depend / Unscheduled) and its associated start_at or dep set change. Aborted tasks are flipped back to Inactive so the new schedule takes effect |
 | `d` / `Delete` | Delete the focused task (confirmation modal; if Active, the agent is stopped first) |
 | `Shift+C` | Open the "Clear all completed tasks?" confirmation |

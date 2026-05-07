@@ -156,6 +156,7 @@ CLI -> Hub:
   DeleteScheduledTasksByStatus { status: ScheduledTaskStatus }
   StartScheduledTaskNow { id: String }
   RestartScheduledTask { id: String, clean: bool }
+  RescheduleScheduledTask { id: String, schedule: ScheduleKind, extra_agent_deps: Vec<String> }
   Ping { protocol_version: u32 }
 
 Hub -> CLI:

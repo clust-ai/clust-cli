@@ -83,6 +83,21 @@ pub struct ScheduleModalOutput {
     /// dependency step. The hub promotes each one to a shadow scheduled-task
     /// row before persisting the new task.
     pub extra_agent_deps: Vec<String>,
+    /// Set when the modal was opened in reschedule mode — the dispatcher
+    /// sends `RescheduleScheduledTask { id }` instead of `CreateScheduledTask`.
+    pub reschedule_task_id: Option<String>,
+}
+
+/// What the modal was opened to do. `Create` is the original Opt+S flow that
+/// walks the user through repo/branch/prompt selection; `Reschedule` keeps the
+/// original task's repo, branch, and prompt and lets the user only pick a new
+/// trigger.
+#[derive(Debug, Clone)]
+enum ScheduleModalMode {
+    Create,
+    /// `task_id` is sent back in the output so the dispatcher can target the
+    /// existing row.
+    Reschedule { task_id: String },
 }
 
 /// One row in the dep picker — either an existing scheduled task or a
@@ -138,6 +153,10 @@ pub struct ScheduleTaskModal {
     /// EnterStartTime / SelectDependencies steps can reuse the input field for
     /// their own value without losing the user's prompt.
     prompt_value: String,
+    /// Create vs reschedule. In reschedule mode the modal jumps straight into
+    /// the SelectScheduleKind step with repo/branch/prompt pre-populated from
+    /// the existing task and never visits the repo/branch/prompt steps.
+    mode: ScheduleModalMode,
     matcher: SkimMatcherV2,
 }
 
@@ -185,8 +204,69 @@ impl ScheduleTaskModal {
             plan_mode: false,
             auto_exit: false,
             prompt_value: String::new(),
+            mode: ScheduleModalMode::Create,
             matcher: SkimMatcherV2::default(),
         }
+    }
+
+    /// Open the modal in reschedule mode. The repo, branch, prompt, and the
+    /// plan/auto-exit flags are taken from the existing task; the user can
+    /// only change the schedule kind and its associated start_at / dep set.
+    /// The first step shown is [`ScheduleModalStep::SelectScheduleKind`].
+    pub fn new_reschedule(
+        task: &ScheduledTaskInfo,
+        repos: Vec<RepoInfo>,
+        all_tasks: Vec<ScheduledTaskInfo>,
+        running_agents: Vec<AgentInfo>,
+    ) -> Self {
+        let already_promoted: std::collections::HashSet<&str> = all_tasks
+            .iter()
+            .filter(|t| t.status == ScheduledTaskStatus::Active)
+            .filter_map(|t| t.agent_id.as_deref())
+            .collect();
+        let candidate_agents: Vec<AgentInfo> = running_agents
+            .into_iter()
+            .filter(|a| {
+                a.is_worktree
+                    && a.repo_path.is_some()
+                    && a.branch_name.is_some()
+                    && !already_promoted.contains(a.id.as_str())
+            })
+            .collect();
+        // Hide the rescheduled task itself from the dep picker — a Depend on
+        // self would deadlock.
+        let mut all_tasks = all_tasks;
+        all_tasks.retain(|t| t.id != task.id);
+
+        let selected_repo = repos.iter().find(|r| r.path == task.repo_path).cloned();
+        Self {
+            step: ScheduleModalStep::SelectScheduleKind,
+            input: String::new(),
+            cursor_pos: 0,
+            selected_idx: 0,
+            repos,
+            branches: Vec::new(),
+            all_tasks,
+            candidate_agents,
+            selected_deps: Vec::new(),
+            selected_repo,
+            schedule_kind: None,
+            target_branch: task.base_branch.clone(),
+            new_branch_name: task.new_branch.clone(),
+            new_branch_required: false,
+            time_error: None,
+            plan_mode: task.plan_mode,
+            auto_exit: task.auto_exit,
+            prompt_value: task.prompt.clone(),
+            mode: ScheduleModalMode::Reschedule {
+                task_id: task.id.clone(),
+            },
+            matcher: SkimMatcherV2::default(),
+        }
+    }
+
+    fn is_reschedule(&self) -> bool {
+        matches!(self.mode, ScheduleModalMode::Reschedule { .. })
     }
 
     #[allow(dead_code)]
@@ -253,10 +333,15 @@ impl ScheduleTaskModal {
             }
             KeyCode::Char(c) => {
                 if key.modifiers.contains(KeyModifiers::ALT) {
-                    if c == 'p' || c == 'P' {
-                        self.plan_mode = !self.plan_mode;
-                    } else if c == 'x' || c == 'X' {
-                        self.auto_exit = !self.auto_exit;
+                    // Reschedule keeps the original task's plan/auto-exit
+                    // (those have their own dedicated keybinds in the panel),
+                    // so the toggles here are no-ops in that mode.
+                    if !self.is_reschedule() {
+                        if c == 'p' || c == 'P' {
+                            self.plan_mode = !self.plan_mode;
+                        } else if c == 'x' || c == 'X' {
+                            self.auto_exit = !self.auto_exit;
+                        }
                     }
                     return ScheduleModalResult::Pending;
                 }
@@ -290,6 +375,10 @@ impl ScheduleTaskModal {
         match self.step {
             ScheduleModalStep::SelectRepo => return ScheduleModalResult::Cancelled,
             ScheduleModalStep::SelectScheduleKind => {
+                if self.is_reschedule() {
+                    // Reschedule starts here — Esc cancels straight back.
+                    return ScheduleModalResult::Cancelled;
+                }
                 self.step = ScheduleModalStep::SelectRepo;
                 self.selected_repo = None;
                 self.branches.clear();
@@ -311,7 +400,14 @@ impl ScheduleTaskModal {
                 self.new_branch_name = None;
             }
             ScheduleModalStep::EnterStartTime | ScheduleModalStep::SelectDependencies => {
-                self.step = ScheduleModalStep::EnterPrompt;
+                // In reschedule mode the kind step is the previous one
+                // (we never visited the prompt step); in create mode we
+                // captured the prompt before advancing here.
+                self.step = if self.is_reschedule() {
+                    ScheduleModalStep::SelectScheduleKind
+                } else {
+                    ScheduleModalStep::EnterPrompt
+                };
             }
         }
         self.reset_input();
@@ -336,6 +432,27 @@ impl ScheduleTaskModal {
                 let choices = self.kind_choices();
                 if let Some(choice) = choices.get(self.selected_idx).copied() {
                     self.schedule_kind = Some(choice);
+                    if self.is_reschedule() {
+                        // Repo / branch / prompt are all carried over from the
+                        // existing task — jump straight to the kind-specific
+                        // detail step, or submit immediately for Unscheduled.
+                        match choice {
+                            ScheduleKindChoice::Schedule => {
+                                self.step = ScheduleModalStep::EnterStartTime;
+                                self.reset_input();
+                                return ScheduleModalResult::Pending;
+                            }
+                            ScheduleKindChoice::Depend => {
+                                self.step = ScheduleModalStep::SelectDependencies;
+                                self.reset_input();
+                                return ScheduleModalResult::Pending;
+                            }
+                            ScheduleKindChoice::Unscheduled => {
+                                let prompt = self.recover_prompt();
+                                return self.complete_with(prompt, ScheduleKind::Unscheduled);
+                            }
+                        }
+                    }
                     if self.branches.is_empty() {
                         self.new_branch_required = true;
                         self.step = ScheduleModalStep::NewBranch;
@@ -449,6 +566,10 @@ impl ScheduleTaskModal {
             .selected_repo
             .as_ref()
             .expect("repo set before completion");
+        let reschedule_task_id = match &self.mode {
+            ScheduleModalMode::Reschedule { task_id } => Some(task_id.clone()),
+            ScheduleModalMode::Create => None,
+        };
         ScheduleModalResult::Completed(ScheduleModalOutput {
             repo_path: repo.path.clone(),
             base_branch: self.target_branch.clone(),
@@ -458,6 +579,7 @@ impl ScheduleTaskModal {
             auto_exit: self.auto_exit,
             schedule,
             extra_agent_deps,
+            reschedule_task_id,
         })
     }
 
@@ -685,14 +807,19 @@ impl ScheduleTaskModal {
     }
 
     fn step_title(&self) -> String {
+        let prefix = if self.is_reschedule() {
+            "Reschedule task"
+        } else {
+            "Schedule task"
+        };
         match self.step {
-            ScheduleModalStep::SelectRepo => "Schedule task — select repository".into(),
-            ScheduleModalStep::SelectScheduleKind => "Schedule task — pick when to start".into(),
-            ScheduleModalStep::SelectBranch => "Schedule task — select branch".into(),
-            ScheduleModalStep::NewBranch => "Schedule task — new branch (Enter to skip)".into(),
-            ScheduleModalStep::EnterPrompt => "Schedule task — prompt (required)".into(),
-            ScheduleModalStep::EnterStartTime => "Schedule task — start time".into(),
-            ScheduleModalStep::SelectDependencies => "Schedule task — pick dependencies".into(),
+            ScheduleModalStep::SelectRepo => format!("{prefix} — select repository"),
+            ScheduleModalStep::SelectScheduleKind => format!("{prefix} — pick when to start"),
+            ScheduleModalStep::SelectBranch => format!("{prefix} — select branch"),
+            ScheduleModalStep::NewBranch => format!("{prefix} — new branch (Enter to skip)"),
+            ScheduleModalStep::EnterPrompt => format!("{prefix} — prompt (required)"),
+            ScheduleModalStep::EnterStartTime => format!("{prefix} — start time"),
+            ScheduleModalStep::SelectDependencies => format!("{prefix} — pick dependencies"),
         }
     }
 
@@ -904,10 +1031,20 @@ impl ScheduleTaskModal {
         } else {
             Span::styled("Auto-Exit", Style::default().fg(theme::R_TEXT_DISABLED))
         });
-        spans.push(Span::styled(
-            format!("    {mod_key}+P plan · {mod_key}+X auto-exit"),
-            Style::default().fg(theme::R_TEXT_DISABLED),
-        ));
+        if self.is_reschedule() {
+            // Reschedule keeps prompt + plan + auto-exit untouched; surface
+            // that explicitly so the user knows the toggle keybinds are
+            // intentionally disabled here.
+            spans.push(Span::styled(
+                "    reschedule (keeps prompt · plan · auto-exit)",
+                Style::default().fg(theme::R_TEXT_DISABLED),
+            ));
+        } else {
+            spans.push(Span::styled(
+                format!("    {mod_key}+P plan · {mod_key}+X auto-exit"),
+                Style::default().fg(theme::R_TEXT_DISABLED),
+            ));
+        }
         frame.render_widget(Paragraph::new(Line::from(spans)), area);
     }
 }
@@ -1084,5 +1221,161 @@ mod tests {
     #[test]
     fn rejects_bad_minute() {
         assert!(parse_time("12:99", fixed_now()).is_err());
+    }
+
+    // ── Reschedule mode ─────────────────────────────────────────────
+
+    fn sample_repo() -> RepoInfo {
+        RepoInfo {
+            path: "/repo".into(),
+            name: "repo".into(),
+            color: None,
+            editor: None,
+            local_branches: vec![BranchInfo {
+                name: "main".into(),
+                is_head: false,
+                active_agent_count: 0,
+                is_worktree: false,
+                is_remote: false,
+            }],
+            remote_branches: vec![],
+        }
+    }
+
+    fn sample_existing_task() -> ScheduledTaskInfo {
+        ScheduledTaskInfo {
+            id: "t1".into(),
+            repo_path: "/repo".into(),
+            repo_name: "repo".into(),
+            branch_name: "main".into(),
+            base_branch: Some("main".into()),
+            new_branch: None,
+            prompt: "do x".into(),
+            plan_mode: true,
+            auto_exit: false,
+            agent_binary: "claude".into(),
+            schedule: ScheduleKind::Time {
+                start_at: "2026-05-06T13:00:00Z".into(),
+            },
+            status: ScheduledTaskStatus::Inactive,
+            agent_id: None,
+            created_at: "2026-05-06T09:00:00Z".into(),
+            completed_at: None,
+        }
+    }
+
+    #[test]
+    fn reschedule_starts_at_kind_step() {
+        let task = sample_existing_task();
+        let modal = ScheduleTaskModal::new_reschedule(
+            &task,
+            vec![sample_repo()],
+            vec![task.clone()],
+            Vec::new(),
+        );
+        assert_eq!(modal.step(), ScheduleModalStep::SelectScheduleKind);
+        assert!(modal.is_reschedule());
+    }
+
+    #[test]
+    fn reschedule_unscheduled_submits_immediately() {
+        let task = sample_existing_task();
+        let mut modal = ScheduleTaskModal::new_reschedule(
+            &task,
+            vec![sample_repo()],
+            vec![task.clone()],
+            Vec::new(),
+        );
+        // Move down past Schedule + Depend to land on Unscheduled.
+        modal.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        modal.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        let result = modal.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        match result {
+            ScheduleModalResult::Completed(out) => {
+                assert_eq!(out.reschedule_task_id.as_deref(), Some("t1"));
+                assert!(matches!(out.schedule, ScheduleKind::Unscheduled));
+                // Prompt + plan + auto-exit must be carried over from the
+                // existing task — reschedule never asks for them.
+                assert_eq!(out.prompt, "do x");
+                assert!(out.plan_mode);
+                assert!(!out.auto_exit);
+            }
+            other => panic!("expected Completed, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn reschedule_schedule_kind_advances_to_start_time() {
+        let task = sample_existing_task();
+        let mut modal = ScheduleTaskModal::new_reschedule(
+            &task,
+            vec![sample_repo()],
+            vec![task.clone()],
+            Vec::new(),
+        );
+        // First option is Schedule.
+        modal.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert_eq!(modal.step(), ScheduleModalStep::EnterStartTime);
+    }
+
+    #[test]
+    fn reschedule_esc_at_kind_step_cancels() {
+        let task = sample_existing_task();
+        let mut modal = ScheduleTaskModal::new_reschedule(
+            &task,
+            vec![sample_repo()],
+            vec![task.clone()],
+            Vec::new(),
+        );
+        let r = modal.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert!(matches!(r, ScheduleModalResult::Cancelled));
+    }
+
+    #[test]
+    fn reschedule_hides_self_from_dep_picker() {
+        let task = sample_existing_task();
+        // The picked-up task itself plus another inactive task to depend on.
+        let other = ScheduledTaskInfo {
+            id: "t2".into(),
+            ..sample_existing_task()
+        };
+        let modal = ScheduleTaskModal::new_reschedule(
+            &task,
+            vec![sample_repo()],
+            vec![task.clone(), other],
+            Vec::new(),
+        );
+        assert_eq!(modal.all_tasks.len(), 1);
+        assert_eq!(modal.all_tasks[0].id, "t2");
+    }
+
+    #[test]
+    fn create_mode_keeps_reschedule_id_none() {
+        // Sanity check: regular Opt+S flow must not accidentally tag itself
+        // as a reschedule.
+        let mut modal = ScheduleTaskModal::new(vec![sample_repo()], Vec::new(), Vec::new());
+        // Walk the modal: pick repo → pick Unscheduled → no branches →
+        // NewBranch (empty input rejected because new_branch_required) →
+        // give it a name → enter prompt → submit.
+        modal.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)); // repo
+        // Repo step picks `repo`; since `local_branches` has one entry,
+        // the kind step won't force `new_branch_required`. Pick the kind:
+        modal.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        modal.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)); // Unscheduled
+        // Now branch step. Pick `main` (only entry).
+        modal.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        // NewBranch — Enter to skip.
+        modal.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        // EnterPrompt — type something.
+        for c in "p".chars() {
+            modal.handle_key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE));
+        }
+        let r = modal.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        match r {
+            ScheduleModalResult::Completed(out) => {
+                assert!(out.reschedule_task_id.is_none());
+            }
+            other => panic!("expected Completed, got {:?}", other),
+        }
     }
 }
