@@ -1279,6 +1279,8 @@ mod tests {
             repo_path: "/repo".into(),
             repo_name: "repo".into(),
             branch_name: format!("br-{id}"),
+            base_branch: None,
+            new_branch: None,
             prompt: "p".into(),
             plan_mode: false,
             auto_exit: false,

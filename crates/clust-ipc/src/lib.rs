@@ -323,7 +323,20 @@ pub struct ScheduledTaskInfo {
     pub id: String,
     pub repo_path: String,
     pub repo_name: String,
+    /// Resolved branch the task's worktree lives on. For "create new" tasks
+    /// this is the sanitized form of `new_branch`; for "use existing" tasks
+    /// it equals `base_branch`.
     pub branch_name: String,
+    /// Original base ref the user picked (e.g. `main`, `origin/foo`). Needed
+    /// at fire time so a "create new" task can re-run `git worktree add -b
+    /// <new_branch> <wt> <base_branch>`. `None` for shadow tasks promoted
+    /// from a running agent.
+    #[serde(default)]
+    pub base_branch: Option<String>,
+    /// Original new-branch name the user requested, if any. `None` when the
+    /// task reuses an existing branch.
+    #[serde(default)]
+    pub new_branch: Option<String>,
     pub prompt: String,
     pub plan_mode: bool,
     pub auto_exit: bool,
@@ -1708,6 +1721,8 @@ mod tests {
             repo_path: "/home/user/project".into(),
             repo_name: "project".into(),
             branch_name: "feature/x".into(),
+            base_branch: Some("main".into()),
+            new_branch: Some("feature/x".into()),
             prompt: "do the thing".into(),
             plan_mode: false,
             auto_exit: true,
