@@ -367,7 +367,7 @@ checksum = "c8d4a3bb8b1e0c1050499d1815f5ab16d04f0959b233085fb31653fbfc9d98f9"
 
 [[package]]
 name = "clust-cli"
-version = "0.0.23"
+version = "0.0.24"
 dependencies = [
  "assert_cmd",
  "chrono",
@@ -390,7 +390,7 @@ dependencies = [
 
 [[package]]
 name = "clust-hub"
-version = "0.0.23"
+version = "0.0.24"
 dependencies = [
  "chrono",
  "clust-ipc",
@@ -408,7 +408,7 @@ dependencies = [
 
 [[package]]
 name = "clust-ipc"
-version = "0.0.23"
+version = "0.0.24"
 dependencies = [
  "dirs",
  "rmp-serde",
