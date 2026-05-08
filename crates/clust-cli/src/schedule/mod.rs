@@ -1366,6 +1366,7 @@ impl ScheduleState {
         let block = Block::default()
             .borders(Borders::ALL)
             .border_style(border_style)
+            .style(Style::default().bg(theme::R_BG_BASE))
             .title(Span::styled(
                 title,
                 Style::default()
@@ -1408,12 +1409,16 @@ impl ScheduleState {
             } else {
                 panel.vterm.to_ratatui_lines()
             };
-            frame.render_widget(Paragraph::new(lines), inner);
+            frame.render_widget(
+                Paragraph::new(lines).style(Style::default().bg(theme::R_BG_BASE)),
+                inner,
+            );
         } else {
             let p = Paragraph::new(Span::styled(
                 "(connecting…)",
                 Style::default().fg(theme::R_TEXT_TERTIARY),
-            ));
+            ))
+            .style(Style::default().bg(theme::R_BG_BASE));
             frame.render_widget(p, inner);
         }
     }
