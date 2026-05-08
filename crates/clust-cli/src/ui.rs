@@ -5747,7 +5747,7 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                             .iter()
                             .find(|(r, _)| r.contains(pos))
                         {
-                            schedule_state.scroll_prompt_at(*idx, -1);
+                            schedule_state.mouse_scroll_at(*idx, -1);
                         }
                     }
                 }
@@ -5820,7 +5820,7 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                             .iter()
                             .find(|(r, _)| r.contains(pos))
                         {
-                            schedule_state.scroll_prompt_at(*idx, 1);
+                            schedule_state.mouse_scroll_at(*idx, 1);
                         }
                     }
                 }
