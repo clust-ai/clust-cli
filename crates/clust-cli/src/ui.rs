@@ -948,11 +948,16 @@ pub fn run(hub_name: &str) -> io::Result<()> {
             }
         }
 
-        // Immediate worktree cleanup prompt when agent exits in overview mode
+        // Immediate worktree cleanup prompt when agent exits in overview mode.
+        // Auto-exit'd agents skip the prompt and keep their branch — auto-exit
+        // is meant to be hands-off, so we never block on a branch decision.
         if !in_focus_mode && active_tab == ActiveTab::Overview && active_menu.is_none() {
             for panel in overview_state.panels.iter_mut() {
                 if panel.exited && panel.is_worktree && !panel.worktree_cleanup_shown {
                     panel.worktree_cleanup_shown = true;
+                    if panel.auto_exit {
+                        continue;
+                    }
                     if let (Some(rp), Some(bn)) = (&panel.repo_path, &panel.branch_name) {
                         pending_worktree_cleanups.push(crate::worktree::WorktreeCleanup {
                             repo_path: rp.clone(),
@@ -3630,7 +3635,9 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                             match key.code {
                                 KeyCode::Esc => {
                                     if is_double_esc(&mut last_esc_press) {
-                                        // Check for worktree cleanup before exiting terminal
+                                        // Check for worktree cleanup before exiting terminal.
+                                        // Auto-exit'd agents skip the prompt and keep their
+                                        // branch — the dialog is silently suppressed.
                                         if let OverviewFocus::Terminal(idx) = overview_state.focus {
                                             if let Some(panel) = overview_state.panels.get_mut(idx)
                                             {
@@ -3639,19 +3646,22 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                                     && !panel.worktree_cleanup_shown
                                                 {
                                                     panel.worktree_cleanup_shown = true;
-                                                    if let (Some(rp), Some(bn)) =
-                                                        (&panel.repo_path, &panel.branch_name)
-                                                    {
-                                                        // Append rather than overwrite — earlier
-                                                        // pending cleanups must remain queued.
-                                                        pending_worktree_cleanups.extend(
-                                                            std::iter::once(
-                                                                crate::worktree::WorktreeCleanup {
-                                                                    repo_path: rp.clone(),
-                                                                    branch_name: bn.clone(),
-                                                                },
-                                                            ),
-                                                        );
+                                                    if !panel.auto_exit {
+                                                        if let (Some(rp), Some(bn)) =
+                                                            (&panel.repo_path, &panel.branch_name)
+                                                        {
+                                                            // Append rather than overwrite —
+                                                            // earlier pending cleanups must
+                                                            // remain queued.
+                                                            pending_worktree_cleanups.extend(
+                                                                std::iter::once(
+                                                                    crate::worktree::WorktreeCleanup {
+                                                                        repo_path: rp.clone(),
+                                                                        branch_name: bn.clone(),
+                                                                    },
+                                                                ),
+                                                            );
+                                                        }
                                                     }
                                                 }
                                             }
