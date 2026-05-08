@@ -439,6 +439,33 @@ impl ScheduleState {
         }
     }
 
+    /// Mouse-wheel scroll on the panel at `idx`. For Active tasks this scrolls
+    /// the agent's vterm scrollback (3 lines per wheel event, mirroring
+    /// Overview); for other statuses it falls back to scrolling the prompt
+    /// body by `delta` lines. Negative `delta` scrolls up, positive down.
+    pub fn mouse_scroll_at(&mut self, idx: usize, delta: i32) {
+        let active_task_id = self
+            .tasks
+            .get(idx)
+            .filter(|t| t.status == ScheduledTaskStatus::Active)
+            .map(|t| t.id.clone());
+        if let Some(task_id) = active_task_id {
+            if let Some(panel) = self.panels.get_mut(&task_id) {
+                const WHEEL_LINES: usize = 3;
+                if delta < 0 {
+                    let max = panel.vterm.scrollback_len();
+                    panel.panel_scroll_offset =
+                        (panel.panel_scroll_offset + WHEEL_LINES).min(max);
+                } else if delta > 0 {
+                    panel.panel_scroll_offset =
+                        panel.panel_scroll_offset.saturating_sub(WHEEL_LINES);
+                }
+                return;
+            }
+        }
+        self.scroll_prompt_at(idx, delta);
+    }
+
     pub fn focus_prev(&mut self) {
         if let ScheduleFocus::Task(idx) = self.focus {
             if let Some(pos) = self.visible_task_indices.iter().position(|&i| i == idx) {
