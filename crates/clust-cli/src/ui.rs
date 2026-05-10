@@ -1596,6 +1596,10 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                                 open_in_terminal(&repo_path);
                                             }
                                             3 => {
+                                                // "Open on Web"
+                                                open_in_browser(&repo_path, status_tx.clone());
+                                            }
+                                            4 => {
                                                 // "Stop All Agents"
                                                 // Collect worktree agents for this repo before stopping
                                                 let repo_agents: Vec<_> = agents
@@ -1622,13 +1626,13 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                                     );
                                                 }
                                             }
-                                            4 => {
+                                            5 => {
                                                 // "Clean Stale Refs"
                                                 clean_stale_refs_ipc(&repo_path);
                                                 last_repo_fetch =
                                                     Instant::now() - Duration::from_secs(10);
                                             }
-                                            5 => {
+                                            6 => {
                                                 // "Detach"
                                                 let tx = status_tx.clone();
                                                 let rp = repo_path.clone();
@@ -1703,7 +1707,7 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                                 last_repo_fetch =
                                                     Instant::now() - Duration::from_secs(10);
                                             }
-                                            6 => {
+                                            7 => {
                                                 // "Purge" → open confirmation dialog
                                                 active_menu = Some(ActiveMenu::ConfirmAction {
                                                     action: ConfirmedAction::PurgeRepo {
@@ -1721,7 +1725,7 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                                     ),
                                                 });
                                             }
-                                            7 => {
+                                            8 => {
                                                 // "Remove Repository" → open confirmation dialog
                                                 active_menu = Some(ActiveMenu::ConfirmAction {
                                                     action: ConfirmedAction::RemoveRepository {
@@ -1739,7 +1743,7 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                                     ),
                                                 });
                                             }
-                                            8 => {
+                                            9 => {
                                                 // "Delete Repository" → open confirmation dialog
                                                 active_menu = Some(ActiveMenu::ConfirmAction {
                                                     action: ConfirmedAction::DeleteRepository {
@@ -3861,6 +3865,7 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                                                 "Change Color".to_string(),
                                                                 "Open in File System".to_string(),
                                                                 "Open in Terminal".to_string(),
+                                                                "Open on Web".to_string(),
                                                                 "Stop All Agents".to_string(),
                                                                 "Clean Stale Refs".to_string(),
                                                                 "Detach".to_string(),
@@ -4329,6 +4334,10 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                                 open_in_terminal(&repo_path);
                                             }
                                             3 => {
+                                                // "Open on Web"
+                                                open_in_browser(&repo_path, status_tx.clone());
+                                            }
+                                            4 => {
                                                 // Collect worktree agents for this repo before stopping
                                                 let repo_agents: Vec<_> = agents
                                                     .iter()
@@ -4354,19 +4363,19 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                                     );
                                                 }
                                             }
-                                            4 => {
+                                            5 => {
                                                 unregister_repo_ipc(&repo_path);
                                                 last_repo_fetch =
                                                     Instant::now() - Duration::from_secs(10);
                                                 last_agent_fetch =
                                                     Instant::now() - Duration::from_secs(10);
                                             }
-                                            5 => {
+                                            6 => {
                                                 clean_stale_refs_ipc(&repo_path);
                                                 last_repo_fetch =
                                                     Instant::now() - Duration::from_secs(10);
                                             }
-                                            6 => {
+                                            7 => {
                                                 // "Detach"
                                                 let tx = status_tx.clone();
                                                 let rp = repo_path.clone();
@@ -4441,7 +4450,7 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                                 last_repo_fetch =
                                                     Instant::now() - Duration::from_secs(10);
                                             }
-                                            7 => {
+                                            8 => {
                                                 active_menu = Some(ActiveMenu::ConfirmAction {
                                                     action: ConfirmedAction::PurgeRepo {
                                                         repo_path,
@@ -7766,6 +7775,117 @@ fn open_in_terminal(path: &str) {
     }
 }
 
+/// Open the repository's `origin` remote in the default browser.
+///
+/// Resolves the URL via `git -C <path> remote get-url origin`, normalizes
+/// SSH/HTTPS forms (works for github, gitlab, and any provider whose web
+/// page lives at the same `host/path` as the git URL), then spawns the
+/// platform's default URL handler. Failures are surfaced via `status_tx`.
+fn open_in_browser(path: &str, status_tx: tokio::sync::mpsc::Sender<StatusMessage>) {
+    let path = path.to_string();
+    let url = match git_remote_origin_url(&path) {
+        Ok(u) => u,
+        Err(e) => {
+            send_status_async(status_tx, format!("Open on Web failed: {e}"), StatusLevel::Error);
+            return;
+        }
+    };
+    let web = match git_url_to_web(&url) {
+        Some(w) => w,
+        None => {
+            send_status_async(
+                status_tx,
+                format!("Open on Web failed: cannot map remote URL to web ({url})"),
+                StatusLevel::Error,
+            );
+            return;
+        }
+    };
+    #[cfg(target_os = "macos")]
+    let spawn = std::process::Command::new("open").arg(&web).spawn();
+    #[cfg(target_os = "linux")]
+    let spawn = std::process::Command::new("xdg-open").arg(&web).spawn();
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    let spawn: std::io::Result<std::process::Child> =
+        Err(std::io::Error::new(std::io::ErrorKind::Unsupported, "unsupported platform"));
+    if let Err(e) = spawn {
+        send_status_async(
+            status_tx,
+            format!("Open on Web failed: could not launch browser: {e}"),
+            StatusLevel::Error,
+        );
+    }
+}
+
+/// Run `git -C <path> remote get-url origin` and return the trimmed URL.
+fn git_remote_origin_url(path: &str) -> Result<String, String> {
+    let output = std::process::Command::new("git")
+        .args(["-C", path, "remote", "get-url", "origin"])
+        .output()
+        .map_err(|e| format!("failed to run git: {e}"))?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let trimmed = stderr.trim();
+        if trimmed.is_empty() {
+            return Err("no 'origin' remote configured".to_string());
+        }
+        return Err(trimmed.to_string());
+    }
+    let url = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if url.is_empty() {
+        return Err("empty remote URL".to_string());
+    }
+    Ok(url)
+}
+
+/// Convert a git remote URL into a https web URL.
+///
+/// Handles:
+/// - `git@host:path/repo.git` → `https://host/path/repo`
+/// - `ssh://git@host/path/repo.git` → `https://host/path/repo`
+/// - `https://host/path/repo.git` → `https://host/path/repo`
+/// - `http://host/path/repo` → `http://host/path/repo`
+fn git_url_to_web(url: &str) -> Option<String> {
+    let url = url.trim();
+    let url = url.strip_suffix(".git").unwrap_or(url);
+    let url = url.trim_end_matches('/');
+
+    if let Some(rest) = url.strip_prefix("ssh://") {
+        let rest = rest.strip_prefix("git@").unwrap_or(rest);
+        if rest.contains('/') {
+            return Some(format!("https://{rest}"));
+        }
+        return None;
+    }
+    if let Some(rest) = url.strip_prefix("git@") {
+        let (host, path) = rest.split_once(':')?;
+        if host.is_empty() || path.is_empty() {
+            return None;
+        }
+        return Some(format!("https://{host}/{path}"));
+    }
+    if url.starts_with("https://") || url.starts_with("http://") {
+        return Some(url.to_string());
+    }
+    None
+}
+
+fn send_status_async(
+    tx: tokio::sync::mpsc::Sender<StatusMessage>,
+    text: String,
+    level: StatusLevel,
+) {
+    tokio::spawn(async move {
+        let _ = tx
+            .send(StatusMessage {
+                text,
+                level,
+                created: Instant::now(),
+            })
+            .await;
+    });
+}
+
 fn set_repo_editor_ipc(path: &str, editor: &str) {
     let path = path.to_string();
     let editor = editor.to_string();
@@ -8802,5 +8922,70 @@ mod tests {
         assert_eq!(sel.level, TreeLevel::Category);
         sel.ascend(&repos); // always goes to Repo level
         assert_eq!(sel.level, TreeLevel::Repo);
+    }
+
+    // ── git_url_to_web ───────────────────────────────────────────
+
+    #[test]
+    fn git_url_to_web_ssh_github() {
+        assert_eq!(
+            git_url_to_web("git@github.com:user/repo.git"),
+            Some("https://github.com/user/repo".to_string()),
+        );
+    }
+
+    #[test]
+    fn git_url_to_web_https_github() {
+        assert_eq!(
+            git_url_to_web("https://github.com/user/repo.git"),
+            Some("https://github.com/user/repo".to_string()),
+        );
+    }
+
+    #[test]
+    fn git_url_to_web_https_no_dotgit() {
+        assert_eq!(
+            git_url_to_web("https://github.com/user/repo"),
+            Some("https://github.com/user/repo".to_string()),
+        );
+    }
+
+    #[test]
+    fn git_url_to_web_ssh_protocol() {
+        assert_eq!(
+            git_url_to_web("ssh://git@github.com/user/repo.git"),
+            Some("https://github.com/user/repo".to_string()),
+        );
+    }
+
+    #[test]
+    fn git_url_to_web_gitlab_subgroup() {
+        // gitlab supports nested groups in the path
+        assert_eq!(
+            git_url_to_web("git@gitlab.com:group/subgroup/repo.git"),
+            Some("https://gitlab.com/group/subgroup/repo".to_string()),
+        );
+    }
+
+    #[test]
+    fn git_url_to_web_self_hosted_https() {
+        assert_eq!(
+            git_url_to_web("https://git.example.com/team/proj.git"),
+            Some("https://git.example.com/team/proj".to_string()),
+        );
+    }
+
+    #[test]
+    fn git_url_to_web_trims_trailing_slash() {
+        assert_eq!(
+            git_url_to_web("https://github.com/user/repo/"),
+            Some("https://github.com/user/repo".to_string()),
+        );
+    }
+
+    #[test]
+    fn git_url_to_web_rejects_garbage() {
+        assert_eq!(git_url_to_web("not-a-url"), None);
+        assert_eq!(git_url_to_web(""), None);
     }
 }
