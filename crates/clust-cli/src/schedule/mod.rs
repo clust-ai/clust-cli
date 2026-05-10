@@ -374,16 +374,25 @@ impl ScheduleState {
     }
 
     /// Resize all live vterms after the panel grid recomputes.
+    ///
+    /// Slots must match the layout in `render`: `Constraint::Ratio(1, slots)`
+    /// where `slots = visible_count.max(2)`. Using `count_fit` here would
+    /// undersize panels when the viewport is wider than the visible task
+    /// count needs, leaving empty space on the right of each Active panel
+    /// (the agent's PTY would wrap at the smaller width). `render_active_body`
+    /// is still the source of truth for the final per-panel size — it
+    /// corrects for rounding when `slots` doesn't divide `panels_area.width`
+    /// evenly — so this routine just keeps `panel_cols`/`panel_rows` in sync
+    /// for fresh PTY spawns and avoids fighting the per-frame correction.
     pub fn resize_panels_to(&mut self, content_area: Rect) {
-        let visible = self.tasks.len().max(2);
         let count_fit = max_panels_for_width(content_area.width).max(1);
-        let slots = count_fit.max(2);
+        let visible_count = self
+            .visible_task_indices
+            .len()
+            .saturating_sub(self.scroll_offset)
+            .min(count_fit);
+        let slots = visible_count.max(2);
         let panel_w = (content_area.width / slots as u16).max(MIN_PANEL_WIDTH);
-        // Active panels hand the entire inner area to the terminal (no inner
-        // header / hint rows), so the usable rows = panel_h − 2 borders.
-        // panel_cols/rows are only used to spawn fresh PTYs for newly-Active
-        // tasks; the per-frame `render_active_body` re-resizes to the actual
-        // inner rect.
         let panel_h = content_area.height;
         let inner_cols = panel_w.saturating_sub(2);
         let inner_rows = panel_h.saturating_sub(2);
@@ -402,7 +411,6 @@ impl ScheduleState {
                 panel.vterm.resize(cols as usize, rows as usize);
             }
         }
-        let _ = visible;
     }
 
     // -- Navigation --
@@ -908,14 +916,17 @@ impl ScheduleState {
             self.render_keybind_hint_bar(frame, hint_area, None, click_map);
             return;
         }
-        self.resize_panels_to(panels_area);
 
-        let count_fit = max_panels_for_width(panels_area.width).max(1);
         // Clamp scroll to the visible-tasks list so collapsing a repo doesn't
-        // leave the grid scrolled past the last remaining panel.
+        // leave the grid scrolled past the last remaining panel. Done before
+        // `resize_panels_to` so it sees the same visible_count we'll use for
+        // layout (otherwise vterm width and rendered panel width diverge).
         if self.scroll_offset >= self.visible_task_indices.len() {
             self.scroll_offset = self.visible_task_indices.len().saturating_sub(1);
         }
+        self.resize_panels_to(panels_area);
+
+        let count_fit = max_panels_for_width(panels_area.width).max(1);
         let visible_count = self
             .visible_task_indices
             .len()
