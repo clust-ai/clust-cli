@@ -118,6 +118,10 @@ pub struct ScheduleState {
     /// Recomputed whenever the task list or `collapsed_repos` changes; used
     /// by both navigation (focus_prev/next walk this list) and rendering.
     pub visible_task_indices: Vec<usize>,
+    /// Last task index that had focus, used by `enter_task_focus` to restore
+    /// the user's previous selection rather than always jumping to the first
+    /// task. Mirrors Overview's `last_terminal_idx`.
+    last_task_idx: usize,
     /// Live PTY connections for tasks in the Active state. Keyed by task id so
     /// we don't lose them when the underlying agent_id list re-orders.
     panels: HashMap<String, AgentPanel>,
@@ -149,6 +153,7 @@ impl ScheduleState {
             collapsed_repos: HashSet::new(),
             filter_cursor: 0,
             visible_task_indices: Vec::new(),
+            last_task_idx: 0,
             panels: HashMap::new(),
             ui: HashMap::new(),
             output_tx,
@@ -228,10 +233,10 @@ impl ScheduleState {
         });
 
         // 5. Restore focus on the same task id when possible.
-        let had_prev_focus = prev_focus_id.is_some();
         if let Some(id) = prev_focus_id {
             if let Some(new_idx) = self.tasks.iter().position(|t| t.id == id) {
                 self.focus = ScheduleFocus::Task(new_idx);
+                self.last_task_idx = new_idx;
             }
         }
 
@@ -239,18 +244,13 @@ impl ScheduleState {
         //    clamping focus — collapsed repos may have shrunk the visible set.
         self.recompute_visible_task_indices();
 
-        // 7. Clamp focus to a valid index. The first time tasks appear we
-        //    auto-focus the first visible task so the keybind hints become
-        //    immediately useful; if no tasks are visible (all collapsed or
-        //    list is empty) we fall back to the bar.
-        match self.focus {
-            ScheduleFocus::OptionsBar
-                if !self.visible_task_indices.is_empty() && !had_prev_focus =>
-            {
-                let first = self.visible_task_indices[0];
-                self.focus = ScheduleFocus::Task(first);
-            }
-            ScheduleFocus::Task(idx) if idx >= self.tasks.len() => {
+        // 7. Clamp focus to a valid index. We deliberately do NOT auto-jump
+        //    from the OptionsBar onto a task when tasks first appear — the
+        //    user starts on the repository filter and has to press
+        //    `Shift+Down` to enter task navigation, mirroring Overview's
+        //    behavior.
+        if let ScheduleFocus::Task(idx) = self.focus {
+            if idx >= self.tasks.len() {
                 self.focus = self
                     .visible_task_indices
                     .last()
@@ -258,11 +258,15 @@ impl ScheduleState {
                     .map(ScheduleFocus::Task)
                     .unwrap_or(ScheduleFocus::OptionsBar);
             }
-            _ => {}
         }
         if self.tasks.is_empty() {
             self.focus = ScheduleFocus::OptionsBar;
         }
+        // Keep last_task_idx within bounds so a stale value doesn't point
+        // past the end of the list when the user re-enters task focus.
+        self.last_task_idx = self
+            .last_task_idx
+            .min(self.tasks.len().saturating_sub(1));
 
         // 8. Clamp filter_cursor to the new used-repos count.
         let used_count = self.used_repo_paths().len();
@@ -419,6 +423,7 @@ impl ScheduleState {
                 self.recompute_visible_task_indices();
             }
             self.focus = ScheduleFocus::Task(idx);
+            self.last_task_idx = idx;
             self.ensure_visible(idx);
         }
     }
@@ -473,6 +478,7 @@ impl ScheduleState {
                 let new_pos = if pos == 0 { len - 1 } else { pos - 1 };
                 let new_idx = self.visible_task_indices[new_pos];
                 self.focus = ScheduleFocus::Task(new_idx);
+                self.last_task_idx = new_idx;
                 self.ensure_visible(new_idx);
             }
         }
@@ -485,22 +491,36 @@ impl ScheduleState {
                 let new_pos = (pos + 1) % len;
                 let new_idx = self.visible_task_indices[new_pos];
                 self.focus = ScheduleFocus::Task(new_idx);
+                self.last_task_idx = new_idx;
                 self.ensure_visible(new_idx);
             }
         }
     }
 
-    /// Move focus from the bar onto the first visible task (or do nothing if
-    /// there are no visible tasks). Used by `Shift+Down` from the bar.
+    /// Move focus from the bar onto a task (or do nothing if there are no
+    /// visible tasks). Used by `Shift+Down` from the bar. Restores the user's
+    /// last focused task when it's still visible; otherwise falls back to the
+    /// first visible task. Mirrors Overview's `enter_terminal`.
     pub fn enter_task_focus(&mut self) {
-        if let Some(&first) = self.visible_task_indices.first() {
-            self.focus = ScheduleFocus::Task(first);
-            self.ensure_visible(first);
-        }
+        let target = if self.visible_task_indices.contains(&self.last_task_idx) {
+            self.last_task_idx
+        } else if let Some(&first) = self.visible_task_indices.first() {
+            first
+        } else {
+            return;
+        };
+        self.focus = ScheduleFocus::Task(target);
+        self.last_task_idx = target;
+        self.ensure_visible(target);
     }
 
     /// Return focus to the bar from a task. Used by `Shift+Up` from a task.
+    /// Records the task index so a subsequent `enter_task_focus` can restore
+    /// it.
     pub fn exit_task_focus(&mut self) {
+        if let ScheduleFocus::Task(idx) = self.focus {
+            self.last_task_idx = idx;
+        }
         self.focus = ScheduleFocus::OptionsBar;
     }
 
@@ -542,6 +562,7 @@ impl ScheduleState {
                     .copied()
                     .map(|i| {
                         self.ensure_visible(i);
+                        self.last_task_idx = i;
                         ScheduleFocus::Task(i)
                     })
                     .unwrap_or(ScheduleFocus::OptionsBar);
@@ -572,6 +593,7 @@ impl ScheduleState {
                     .copied()
                     .map(|i| {
                         self.ensure_visible(i);
+                        self.last_task_idx = i;
                         ScheduleFocus::Task(i)
                     })
                     .unwrap_or(ScheduleFocus::OptionsBar);
@@ -1847,7 +1869,10 @@ mod tests {
     }
 
     #[test]
-    fn focus_initialises_when_tasks_appear() {
+    fn focus_stays_on_bar_when_tasks_appear() {
+        // Sync should not steal focus from the bar onto a task — the user
+        // starts on the repository filter and presses Shift+Down to enter
+        // task navigation.
         let mut state = ScheduleState::new();
         assert_eq!(state.focus, ScheduleFocus::OptionsBar);
         sync(
@@ -1858,7 +1883,67 @@ mod tests {
                 ScheduleKind::Unscheduled,
             )],
         );
-        assert_eq!(state.focus, ScheduleFocus::Task(0));
+        assert_eq!(state.focus, ScheduleFocus::OptionsBar);
+    }
+
+    #[test]
+    fn focus_stays_on_bar_across_repeated_syncs() {
+        // Bug regression: every fetch tick used to auto-jump focus from the
+        // bar onto the first task, fighting the user's intent.
+        let mut state = ScheduleState::new();
+        sync(
+            &mut state,
+            vec![task(
+                "a",
+                ScheduledTaskStatus::Inactive,
+                ScheduleKind::Unscheduled,
+            )],
+        );
+        // Re-sync with the same task list (simulates the periodic fetch).
+        sync(
+            &mut state,
+            vec![task(
+                "a",
+                ScheduledTaskStatus::Inactive,
+                ScheduleKind::Unscheduled,
+            )],
+        );
+        assert_eq!(state.focus, ScheduleFocus::OptionsBar);
+    }
+
+    #[test]
+    fn enter_task_focus_restores_last_focused_task() {
+        // After exiting task focus and re-entering, the user should land on
+        // the same task they were on, not always the first one.
+        let mut state = ScheduleState::new();
+        sync(
+            &mut state,
+            vec![
+                task(
+                    "a",
+                    ScheduledTaskStatus::Inactive,
+                    ScheduleKind::Unscheduled,
+                ),
+                task(
+                    "b",
+                    ScheduledTaskStatus::Inactive,
+                    ScheduleKind::Unscheduled,
+                ),
+                task(
+                    "c",
+                    ScheduledTaskStatus::Inactive,
+                    ScheduleKind::Unscheduled,
+                ),
+            ],
+        );
+        state.enter_task_focus();
+        state.focus_next();
+        state.focus_next();
+        assert_eq!(state.focus, ScheduleFocus::Task(2));
+        state.exit_task_focus();
+        assert_eq!(state.focus, ScheduleFocus::OptionsBar);
+        state.enter_task_focus();
+        assert_eq!(state.focus, ScheduleFocus::Task(2));
     }
 
     #[test]
@@ -1936,6 +2021,7 @@ mod tests {
                 ScheduleKind::Unscheduled,
             )],
         );
+        state.enter_task_focus();
         let action = state.handle_key(KeyEvent::new(KeyCode::Char('e'), KeyModifiers::NONE));
         match action {
             ScheduleAction::EditPrompt { task_id, .. } => assert_eq!(task_id, "a"),
@@ -1954,6 +2040,7 @@ mod tests {
                 ScheduleKind::Unscheduled,
             )],
         );
+        state.enter_task_focus();
         let action = state.handle_key(KeyEvent::new(KeyCode::Char('e'), KeyModifiers::NONE));
         assert_eq!(action, ScheduleAction::Noop);
     }
@@ -1969,6 +2056,7 @@ mod tests {
                 ScheduleKind::Unscheduled,
             )],
         );
+        state.enter_task_focus();
         let action = state.handle_key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE));
         assert_eq!(
             action,
@@ -1989,6 +2077,7 @@ mod tests {
                 ScheduleKind::Unscheduled,
             )],
         );
+        state.enter_task_focus();
         let r = state.handle_key(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::NONE));
         assert_eq!(
             r,
@@ -2018,6 +2107,7 @@ mod tests {
                 ScheduleKind::Unscheduled,
             )],
         );
+        state.enter_task_focus();
         let action = state.handle_key(KeyEvent::new(KeyCode::Char('S'), KeyModifiers::SHIFT));
         assert_eq!(
             action,
@@ -2038,6 +2128,7 @@ mod tests {
                 ScheduleKind::Unscheduled,
             )],
         );
+        state.enter_task_focus();
         let action = state.handle_key(KeyEvent::new(KeyCode::Char('S'), KeyModifiers::SHIFT));
         assert_eq!(
             action,
@@ -2058,6 +2149,7 @@ mod tests {
                 ScheduleKind::Unscheduled,
             )],
         );
+        state.enter_task_focus();
         let action = state.handle_key(KeyEvent::new(KeyCode::Char('S'), KeyModifiers::SHIFT));
         assert_eq!(action, ScheduleAction::Noop);
     }
@@ -2073,6 +2165,7 @@ mod tests {
                 ScheduleKind::Unscheduled,
             )],
         );
+        state.enter_task_focus();
         let action = state.handle_key(KeyEvent::new(KeyCode::Char('S'), KeyModifiers::SHIFT));
         assert_eq!(action, ScheduleAction::Noop);
     }
@@ -2088,6 +2181,7 @@ mod tests {
                 ScheduleKind::Unscheduled,
             )],
         );
+        state.enter_task_focus();
         let action = state.handle_key(KeyEvent::new(KeyCode::Char('d'), KeyModifiers::NONE));
         match action {
             ScheduleAction::ConfirmDelete { task_id, .. } => assert_eq!(task_id, "a"),
