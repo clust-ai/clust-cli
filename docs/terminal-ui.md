@@ -498,7 +498,7 @@ Clicking a repo chip toggles its collapsed state without moving keyboard focus. 
 | Status | Column body |
 |--------|-------------|
 | `Inactive` | Status pill, `PLAN` and `AUTO-EXIT` indicator pills, a schedule info line that highlights inline keybinds in accent color (e.g. "Unscheduled — press **s** to start now" / "Starts in 1h 23m" / "Waiting on N task(s)"), and the full prompt text wrapping on the X axis and scrollable on Y. If any upstream dep has Auto-Exit OFF, a warning line appears: `⚠ depends on tasks without AUTO-EXIT`. |
-| `Active` | A live `TerminalEmulator` rendering the agent's PTY output, filling the entire inner area of the column (no inner header row, status pills, or hint line — those would only steal rows from the live output). The keybind footer at the bottom of the tab continues to advertise `Shift+↓ focus mode`. |
+| `Active` | A live `TerminalEmulator` rendering the agent's PTY output, filling the entire inner area of the column (no inner header row, status pills, or hint line — those would only steal rows from the live output). Both the column block and the inner Paragraph paint `R_BG_BASE` so the embedded vterm shares the same background as Overview's agent panels rather than falling through to the host terminal's background. The keybind footer at the bottom of the tab continues to advertise `Shift+↓ focus mode`. |
 | `Complete` | Centred branch name + small green `✓`, with a final `press d to remove` hint. |
 | `Aborted` | Status pill (red), the original prompt, and an inline hint "Aborted — press **r** to restart, **Shift+R** for clean restart" with the keys highlighted in accent color. |
 
@@ -792,7 +792,7 @@ Scroll wheel events scroll the element under the mouse cursor rather than the ke
 
 | Cursor Position | Scroll Action |
 |-----------------|---------------|
-| Over a task panel | Scroll that task's prompt up/down by one line per wheel tick (1 line). For Inactive/Aborted tasks this scrolls the prompt body; for Active tasks the wheel scroll has no visible effect because the panel embeds a live agent vterm whose scrollback is reachable from focus mode. Focus is **not** changed by the wheel — the user can scroll a panel's prompt without losing their current task selection. |
+| Over a task panel | Scroll that task's body up/down. For **Active** tasks the wheel scrolls the embedded agent vterm's scrollback (3 lines per tick, mirroring Overview's wheel handler). For **Inactive / Aborted / Complete** tasks the wheel scrolls the prompt body (1 line per tick). Focus is **not** changed by the wheel — the user can scroll a panel without losing their current task selection. |
 
 **Focus mode:**
 
