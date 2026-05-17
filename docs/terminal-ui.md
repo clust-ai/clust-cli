@@ -125,7 +125,7 @@ A multi-agent terminal overview that displays all active agents side-by-side wit
 ││                    │││                │││         ││
 │└──── Shift+↓ focus──┘│└────────────────┘│└─────────┘│
 ├──────────────────────┴──────────────────┴───────────┤
-│ ● connected  Shift+↓ enter terminal  ...    v0.0.25 │
+│ ● connected  Shift+↓ enter terminal  ...    v0.0.26 │
 └─────────────────────────────────────────────────────┘
 ```
 
@@ -135,7 +135,7 @@ A multi-agent terminal overview that displays all active agents side-by-side wit
 - **Agent panels (horizontal):** Dynamically sized columns distributed evenly across the available width. The number of visible panels is determined by how many fit at the minimum width of 60 columns. Panels use ratio-based constraints so they fill the screen evenly (1 panel = half screen, 2 panels = half each, 3 panels = one-third each, etc.). A single panel never exceeds half the screen width. When more agents exist than fit on screen, horizontal scrolling is enabled with `◀ N` / `N ▶` indicators.
 - Each panel has **box-drawing borders** (top, bottom, left, right). When a panel's agent is associated with a repository, the border color uses the repo's assigned color (bright when focused, dimmed to 60% brightness when unfocused via `dim_color()`). Panels without a repo fall back to accent blue when focused and subtle gray when unfocused.
 - The **focused panel** displays a centered `Shift+↓ focus` hint in its bottom border (rendered via `Block::title_bottom()`). The shortcut text uses the bright accent color and the label uses secondary text color. This hint only appears when a terminal panel is focused in overview mode (not in focus mode).
-- Inside the border, a **header row** shows agent ID (accent-colored), separator, agent binary name, optional repo/branch info, and status indicator (`●` green for running, `[exited]` red for exited). When the agent has a `repo_path`, the repo name (extracted from the path's last component) is displayed in the repo's assigned color, followed by `/branch_name` in tertiary text color (e.g., `myrepo/main`). When the agent has no `repo_path` but has a `branch_name`, the branch is shown alone in tertiary text color. Both are preceded by a `·` separator. The branch name is sourced from `AgentInfo.branch_name` and updates on each sync cycle (every 2 seconds). Agents whose `auto_exit` flag is on render a bold `AUTO-EXIT` pill in `R_INFO` after the status indicator so it's obvious which panels will self-terminate when the agent stops responding.
+- Inside the border, a **header row** shows agent ID (accent-colored), separator, agent binary name, optional repo/branch info, and status indicator (`●` green for running, `[exited]` red for exited). When the agent has a `repo_path`, the repo name (extracted from the path's last component) is displayed in the repo's assigned color, followed by `/branch_name` in tertiary text color (e.g., `myrepo/main`). When the agent has no `repo_path` but has a `branch_name`, the branch is shown alone in tertiary text color. Both are preceded by a `·` separator. The branch name is sourced from `AgentInfo.branch_name` and updates on each sync cycle (every 2 seconds). Agents whose `auto_exit` flag is on render a bold `AUTO-EXIT` pill — inverted (`R_BG_BASE` foreground on `R_WARNING` yellow background) — after the status indicator so it's obvious at a glance which panels will self-terminate when the agent stops responding. The same badge is mirrored on the bottom border (right-aligned) alongside an `Alt+X disable` hint, so the auto-exit state is visible no matter where the user's eye lands inside the panel.
 - The **terminal area** below the header renders the agent's PTY output using a `vt100`-backed terminal emulator (`TerminalEmulator`) with full ANSI support (cursor movement, SGR colors/styles, erase operations, scroll regions, line wrapping, alternate screen buffer). The terminal emulator gets the inner width (total panel width minus 2 border columns).
 
 **Focus modes:**
@@ -153,13 +153,13 @@ A multi-agent terminal overview that displays all active agents side-by-side wit
 | Options Bar | `Shift+←` / `Shift+→` | Scroll viewport left/right |
 | Options Bar | `←` / `→` | Navigate repo groups |
 | Options Bar | `Enter` / `Space` | Toggle collapse/expand of selected repo group |
-| Options Bar | `Shift+X` | Disable auto-exit on the most recently focused panel (no-op if it isn't on) |
+| Options Bar | `Alt+X` (`Opt+X` on macOS) | Disable auto-exit on the most recently focused panel (no-op if it isn't on). Uses Alt rather than Shift because Shift+X would collide with typing a capital `X`. |
 | Terminal | `Esc` (single) | Forward Esc to agent process |
 | Terminal | `Esc×2` (double-tap) | Deselect terminal, return to options bar |
 | Terminal | `Shift+↑` | Return to options bar |
 | Terminal | `Shift+←` / `Shift+→` | Switch focus to previous/next agent panel (wraps around) |
 | Terminal | `PageUp` / `PageDown` | Scroll focused panel through scrollback history |
-| Terminal | `Shift+X` | Disable auto-exit on the focused panel (no-op if it isn't on) |
+| Terminal | `Alt+X` (`Opt+X` on macOS) | Disable auto-exit on the focused panel (no-op if it isn't on). Uses Alt rather than Shift to avoid colliding with typing capital `X` into the agent terminal. |
 | Terminal | Any other key | Forwarded to the focused agent's PTY |
 
 **Implementation:**
@@ -184,7 +184,7 @@ On startup, `clust ui` automatically connects to the hub daemon, starting it if 
 ### Bottom Status Bar
 
 ```
-● connected  q to quit  Q to quit and stop hub  ↑↓←→ navigate  Shift+←→ panels                           v0.0.25
+● connected  q to quit  Q to quit and stop hub  ↑↓←→ navigate  Shift+←→ panels                           v0.0.26
 ```
 
 | Section | Description |
@@ -194,7 +194,7 @@ On startup, `clust ui` automatically connects to the hub daemon, starting it if 
 | BYPASS indicator | When bypass-permissions is enabled globally, shows `BYPASS` in a distinct color. Hidden when disabled. |
 | Focused agent | When an agent has keyboard focus (in Overview terminal focus or focus mode), shows the repo name in the repo's assigned color followed by `/branch` in secondary text color |
 | Status message / Shortcuts | Either a temporary status message or context-aware keybinding hints (see below) |
-| Version | Right-aligned, e.g. `v0.0.25` |
+| Version | Right-aligned, e.g. `v0.0.26` |
 
 **Status messages:** Temporary status messages override the keybinding hints area. Messages are displayed for 5 seconds before auto-dismissing, after which the keybinding hints reappear. Two severity levels exist: `Error` (displayed in `R_ERROR` color) and `Success` (displayed in `R_SUCCESS` color). Status messages are used to surface feedback from async operations such as agent creation, branch pulls, and remote branch checkout -- both success confirmations (e.g., "Agent started on feature-branch", "Pulled main: Already up to date.", "Checked out feature-branch") and error details (e.g., "Agent create failed: hub connect error: ...", "Pull failed: ...", "Checkout failed: ..."). The `StatusMessage` struct tracks the message text, level, and creation `Instant` for auto-dismissal timing. Status messages are delivered from background tokio tasks to the main event loop via a dedicated `mpsc` channel (`status_tx` / `status_rx`), separate from the `AgentStartResult` channel used for agent creation results.
 
@@ -299,7 +299,7 @@ When focus mode is active, the 1-row tab bar is replaced by a back-bar that show
 │      3      3│  let x = 1;   ││                    ││
 │                               │└────────────────────┘│
 ├─────────────────────────────────────────────────────┤
-│ ● connected  Shift+←/→ switch panel  ...     v0.0.25│
+│ ● connected  Shift+←/→ switch panel  ...     v0.0.26│
 └─────────────────────────────────────────────────────┘
 ```
 
