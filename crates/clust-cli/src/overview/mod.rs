@@ -1465,6 +1465,26 @@ pub(crate) fn render_agent_panel(
         );
     }
 
+    // Auto-exit footer badge — mirrors the header pill on the bottom border so
+    // the state is visible no matter where the user is looking inside the
+    // panel, and surfaces the Alt+X shortcut to disable it.
+    if panel.auto_exit && !panel.exited {
+        block = block.title_bottom(
+            Line::from(vec![
+                Span::styled(
+                    " AUTO-EXIT ",
+                    Style::default()
+                        .fg(theme::R_BG_BASE)
+                        .bg(theme::R_WARNING)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(" Alt+X", Style::default().fg(theme::R_ACCENT_BRIGHT)),
+                Span::styled(" disable ", Style::default().fg(theme::R_TEXT_SECONDARY)),
+            ])
+            .right_aligned(),
+        );
+    }
+
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
@@ -1550,11 +1570,14 @@ pub(crate) fn render_agent_panel(
     }
 
     if panel.auto_exit && !panel.exited {
+        // Inverted yellow pill — auto-exit silently closes the agent on
+        // completion, so the badge needs to stand out from the rest of the
+        // header.
         header_spans.push(Span::styled(
-            "AUTO-EXIT",
+            " AUTO-EXIT ",
             Style::default()
-                .fg(theme::R_INFO)
-                .bg(header_bg)
+                .fg(theme::R_BG_BASE)
+                .bg(theme::R_WARNING)
                 .add_modifier(Modifier::BOLD),
         ));
         header_spans.push(Span::styled(" ", Style::default().bg(header_bg)));

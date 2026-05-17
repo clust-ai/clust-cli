@@ -3568,7 +3568,16 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                         && matches!(overview_state.focus, OverviewFocus::Terminal(_))
                     {
                         let shift = key.modifiers.contains(KeyModifiers::SHIFT);
-                        if shift {
+                        let alt = key.modifiers.contains(KeyModifiers::ALT);
+                        // Alt+X disables auto-exit on the focused panel. Use
+                        // Alt (Opt on macOS) rather than Shift because Shift+X
+                        // collides with typing a capital X into the terminal.
+                        if alt && matches!(key.code, KeyCode::Char('x') | KeyCode::Char('X')) {
+                            disable_auto_exit_for_focused_panel(
+                                &mut overview_state,
+                                status_tx.clone(),
+                            );
+                        } else if shift {
                             match key.code {
                                 KeyCode::Up => overview_state.exit_terminal(),
                                 KeyCode::Down => {
@@ -3621,12 +3630,6 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                 }
                                 KeyCode::PageDown => {
                                     overview_state.panel_scroll_down();
-                                }
-                                KeyCode::Char('X') => {
-                                    disable_auto_exit_for_focused_panel(
-                                        &mut overview_state,
-                                        status_tx.clone(),
-                                    );
                                 }
                                 _ => {
                                     // Shift+other key — forward to agent
@@ -3778,6 +3781,7 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                             // Overview OptionsBar navigation
                             _ if active_tab == ActiveTab::Overview => {
                                 let shift = key.modifiers.contains(KeyModifiers::SHIFT);
+                                let alt = key.modifiers.contains(KeyModifiers::ALT);
                                 match key.code {
                                     KeyCode::Down if shift => {
                                         overview_state.enter_terminal();
@@ -3804,7 +3808,10 @@ pub fn run(hub_name: &str) -> io::Result<()> {
                                             overview_state.filter_cursor += 1;
                                         }
                                     }
-                                    KeyCode::Char('X') => {
+                                    // Alt+X (Opt+X on macOS) disables auto-exit
+                                    // on the focused panel. Shift+X would
+                                    // collide with typing a capital X.
+                                    KeyCode::Char('x') | KeyCode::Char('X') if alt => {
                                         disable_auto_exit_for_focused_panel(
                                             &mut overview_state,
                                             status_tx.clone(),
@@ -6893,12 +6900,12 @@ fn render_help_overlay(frame: &mut Frame, area: Rect, active_tab: ActiveTab, in_
         lines.push(header_line("Overview"));
         lines.push(binding_line("Shift+\u{2190}/\u{2192}", "Scroll panels"));
         lines.push(binding_line("Shift+\u{2193}", "Enter terminal"));
-        lines.push(binding_line("Shift+X", "Disable auto-exit"));
+        lines.push(binding_line("Alt+X", "Disable auto-exit"));
         lines.push(sub_label_line("In terminal:"));
         lines.push(binding_line("Shift+\u{2191}", "Back to options bar"));
         lines.push(binding_line("Shift+\u{2193}", "Enter focus mode"));
         lines.push(binding_line("Shift+\u{2190}/\u{2192}", "Switch agent"));
-        lines.push(binding_line("Shift+X", "Disable auto-exit"));
+        lines.push(binding_line("Alt+X", "Disable auto-exit"));
         lines.push(binding_line("PgUp / PgDn", "Scroll terminal"));
     }
 
